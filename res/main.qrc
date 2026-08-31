@@ -1,0 +1,16 @@
+<RCC>
+    <qresource prefix="/">
+        <file>image/main_about.png</file>
+        <file>image/main_company.png</file>
+        <file>image/main_config.png</file>
+        <file>image/main_data.png</file>
+        <file>image/main_exit.png</file>
+        <file>image/main_help.png</file>
+        <file>image/main_main.png</file>
+        <file>image/main_person.png</file>
+        <file>font/iconfont.ttf</file>
+        <file>gl/fragment.fsh</file>
+        <file>gl/vertex.vsh</file>
+        <file>image/1.png</file>
+    </qresource>
+</RCC>
