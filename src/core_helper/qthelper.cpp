@@ -1,4 +1,4 @@
-﻿#include "qthelper.h"
+#include "qthelper.h"
 #include <QNetworkInterface>
 #include <QNetworkProxy>
 #include <QWidget>
@@ -538,8 +538,32 @@ void QtHelper::setFont(int fontSize)
     fontSize = 25;
 #endif
 
+    QStringList preferredFonts;
+#ifdef Q_OS_WIN
+    preferredFonts << "Microsoft YaHei" << "SimHei" << "SimSun";
+#elif defined(Q_OS_MAC)
+    preferredFonts << "PingFang SC" << "Heiti SC" << "STHeiti";
+#else
+    preferredFonts << "Noto Sans CJK SC" << "Noto Sans SC"
+                   << "Source Han Sans SC" << "WenQuanYi Micro Hei"
+                   << "AR PL UMing CN" << "AR PL UKai CN"
+                   << "Droid Sans Fallback";
+#endif
+
+    QString family;
+    QFontDatabase db;
+    for (const QString &f : preferredFonts) {
+        if (db.families().contains(f)) {
+            family = f;
+            break;
+        }
+    }
+    if (family.isEmpty()) {
+        family = qApp->font().family();
+    }
+
     QFont font;
-    font.setFamily("MicroSoft Yahei");
+    font.setFamily(family);
     font.setPixelSize(fontSize);
     qApp->setFont(font);
 }
