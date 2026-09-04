@@ -1,4 +1,4 @@
-﻿#include "iconhelper.h"
+#include "iconhelper.h"
 
 IconHelper *IconHelper::iconFontAliBaBa = 0;
 IconHelper *IconHelper::iconFontAwesome = 0;
@@ -18,7 +18,14 @@ void IconHelper::initFont()
             iconFontAwesome = new IconHelper(":/font/fontawesome-webfont.ttf", "FontAwesome");
         }
         if (iconFontAwesome6 == 0) {
-            iconFontAwesome6 = new IconHelper(":/font/fa-regular-400.ttf", "Font Awesome 6 Pro Regular");
+            QString fa6File = ":/font/fa-regular-400.ttf";
+            QString fa6Name = "Font Awesome 6 Pro Regular";
+            if (QFile(fa6File).exists()) {
+                iconFontAwesome6 = new IconHelper(fa6File, fa6Name);
+            } else {
+                qDebug() << "Font Awesome 6 Pro Regular not found, falling back to FontAwesome";
+                iconFontAwesome6 = iconFontAwesome;
+            }
         }
         if (iconFontWeather == 0) {
             iconFontWeather = new IconHelper(":/font/pe-icon-set-weather.ttf", "pe-icon-set-weather");
