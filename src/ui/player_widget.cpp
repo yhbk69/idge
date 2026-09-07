@@ -34,7 +34,7 @@ PlayerWidget::PlayerWidget(QWidget* parent)
     video_widget_->setContentsMargins(0,0,0,0);
 
     overlayLabel = new QLabel(this);
-    overlayLabel->setText("OSD 叠加wenja");
+    overlayLabel->setText("OSD 叠加");
     overlayLabel->setAlignment(Qt::AlignCenter);
     overlayLabel->setStyleSheet(
         "QLabel {"
@@ -45,6 +45,7 @@ PlayerWidget::PlayerWidget(QWidget* parent)
         "}"
     );
     overlayLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+    overlayLabel->setVisible(false);
 
     mainLayout->addWidget(video_widget_, 0, 0);
     mainLayout->addWidget(overlayLabel, 0, 0);

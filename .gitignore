@@ -12,6 +12,8 @@ install/
 *.bin
 3rdparty/ffmpeg/lib/
 3rdparty/ffmpeg/bin/
+3rdparty/ffmpeg-rkmpp/lib/
+3rdparty/ffmpeg-rkmpp/bin/
 3rdparty/opencv/
 3rdparty/openssl1.1.0/lib/
 3rdparty/openssl1.1.0/bin/

@@ -37,6 +37,7 @@ pkg_check_modules(GLES2 REQUIRED glesv2)
 
 # 添加 /usr/include 到包含路径
 include_directories(
+    ${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg-rkmpp/include
     /usr/include
     /usr/include/libdrm
     ${OpenCV_INCLUDE_DIRS}
@@ -136,6 +137,14 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/ 3rdparty.out)
 #add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/utils/ utils.out)
 
 set(CMAKE_INSTALL_RPATH "$ORIGIN/../lib")
+set(CMAKE_BUILD_RPATH
+    "${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg-rkmpp/lib"
+    "${CMAKE_SOURCE_DIR}/3rdparty/zlmediakit/aarch64"
+    "${CMAKE_SOURCE_DIR}/3rdparty/rknpu2/Linux/aarch64"
+    "${CMAKE_SOURCE_DIR}/3rdparty/librga/Linux/aarch64"
+    "${CMAKE_SOURCE_DIR}/3rdparty/kaldi_native_fbank/Linux/aarch64"
+    "${CMAKE_PREFIX_PATH}/lib"
+)
 
 file(GLOB PROJECT_SOURCES CONFIGURE_DEPENDS 
                
@@ -172,11 +181,11 @@ add_executable(${PROJECT_NAME}
 )
 
 target_link_directories(${PROJECT_NAME} PUBLIC 
+                                ${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg-rkmpp/lib
                                 ${CMAKE_SOURCE_DIR}/3rdparty/libyuv/lib
                                 ${CMAKE_SOURCE_DIR}/3rdparty/zlmediakit/aarch64
                                 ${CMAKE_SOURCE_DIR}/3rdparty/librga/lib
                                 ${CMAKE_SOURCE_DIR}/3rdparty/rknpu2/Linux/aarch64
-                                ${CMAKE_SOURCE_DIR}/3rdparty/mpp/lib
                                 ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/lib
                                 ) 
                                 
@@ -198,7 +207,6 @@ target_link_libraries(${PROJECT_NAME}
     swresample
     postproc
     pthread
-    rockchip_mpp
     mk_api
     jsoncpp
     rknnrt
@@ -217,6 +225,7 @@ target_link_libraries(${PROJECT_NAME}
     rknnrt
     dl)
 target_compile_definitions(${PROJECT_NAME} PRIVATE ZERO_COPY)
+target_link_options(${PROJECT_NAME} PRIVATE "LINKER:--allow-shlib-undefined" "LINKER:--disable-new-dtags")
 
 # yolo11_videocapture_demo
 # add_executable(yolo11_videocapture_demo 
@@ -234,6 +243,11 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE ZERO_COPY)
 #     dl)
 # target_compile_definitions(yolo11_videocapture_demo PRIVATE ZERO_COPY)
 
+
+# 安装 rkmpp 版 FFmpeg 动态库，供部署运行时使用（RPATH 为 $ORIGIN/../lib）
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg-rkmpp/lib/
+        DESTINATION lib
+        FILES_MATCHING PATTERN "*.so*")
 
 #install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/model/bus.jpg DESTINATION model)
 #install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/model/coco_80_labels_list.txt DESTINATION model)

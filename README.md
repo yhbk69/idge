@@ -83,32 +83,13 @@ aarch64-linux-gnu-g++ --version
 
 ## 运行说明
 
-### 1. GUI 模式（主应用）
+### GUI 模式
 ```bash
-./idge
-```
+# 开发目录直接运行（已内置 RPATH，无需额外设置）
+./build/build_rk3588_linux/idge
 
-### 2. 摄像头预览
-```bash
-./video-preview.sh
-# RK3588: 1920x1080@30fps via glimagesink
-# 其他平台: 640x480 via rkximagesink
-```
-
-### 3. 独立 YOLO11 检测
-```bash
-./yolo11_videocapture_demo
-# 默认使用 /dev/video31 摄像头
-# 模型路径: yolo11n.rknn
-```
-
-### 4. Python 模型转换
-```bash
-# ONNX -> RKNN 转换
-python3 python/convert.py model.onnx rk3588 i8 model.rknn
-
-# Python 推理验证
-python3 python/yolo11.py --model_path model.rknn --target rk3588
+# 或使用 install 目录
+./install/rk3588_linux/bin/idge
 ```
 
 ## 目录结构
