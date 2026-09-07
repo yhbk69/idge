@@ -178,7 +178,7 @@ target_link_directories(${PROJECT_NAME} PUBLIC
                                 ${CMAKE_SOURCE_DIR}/3rdparty/rknpu2/Linux/aarch64
                                 ${CMAKE_SOURCE_DIR}/3rdparty/mpp/lib
                                 ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/lib
-                                ${CMAKE_SOURCE_DIR}/3rdparty/openssl1.1.0/lib) 
+                                ) 
                                 
 target_link_libraries(${PROJECT_NAME}
     Qt5::Gui 

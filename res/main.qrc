@@ -9,6 +9,7 @@
         <file>image/main_main.png</file>
         <file>image/main_person.png</file>
         <file>font/iconfont.ttf</file>
+        <file>font/fontawesome-webfont.ttf</file>
         <file>gl/fragment.fsh</file>
         <file>gl/vertex.vsh</file>
         <file>image/1.png</file>

@@ -2,6 +2,8 @@
 #define FRMMAIN_H
 
 #include <QWidget>
+#include <QTextCursor>
+#include <QTextCharFormat>
 
 class QAbstractButton;
 
@@ -44,6 +46,11 @@ private:
                      QString &darkColorStart, QString &darkColorEnd,
                      QString &highColor);
 
+    // 日志功能（参考 rknn_Multithread 项目）
+    QString currentTimestamp();
+    void log(const QString &category, const QString &message);
+    void logWithColor(const QString &category, const QString &message, const QColor &color);
+
 private slots:
     void initForm();
     void initStyle();
@@ -53,6 +60,13 @@ private slots:
     void leftMainClick();
     void leftConfigClick();
     void systemExit();
+    void initDebugPage();
+    void appendLog(const QString &msg);
+    void on_btnBrowseVideo_clicked();
+    void on_btnBrowseModel_clicked();
+    void on_btnBrowseLabel_clicked();
+    void on_spinBoxConfThresh_valueChanged(double value);
+    void on_spinBoxNmsThresh_valueChanged(double value);
 
 private slots:
     void on_btnMenu_Min_clicked();

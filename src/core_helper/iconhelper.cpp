@@ -30,6 +30,17 @@ void IconHelper::initFont()
         if (iconFontWeather == 0) {
             iconFontWeather = new IconHelper(":/font/pe-icon-set-weather.ttf", "pe-icon-set-weather");
         }
+
+        //如果其他图标字体没有加载成功,则回退到Alibaba图标字体
+        if (iconFontAwesome->getIconFont().family().isEmpty()) {
+            iconFontAwesome = iconFontAliBaBa;
+        }
+        if (iconFontAwesome6->getIconFont().family().isEmpty()) {
+            iconFontAwesome6 = iconFontAliBaBa;
+        }
+        if (iconFontWeather->getIconFont().family().isEmpty()) {
+            iconFontWeather = iconFontAliBaBa;
+        }
     }
 }
 

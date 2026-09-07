@@ -545,8 +545,8 @@ void QtHelper::setFont(int fontSize)
     preferredFonts << "PingFang SC" << "Heiti SC" << "STHeiti";
 #else
     QStringList localFontFiles;
-    localFontFiles << "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf";
     localFontFiles << "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
+    localFontFiles << "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf";
 
     QString fontFile;
     for (const QString &f : localFontFiles) {

@@ -4,6 +4,10 @@
 #include "ui_frmmain.h"
 #include "core_helper/iconhelper.h"
 #include "core_helper/qthelper.h"
+#include "SharedTypes.hpp"
+#include <QDateTime>
+#include <QDir>
+#include <QFileInfo>
 
 frmMain::frmMain(QWidget *parent) : QWidget(parent), ui(new Ui::frmMain)
 {
@@ -36,7 +40,6 @@ void frmMain::getQssColor(const QString &qss, const QString &flag, QString &colo
     if (index >= 0) {
         color = qss.mid(index + flag.length(), 7);
     }
-    //qDebug() << TIMEMS << flag << color;
 }
 
 void frmMain::getQssColor(const QString &qss, QString &textColor, QString &panelColor,
@@ -53,6 +56,65 @@ void frmMain::getQssColor(const QString &qss, QString &textColor, QString &panel
     getQssColor(qss, "HighColor:", highColor);
 }
 
+// ==========================================
+// 日志功能（参考 rknn_Multithread 项目）
+// ==========================================
+
+QString frmMain::currentTimestamp()
+{
+    return QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
+}
+
+void frmMain::log(const QString &category, const QString &message)
+{
+    QColor color;
+    QString cat_lower = category.toLower();
+
+    if (cat_lower == "alarm" || cat_lower == "error") {
+        color = QColor(220, 50, 50);    // 红色
+    } else if (cat_lower == "warning" || cat_lower == "warn") {
+        color = QColor(220, 180, 0);    // 黄色
+    } else if (cat_lower == "system") {
+        color = QColor(50, 120, 220);   // 蓝色
+    } else if (cat_lower == "info") {
+        color = QColor(50, 180, 50);    // 绿色
+    } else {
+        color = QColor(180, 180, 180);  // 灰色（默认）
+    }
+
+    logWithColor(category, message, color);
+}
+
+void frmMain::logWithColor(const QString &category, const QString &message, const QColor &color)
+{
+    QTextCursor cursor = ui->textBrowserLog->textCursor();
+    cursor.movePosition(QTextCursor::End);
+
+    // 添加时间戳（灰色）
+    QTextCharFormat tsFormat;
+    tsFormat.setForeground(QColor(128, 128, 128));
+    cursor.insertText(QString("[%1]").arg(currentTimestamp()), tsFormat);
+
+    // 添加类别（带颜色，加粗）
+    QTextCharFormat catFormat;
+    catFormat.setForeground(color);
+    catFormat.setFontWeight(QFont::Bold);
+    cursor.insertText(QString("[%1] ").arg(category), catFormat);
+
+    // 添加消息（带颜色）
+    QTextCharFormat msgFormat;
+    msgFormat.setForeground(color);
+    cursor.insertText(message + "\n", msgFormat);
+
+    // 滚动到底部
+    ui->textBrowserLog->setTextCursor(cursor);
+    ui->textBrowserLog->ensureCursorVisible();
+}
+
+// ==========================================
+// UI 初始化
+// ==========================================
+
 void frmMain::initForm()
 {
     //设置无边框
@@ -63,7 +125,6 @@ void frmMain::initForm()
     IconHelper::setIcon(ui->btnMenu_Max, 0xf067);
     IconHelper::setIcon(ui->btnMenu_Close, 0xf00d);
 
-    //ui->widgetMenu->setVisible(false);
     ui->widgetTitle->setProperty("form", "title");
     //关联事件过滤器用于双击放大
     ui->widgetTitle->installEventFilter(this);
@@ -95,6 +156,9 @@ void frmMain::initForm()
     ui->widgetLeftConfig->setProperty("flag", "left");
     ui->page1->setStyleSheet(QString("QWidget[flag=\"left\"] QAbstractButton{min-height:%1px;max-height:%1px;}").arg(60));
     ui->page2->setStyleSheet(QString("QWidget[flag=\"left\"] QAbstractButton{min-height:%1px;max-height:%1px;}").arg(25));
+
+    // 初始化调试帮助页面
+    initDebugPage();
 }
 
 void frmMain::initStyle()
@@ -138,17 +202,13 @@ void frmMain::buttonClick()
     } else if (name == "使用帮助") {
         ui->stackedWidget->setCurrentIndex(3);
     } else if (name == "用户退出") {
-        
         systemExit();
-        //close();
-        //exit(0);
     }
 }
 
 void frmMain::initLeftMain()
 {
     iconsMain << 0xf030 << 0xf03e << 0xf247;
-    //btnsMain << ui->tbtnMain1 << ui->tbtnMain2 << ui->tbtnMain3;
 
     for (int i = 0; i < btnsMain.count(); ++i) {
         QToolButton *btn = (QToolButton *)btnsMain.at(i);
@@ -166,7 +226,6 @@ void frmMain::initLeftMain()
     styleColor.borderColor = borderColor;
     styleColor.setColor(normalBgColor, normalTextColor, darkBgColor, darkTextColor);
     IconHelper::setStyle(ui->widgetLeftMain, btnsMain, iconsMain, styleColor);
-    //ui->tbtnMain1->click();
 }
 
 void frmMain::initLeftConfig()
@@ -201,8 +260,6 @@ void frmMain::leftMainClick()
         QAbstractButton *btn = btnsMain.at(i);
         btn->setChecked(btn == b);
     }
-
-    //ui->lab1->setText(name);
 }
 
 void frmMain::leftConfigClick()
@@ -213,7 +270,6 @@ void frmMain::leftConfigClick()
         QAbstractButton *btn = btnsConfig.at(i);
         btn->setChecked(btn == b);
     }
-
     ui->lab2->setText(name);
 }
 
@@ -243,17 +299,135 @@ void frmMain::on_btnMenu_Close_clicked()
     systemExit();
 }
 
-void frmMain:: systemExit()
+void frmMain::systemExit()
 {
     if (!QMessageBox::information(this, tr("退出"), tr("确认要退出系统吗?"), tr("确定"), tr("取消")))
     {
         close();
     }
-
 }
 
 void frmMain::on_pageRoll_customContextMenuRequested(const QPoint &pos)
 {
-
 }
 
+// ==========================================
+// 调试页面初始化
+// ==========================================
+
+void frmMain::initDebugPage()
+{
+    // 系统信息
+    ui->labPlatformVal->setText("RK3588");
+    ui->labNpuCoresVal->setText(QString::number(NPU_CORE_NUM));
+    ui->labVideoInVal->setText("RTSP / V4L2");
+    ui->labMaxChannelsVal->setText("4");
+
+    // 模型配置 - lineEdit already set from UI
+    ui->labInputSizeVal->setText("640 x 640");
+    ui->labModelTypeVal->setText("YOLO11 (RKNN)");
+
+    // 检测配置 - spinbox already set from UI
+    ui->labClassNumVal->setText("80 (COCO)");
+    ui->labThreadsVal->setText("3");
+
+    // 初始日志（带颜色）
+    log("system", "系统启动");
+    log("system", "平台: RK3588, NPU核心数: " + QString::number(NPU_CORE_NUM));
+    log("info", "模型加载: " + ui->lineEditModelPath->text());
+    log("info", "标签加载: " + ui->lineEditLabelPath->text());
+    log("system", "视频解码器初始化完成");
+    log("system", "推理线程池启动, 线程数: 3");
+}
+
+// ==========================================
+// 浏览按钮 - 视频支持文件和文件夹
+// ==========================================
+
+void frmMain::on_btnBrowseVideo_clicked()
+{
+    QString currentPath = ui->lineEditVideoPath->text().isEmpty()
+        ? QDir::homePath()
+        : ui->lineEditVideoPath->text();
+
+    // 同时支持选择文件和文件夹
+    QFileDialog dialog(this, "选择视频文件或文件夹");
+    dialog.setFileMode(QFileDialog::ExistingFiles);
+    dialog.setOption(QFileDialog::DontUseNativeDialog, false);
+    dialog.setDirectory(currentPath);
+    dialog.setNameFilter("视频文件 (*.mp4 *.avi *.mkv *.mov *.flv *.ts *.webm);;所有文件 (*)");
+
+    if (dialog.exec() == QDialog::Accepted) {
+        QStringList files = dialog.selectedFiles();
+        if (!files.isEmpty()) {
+            // 如果选了多个文件，用分号分隔；单个直接显示路径
+            QString path;
+            if (files.size() == 1) {
+                QFileInfo fi(files.first());
+                if (fi.isDir()) {
+                    path = files.first();
+                } else {
+                    path = files.first();
+                }
+            } else {
+                path = files.join(";");
+            }
+            ui->lineEditVideoPath->setText(path);
+            log("system", QString("视频源已更新: %1").arg(path));
+        }
+    }
+}
+
+void frmMain::on_btnBrowseModel_clicked()
+{
+    QString currentPath = ui->lineEditModelPath->text().isEmpty()
+        ? QDir::currentPath()
+        : QFileInfo(ui->lineEditModelPath->text()).path();
+
+    QString file = QFileDialog::getOpenFileName(this, "选择模型文件", currentPath,
+        "RKNN模型 (*.rknn);;ONNX模型 (*.onnx);;所有文件 (*)");
+    if (!file.isEmpty()) {
+        ui->lineEditModelPath->setText(file);
+        QFileInfo fi(file);
+        log("model", QString("已选择模型: %1 (%2 MB)")
+            .arg(fi.fileName())
+            .arg(fi.size() / (1024.0 * 1024.0), 0, 'f', 2));
+    }
+}
+
+void frmMain::on_btnBrowseLabel_clicked()
+{
+    QString currentPath = ui->lineEditLabelPath->text().isEmpty()
+        ? QDir::currentPath()
+        : QFileInfo(ui->lineEditLabelPath->text()).path();
+
+    QString file = QFileDialog::getOpenFileName(this, "选择标签文件", currentPath,
+        "文本文件 (*.txt);;所有文件 (*)");
+    if (!file.isEmpty()) {
+        ui->lineEditLabelPath->setText(file);
+        log("info", QString("已选择标签文件: %1").arg(QFileInfo(file).fileName()));
+    }
+}
+
+// ==========================================
+// 阈值变化日志
+// ==========================================
+
+void frmMain::on_spinBoxConfThresh_valueChanged(double value)
+{
+    log("system", QString("置信度阈值已更新: %1").arg(value, 0, 'f', 2));
+}
+
+void frmMain::on_spinBoxNmsThresh_valueChanged(double value)
+{
+    log("system", QString("NMS阈值已更新: %1").arg(value, 0, 'f', 2));
+}
+
+// ==========================================
+// 公共日志接口
+// ==========================================
+
+void frmMain::appendLog(const QString &msg)
+{
+    ui->textBrowserLog->append(msg);
+}
