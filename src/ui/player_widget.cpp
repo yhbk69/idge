@@ -65,7 +65,7 @@ PlayerWidget::PlayerWidget(QWidget* parent)
 
 void PlayerWidget::open(std::string url)
 {
-    decoder_->start("/home/ubuntu/projects/qt_video/192.mp4");
+    decoder_->start(QString::fromStdString(url));
 
 }
 

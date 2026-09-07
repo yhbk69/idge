@@ -25,30 +25,30 @@ public:
     {
         
         std::shared_ptr<YOLO11Model> detector1 = std::make_shared<YOLO11Model>(
-            "/home/ubuntu/projects/idge/model/yolo11n.rknn",
-            "/home/ubuntu/projects/idge/model/coco_80_labels_list.txt",
+            "model/yolo11n.rknn",
+            "model/coco_80_labels_list.txt",
             RKNN_NPU_CORE_0
         );
         m_models["1"] = detector1;
 
         std::shared_ptr<YOLO11Model> detector2 = std::make_shared<YOLO11Model>(
-            "/home/ubuntu/projects/idge/model/yolo11n.rknn",
-            "/home/ubuntu/projects/idge/model/coco_80_labels_list.txt",
+            "model/yolo11n.rknn",
+            "model/coco_80_labels_list.txt",
             RKNN_NPU_CORE_1
 
         );
         m_models["2"] = detector2;
 
         std::shared_ptr<YOLO11Model> detector3 = std::make_shared<YOLO11Model>(
-            "/home/ubuntu/projects/idge/model/yolo11n.rknn",
-            "/home/ubuntu/projects/idge/model/coco_80_labels_list.txt",
+            "model/yolo11n.rknn",
+            "model/coco_80_labels_list.txt",
             RKNN_NPU_CORE_2
         );
         m_models["3"] = detector3;
 
         std::shared_ptr<YOLO11Model> detector4 = std::make_shared<YOLO11Model>(
-            "/home/ubuntu/projects/idge/model/yolo11n.rknn",
-            "/home/ubuntu/projects/idge/model/coco_80_labels_list.txt",
+            "model/yolo11n.rknn",
+            "model/coco_80_labels_list.txt",
             RKNN_NPU_CORE_0
         );
         m_models["4"] = detector4;

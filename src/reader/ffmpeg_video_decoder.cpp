@@ -30,8 +30,8 @@ FFmpegVideoDecoder::FFmpegVideoDecoder(QObject *parent) : QObject(parent)
 {
     detectResultQueue_= std::make_shared<PriorityQueue<object_detect_result_list>>(12);
     dmaBufferPool_ = std::make_shared<DmaBufferPool>(64, 640, 640, RK_FORMAT_BGR_888, 16);
-    yolo11 = new YOLO11Model("/home/ubuntu/projects/idge/model/yolo11n.rknn", 
-                        "/home/ubuntu/projects/idge/model/coco_80_labels_list.txt", 
+    yolo11 = new YOLO11Model("model/yolo11n.rknn", 
+                        "model/coco_80_labels_list.txt", 
                         RKNN_NPU_CORE_0);
     frameQueue_ = std::make_shared<FrameQueue>(2, dmaBufferPool_);
     AppConfig appConfig;
@@ -39,20 +39,20 @@ FFmpegVideoDecoder::FFmpegVideoDecoder(QObject *parent) : QObject(parent)
     modelPool_->init();
     TaskConfig taskConfig;
     taskConfig.core_mask = RKNN_NPU_CORE_0;
-    taskConfig.modelPath = "/home/ubuntu/projects/idge/model/yolo11n.rknn";
-    taskConfig.labelPath = "/home/ubuntu/projects/idge/model/coco_80_labels_list.txt";
+    taskConfig.modelPath = "model/yolo11n.rknn";
+    taskConfig.labelPath = "model/coco_80_labels_list.txt";
     ppeTask_ = new PpeTask(taskConfig);
 
     TaskConfig taskConfig2;
     taskConfig2.core_mask = RKNN_NPU_CORE_1;
-    taskConfig2.modelPath = "/home/ubuntu/projects/idge/model/yolo11n.rknn";
-    taskConfig2.labelPath = "/home/ubuntu/projects/idge/model/coco_80_labels_list.txt";
+    taskConfig2.modelPath = "model/yolo11n.rknn";
+    taskConfig2.labelPath = "model/coco_80_labels_list.txt";
     ppeTask2_ = new PpeTask(taskConfig2);
 
     TaskConfig taskConfig3;
     taskConfig3.core_mask = RKNN_NPU_CORE_2;
-    taskConfig3.modelPath = "/home/ubuntu/projects/idge/model/yolo11n.rknn";
-    taskConfig3.labelPath = "/home/ubuntu/projects/idge/model/coco_80_labels_list.txt";
+    taskConfig3.modelPath = "model/yolo11n.rknn";
+    taskConfig3.labelPath = "model/coco_80_labels_list.txt";
     ppeTask3_ = new PpeTask(taskConfig3);
 }
 
