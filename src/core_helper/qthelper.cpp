@@ -544,6 +544,33 @@ void QtHelper::setFont(int fontSize)
 #elif defined(Q_OS_MAC)
     preferredFonts << "PingFang SC" << "Heiti SC" << "STHeiti";
 #else
+    QStringList localFontFiles;
+    localFontFiles << "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf";
+    localFontFiles << "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
+
+    QString fontFile;
+    for (const QString &f : localFontFiles) {
+        if (QFile::exists(f)) {
+            fontFile = f;
+            break;
+        }
+    }
+
+    if (!fontFile.isEmpty()) {
+        QFontDatabase fontDb;
+        int fontId = fontDb.addApplicationFont(fontFile);
+        QStringList families = fontDb.applicationFontFamilies(fontId);
+        if (!families.isEmpty()) {
+            QFont font(families.first());
+            font.setPixelSize(fontSize);
+#if (QT_VERSION >= QT_VERSION_CHECK(4,8,0))
+            font.setHintingPreference(QFont::PreferNoHinting);
+#endif
+            qApp->setFont(font);
+            return;
+        }
+    }
+
     preferredFonts << "Noto Sans CJK SC" << "Noto Sans SC"
                    << "Source Han Sans SC" << "WenQuanYi Micro Hei"
                    << "AR PL UMing CN" << "AR PL UKai CN"

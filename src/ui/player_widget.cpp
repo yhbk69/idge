@@ -37,7 +37,7 @@ PlayerWidget::PlayerWidget(QWidget* parent)
     overlayLabel->setText("OSD 叠加wenja");
     overlayLabel->setAlignment(Qt::AlignCenter);
     overlayLabel->setStyleSheet(
-        "QLable {"
+        "QLabel {"
         "   background: transparent;"
         "   color: white;"
         "   font-size: 24px;"

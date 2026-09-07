@@ -75,7 +75,7 @@ void frmMain::initForm()
     ui->labTitle->setText("施工行为监测与分析");
     this->setWindowTitle(ui->labTitle->text());
 
-    ui->stackedWidget->setStyleSheet("QLabel{font:50px;}");
+    ui->stackedWidget->setStyleSheet("QLabel{font-size:50px;}");
 
     QSize icoSize(20, 20);
     int icoWidth = 50;

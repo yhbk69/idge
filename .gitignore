@@ -30,3 +30,4 @@ install/
 .DS_Store
 *.log
 gmon.out
+plan/
