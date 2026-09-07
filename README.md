@@ -20,27 +20,50 @@
 | C++17 | 主要开发语言 |
 | Qt5 | GUI 框架 |
 | RKNN Runtime (rknpu2) | Rockchip NPU 推理引擎 |
-| FFmpeg | 视频解码 (h264_rkmpp/h264 硬解码) |
-| RGA | 硬件 2D 图像加速 |
-| OpenGL ES 3.0 / EGL | GPU 零拷贝视频渲染 |
-| OpenCV 4.10 | 图像处理辅助 |
+| FFmpeg (rkmpp) | 视频硬件解码 (h264_rkmpp) |
+| RGA | 硬件 2D 图像加速（色彩转换 + 缩放） |
+| OpenGL ES 2.0 / EGL | GPU 零拷贝视频渲染 |
 | CMake 3.10+ | 构建系统 |
 
-### 系统架构流程
+### 视频处理全流程
+
+#### 输入格式
+视频源可以是本地 `.mp4` 文件或 RTSP 摄像头流，编码格式为 **H.264 (AVC)**。文件通过 FFmpeg 的 `avformat` 打开，由 `h264_rkmpp` 硬件解码器在 RK3588 的 VPU 上解码。
+
+#### 格式转换链路
 ```
-摄像头/视频文件
+H.264 编码流
+    ↓  FFmpeg h264_rkmpp 硬解码（VPU 硬件解码）
+NV12 DMA-BUF fd（YUV 420 半平面，GPU 可直接访问）
+    ↓  RGA 硬件色彩转换（fd → fd，零拷贝）
+RGBA8888 DMA-BUF fd（RGBA 4 通道，OpenGL 可直接导入）
+    ↓  CPU 侧画框 + 标签（draw_rectangle / draw_text，mmap 直写像素）
+RGBA8888 DMA-BUF fd（带检测框的最终画面）
+    ↓  dup(fd) 传递给渲染线程
     ↓
-FFmpeg RKMPP 硬解码 (Drm Prime)
-    ↓
-RGA 零拷贝色彩转换 + 缩放
-    ↓
-┌─────────────────┐  ┌─────────────────────┐
-│ EGL 渲染 (零拷贝) │  │ 检测任务队列          │
-│ DMA-BUF fd      │  │ 3个NPU核心并行推理    │
-│ -> EGLImage     │  │ YOLO11n 推理 (RKNN)  │
-│ -> GL 纹理      │  │ NMS 后处理            │
-└─────────────────┘  └─────────────────────┘
+    ├──→ EGLImage 导入 DMA-BUF（零拷贝，无需 CPU 拷贝）
+    │        ↓
+    │    OpenGL ES 纹理绘制（带宽高比保持的 quad 绘制）
+    │        ↓
+    │    屏幕显示 + QPainter 叠加 FPS 帧率
+    │
+    └──→ RGA 缩放到 640×640 RGB（用于 YOLO 推理）
+             ↓
+         RKNN NPU 3 核并行推理（YOLO11）
+             ↓
+         NMS 后处理 → 检测结果队列 → 画框叠加到下一帧
 ```
+
+#### 各阶段详解
+
+| 阶段 | 输入格式 | 输出格式 | 执行硬件 | 关键代码 |
+|------|----------|----------|----------|----------|
+| 解码 | H.264 码流 | NV12 DMA-BUF | VPU (MPP) | `ffmpeg_video_decoder.cpp:280-294` |
+| 色彩转换 | NV12 DMA-BUF | RGBA DMA-BUF | RGA 硬件 | `RgaConverter::convertNV12ToRGBAbyRGA()` |
+| 推理预处理 | RGBA DMA-BUF | 640×640 RGB DMA-BUF | RGA 硬件 | `RgaConverter::rgba_to_rgb_resize()` |
+| NPU 推理 | 640×640 RGB | 检测结果 (80类) | NPU ×3 | `YOLO11Model::detect()` |
+| 画框叠加 | RGBA DMA-BUF + 检测结果 | 带框的 RGBA DMA-BUF | CPU (mmap) | `draw_rectangle()` + `draw_text()` |
+| 渲染 | RGBA DMA-BUF fd | 屏幕像素 | GPU (Mali) | EGLImage → GL texture → quad |
 
 ## 系统要求
 
@@ -65,9 +88,28 @@ aarch64-linux-gnu-gcc --version
 aarch64-linux-gnu-g++ --version
 ```
 
-### 2. 构建项目
+### 2. 构建 rkmpp FFmpeg（板子上原生编译）
+系统自带的 FFmpeg 4.x 不支持 rkmpp 硬解码，需从源码编译带 rkmpp 支持的 FFmpeg 6.1：
 ```bash
-# 在 RK3588 板子上交叉编译
+# 克隆源码（在板子上）
+cd /tmp
+git clone https://github.com/nyanmisaka/ffmpeg-rockchip.git -b 6.1 ffmpeg-rockchip
+cd ffmpeg-rockchip
+
+# 配置：启用 rkmpp + libdrm，关闭不需要的模块
+./configure \
+    --enable-rkmpp --enable-libdrm --enable-version3 \
+    --enable-shared --disable-static \
+    --disable-doc --disable-debug \
+    --prefix=/path/to/idge-main/3rdparty/ffmpeg-rkmpp
+
+# 编译安装
+make -j$(nproc) && make install
+```
+
+### 3. 构建项目
+```bash
+# 在 RK3588 板子上构建（使用板载 aarch64 编译器）
 ./build-linux.sh -t rk3588 -b Release
 
 # 可选参数：
@@ -78,8 +120,8 @@ aarch64-linux-gnu-g++ --version
 # -d            启用 DMA32 (RGA2, 低于4G内存)
 ```
 
-### 3. 构建产物
-构建完成后，可执行文件将安装到 `install/rk3588_linux/` 目录。
+### 4. 构建产物
+构建完成后，可执行文件将安装到 `install/rk3588_linux/` 目录。动态库搜索路径（RPATH）已设为 `$ORIGIN/../lib`。
 
 ## 运行说明
 
@@ -98,12 +140,20 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
 
 > **注意**：必须加载 Mali EGL（而非 Mesa），否则渲染会黑屏。`run.sh` 已自动处理。
 
-### 依赖库说明
-| 库 | 来源 | 用途 |
+### 关键环境变量
+| 变量 | 值 | 说明 |
+|------|------|------|
+| `DISPLAY` | `:0` | X11 显示服务器 |
+| `LD_LIBRARY_PATH` | 见下 | 动态库搜索路径 |
+| `XDG_RUNTIME_DIR` | `/run/user/$(id -u)` | 用户运行时目录 |
+
+### 库路径说明
+| 库 | 路径 | 说明 |
 |----|------|------|
-| Mali EGL/GLES | `/usr/lib/aarch64-linux-gnu/mali/` | GPU 零拷贝渲染 |
-| ffmpeg-rkmpp | `3rdparty/ffmpeg-rkmpp/lib/` | h264_rkmpp 硬件解码 |
-| librga | 系统 `/usr/lib/` | RGA 硬件加速 |
+| Mali EGL/GLES | `/usr/lib/aarch64-linux-gnu/mali/` | GPU 渲染驱动（系统安装） |
+| ffmpeg-rkmpp | `3rdparty/ffmpeg-rkmpp/lib/` | 带 rkmpp 支持的 FFmpeg 6.1（板子原生编译） |
+| Qt5 | `/usr/local/Qt-5.15.18/lib/` | Qt5 运行库（板子安装） |
+| librga | `/usr/lib/` | RGA 硬件加速库（系统自带） |
 
 ## 目录结构
 
@@ -154,6 +204,28 @@ idge-main/
 - **输入尺寸**：640x640 (LetterBox 预处理)
 - **支持的量化**：uint8, int8, float32
 - **NPU 核心**：支持指定到 RK3588 的 3 个 NPU 核心
+
+## 第三方库版本
+
+| 库 | 版本 | 路径 | 用途 |
+|----|------|------|------|
+| FFmpeg (rkmpp) | 6.1.1 | `3rdparty/ffmpeg-rkmpp/` | h264_rkmpp 硬件解码 |
+| MPP | 1.3.10 | `3rdparty/mpp/` | Rockchip 多媒体处理平台 |
+| RKNN Runtime (rknpu2) | 运行时查询 | `3rdparty/rknpu2/` | NPU 推理引擎 |
+| librga | 1.10.0 | `3rdparty/librga/` | RGA 硬件 2D 加速 |
+| OpenCV | 4.2.0 | 系统 `/usr/lib/` | 图像处理 |
+| Qt5 | 5.15.18 | `/usr/local/Qt-5.15.18/` | GUI 框架 |
+| jsoncpp | 1.9.7 | `3rdparty/jsoncpp/` | JSON 解析 |
+| libjpeg-turbo | 2.1.3 | `3rdparty/jpeg_turbo/` | JPEG 编解码 |
+| libyuv | 1882 | `3rdparty/libyuv/` | YUV 图像缩放 |
+| libsndfile | 1.2.2 | `3rdparty/libsndfile/` | 音频文件读写 |
+| OpenSSL | 1.1.0l / 3.0.21 | `3rdparty/openssl1.1.0/` `3rdparty/openssl3.0.21/` | 加密/SSL |
+| ZeroMQ | 4.3.5 | `3rdparty/zmq/` | 消息队列 |
+| FFTW | 3.3.10 | `3rdparty/fftw/` | 快速傅里叶变换 |
+| stb_image | 2.26 | `3rdparty/stb_image/` | 图片读写 (header-only) |
+| stb_image_write | 1.15 | `3rdparty/stb_image/` | 图片写入 (header-only) |
+| OpenCL | 2.2 (stub) | `3rdparty/opencl/` | GPU 计算接口 |
+| allocator | DRM 内核头文件 | `3rdparty/allocator/` | DRM/DMA-BUF 分配 |
 
 ## 已知问题
 

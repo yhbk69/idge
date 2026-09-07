@@ -33,3 +33,4 @@ install/
 *.log
 gmon.out
 plan/
+config.json
