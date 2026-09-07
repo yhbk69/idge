@@ -83,14 +83,27 @@ aarch64-linux-gnu-g++ --version
 
 ## 运行说明
 
-### GUI 模式
+### GUI 模式（推荐）
 ```bash
-# 开发目录直接运行（已内置 RPATH，无需额外设置）
-./build/build_rk3588_linux/idge
-
-# 或使用 install 目录
-./install/rk3588_linux/bin/idge
+# 一键启动（自动设置 Mali EGL 和 rkmpp FFmpeg 库路径）
+./run.sh
 ```
+
+### 手动运行
+```bash
+# 开发目录直接运行，需要手动设置 Mali EGL 和 rkmpp FFmpeg 库路径
+export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib:/usr/local/Qt-5.15.18/lib:$LD_LIBRARY_PATH
+./build/build_rk3588_linux/idge
+```
+
+> **注意**：必须加载 Mali EGL（而非 Mesa），否则渲染会黑屏。`run.sh` 已自动处理。
+
+### 依赖库说明
+| 库 | 来源 | 用途 |
+|----|------|------|
+| Mali EGL/GLES | `/usr/lib/aarch64-linux-gnu/mali/` | GPU 零拷贝渲染 |
+| ffmpeg-rkmpp | `3rdparty/ffmpeg-rkmpp/lib/` | h264_rkmpp 硬件解码 |
+| librga | 系统 `/usr/lib/` | RGA 硬件加速 |
 
 ## 目录结构
 
@@ -98,6 +111,7 @@ aarch64-linux-gnu-g++ --version
 idge-main/
 ├── CMakeLists.txt              # 主构建配置
 ├── build-linux.sh              # Linux 交叉编译脚本
+├── run.sh                      # 一键启动脚本（自动设置库路径）
 ├── video-preview.sh            # MIPI CSI 摄像头预览脚本
 ├── yolo11_videocapture_demo.cc # 独立 YOLO11 视频检测示例
 │

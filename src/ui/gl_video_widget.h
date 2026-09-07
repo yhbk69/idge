@@ -7,6 +7,7 @@
 #include <QOpenGLShaderProgram>
 #include <QMutex>
 #include <QQueue>
+#include <QElapsedTimer>
 
 #include "eglimage_helper.h"
 
@@ -53,6 +54,11 @@ private:
 
     QMutex mutex_;
     bool initialized_ = false;
+
+    // FPS 统计
+    QElapsedTimer fpsTimer_;
+    int fpsFrameCount_ = 0;
+    float currentFps_ = 0.0f;
 };
 
 #endif

@@ -84,6 +84,7 @@ void GLVideoWidget::initializeGL()
     }
 
     initialized_ = true;
+    fpsTimer_.start();
     qDebug() << "GLVideoWidget initialized";
 }
 
@@ -110,6 +111,15 @@ void GLVideoWidget::onFrameReady(RenderFrame frame)
     prev_frame_ = pending_frame_;
     pending_frame_ = frame;
     frame_updated_ = true;
+
+    // FPS 统计
+    fpsFrameCount_++;
+    qint64 elapsed = fpsTimer_.elapsed();
+    if (elapsed >= 1000) {
+        currentFps_ = fpsFrameCount_ * 1000.0f / elapsed;
+        fpsFrameCount_ = 0;
+        fpsTimer_.restart();
+    }
 
     update();
 }
@@ -203,8 +213,12 @@ void GLVideoWidget::drawQuad()
 
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
-    painter.setPen(Qt::red);
-    painter.drawText(100,100 , "afasf");
+    painter.setPen(Qt::green);
+    QFont font = painter.font();
+    font.setPixelSize(24);
+    font.setBold(true);
+    painter.setFont(font);
+    painter.drawText(10, 30, QString("FPS: %1").arg(currentFps_, 0, 'f', 1));
     painter.end();
 
 }

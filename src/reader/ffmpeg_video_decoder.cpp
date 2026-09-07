@@ -395,11 +395,6 @@ void FFmpegVideoDecoder::decodeLoop()
                         {
                             object_detect_result *det_result = &(od_results.results[i]);
 
-                            // printf("%s @ (%d %d %d %d) %.3f\n", coco_cls_to_name(det_result->cls_id),
-                            //     det_result->box.left, det_result->box.top,
-                            //     det_result->box.right, det_result->box.bottom,
-                            //     det_result->prop);
-
                             int x1 = det_result->box.left;
                             int y1 = det_result->box.top;   
                             int x2 = det_result->box.right;
@@ -407,7 +402,11 @@ void FFmpegVideoDecoder::decodeLoop()
 
                             draw_rectangle(&dislayImage, x1, y1, x2 - x1, y2 - y1, COLOR_BLUE, 3);
 
-                            //sprintf(text, "%s %.1f%%", coco_cls_to_name(det_result->cls_id), det_result->prop * 100);
+                            const auto &cls = yolo11->getClassNames();
+                            if (det_result->cls_id >= 0 && det_result->cls_id < (int)cls.size())
+                                snprintf(text, sizeof(text), "%s %.1f%%", cls[det_result->cls_id].c_str(), det_result->prop * 100);
+                            else
+                                snprintf(text, sizeof(text), "cls_%d %.1f%%", det_result->cls_id, det_result->prop * 100);
                             draw_text(&dislayImage, text, x1, y1 - 20, COLOR_RED, 10);
                         }
 
