@@ -67,7 +67,11 @@ PlayerWidget::PlayerWidget(QWidget* parent)
 void PlayerWidget::open(std::string url)
 {
     decoder_->start(QString::fromStdString(url));
+}
 
+void PlayerWidget::stopDecoder()
+{
+    decoder_->stop();
 }
 
 void PlayerWidget::btnClicked()

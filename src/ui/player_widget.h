@@ -17,6 +17,7 @@ public:
     explicit PlayerWidget(QWidget* parent = nullptr);
     ~PlayerWidget();
     void open(std::string url);
+    void stopDecoder();
 
 private:
 

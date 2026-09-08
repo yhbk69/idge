@@ -27,6 +27,7 @@ private:
 
 public:
     PpeTask(TaskConfig config);
+    ~PpeTask();
     void init();
     void start();
     void put(std::shared_ptr<TaskData> task);

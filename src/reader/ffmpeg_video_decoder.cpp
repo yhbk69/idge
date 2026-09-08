@@ -1,7 +1,6 @@
 // video_decoder.cpp
 #include "ffmpeg_video_decoder.h"
 #include "rga_converter.h"
-//#include "dmabuf.h"
 
 #include <QDebug>
 #include <QElapsedTimer>
@@ -10,8 +9,6 @@
 #include "image_utils.h"
 #include "ThreadPool.hpp"
 #include "helmet_task.h"
-
-//extern const std::shared_ptr<dpool::ThreadPool> detectPool;
 
 enum AVPixelFormat GetHWFormat(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts)
 {
@@ -24,6 +21,13 @@ enum AVPixelFormat GetHWFormat(AVCodecContext *ctx, const enum AVPixelFormat *pi
 
     fprintf(stderr, "Failed to get HW surface format.\n");
     return AV_PIX_FMT_NONE;
+}
+
+// FFmpeg 中断回调：当 running_ 为 false 时中断 av_read_frame / avcodec_receive_frame
+static int decodeInterruptCallback(void *ctx)
+{
+    std::atomic<bool> *running = static_cast<std::atomic<bool> *>(ctx);
+    return running->load() ? 0 : 1;
 }
 
 FFmpegVideoDecoder::FFmpegVideoDecoder(QObject *parent) : QObject(parent) 
@@ -89,10 +93,16 @@ void FFmpegVideoDecoder::stop()
     ppeTask3_->stop();
     if (thread_)
     {
+        // interrupt_callback 会中断 av_read_frame 阻塞，线程会在当前帧处理完后退出
         thread_->quit();
-        thread_->wait(3000);
+        if (!thread_->wait(5000)) {
+            qWarning() << "Decoder thread did not stop in time, terminating";
+            thread_->terminate();
+            thread_->wait(2000);
+        }
         thread_ = nullptr;
     }
+    running_ = true;  // 重置，为下次 start() 准备
 }
 
 void FFmpegVideoDecoder::doInfer()
@@ -143,6 +153,12 @@ void FFmpegVideoDecoder::decodeLoop()
 
     // ===== 1. 打开文件 =====
     AVFormatContext *fmt_ctx = nullptr;
+
+    // 设置中断回调，使 av_read_frame 在 running_=false 时能被中断
+    AVIOInterruptCB interrupt_cb = {decodeInterruptCallback, &running_};
+    fmt_ctx = avformat_alloc_context();
+    fmt_ctx->interrupt_callback = interrupt_cb;
+
     ret = avformat_open_input(&fmt_ctx, url_.toUtf8().constData(), nullptr, nullptr);
     if (ret < 0)
     {
@@ -155,6 +171,7 @@ void FFmpegVideoDecoder::decodeLoop()
     if (vidx < 0)
     {
         emit error("No video stream");
+        avformat_close_input(&fmt_ctx);
         return;
     }
 
@@ -167,6 +184,7 @@ void FFmpegVideoDecoder::decodeLoop()
     if (!codec)
     {
         emit error("No decoder");
+        avformat_close_input(&fmt_ctx);
         return;
     }
 
@@ -188,6 +206,8 @@ void FFmpegVideoDecoder::decodeLoop()
         char errrbuf[256];
         av_strerror(err, errrbuf, sizeof(errrbuf));
         printf("failed %s\n", errrbuf);
+        avcodec_free_context(&dec_ctx);
+        avformat_close_input(&fmt_ctx);
 		return ;
 	}
 
@@ -448,7 +468,8 @@ void FFmpegVideoDecoder::decodeLoop()
     // ===== 5. 清理 =====
     for (int i = 0; i < 2; i++)
     {
-        //dmabuf_free(drm_fd, rgba_bufs[i]);
+        delete dst_bufs[i];
+        dst_bufs[i] = nullptr;
     }
     close(drm_fd);
 

@@ -459,6 +459,20 @@ void frmMain::systemExit()
     }
 }
 
+void frmMain::closeEvent(QCloseEvent *event)
+{
+    // 停止所有 4 路解码器和推理任务
+    if (videoWindow) {
+        for (int ch = 0; ch < 4; ch++) {
+            PlayerWidget *pw = videoWindow->playerWidget(ch);
+            if (pw) {
+                pw->stopDecoder();
+            }
+        }
+    }
+    event->accept();
+}
+
 void frmMain::on_pageRoll_customContextMenuRequested(const QPoint &pos)
 {
 }
