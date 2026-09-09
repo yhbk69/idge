@@ -6,6 +6,7 @@
 #include <QVBoxLayout>
 #include <QTimer>
 #include <QMap>
+#include <QScrollArea>
 
 class DashboardWidget : public QWidget
 {
@@ -37,8 +38,9 @@ private:
     QLabel *lblTemp_ = nullptr;
     QLabel *lblNpu_ = nullptr;
 
-    QFrame *classStatsWidget_ = nullptr;
+    QWidget *classStatsWidget_ = nullptr;
     QVBoxLayout *classStatsLayout_ = nullptr;
+    QScrollArea *classStatsScroll_ = nullptr;
 
     QTimer refreshTimer_;
     qint64 startTime_ = 0;

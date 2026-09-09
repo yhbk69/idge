@@ -17,6 +17,7 @@ struct AlarmRecord {
     QString className;
     float confidence;
     bool acknowledged;
+    QString imgPath;      ///< 报警截图路径（可为空）
 };
 
 Q_DECLARE_METATYPE(AlarmRecord)
@@ -32,8 +33,12 @@ public:
 
     void setClassNames(const QStringList &names);
 
-    // 接收检测结果，生成报警
-    void onDetectionResult(int channel, const object_detect_result_list &results);
+    // 在产生画面的线程(解码线程)调用：统计 + 判定报警（含去重限流）
+    // 返回本次真正需要上报的新报警（尚未存储，imgPath 待填充）
+    QVector<AlarmRecord> ingest(int channel, const object_detect_result_list &results);
+
+    // 存储新报警并发出 alarmGenerated / statsUpdated 信号
+    void storeAndNotify(const QVector<AlarmRecord> &alarms);
 
     QVector<AlarmRecord> alarms() const;
     int alarmCount() const;

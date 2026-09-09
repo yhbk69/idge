@@ -4,11 +4,149 @@
 
 #include <QDebug>
 #include <QElapsedTimer>
+#include <QDateTime>
+#include <cerrno>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
+#include <vector>
+#include <cstring>
+#include <sys/stat.h>
 #include <unistd.h>
 #include "DmaFrameBuffer.h"
 #include "image_utils.h"
 #include "ThreadPool.hpp"
 #include "helmet_task.h"
+#include "alarm_manager.h"
+
+// ============================================================
+// 报警截图异步写入器
+//
+// 为什么需要后台线程：
+//   PNG 编码 + 写盘很费 CPU（720p 一张要几百毫秒），如果放在解码线程里
+//   同步执行，会直接把帧率拖到个位数。
+//   所以这里：解码线程只负责【拷贝一份像素 + 提交】，编码和写盘全部
+//   在独立的后台线程完成，解码线程绝不阻塞。
+//
+// 目录结构：alarms/日期/通道N_类别_时间.png
+// 为什么用 PNG 不用 JPG：
+//   画面像素是 RGBA(4通道)，而 image_utils 的 jpg 写入只支持 RGB(3通道)，
+//   PNG 写入支持 4 通道，所以这里存 png。
+// ============================================================
+namespace {
+
+// 一张待写盘的截图任务（含一份像素拷贝 + 目标路径）
+struct SnapJob {
+    std::vector<unsigned char> rgba;   // RGBA 像素拷贝（w*h*4 字节）
+    int w = 0;
+    int h = 0;
+    QString path;                      // 保存路径
+};
+
+class SnapWriter {
+public:
+    static SnapWriter &get()
+    {
+        static SnapWriter w;            // 进程内唯一写盘线程，首次提交时启动
+        return w;
+    }
+
+    // 提交一张截图：把像素复制一份入队，立即返回（不阻塞解码线程）
+    // 队列满（积压太多）时丢弃最旧的一张，避免内存无限增长
+    void submit(int w, int h, const unsigned char *px, const QString &path)
+    {
+        SnapJob job;
+        job.w = w;
+        job.h = h;
+        job.path = path;
+        job.rgba.assign(px, px + (size_t)w * h * 4);
+
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            if ((int)q_.size() >= kMaxPending) q_.pop();   // 满了丢最旧
+            q_.push(std::move(job));
+        }
+        cv_.notify_one();
+    }
+
+private:
+    static const int kMaxPending = 4;   // 最多积压 4 张，防止内存暴涨
+
+    SnapWriter() { th_ = std::thread([this] { run(); }); }
+    ~SnapWriter()
+    {
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        if (th_.joinable()) th_.join();   // 退出前把队列里剩余的都写完
+    }
+
+    void run()
+    {
+        for (;;) {
+            SnapJob job;
+            {
+                std::unique_lock<std::mutex> lk(mtx_);
+                cv_.wait(lk, [this] { return stop_ || !q_.empty(); });
+                if (stop_ && q_.empty()) return;
+                job = std::move(q_.front());
+                q_.pop();
+            }
+            writePng(job);
+        }
+    }
+
+    // 真正把像素编码成 PNG 并写盘（只在后台线程调用）
+    static void writePng(SnapJob &job)
+    {
+        image_buffer_t img;
+        memset(&img, 0, sizeof(img));
+        img.format = image_format_t::IMAGE_FORMAT_RGBA8888;
+        img.virt_addr = job.rgba.data();      // 指向像素拷贝
+        img.width = job.w;
+        img.height = job.h;
+        img.width_stride = job.w;
+        write_image(job.path.toUtf8().constData(), &img);
+    }
+
+    std::thread th_;
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    std::queue<SnapJob> q_;
+    bool stop_ = false;
+};
+
+} // namespace
+
+// 生成截图路径并提交给后台线程，返回保存路径
+static QString submitAlarmSnapshot(int channel, const QString &className,
+                                   int w, int h, const unsigned char *rgba)
+{
+    // 一级目录 alarms/ 存截图根目录
+    if (::mkdir("alarms", 0755) != 0 && errno != EEXIST) {
+        return QString();
+    }
+    // 二级目录 alarms/yyyyMMdd 按天归档
+    QString day = QDate::currentDate().toString("yyyyMMdd");
+    QString dir = QString("alarms/%1").arg(day);
+    if (::mkdir(dir.toUtf8().constData(), 0755) != 0 && errno != EEXIST) {
+        return QString();
+    }
+
+    // 文件名：通道N_类别_时分秒_毫秒.png
+    QString path = QString("%1/ch%2_%3_%4.png")
+        .arg(dir)
+        .arg(channel + 1)
+        .arg(className)
+        .arg(QDateTime::currentDateTime().toString("HHmmss_zzz"));
+
+    // 提交给后台线程写盘（拷贝像素副本），解码线程立即返回不等待
+    SnapWriter::get().submit(w, h, rgba, path);
+    return path;
+}
 
 enum AVPixelFormat GetHWFormat(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts)
 {
@@ -88,20 +226,29 @@ void FFmpegVideoDecoder::start(const QString &url)
 void FFmpegVideoDecoder::stop()
 {
     running_ = false;
-    ppeTask_->stop();
-    ppeTask2_->stop();
-    ppeTask3_->stop();
+
+    // 先唤醒并请求推理线程退出（不阻塞），避免它们在解码线程还在投递时被 join 卡住
+    ppeTask_->requestStop();
+    ppeTask2_->requestStop();
+    ppeTask3_->requestStop();
+
+    // 再停止解码线程（interrupt_callback 中断 av_read_frame，线程处理完当前帧后退出）
     if (thread_)
     {
-        // interrupt_callback 会中断 av_read_frame 阻塞，线程会在当前帧处理完后退出
         thread_->quit();
-        if (!thread_->wait(5000)) {
+        if (!thread_->wait(3000)) {
             qWarning() << "Decoder thread did not stop in time, terminating";
             thread_->terminate();
-            thread_->wait(2000);
+            thread_->wait(1500);
         }
         thread_ = nullptr;
     }
+
+    // 最后回收推理线程（此时解码线程已停，不会再投递新任务）
+    ppeTask_->join();
+    ppeTask2_->join();
+    ppeTask3_->join();
+
     running_ = true;  // 重置，为下次 start() 准备
 }
 
@@ -432,8 +579,32 @@ void FFmpegVideoDecoder::decodeLoop()
                             draw_text(&dislayImage, text, x1, y1 - 20, COLOR_RED, 10);
                         }
 
-                        // 发送检测结果给报警管理器
-                        emit detectionResult(channel_, od_results);
+                        // ============ 报警判定 + 截图 ============
+                        // 1) ingest(): 把检测结果交给报警管理器做"统计 + 报警判定"
+                        //    - 累加各类别检测数量（看板用）
+                        //    - 判断检测到的类别是否在报警名单里（config.json alarm.classes）
+                        //    - 同一个通道同一类别在 2 秒内只算一次报警（去重限流）
+                        //    返回值 newAlarms 是"这次真正要上报的报警"列表（可能为空）
+                        QVector<AlarmRecord> newAlarms =
+                            AlarmManager::instance().ingest(channel_, od_results);
+
+                        // 2) 如果有新报警，就把"当前这一帧"的像素交给后台线程写盘
+                        //    这里只拷贝像素+提交，不做 PNG 编码/写盘，避免拖慢解码线程
+                        if (!newAlarms.isEmpty()) {
+                            QString snap = submitAlarmSnapshot(
+                                channel_,
+                                newAlarms.front().className,
+                                dislayImage.width,
+                                dislayImage.height,
+                                (const unsigned char *)dislayImage.virt_addr);
+                            // 同一帧的多个报警共用同一张截图
+                            for (auto &a : newAlarms) {
+                                a.imgPath = snap;
+                            }
+                            // 3) storeAndNotify(): 真正入库并通知界面
+                            //    -> 界面收到 alarmGenerated 信号：弹 toast、报警列表自动插入新行
+                            AlarmManager::instance().storeAndNotify(newAlarms);
+                        }
                     }
 
                     

@@ -34,6 +34,11 @@
 #include <QFileInfo>
 #include <QLabel>
 #include <QTimer>
+#include <QToolButton>
+#include <QMessageBox>
+#include <QPushButton>
+#include <QGuiApplication>
+#include <QScreen>
 
 // ==========================================
 // 构造 / 析构
@@ -234,13 +239,22 @@ void frmMain::initForm()
     ui->stackedWidget->setStyleSheet("QLabel{font-size:50px;}");
 
     // 6. 配置顶部导航按钮
-    QSize icoSize(20, 20);
-    int icoWidth = 50;
+    QSize icoSize(22, 22);
+    int icoWidth = 56;
     QList<QAbstractButton *> tbtns = ui->widgetTop->findChildren<QAbstractButton *>();
     foreach (QAbstractButton *btn, tbtns) {
+        QToolButton *tbtn = qobject_cast<QToolButton *>(btn);
         btn->setIconSize(icoSize);
         btn->setMinimumWidth(icoWidth);
         btn->setCheckable(true);
+        if (tbtn) {
+            // 图标+文字（不只是图标）
+            tbtn->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+            tbtn->setMinimumHeight(58);
+            QFont bf = tbtn->font();
+            bf.setPixelSize(12);
+            tbtn->setFont(bf);
+        }
         connect(btn, SIGNAL(clicked()), this, SLOT(buttonClick()));
     }
 
@@ -349,8 +363,6 @@ void frmMain::initNewPages()
     for (int ch = 0; ch < 4; ch++) {
         PlayerWidget *pw = videoWindow->playerWidget(ch);
         if (pw && pw->decoder()) {
-            connect(pw->decoder(), &FFmpegVideoDecoder::detectionResult,
-                    &AlarmManager::instance(), &AlarmManager::onDetectionResult);
             connect(pw->decoder(), &FFmpegVideoDecoder::statusChanged,
                     this, [this](int ch, int online) {
                         AlarmManager::instance().setChannelOnline(ch, online != 0);
@@ -583,8 +595,25 @@ void frmMain::on_btnMenu_Close_clicked()
  */
 void frmMain::systemExit()
 {
-    if (!QMessageBox::information(this, tr("退出"), tr("确认要退出系统吗?"), tr("确定"), tr("取消")))
-    {
+    // 顶层无父窗口 + 置顶，避免模态框被全屏无边框主窗遮挡导致"卡死"
+    QMessageBox box(QMessageBox::Question, tr("退出系统"), tr("确认要退出系统吗?"),
+                    QMessageBox::Ok | QMessageBox::Cancel, nullptr);
+    box.setWindowFlags(box.windowFlags() | Qt::WindowStaysOnTopHint);
+    QAbstractButton *okBtn = box.button(QMessageBox::Ok);
+    if (okBtn) okBtn->setText(tr("确定"));
+    QAbstractButton *cancelBtn = box.button(QMessageBox::Cancel);
+    if (cancelBtn) cancelBtn->setText(tr("取消"));
+    box.adjustSize();
+
+    // 居中显示
+    if (QScreen *screen = QGuiApplication::primaryScreen()) {
+        QRect scr = screen->availableGeometry();
+        box.move(scr.center() - box.rect().center());
+    }
+    box.raise();
+    box.activateWindow();
+
+    if (box.exec() == QMessageBox::Ok) {
         close();
     }
 }

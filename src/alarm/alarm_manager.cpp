@@ -6,6 +6,11 @@
 AlarmManager &AlarmManager::instance()
 {
     static AlarmManager mgr;
+    static const bool registered = []() {
+        qRegisterMetaType<AlarmRecord>("AlarmRecord");
+        return true;
+    }();
+    (void)registered;
     return mgr;
 }
 
@@ -25,7 +30,7 @@ void AlarmManager::setClassNames(const QStringList &names)
     classNames_ = names;
 }
 
-void AlarmManager::onDetectionResult(int channel, const object_detect_result_list &results)
+QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_result_list &results)
 {
     QVector<AlarmRecord> newAlarms;
     {
@@ -61,18 +66,27 @@ void AlarmManager::onDetectionResult(int channel, const object_detect_result_lis
                 alarm.className = className;
                 alarm.confidence = det.prop;
                 alarm.acknowledged = false;
-                alarms_.append(alarm);
                 newAlarms.append(alarm);
-
-                // 限制报警数量，最多保留 1000 条
-                if (alarms_.size() > 1000) {
-                    alarms_.removeFirst();
-                }
             }
+        }
+    }
+    return newAlarms;
+}
+
+void AlarmManager::storeAndNotify(const QVector<AlarmRecord> &alarms)
+{
+    {
+        QMutexLocker lock(&mutex_);
+        for (const AlarmRecord &a : alarms) {
+            alarms_.append(a);
+        }
+        // 限制报警数量，最多保留 1000 条
+        while (alarms_.size() > 1000) {
+            alarms_.removeFirst();
         }
     } // 解锁后再发信号，避免死锁
 
-    for (const AlarmRecord &alarm : newAlarms)
+    for (const AlarmRecord &alarm : alarms)
         emit alarmGenerated(alarm);
     emit statsUpdated();
 }

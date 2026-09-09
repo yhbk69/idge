@@ -26,30 +26,38 @@ QWidget *DashboardWidget::createCard(const QString &titleText, const QString &un
     QFrame *card = new QFrame();
     card->setFrameShape(QFrame::StyledPanel);
     card->setStyleSheet(
-        "QFrame { background: #2d2d3d; border-radius: 8px; padding: 12px; }"
+        "QFrame { background: #2d2d3d; border-radius: 8px; padding: 6px; }"
     );
-    card->setMinimumHeight(100);
+    card->setMinimumHeight(135);
+    card->setMinimumWidth(240);
 
     QVBoxLayout *lay = new QVBoxLayout(card);
-    lay->setContentsMargins(16, 12, 16, 12);
+    lay->setContentsMargins(18, 14, 18, 14);
+    lay->setSpacing(4);
 
     QLabel *titleLabel = new QLabel(titleText);
-    titleLabel->setStyleSheet("color: #888; font-size: 12px;");
+    titleLabel->setStyleSheet("color: #9aa0a6; font-size: 15px; font-weight: bold;");
     lay->addWidget(titleLabel);
 
     QHBoxLayout *valLay = new QHBoxLayout();
+    valLay->setSpacing(6);
     *valueLabel = new QLabel("0");
-    (*valueLabel)->setStyleSheet("color: #fff; font-size: 28px; font-weight: bold;");
+    (*valueLabel)->setStyleSheet("color: #fff; font-size: 36px; font-weight: bold;");
+    (*valueLabel)->setAlignment(Qt::AlignVCenter);
     valLay->addWidget(*valueLabel);
 
-    QLabel *unitLabel = new QLabel(unit);
-    unitLabel->setStyleSheet("color: #666; font-size: 13px; margin-top: 8px;");
-    valLay->addWidget(unitLabel);
+    if (!unit.isEmpty()) {
+        QLabel *unitLabel = new QLabel(unit);
+        unitLabel->setStyleSheet("color: #666; font-size: 14px;");
+        unitLabel->setAlignment(Qt::AlignBottom | Qt::AlignLeft);
+        valLay->addWidget(unitLabel);
+    }
     valLay->addStretch();
     lay->addLayout(valLay);
 
     *descLabel = new QLabel("");
-    (*descLabel)->setStyleSheet("color: #aaa; font-size: 11px;");
+    (*descLabel)->setStyleSheet("color: #aaa; font-size: 13px;");
+    (*descLabel)->setWordWrap(true);
     lay->addWidget(*descLabel);
 
     return card;
@@ -57,24 +65,18 @@ QWidget *DashboardWidget::createCard(const QString &titleText, const QString &un
 
 void DashboardWidget::setupUi()
 {
-    QScrollArea *scroll = new QScrollArea(this);
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setStyleSheet("QScrollArea { background: #1e1e2e; border: none; }");
-
-    QWidget *container = new QWidget();
-    QVBoxLayout *mainLay = new QVBoxLayout(container);
-    mainLay->setContentsMargins(20, 20, 20, 20);
-    mainLay->setSpacing(16);
+    QVBoxLayout *mainLay = new QVBoxLayout(this);
+    mainLay->setContentsMargins(20, 16, 20, 16);
+    mainLay->setSpacing(14);
 
     // 标题
     QLabel *header = new QLabel("数据看板");
-    header->setStyleSheet("color: #fff; font-size: 20px; font-weight: bold;");
+    header->setStyleSheet("color: #fff; font-size: 22px; font-weight: bold;");
     mainLay->addWidget(header);
 
-    // 统计卡片（4 列）
+    // ===== 统计卡片（4 列，放大） =====
     QGridLayout *cardGrid = new QGridLayout();
-    cardGrid->setSpacing(12);
+    cardGrid->setSpacing(14);
 
     cardGrid->addWidget(
         createCard("检测总数", "次", &lblDetections_, &lblDetectionsDesc_), 0, 0);
@@ -84,12 +86,16 @@ void DashboardWidget::setupUi()
         createCard("在线通道", "路", &lblChannels_, &lblChannelsDesc_), 0, 2);
     cardGrid->addWidget(
         createCard("运行时长", "", &lblUptime_, &lblUptimeDesc_), 0, 3);
+    cardGrid->setColumnStretch(0, 1);
+    cardGrid->setColumnStretch(1, 1);
+    cardGrid->setColumnStretch(2, 1);
+    cardGrid->setColumnStretch(3, 1);
 
     mainLay->addLayout(cardGrid);
 
-    // 系统状态
+    // ===== 系统状态 =====
     QLabel *sysTitle = new QLabel("系统状态");
-    sysTitle->setStyleSheet("color: #fff; font-size: 16px; font-weight: bold;");
+    sysTitle->setStyleSheet("color: #fff; font-size: 17px; font-weight: bold;");
     mainLay->addWidget(sysTitle);
 
     QGridLayout *sysGrid = new QGridLayout();
@@ -99,14 +105,16 @@ void DashboardWidget::setupUi()
         QFrame *frame = new QFrame();
         frame->setFrameShape(QFrame::StyledPanel);
         frame->setStyleSheet(
-            "QFrame { background: #2d2d3d; border-radius: 6px; padding: 10px; }");
+            "QFrame { background: #2d2d3d; border-radius: 6px; padding: 12px; }");
+        frame->setMinimumHeight(52);
         QHBoxLayout *h = new QHBoxLayout(frame);
+        h->setContentsMargins(14, 6, 14, 6);
         QLabel *lbl = new QLabel(label);
-        lbl->setStyleSheet("color: #aaa; font-size: 12px;");
+        lbl->setStyleSheet("color: #aaa; font-size: 14px;");
         h->addWidget(lbl);
         h->addStretch();
         *val = new QLabel("--");
-        (*val)->setStyleSheet("color: #4fc3f7; font-size: 14px; font-weight: bold;");
+        (*val)->setStyleSheet("color: #4fc3f7; font-size: 16px; font-weight: bold;");
         h->addWidget(*val);
         sysGrid->addWidget(frame, row, col);
     };
@@ -118,31 +126,30 @@ void DashboardWidget::setupUi()
 
     mainLay->addLayout(sysGrid);
 
-    // 类别统计
+    // ===== 类别统计（独立滚动，不滚动整个界面） =====
     QLabel *clsTitle = new QLabel("类别统计");
-    clsTitle->setStyleSheet("color: #fff; font-size: 16px; font-weight: bold;");
+    clsTitle->setStyleSheet("color: #fff; font-size: 17px; font-weight: bold;");
     mainLay->addWidget(clsTitle);
 
-    classStatsWidget_ = new QFrame();
-    classStatsWidget_->setFrameShape(QFrame::StyledPanel);
-    classStatsWidget_->setStyleSheet(
-        "QFrame { background: #2d2d3d; border-radius: 6px; padding: 12px; }");
+    classStatsScroll_ = new QScrollArea();
+    classStatsScroll_->setWidgetResizable(true);
+    classStatsScroll_->setFrameShape(QFrame::StyledPanel);
+    classStatsScroll_->setStyleSheet(
+        "QScrollArea { background: #2d2d3d; border-radius: 6px; border: 1px solid #3d3d4d; }");
+    classStatsScroll_->setMinimumHeight(160);
+
+    classStatsWidget_ = new QWidget();
     classStatsLayout_ = new QVBoxLayout(classStatsWidget_);
-    classStatsLayout_->setContentsMargins(12, 8, 12, 8);
-    classStatsLayout_->setSpacing(4);
+    classStatsLayout_->setContentsMargins(14, 10, 14, 10);
+    classStatsLayout_->setSpacing(6);
+    classStatsLayout_->addStretch();
 
     QLabel *emptyLabel = new QLabel("暂无数据");
-    emptyLabel->setStyleSheet("color: #666; font-size: 12px;");
-    classStatsLayout_->addWidget(emptyLabel);
+    emptyLabel->setStyleSheet("color: #666; font-size: 13px;");
+    classStatsLayout_->insertWidget(0, emptyLabel);
 
-    mainLay->addWidget(classStatsWidget_);
-    mainLay->addStretch();
-
-    scroll->setWidget(container);
-
-    QVBoxLayout *outer = new QVBoxLayout(this);
-    outer->setContentsMargins(0, 0, 0, 0);
-    outer->addWidget(scroll);
+    classStatsScroll_->setWidget(classStatsWidget_);
+    mainLay->addWidget(classStatsScroll_, 1);   // 占剩余高度，内部滚动
 }
 
 void DashboardWidget::onTimer()

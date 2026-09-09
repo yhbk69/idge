@@ -31,6 +31,10 @@ public:
     void init();
     void start();
     void put(std::shared_ptr<TaskData> task);
+    // 仅请求停止（关队列唤醒线程），不阻塞
+    void requestStop();
+    // 等待线程退出（阻塞）
+    void join();
     void stop();
 private:
     void run();

@@ -68,15 +68,25 @@ void PpeTask::put(std::shared_ptr<TaskData> task)
 
 }
 
-void PpeTask::stop()
+void PpeTask::requestStop()
 {
     running_ = false;
     if (taskQueue_) {
         taskQueue_->close();  // 唤醒阻塞在 pop() 上的线程
     }
+}
+
+void PpeTask::join()
+{
     if (thread_.joinable()) {
         thread_.join();
     }
+}
+
+void PpeTask::stop()
+{
+    requestStop();
+    join();
 }
 
 PpeTask::~PpeTask()
