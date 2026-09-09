@@ -1,22 +1,36 @@
 #include "iconhelper.h"
 
+// ============================================================================
+// 静态成员初始化
+// ============================================================================
 IconHelper *IconHelper::iconFontAliBaBa = 0;
 IconHelper *IconHelper::iconFontAwesome = 0;
 IconHelper *IconHelper::iconFontAwesome6 = 0;
 IconHelper *IconHelper::iconFontWeather = 0;
 int IconHelper::iconFontIndex = -1;
 
+// ============================================================================
+// initFont - 初始化所有图形字体（懒加载）
+// 首次调用时加载所有字体文件，后续调用直接返回
+// 支持回退机制：如果某字体加载失败，自动回退到其他字体
+// ============================================================================
 void IconHelper::initFont()
 {
     static bool isInit = false;
     if (!isInit) {
         isInit = true;
+
+        // 加载阿里巴巴图标字体
         if (iconFontAliBaBa == 0) {
             iconFontAliBaBa = new IconHelper(":/font/iconfont.ttf", "iconfont");
         }
+
+        // 加载FontAwesome图标字体
         if (iconFontAwesome == 0) {
             iconFontAwesome = new IconHelper(":/font/fontawesome-webfont.ttf", "FontAwesome");
         }
+
+        // 加载FontAwesome 6图标字体（如果文件存在）
         if (iconFontAwesome6 == 0) {
             QString fa6File = ":/font/fa-regular-400.ttf";
             QString fa6Name = "Font Awesome 6 Pro Regular";
@@ -27,11 +41,13 @@ void IconHelper::initFont()
                 iconFontAwesome6 = iconFontAwesome;
             }
         }
+
+        // 加载天气图标字体
         if (iconFontWeather == 0) {
             iconFontWeather = new IconHelper(":/font/pe-icon-set-weather.ttf", "pe-icon-set-weather");
         }
 
-        //如果其他图标字体没有加载成功,则回退到Alibaba图标字体
+        // 回退机制：如果字体加载失败，回退到阿里巴巴字体
         if (iconFontAwesome->getIconFont().family().isEmpty()) {
             iconFontAwesome = iconFontAliBaBa;
         }
@@ -44,11 +60,18 @@ void IconHelper::initFont()
     }
 }
 
+// ============================================================================
+// setIconFontIndex - 设置当前使用的字体索引
+// 0=Alibaba, 1=FontAwesome, 2=FontAwesome6, 3=Weather
+// ============================================================================
 void IconHelper::setIconFontIndex(int index)
 {
     iconFontIndex = index;
 }
 
+// ============================================================================
+// getIconFont* - 获取各字体的QFont对象
+// ============================================================================
 QFont IconHelper::getIconFontAliBaBa()
 {
     initFont();
@@ -73,20 +96,22 @@ QFont IconHelper::getIconFontWeather()
     return iconFontWeather->getIconFont();
 }
 
+// ============================================================================
+// getIconHelper - 根据图标值自动选择对应的字体类
+// 不同字体库的Unicode码点范围不同：
+//   FontAwesome: 0xf000-0xf2e0
+//   FontAwesome6: 0xe000-0xe33d, 0xf000-0xf8ff
+//   Alibaba: 0xe501-0xe793, 0xe8d5-0xea5d, 0xeb00-0xec00
+//   Weather: 0xe900-0xe9cf
+// ============================================================================
 IconHelper *IconHelper::getIconHelper(int icon)
 {
     initFont();
 
-    //指定了字体索引则取对应索引的字体类
-    //没指定则自动根据不同的字体的值选择对应的类
-    //由于部分值范围冲突所以可以指定索引来取
-    //fontawesome   0xf000-0xf2e0
-    //fontawesome6  0xe000-0xe33d 0xf000-0xf8ff
-    //iconfont      0xe501-0xe793 0xe8d5-0xea5d 0xeb00-0xec00
-    //weather       0xe900-0xe9cf
-
     IconHelper *iconHelper = iconFontAwesome;
+
     if (iconFontIndex < 0) {
+        // 自动选择：根据图标值的Unicode范围判断字体
         if ((icon >= 0xe501 && icon <= 0xe793) || (icon >= 0xe8d5 && icon <= 0xea5d) || (icon >= 0xeb00 && icon <= 0xec00)) {
             iconHelper = iconFontAliBaBa;
         }
@@ -103,6 +128,9 @@ IconHelper *IconHelper::getIconHelper(int icon)
     return iconHelper;
 }
 
+// ============================================================================
+// 静态接口：设置图标到QLabel/QAbstractButton
+// ============================================================================
 void IconHelper::setIcon(QLabel *lab, int icon, quint32 size)
 {
     getIconHelper(icon)->setIcon1(lab, icon, size);
@@ -125,6 +153,9 @@ QPixmap IconHelper::getPixmap(const QColor &color, int icon, quint32 size,
     return getIconHelper(icon)->getPixmap1(color, icon, size, width, height, flags);
 }
 
+// ============================================================================
+// 静态接口：设置导航栏样式
+// ============================================================================
 void IconHelper::setStyle(QWidget *widget, QList<QPushButton *> btns,
                           QList<int> icons, const IconHelper::StyleColor &styleColor)
 {
@@ -146,13 +177,16 @@ void IconHelper::setStyle(QWidget *widget, QList<QAbstractButton *> btns,
     getIconHelper(icon)->setStyle1(widget, btns, icons, styleColor);
 }
 
-
+// ============================================================================
+// 构造函数：加载字体文件
+// 使用QFontDatabase加载自定义字体文件
+// ============================================================================
 IconHelper::IconHelper(const QString &fontFile, const QString &fontName, QObject *parent) : QObject(parent)
 {
-    //判断图形字体是否存在,不存在则加入
-    //这里暂时限制在同一个项目中只加载一次字体文件
     QFontDatabase fontDb;
-    bool exist = false;//fontDb.families().contains(fontName);
+    bool exist = false;
+
+    // 检查字体是否已加载，未加载则添加
     if (!exist && QFile(fontFile).exists()) {
         int fontId = fontDb.addApplicationFont(fontFile);
         QStringList listName = fontDb.applicationFontFamilies(fontId);
@@ -161,7 +195,7 @@ IconHelper::IconHelper(const QString &fontFile, const QString &fontName, QObject
         }
     }
 
-    //再次判断是否包含字体名称防止加载失败
+    // 创建字体对象（禁用字体提示以获得更清晰的图标显示）
     if (fontDb.families().contains(fontName)) {
         iconFont = QFont(fontName);
 #if (QT_VERSION >= QT_VERSION_CHECK(4,8,0))
@@ -170,16 +204,21 @@ IconHelper::IconHelper(const QString &fontFile, const QString &fontName, QObject
     }
 }
 
+// ============================================================================
+// eventFilter - 事件过滤器
+// 监听按钮的鼠标事件，根据状态切换图标
+// ============================================================================
 bool IconHelper::eventFilter(QObject *watched, QEvent *event)
 {
-    //根据不同的
     if (watched->inherits("QAbstractButton")) {
         QAbstractButton *btn = (QAbstractButton *)watched;
         int index = btns.indexOf(btn);
+
         if (index >= 0) {
-            //不同的事件设置不同的图标,同时区分选中的和没有选中的
             int type = event->type();
+
             if (btn->isChecked()) {
+                // 选中状态：所有事件都使用选中图标
                 if (type == QEvent::MouseButtonPress) {
                     QMouseEvent *mouseEvent = (QMouseEvent *)event;
                     if (mouseEvent->button() == Qt::LeftButton) {
@@ -191,15 +230,16 @@ bool IconHelper::eventFilter(QObject *watched, QEvent *event)
                     btn->setIcon(QIcon(pixChecked.at(index)));
                 }
             } else {
+                // 非选中状态：根据事件类型切换图标
                 if (type == QEvent::MouseButtonPress) {
                     QMouseEvent *mouseEvent = (QMouseEvent *)event;
                     if (mouseEvent->button() == Qt::LeftButton) {
-                        btn->setIcon(QIcon(pixPressed.at(index)));
+                        btn->setIcon(QIcon(pixPressed.at(index)));  // 按下图标
                     }
                 } else if (type == QEvent::Enter) {
-                    btn->setIcon(QIcon(pixHover.at(index)));
+                    btn->setIcon(QIcon(pixHover.at(index)));        // 悬停图标
                 } else if (type == QEvent::Leave) {
-                    btn->setIcon(QIcon(pixNormal.at(index)));
+                    btn->setIcon(QIcon(pixNormal.at(index)));       // 正常图标
                 }
             }
         }
@@ -208,9 +248,12 @@ bool IconHelper::eventFilter(QObject *watched, QEvent *event)
     return QObject::eventFilter(watched, event);
 }
 
+// ============================================================================
+// toggled - 按钮选中状态切换槽函数
+// 根据选中状态更新按钮图标
+// ============================================================================
 void IconHelper::toggled(bool checked)
 {
-    //选中和不选中设置不同的图标
     QAbstractButton *btn = (QAbstractButton *)sender();
     int index = btns.indexOf(btn);
     if (checked) {
@@ -225,11 +268,14 @@ QFont IconHelper::getIconFont()
     return this->iconFont;
 }
 
+// ============================================================================
+// 实例接口：设置图标到QLabel/QAbstractButton
+// ============================================================================
 void IconHelper::setIcon1(QLabel *lab, int icon, quint32 size)
 {
     iconFont.setPixelSize(size);
     lab->setFont(iconFont);
-    lab->setText((QChar)icon);
+    lab->setText((QChar)icon);  // 将图标Unicode码点作为文本设置
 }
 
 void IconHelper::setIcon1(QAbstractButton *btn, int icon, quint32 size)
@@ -239,24 +285,32 @@ void IconHelper::setIcon1(QAbstractButton *btn, int icon, quint32 size)
     btn->setText((QChar)icon);
 }
 
+// ============================================================================
+// 实例接口：将图标转换为QPixmap并设置到按钮
+// ============================================================================
 void IconHelper::setPixmap1(QAbstractButton *btn, const QColor &color, int icon, quint32 size,
                             quint32 width, quint32 height, int flags)
 {
     btn->setIcon(getPixmap1(color, icon, size, width, height, flags));
 }
 
+// ============================================================================
+// getPixmap1 - 将图形字体渲染为QPixmap图片
+// 使用QPainter在透明背景上绘制字体图标
+// ============================================================================
 QPixmap IconHelper::getPixmap1(const QColor &color, int icon, quint32 size,
                                quint32 width, quint32 height, int flags)
 {
-    //主动绘制图形字体到图片
+    // 创建透明背景的画布
     QPixmap pix(width, height);
     pix.fill(Qt::transparent);
 
     QPainter painter;
     painter.begin(&pix);
-    painter.setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
+    painter.setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);  // 启用抗锯齿
     painter.setPen(color);
 
+    // 设置字体大小并绘制图标字符
     iconFont.setPixelSize(size);
     painter.setFont(iconFont);
     painter.drawText(pix.rect(), flags, (QChar)icon);
@@ -264,13 +318,15 @@ QPixmap IconHelper::getPixmap1(const QColor &color, int icon, quint32 size,
     return pix;
 }
 
+// ============================================================================
+// 实例接口：设置导航栏样式
+// ============================================================================
 void IconHelper::setStyle1(QWidget *widget, QList<QPushButton *> btns, QList<int> icons, const IconHelper::StyleColor &styleColor)
 {
     QList<QAbstractButton *> list;
     foreach (QPushButton *btn, btns) {
         list << btn;
     }
-
     setStyle(widget, list, icons, styleColor);
 }
 
@@ -280,10 +336,13 @@ void IconHelper::setStyle1(QWidget *widget, QList<QToolButton *> btns, QList<int
     foreach (QToolButton *btn, btns) {
         list << btn;
     }
-
     setStyle(widget, list, icons, styleColor);
 }
 
+// ============================================================================
+// setStyle1 - 核心导航栏样式设置方法
+// 生成完整的QSS样式表，包括正常/悬停/按下/选中四种状态
+// ============================================================================
 void IconHelper::setStyle1(QWidget *widget, QList<QAbstractButton *> btns, QList<int> icons, const IconHelper::StyleColor &styleColor)
 {
     int btnCount = btns.count();
@@ -292,6 +351,7 @@ void IconHelper::setStyle1(QWidget *widget, QList<QAbstractButton *> btns, QList
         return;
     }
 
+    // 读取样式参数
     QString position = styleColor.position;
     quint32 btnWidth = styleColor.btnWidth;
     quint32 btnHeight = styleColor.btnHeight;
@@ -300,7 +360,7 @@ void IconHelper::setStyle1(QWidget *widget, QList<QAbstractButton *> btns, QList
     quint32 iconHeight = styleColor.iconHeight;
     quint32 borderWidth = styleColor.borderWidth;
 
-    //根据不同的位置计算边框
+    // 根据图标位置生成对应的边框样式
     QString strBorder;
     if (position == "top") {
         strBorder = QString("border-width:%1px 0px 0px 0px;padding-top:%1px;padding-bottom:%2px;")
@@ -316,9 +376,10 @@ void IconHelper::setStyle1(QWidget *widget, QList<QAbstractButton *> btns, QList
                     .arg(borderWidth).arg(borderWidth * 2);
     }
 
-    //如果图标是左侧显示则需要让没有选中的按钮左侧也有加深的边框,颜色为背景颜色
-    //如果图标在文字上面而设置的边框是 top bottom 也需要启用加深边框
+    // 生成QSS样式表
     QStringList qss;
+
+    // 正常状态样式
     if (styleColor.defaultBorder) {
         qss << QString("QWidget[flag=\"%1\"] QAbstractButton{border-style:solid;border-radius:0px;%2border-color:%3;color:%4;background:%5;}")
             .arg(position).arg(strBorder).arg(styleColor.normalBgColor).arg(styleColor.normalTextColor).arg(styleColor.normalBgColor);
@@ -327,15 +388,17 @@ void IconHelper::setStyle1(QWidget *widget, QList<QAbstractButton *> btns, QList
             .arg(position).arg(styleColor.normalTextColor).arg(styleColor.normalBgColor);
     }
 
-    //悬停+按下+选中
+    // 悬停状态样式
     qss << QString("QWidget[flag=\"%1\"] QAbstractButton:hover{border-style:solid;%2border-color:%3;color:%4;background:%5;}")
         .arg(position).arg(strBorder).arg(styleColor.borderColor).arg(styleColor.hoverTextColor).arg(styleColor.hoverBgColor);
+    // 按下状态样式
     qss << QString("QWidget[flag=\"%1\"] QAbstractButton:pressed{border-style:solid;%2border-color:%3;color:%4;background:%5;}")
         .arg(position).arg(strBorder).arg(styleColor.borderColor).arg(styleColor.pressedTextColor).arg(styleColor.pressedBgColor);
+    // 选中状态样式
     qss << QString("QWidget[flag=\"%1\"] QAbstractButton:checked{border-style:solid;%2border-color:%3;color:%4;background:%5;}")
         .arg(position).arg(strBorder).arg(styleColor.borderColor).arg(styleColor.checkedTextColor).arg(styleColor.checkedBgColor);
 
-    //窗体背景颜色+按钮背景颜色
+    // 窗体背景和子按钮样式
     qss << QString("QWidget#%1{background:%2;}")
         .arg(widget->objectName()).arg(styleColor.normalBgColor);
     qss << QString("QWidget>QAbstractButton{border-width:0px;background-color:%1;color:%2;}")
@@ -347,7 +410,7 @@ void IconHelper::setStyle1(QWidget *widget, QList<QAbstractButton *> btns, QList
     qss << QString("QWidget>QAbstractButton:checked{background-color:%1;color:%2;}")
         .arg(styleColor.checkedBgColor).arg(styleColor.checkedTextColor);
 
-    //按钮宽度高度
+    // 按钮尺寸约束
     if (btnWidth > 0) {
         qss << QString("QWidget>QAbstractButton{min-width:%1px;}").arg(btnWidth);
     }
@@ -355,10 +418,10 @@ void IconHelper::setStyle1(QWidget *widget, QList<QAbstractButton *> btns, QList
         qss << QString("QWidget>QAbstractButton{min-height:%1px;}").arg(btnHeight);
     }
 
-    //设置样式表
+    // 应用样式表
     widget->setStyleSheet(qss.join(""));
 
-    //可能会重复调用设置所以先要移除上一次的
+    // 移除旧的事件过滤器和信号连接（防止重复设置）
     for (int i = 0; i < btnCount; ++i) {
         for (int j = 0; j < this->btns.count(); j++) {
             if (this->btns.at(j) == btns.at(i)) {
@@ -374,7 +437,7 @@ void IconHelper::setStyle1(QWidget *widget, QList<QAbstractButton *> btns, QList
         }
     }
 
-    //存储对应按钮对象,方便鼠标移上去的时候切换图片
+    // 为每个按钮生成四种状态的图标，并安装事件过滤器
     int checkedIndex = -1;
     for (int i = 0; i < btnCount; ++i) {
         int icon = icons.at(i);
@@ -383,7 +446,7 @@ void IconHelper::setStyle1(QWidget *widget, QList<QAbstractButton *> btns, QList
         QPixmap pixPressed = getPixmap1(styleColor.pressedTextColor, icon, iconSize, iconWidth, iconHeight);
         QPixmap pixChecked = getPixmap1(styleColor.checkedTextColor, icon, iconSize, iconWidth, iconHeight);
 
-        //记住最后选中的按钮
+        // 记录当前选中的按钮索引
         QAbstractButton *btn = btns.at(i);
         if (btn->isChecked()) {
             checkedIndex = i;
@@ -391,7 +454,7 @@ void IconHelper::setStyle1(QWidget *widget, QList<QAbstractButton *> btns, QList
 
         btn->setIcon(QIcon(pixNormal));
         btn->setIconSize(QSize(iconWidth, iconHeight));
-        btn->installEventFilter(this);
+        btn->installEventFilter(this);  // 安装事件过滤器以监听鼠标事件
         connect(btn, SIGNAL(toggled(bool)), this, SLOT(toggled(bool)));
 
         this->btns << btn;
@@ -401,7 +464,7 @@ void IconHelper::setStyle1(QWidget *widget, QList<QAbstractButton *> btns, QList
         this->pixChecked << pixChecked;
     }
 
-    //主动触发一下选中的按钮
+    // 主动触发选中按钮的状态更新
     if (checkedIndex >= 0) {
         QMetaObject::invokeMethod(btns.at(checkedIndex), "toggled", Q_ARG(bool, true));
     }

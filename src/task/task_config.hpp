@@ -2,14 +2,24 @@
 #define TASK_CONFIG_H
 
 
-#include <string>
-#include <rknn_api.h>
+// =====================================================================
+// 头文件引用
+// =====================================================================
+#include <string>               // 字符串类
+#include <rknn_api.h>           // RKNN NPU推理API
 
+// =====================================================================
+// TaskConfig结构体 - 任务配置
+// =====================================================================
+// 作用：定义推理任务的配置参数
+// 包含模型路径、标签路径和NPU核心分配
+// =====================================================================
 struct TaskConfig
 {
-    std::string modelPath;
-    std::string labelPath;
-    rknn_core_mask core_mask;
+    std::string modelPath;      // RKNN模型文件路径（.rknn格式）
+    std::string labelPath;      // 标签文件路径，用于检测结果映射
+    rknn_core_mask core_mask;   // NPU核心掩码，指定在哪个NPU核心上运行
+                                // RK3588有3个NPU核心，可通过掩码选择特定核心
 };
 
 #endif

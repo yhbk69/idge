@@ -1,20 +1,47 @@
 #ifndef HELMET_TASK_H
 #define HELMET_TASK_H
 
-#include "base_task.h"
-#include <iostream>
-#include "opencv2/opencv.hpp"
-#include "DmaFrameBuffer.h"
-#include "DmaBufferPool.h"
-#include "easy_timer.h"
-#include "common.hpp"
+// =====================================================================
+// 头文件引用
+// =====================================================================
+#include "base_task.h"          // 基础任务类，提供任务接口
+#include <iostream>             // 标准输入输出流
+#include "opencv2/opencv.hpp"   // OpenCV图像处理库
+#include "DmaFrameBuffer.h"     // DMA帧缓冲区，用于零拷贝图像传输
+#include "DmaBufferPool.h"      // DMA缓冲池，管理DMA内存分配与释放
+#include "easy_timer.h"         // 计时器工具，用于性能测量
+#include "common.hpp"           // 通用类型定义（DetectContext等）
 
+// =====================================================================
+// HelmetTask类 - 头盔检测任务
+// =====================================================================
+// 作用：执行头盔检测推理任务，支持多种输入方式
+// 通过NPU加速进行目标检测，支持DMA零拷贝和常规图像缓冲区
+// =====================================================================
 class HelmetTask
 {
 
 public:
+    // =================================================================
+    // runWithDma - DMA零拷贝推理
+    // =================================================================
+    // 作用：使用DMA缓冲区进行头盔检测推理
+    // 参数：
+    //   detectFrame - DMA缓冲区指针，指向待检测的图像数据
+    //                 DMA零拷贝避免CPU内存拷贝，提升性能
+    //   context - 检测上下文，包含检测结果和配置信息
+    // =================================================================
     //static void run(cv::Mat& img, DetectContext context);
     static void runWithDma(DmaBuffer* detectFrame, DetectContext& context);
+
+    // =================================================================
+    // run - 常规图像推理
+    // =================================================================
+    // 作用：使用常规图像缓冲区进行头盔检测推理
+    // 参数：
+    //   image - 图像缓冲区引用，包含待检测图像
+    //   context - 检测上下文，包含检测结果和配置信息
+    // =================================================================
     static void run(image_buffer_t& image, DetectContext context);
 };
 

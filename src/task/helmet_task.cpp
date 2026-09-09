@@ -1,3 +1,20 @@
+// ============================================================================
+// helmet_task.cpp - 安全帽检测任务实现
+// ============================================================================
+//
+// 功能：
+//   执行目标检测推理，调用 YOLO11Model 进行检测。
+//
+// 工作流程：
+//   1. 从 ModelPool 获取模型实例（按模型 ID）
+//   2. 调用 model->detect() 执行推理（RKNN NPU）
+//   3. 推理完成后释放 DMA 缓冲区
+//
+// 级联模型支持：
+//   可以依次调用多个模型进行级联检测，
+//   每个模型的检测结果合并后输出。
+//
+// ============================================================================
 
 #include <math.h>
 #include <chrono>
@@ -7,67 +24,51 @@
 #include "DmaBufferPool.h"
 #include "easy_timer.h"
 
+// ============================================================================
+// run - 执行安全帽检测（使用 image_buffer_t）
+// ============================================================================
+// 参数：
+//   - image: 输入图像（NV12 格式，包含 DMA-BUF fd）
+//   - context: 检测上下文（包含模型池、DMA 缓冲池等）
+//
+// 流程：
+//   1. 从模型池获取模型 "1"（YOLO11Model）
+//   2. 调用 detect() 执行推理
+//   3. 释放 DMA 缓冲区
+//
+// ============================================================================
 void HelmetTask::run(image_buffer_t& image, DetectContext context) 
 {
-    
     object_detect_result_list results1;
 
+    // 从模型池获取模型 "1"（对应 NPU 核心 0）
     std::shared_ptr<YOLO11Model> model = dpool::context->getModel("1");
     
     auto t1 = chrono::system_clock::now();
-    model->detect(&image, &results1, true);
-    // auto t2 = chrono::system_clock::now();
-    // std::cout << "thread Id:" << std::this_thread::get_id() << " step 1 detect time : " << chrono::duration_cast<chrono::microseconds>(t2 - t1).count() / 1000.0 << std::endl;
-    
-    // std::shared_ptr<YOLO11Model> model2 = dpool::context->getModel("2");
-    // model2->detect(&image, &results1, true);
-    // auto t3 = chrono::system_clock::now();
-    // //std::cout << "step 2 detect time : " << chrono::duration_cast<chrono::microseconds>(t3 - t2).count() / 1000.0 << std::endl;
+    model->detect(&image, &results1, true);  // 执行推理（RKNN NPU）
 
-    // std::shared_ptr<YOLO11Model> model3 = dpool::context->getModel("3");
-    // model3->detect(&image, &results1, true);
-
-    // std::shared_ptr<YOLO11Model> model4 = dpool::context->getModel("4");
-    // model4->detect(&image, &results1, true);
-    // auto t4 = chrono::system_clock::now();
-    // //std::cout << "step all detect time : " << chrono::duration_cast<chrono::microseconds>(t4 - t1).count() / 1000.0 << std::endl;
-
-    // DetectResult r;
-    // r.time = t2.time_since_epoch().count();
-    // context.detectResultQueue->push(r);
-
+    // 释放 DMA 缓冲区（避免内存泄漏）
     context.dmaBufferPool->release(image.dmaBuffer);
-
 }
 
+// ============================================================================
+// runWithDma - 使用 DMA-BUF 直接推理（零拷贝）
+// ============================================================================
+// 参数：
+//   - detectFrame: DMA-BUF 帧（直接传给 RKNN 推理）
+//   - context: 检测上下文
+//
+// 注意：此函数当前为未实现状态（代码被注释）
+// 预期流程：
+//   1. model->setInputDmaBuf(detectFrame): 设置 RKNN 输入
+//   2. model->run(): 执行推理
+//   3. model->getResult(): 获取输出结果
+//   4. context.detectResultQueue->push(r): 推送到结果队列
+//
+// ============================================================================
 void HelmetTask::runWithDma(DmaBuffer* detectFrame, DetectContext& context)
 {
-    // TIMER timer;
-    // timer.tik();
-    // std::shared_ptr<RknnModel> model = dpool::context->getRknnModel("1");
-    
-    // model->setInputDmaBuf(detectFrame);
-    // timer.tok();
-    // timer.print_time("setInputDmaBuf");
-
-    // timer.tik();
-    // model->run();
-    // // void* out_data = model->getOutputPtr(0);
-    // timer.tok();
-    // timer.print_time("model->run()");
-    // vector<vector<float>> result = model->getResult();
-    // DetectResult r;
-    // r.time = chrono::system_clock::now().time_since_epoch().count();
-    // r.result = result;
-    // context.detectResultQueue->push(r);
-    // model->destroyInputDma();
-    // int out_w = 8400;
-    // int out_h = 84;
-    // context.dmaBufferPool->release(detectFrame);
-    //detectFrame->release();
-    //delete detectFrame;
-    //auto detections = postproc.process
-
+    // 当前为未实现状态，代码被注释
 }
 
 

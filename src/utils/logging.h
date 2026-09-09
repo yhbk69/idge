@@ -2,19 +2,30 @@
 #ifndef RK3588_DEMO_LOGGING_H
 #define RK3588_DEMO_LOGGING_H
 
-// a logging wrapper so it can be easily replaced
+// ============================================================================
+// 日志工具头文件
+// 提供分级日志输出功能，便于调试和问题定位
+// 支持4个日志级别：ERROR、WARNING、INFO、DEBUG
+// ============================================================================
+
 #include <stdio.h>
 
-// log level from low to high
-// 0: no log
-// 1: error
-// 2: error, warning
-// 3: error, warning, info
-// 4: error, warning, info, debug
+// ============================================================================
+// 全局日志级别控制
+// 0: 不输出任何日志
+// 1: 仅输出错误信息
+// 2: 输出错误和警告信息
+// 3: 输出错误、警告和信息
+// 4: 输出所有级别（包括调试信息）
+// ============================================================================
 static int32_t g_log_level = 4;
 
-// a printf wrapper so the msg can be formatted with %d %s, etc.
+// ============================================================================
+// 日志宏定义
+// 使用do-while(0)包裹确保宏在所有上下文中安全使用
+// ============================================================================
 
+// 错误日志：用于输出严重错误信息
 #define NN_LOG_ERROR(...)          \
     do                             \
     {                              \
@@ -26,6 +37,7 @@ static int32_t g_log_level = 4;
         }                          \
     } while (0)
 
+// 警告日志：用于输出潜在问题警告
 #define NN_LOG_WARNING(...)          \
     do                               \
     {                                \
@@ -37,6 +49,7 @@ static int32_t g_log_level = 4;
         }                            \
     } while (0)
 
+// 信息日志：用于输出关键运行信息
 #define NN_LOG_INFO(...)          \
     do                            \
     {                             \
@@ -48,6 +61,7 @@ static int32_t g_log_level = 4;
         }                         \
     } while (0)
 
+// 调试日志：用于输出详细调试信息
 #define NN_LOG_DEBUG(...)          \
     do                             \
     {                              \

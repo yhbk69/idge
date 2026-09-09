@@ -1,18 +1,32 @@
 ﻿#ifndef APPDATA_H
 #define APPDATA_H
 
+// ============================================================================
+// 应用数据类头文件
+// 存储应用程序的全局配置参数（静态成员）
+// 支持根据屏幕分辨率自动调整界面尺寸
+// ============================================================================
+
 #include "head.h"
 
+// ============================================================================
+// AppData - 应用程序全局数据类
+// 使用静态成员存储全局配置，无需实例化即可访问
+// ============================================================================
 class AppData
 {
 public:
-    static QString TitleFlag;       //标题标识
-    static int RowHeight;           //行高
-    static int RightWidth;          //右侧宽度
-    static int FormWidth;           //窗体宽度
-    static int FormHeight;          //窗体高度
+    static QString TitleFlag;       // 标题标识（用于窗口标题显示）
+    static int RowHeight;           // 表格行高（像素）
+    static int RightWidth;          // 右侧面板宽度（像素）
+    static int FormWidth;           // 主窗体宽度（像素）
+    static int FormHeight;          // 主窗体高度（像素）
 
-    static void checkRatio();       //校验分辨率    
+    /**
+     * @brief 校验分辨率并调整界面参数
+     * 根据屏幕宽度自动调整默认参数，确保高分辨率屏幕下界面不会过小
+     */
+    static void checkRatio();
 };
 
 #endif // APPDATA_H
