@@ -1152,6 +1152,67 @@
                                 </widget>
                             </item>
                             <item>
+                                <widget class="QGroupBox" name="grpAlarmConfig">
+                                    <property name="title">
+                                        <string>报警配置</string>
+                                    </property>
+                                    <layout class="QGridLayout" name="gridLayout_alarm">
+                                        <property name="horizontalSpacing">
+                                            <number>20</number>
+                                        </property>
+                                        <property name="verticalSpacing">
+                                            <number>6</number>
+                                        </property>
+                                        <item row="0" column="0">
+                                            <widget class="QLabel" name="labAlarmClasses">
+                                                <property name="text">
+                                                    <string>报警类别:</string>
+                                                </property>
+                                                <property name="minimumSize">
+                                                    <size>
+                                                        <width>120</width>
+                                                        <height>0</height>
+                                                    </size>
+                                                </property>
+                                            </widget>
+                                        </item>
+                                        <item row="0" column="1">
+                                            <widget class="QLineEdit" name="editAlarmClasses">
+                                                <property name="placeholderText">
+                                                    <string>person, helmet, car</string>
+                                                </property>
+                                            </widget>
+                                        </item>
+                                        <item row="0" column="2">
+                                            <widget class="QPushButton" name="btnSaveAlarmClasses">
+                                                <property name="text">
+                                                    <string>保存配置</string>
+                                                </property>
+                                                <property name="minimumSize">
+                                                    <size>
+                                                        <width>80</width>
+                                                        <height>0</height>
+                                                    </size>
+                                                </property>
+                                            </widget>
+                                        </item>
+                                        <item row="1" column="1">
+                                            <widget class="QLabel" name="labAlarmHint">
+                                                <property name="text">
+                                                    <string>逗号分隔，留空则默认只报 person。可用: person, bicycle, car, motorcycle, bus, truck 等 COCO 类别</string>
+                                                </property>
+                                                <property name="styleSheet">
+                                                    <string>color: #888; font-size: 11px;</string>
+                                                </property>
+                                                <property name="wordWrap">
+                                                    <bool>true</bool>
+                                                </property>
+                                            </widget>
+                                        </item>
+                                    </layout>
+                                </widget>
+                            </item>
+                            <item>
                                 <widget class="QGroupBox" name="grpLog">
                                     <property name="title">
                                         <string>运行日志</string>

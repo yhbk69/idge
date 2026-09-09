@@ -725,6 +725,28 @@ void frmMain::initDebugPage()
     // ========== 级联模型配置区（5个槽位 + 备注 + 清空） ==========
     initCascadeUi();
 
+    // ========== 报警配置（从 config.json 读取，保存后实时生效） ==========
+    {
+        QStringList classes = cfg.alarmClasses();
+        ui->editAlarmClasses->setText(classes.join(", "));
+        connect(ui->btnSaveAlarmClasses, &QPushButton::clicked, this, [this]() {
+            QString text = ui->editAlarmClasses->text().trimmed();
+            QStringList classes;
+            if (!text.isEmpty()) {
+                for (const auto &s : text.split(",", Qt::SkipEmptyParts)) {
+                    QString trimmed = s.trimmed();
+                    if (!trimmed.isEmpty()) classes.append(trimmed);
+                }
+            }
+            ConfigManager &c = ConfigManager::instance();
+            c.setAlarmClasses(classes);
+            c.save();
+            AlarmManager::instance().setAlarmClasses(classes);
+            QString display = classes.isEmpty() ? "(空, 不报警)" : classes.join(", ");
+            log("system", QString("报警类别已更新: %1").arg(display));
+        });
+    }
+
     // ========== 初始日志（带颜色） ==========
     log("system", "系统启动");
     log("system", "平台: RK3588, NPU核心数: " + QString::number(NPU_CORE_NUM));
