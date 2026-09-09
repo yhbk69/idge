@@ -1,0 +1,51 @@
+{
+    "video": {
+        "channel1": "192.mp4",
+        "channel2": "192.mp4",
+        "channel3": "192.mp4",
+        "channel4": "192.mp4",
+        "notes": ["", "", "", ""]
+    },
+    "model": {
+        "input_size": "640x640",
+        "type": "YOLO11"
+    },
+    "cascade": {
+        "models": [
+            {
+                "path": "model/person.rknn",
+                "label": "model/person_labels.txt",
+                "note": "行人检测"
+            },
+            {
+                "path": "model/helmet.rknn",
+                "label": "model/helmet_labels.txt",
+                "note": "安全帽检测"
+            },
+            {
+                "path": "model/vest.rknn",
+                "label": "model/vest_labels.txt",
+                "note": "反光背心检测"
+            },
+            {
+                "path": "",
+                "label": "",
+                "note": ""
+            },
+            {
+                "path": "",
+                "label": "",
+                "note": ""
+            }
+        ]
+    },
+    "detect": {
+        "conf_threshold": 0.25,
+        "nms_threshold": 0.45,
+        "class_num": 80,
+        "threads": 3
+    },
+    "alarm": {
+        "classes": ["person", "helmet", "vest"]
+    }
+}

@@ -35,6 +35,22 @@
 #include "rknn_api.h"
 #include "SharedTypes.hpp"
 
+// NPU 核心掩码数组（循环分配：0 → 1 → 2 → 0 → 1）
+static const rknn_core_mask NPU_CORES[] = {
+    RKNN_NPU_CORE_0,
+    RKNN_NPU_CORE_1,
+    RKNN_NPU_CORE_2,
+    RKNN_NPU_CORE_0,
+    RKNN_NPU_CORE_1
+};
+
+// 模型配置结构体（用于从外部传入配置）
+struct ModelConfig {
+    std::string modelPath;   // RKNN 模型文件路径
+    std::string labelPath;   // 标签文件路径
+    std::string note;        // 模型备注
+};
+
 // ============================================================================
 // ExecuteContext - 执行上下文
 // ============================================================================
@@ -48,59 +64,93 @@
 //   - 每个线程有自己的模型实例，避免竞争
 //
 // ============================================================================
+// ============================================================================
+// ExecuteContext - 执行上下文（管理模型实例）
+// ============================================================================
+// 每个线程有自己的 ExecuteContext，包含多个 YOLO11Model 实例。
+// 通过 thread_local 确保线程隔离。
+//
+// 级联模型配置（从 config.json 读取）：
+//   "cascade": {
+//     "models": [
+//       {"path": "model/person.rknn", "label": "model/person_labels.txt", "note": "行人检测"},
+//       {"path": "model/helmet.rknn", "label": "model/helmet_labels.txt", "note": "安全帽检测"},
+//       {"path": "model/vest.rknn",   "label": "model/vest_labels.txt",   "note": "背心检测"}
+//     ]
+//   }
+// ============================================================================
 class ExecuteContext
 {
 private:
     // 模型实例表（按 modelId 索引）
     std::unordered_map<std::string, std::shared_ptr<YOLO11Model>> m_models;
+
 public:
-    // 初始化：加载多个模型实例，分配到不同 NPU 核心
-    void init(AppConfig config) 
+    // 初始化：从配置列表加载所有模型
+    void init(AppConfig config, const std::vector<ModelConfig> &modelConfigs = {})
     {
-        // 模型 1: 使用 NPU 核心 0
-        std::shared_ptr<YOLO11Model> detector1 = std::make_shared<YOLO11Model>(
-            "model/yolo11n.rknn",
-            "model/coco_80_labels_list.txt",
-            RKNN_NPU_CORE_0
-        );
-        m_models["1"] = detector1;
+        // 如果没有传入配置，使用默认配置
+        std::vector<ModelConfig> configs = modelConfigs;
+        if (configs.empty()) {
+            configs = {
+                {"model/yolo11n.rknn", "model/coco_80_labels_list.txt", "默认模型"}
+            };
+        }
 
-        // 模型 2: 使用 NPU 核心 1
-        std::shared_ptr<YOLO11Model> detector2 = std::make_shared<YOLO11Model>(
-            "model/yolo11n.rknn",
-            "model/coco_80_labels_list.txt",
-            RKNN_NPU_CORE_1
+        for (int i = 0; i < configs.size() && i < 5; ++i) {
+            const auto &cfg = configs[i];
 
-        );
-        m_models["2"] = detector2;
+            // 跳过未配置的模型（路径为空）
+            if (cfg.modelPath.empty()) {
+                continue;
+            }
 
-        // 模型 3: 使用 NPU 核心 2
-        std::shared_ptr<YOLO11Model> detector3 = std::make_shared<YOLO11Model>(
-            "model/yolo11n.rknn",
-            "model/coco_80_labels_list.txt",
-            RKNN_NPU_CORE_2
-        );
-        m_models["3"] = detector3;
+            // 循环分配 NPU 核心（0, 1, 2, 0, 1）
+            rknn_core_mask coreMask = NPU_CORES[i % 5];
 
-        // 模型 4: 使用 NPU 核心 0（与模型 1 共享核心，需要排队）
-        std::shared_ptr<YOLO11Model> detector4 = std::make_shared<YOLO11Model>(
-            "model/yolo11n.rknn",
-            "model/coco_80_labels_list.txt",
-            RKNN_NPU_CORE_0
-        );
-        m_models["4"] = detector4;
+            std::string modelId = std::to_string(i + 1);
 
+            std::cout << "[ExecuteContext] 加载模型 " << modelId
+                      << ": path=" << cfg.modelPath
+                      << ", label=" << cfg.labelPath
+                      << ", core=" << (i % 3)
+                      << ", note=" << cfg.note
+                      << std::endl;
+
+            // 创建 YOLO11Model 实例（构造时自动加载标签文件）
+            auto model = std::make_shared<YOLO11Model>(
+                cfg.modelPath,
+                cfg.labelPath,
+                coreMask);
+
+            m_models[modelId] = model;
+        }
+
+        std::cout << "[ExecuteContext] 共加载 " << m_models.size() << " 个模型" << std::endl;
     }
 
     // 获取指定 ID 的模型实例
     std::shared_ptr<YOLO11Model> getModel(std::string modelId)
     {
-        if (modelId.empty())
-        {
+        if (modelId.empty()) {
             return NULL;
         }
-        
         return m_models[modelId];
+    }
+
+    // 获取指定 ID 模型的类别名称列表
+    std::vector<std::string> getClassNames(const std::string &modelId)
+    {
+        if (m_models.count(modelId)) {
+            return m_models[modelId]->getClassNames();
+        }
+        return {};
+    }
+
+    // 获取已加载的模型数量
+    int getModelCount() const
+    {
+        return m_models.size();
     }
 
     void putResult()
@@ -154,6 +204,13 @@ namespace dpool
         {
             this->maxThreads_ = maxThreads;
         }
+
+        // 设置模型配置列表（在启动线程前调用）
+        inline void setModelConfigs(const std::vector<ModelConfig> &configs)
+        {
+            modelConfigs_ = configs;
+        }
+
         // 禁用拷贝操作
         ThreadPool(const ThreadPool &) = delete;
         ThreadPool &operator=(const ThreadPool &) = delete;
@@ -264,7 +321,7 @@ namespace dpool
             {
                 //std::cout << "thread Id:" << std::this_thread::get_id() << " context init" << std::endl;
                 context = std::make_shared<ExecuteContext>();
-                context->init(config);
+                context->init(config, modelConfigs_);
             }
             
             while (true)
@@ -340,6 +397,7 @@ namespace dpool
         std::queue<ThreadID> finishedThreadIDs_;  // 已退出线程的 ID
         std::unordered_map<ThreadID, Thread> threads_;  // 线程表
         AppConfig config;                    // 配置信息
+        std::vector<ModelConfig> modelConfigs_;  // 模型配置列表
     };
 
     constexpr size_t ThreadPool::WAIT_SECONDS;

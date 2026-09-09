@@ -89,6 +89,16 @@ public:
      */
     void setCascadeModelNote(int idx, const QString &note);
 
+    /**
+     * @brief 获取第 idx 个级联模型的标签文件路径（1~5）
+     */
+    QString cascadeModelLabel(int idx) const;
+
+    /**
+     * @brief 设置第 idx 个级联模型的标签文件路径
+     */
+    void setCascadeModelLabel(int idx, const QString &label);
+
     // ========== 模型配置 ==========
 
     /**

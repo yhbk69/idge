@@ -88,22 +88,21 @@ void ConfigManager::load(const QString &path)
             {"notes", QJsonArray{"", "", "", ""}}  // 通道备注
         };
 
-        // 模型配置
+        // 模型通用配置
         root_["model"] = QJsonObject{
-            {"path", "model/yolo11n.rknn"},           // RKNN 模型路径
-            {"label", "model/coco_80_labels_list.txt"}, // 标签文件路径
-            {"input_size", "640x640"},                 // 模型输入尺寸
-            {"type", "YOLO11"}                         // 模型类型
+            {"input_size", "640x640"},   // 模型输入尺寸
+            {"type", "YOLO11"}           // 模型类型
         };
 
-        // 级联模型配置（最多 5 个模型）
+        // 所有模型统一在 cascade.models 中配置（包括主模型）
+        // 每个模型独立指定路径、标签、备注
         root_["cascade"] = QJsonObject{
             {"models", QJsonArray{
-                QJsonObject{{"path", ""}, {"note", ""}},  // 模型 2
-                QJsonObject{{"path", ""}, {"note", ""}},  // 模型 3
-                QJsonObject{{"path", ""}, {"note", ""}},  // 模型 4
-                QJsonObject{{"path", ""}, {"note", ""}},  // 模型 5
-                QJsonObject{{"path", ""}, {"note", ""}}   // 模型 6
+                QJsonObject{{"path", "model/yolo11n.rknn"}, {"label", "model/coco_80_labels_list.txt"}, {"note", "默认模型"}},
+                QJsonObject{{"path", ""}, {"label", ""}, {"note", ""}},
+                QJsonObject{{"path", ""}, {"label", ""}, {"note", ""}},
+                QJsonObject{{"path", ""}, {"label", ""}, {"note", ""}},
+                QJsonObject{{"path", ""}, {"label", ""}, {"note", ""}}
             }}
         };
 
@@ -274,6 +273,29 @@ void ConfigManager::setCascadeModelNote(int idx, const QString &note)
     if (idx >= 1 && idx <= 5) {
         QJsonObject o = arr[idx - 1].toObject();
         o["note"] = note;
+        arr[idx - 1] = o;
+    }
+    cascade["models"] = arr;
+    root_["cascade"] = cascade;
+}
+
+// 获取级联模型标签文件路径
+QString ConfigManager::cascadeModelLabel(int idx) const
+{
+    QJsonObject cascade = root_["cascade"].toObject();
+    return cascadeModelObject(cascade, idx)["label"].toString();
+}
+
+// 设置级联模型标签文件路径
+void ConfigManager::setCascadeModelLabel(int idx, const QString &label)
+{
+    QJsonObject cascade = root_["cascade"].toObject();
+    QJsonArray arr = cascade["models"].toArray();
+    // 补齐到 5 个
+    while (arr.size() < 5) arr.append(QJsonObject());
+    if (idx >= 1 && idx <= 5) {
+        QJsonObject o = arr[idx - 1].toObject();
+        o["label"] = label;
         arr[idx - 1] = o;
     }
     cascade["models"] = arr;
