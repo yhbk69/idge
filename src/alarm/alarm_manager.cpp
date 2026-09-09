@@ -106,6 +106,16 @@ int AlarmManager::onlineChannelCount() const
     return onlineChannels_.size();
 }
 
+void AlarmManager::setScreenshotsEnabled(bool on)
+{
+    screenshotsOn_.store(on);
+}
+
+bool AlarmManager::screenshotsEnabled() const
+{
+    return screenshotsOn_.load();
+}
+
 QVector<AlarmRecord> AlarmManager::alarms() const
 {
     QMutexLocker lock(&mutex_);

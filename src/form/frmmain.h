@@ -21,8 +21,10 @@
 #include <QTextCursor>
 #include <QTextCharFormat>
 #include <QCloseEvent>
+#include <QVector>
 
 class QAbstractButton;
+class QLineEdit;
 class frmVideoWindow;
 class DashboardWidget;
 class AlarmListWidget;
@@ -135,8 +137,16 @@ private slots:
     void leftConfigClick();        ///< 系统设置页左侧按钮点击
     void systemExit();             ///< 系统退出确认
     void initDebugPage();          ///< 初始化调试帮助页（从 config.json 读取配置）
+    void initCascadeUi();          ///< 初始化级联模型配置区（5个槽位+备注+清空）
     void appendLog(const QString &msg);  ///< 追加日志到文本框
 
+private:
+    // ========== 级联模型配置控件（数据成员，不能放 slots 里） ==========
+    QLineEdit *cascadePathEdit_[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+    QLineEdit *cascadeNoteEdit_[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+    QLineEdit *chNoteEdit_[4] = {nullptr, nullptr, nullptr, nullptr};  // 每路通道备注
+
+private slots:
     // ========== 4路视频浏览按钮 ==========
     void on_btnBrowseCh1_clicked();  ///< 通道1 视频浏览
     void on_btnBrowseCh2_clicked();  ///< 通道2 视频浏览

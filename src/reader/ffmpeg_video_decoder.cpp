@@ -19,29 +19,34 @@
 #include "ThreadPool.hpp"
 #include "helmet_task.h"
 #include "alarm_manager.h"
+// X11 头文件把 None/Null/Bool 等定义成宏(0/int)，会顶掉 Qt 头文件里同名的
+// 枚举成员（如 QUrl::None、QJsonValue::Null），这里统一去掉这些宏避免解析报错
+#undef None
+#undef Null
+#undef Bool
+#include "ConfigManager.h"
+#include <fstream>
 
 // ============================================================
 // 报警截图异步写入器
 //
-// 为什么需要后台线程：
-//   PNG 编码 + 写盘很费 CPU（720p 一张要几百毫秒），如果放在解码线程里
-//   同步执行，会直接把帧率拖到个位数。
-//   所以这里：解码线程只负责【拷贝一份像素 + 提交】，编码和写盘全部
-//   在独立的后台线程完成，解码线程绝不阻塞。
+// 为什么用后台线程：PNG/JPEG 编码比较费 CPU，若在解码线程同步执行会拖低帧率，
+// 所以解码线程只负责【拷贝像素 + 提交】，编码写盘在独立后台线程完成。
 //
-// 目录结构：alarms/日期/通道N_类别_时间.png
-// 为什么用 PNG 不用 JPG：
-//   画面像素是 RGBA(4通道)，而 image_utils 的 jpg 写入只支持 RGB(3通道)，
-//   PNG 写入支持 4 通道，所以这里存 png。
+// 为什么用 JPG 不用 PNG：
+//   PNG 的 zlib 压缩在板子上非常慢；JPG(turbojpeg) 快得多、文件也小。
+//   image_utils 的 jpg 写入只支持 RGB(3通道)，所以先把 RGBA 转成 RGB 再写。
+//
+// 目录：alarms/日期/通道N_类别_时间.jpg
 // ============================================================
 namespace {
 
-// 一张待写盘的截图任务（含一份像素拷贝 + 目标路径）
+// 一张待写盘的任务：存一份 RGB 像素拷贝（去掉 alpha，体积比 RGBA 小 25%）+ 路径
 struct SnapJob {
-    std::vector<unsigned char> rgba;   // RGBA 像素拷贝（w*h*4 字节）
+    std::vector<unsigned char> rgb;    // RGB 像素拷贝（w*h*3 字节）
     int w = 0;
     int h = 0;
-    QString path;                      // 保存路径
+    QString path;                      // 保存路径(.jpg)
 };
 
 class SnapWriter {
@@ -52,15 +57,27 @@ public:
         return w;
     }
 
-    // 提交一张截图：把像素复制一份入队，立即返回（不阻塞解码线程）
+    // 提交一张截图：RGBA 像素先转成 RGB 再入队，立即返回（不阻塞解码线程）
     // 队列满（积压太多）时丢弃最旧的一张，避免内存无限增长
-    void submit(int w, int h, const unsigned char *px, const QString &path)
+    void submit(int w, int h, const unsigned char *rgba, const QString &path)
     {
         SnapJob job;
         job.w = w;
         job.h = h;
         job.path = path;
-        job.rgba.assign(px, px + (size_t)w * h * 4);
+        job.rgb.resize((size_t)w * h * 3);
+
+        // RGBA(4字节/像素) -> RGB(3字节/像素)，跳过 alpha 字节
+        const unsigned char *s = rgba;
+        unsigned char *d = job.rgb.data();
+        size_t n = (size_t)w * h;
+        for (size_t i = 0; i < n; ++i) {
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = s[2];
+            s += 4;
+            d += 3;
+        }
 
         {
             std::lock_guard<std::mutex> lk(mtx_);
@@ -95,17 +112,17 @@ private:
                 job = std::move(q_.front());
                 q_.pop();
             }
-            writePng(job);
+            writeJpg(job);
         }
     }
 
-    // 真正把像素编码成 PNG 并写盘（只在后台线程调用）
-    static void writePng(SnapJob &job)
+    // 真正把 RGB 像素编码成 JPG 并写盘（只在后台线程调用）
+    static void writeJpg(SnapJob &job)
     {
         image_buffer_t img;
         memset(&img, 0, sizeof(img));
-        img.format = image_format_t::IMAGE_FORMAT_RGBA8888;
-        img.virt_addr = job.rgba.data();      // 指向像素拷贝
+        img.format = image_format_t::IMAGE_FORMAT_RGB888;
+        img.virt_addr = job.rgb.data();   // 指向 RGB 像素拷贝
         img.width = job.w;
         img.height = job.h;
         img.width_stride = job.w;
@@ -136,8 +153,8 @@ static QString submitAlarmSnapshot(int channel, const QString &className,
         return QString();
     }
 
-    // 文件名：通道N_类别_时分秒_毫秒.png
-    QString path = QString("%1/ch%2_%3_%4.png")
+    // 文件名：通道N_类别_时分秒_毫秒.jpg
+    QString path = QString("%1/ch%2_%3_%4.jpg")
         .arg(dir)
         .arg(channel + 1)
         .arg(className)
@@ -170,32 +187,73 @@ static int decodeInterruptCallback(void *ctx)
 
 FFmpegVideoDecoder::FFmpegVideoDecoder(QObject *parent) : QObject(parent) 
 {
-    detectResultQueue_= std::make_shared<PriorityQueue<object_detect_result_list>>(12);
     dmaBufferPool_ = std::make_shared<DmaBufferPool>(64, 640, 640, RK_FORMAT_BGR_888, 16);
-    yolo11 = new YOLO11Model("model/yolo11n.rknn", 
-                        "model/coco_80_labels_list.txt", 
-                        RKNN_NPU_CORE_0);
-    frameQueue_ = std::make_shared<FrameQueue>(2, dmaBufferPool_);
-    AppConfig appConfig;
-    modelPool_ = std::make_shared<ModelPool>(appConfig);
-    modelPool_->init();
-    TaskConfig taskConfig;
-    taskConfig.core_mask = RKNN_NPU_CORE_0;
-    taskConfig.modelPath = "model/yolo11n.rknn";
-    taskConfig.labelPath = "model/coco_80_labels_list.txt";
-    ppeTask_ = new PpeTask(taskConfig);
 
-    TaskConfig taskConfig2;
-    taskConfig2.core_mask = RKNN_NPU_CORE_1;
-    taskConfig2.modelPath = "model/yolo11n.rknn";
-    taskConfig2.labelPath = "model/coco_80_labels_list.txt";
-    ppeTask2_ = new PpeTask(taskConfig2);
+    // 从 config.json 的"模型路径1 + 级联模型2~5"建立级联推理任务列表
+    buildCascadeTasks();
+}
 
-    TaskConfig taskConfig3;
-    taskConfig3.core_mask = RKNN_NPU_CORE_2;
-    taskConfig3.modelPath = "model/yolo11n.rknn";
-    taskConfig3.labelPath = "model/coco_80_labels_list.txt";
-    ppeTask3_ = new PpeTask(taskConfig3);
+// ============================================================
+// 级联任务构建：
+//   model.path(模型1) + cascade.models 2~5 中非空的路径，各建一个 PpeTask。
+//   PpeTask 每个占一个 std::thread，NPU 核心 0/1/2 轮流分配，避免全部挤在同一核。
+//   每个任务配一个独立结果队列 slotQueues_[i]，画框时按模型上色、互不干扰。
+//   空路径 = 不启用该槽（界面里空着即可）。
+// ============================================================
+void FFmpegVideoDecoder::buildCascadeTasks()
+{
+    ConfigManager &cfg = ConfigManager::instance();
+    // 解码器构造比主窗口 ConfigManager::load() 早，这里确保配置已读入
+    if (cfg.modelPath().isEmpty() && cfg.labelPath().isEmpty()) {
+        cfg.load("config.json");
+    }
+    QString labelPath = cfg.labelPath();
+    if (labelPath.isEmpty()) labelPath = "model/coco_80_labels_list.txt";
+
+    // 收集启用的模型路径：模型1 永远取全局 model.path；2~5 读 cascade 配置
+    QStringList modelPaths;
+    QString m1 = cfg.modelPath().trimmed();
+    if (!m1.isEmpty()) modelPaths << m1;
+    for (int i = 2; i <= 5; ++i) {
+        QString p = cfg.cascadeModelPath(i).trimmed();
+        if (!p.isEmpty()) modelPaths << p;
+    }
+    if (modelPaths.isEmpty()) {
+        // 兜底：什么也没配就用默认模型
+        modelPaths << "model/yolo11n.rknn";
+    }
+
+    // 读一次类别名（各模型共用同一标签文件）
+    classNames_.clear();
+    {
+        std::ifstream infile(labelPath.toStdString());
+        std::string line;
+        while (infile && std::getline(infile, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            classNames_.push_back(line);
+        }
+    }
+
+    // 每个非空模型一个推理任务 + 一个结果队列
+    int idx = 0;
+    for (const QString &mp : modelPaths) {
+        TaskConfig taskConfig;
+        taskConfig.core_mask = (rknn_core_mask)(RKNN_NPU_CORE_0 + (idx % 3)); // 0/1/2 轮流
+        taskConfig.modelPath = mp.toStdString();
+        taskConfig.labelPath = labelPath.toStdString();
+
+        PpeTask *task = new PpeTask(taskConfig);
+        tasks_.push_back(task);
+
+        // 每个任务一个独立结果队列（容量 8，满了丢旧保新）
+        slotQueues_.push_back(std::make_shared<PriorityQueue<object_detect_result_list>>(8));
+        idx++;
+    }
+
+    qDebug() << "Cascade tasks:" << tasks_.size() << "label:" << labelPath;
+    for (size_t k = 0; k < tasks_.size(); ++k) {
+        qDebug() << "  slot" << k + 1 << "->" << modelPaths[k];
+    }
 }
 
 FFmpegVideoDecoder::~FFmpegVideoDecoder() { stop(); }
@@ -207,10 +265,11 @@ void FFmpegVideoDecoder::start(const QString &url)
 
     url_ = url;
     running_ = true;
-    //inferThread = std::thread(&FFmpegVideoDecoder::doInfer, this);
-    ppeTask_->start();
-    ppeTask2_->start();
-    ppeTask3_->start();
+
+    // 启动所有级联推理任务
+    for (PpeTask *task : tasks_) {
+        task->start();
+    }
 
     thread_ = new QThread;
     moveToThread(thread_);
@@ -218,21 +277,18 @@ void FFmpegVideoDecoder::start(const QString &url)
     connect(thread_, &QThread::finished, thread_, &QThread::deleteLater);
 
     thread_->start();
-
-    
-
 }
 
 void FFmpegVideoDecoder::stop()
 {
     running_ = false;
 
-    // 先唤醒并请求推理线程退出（不阻塞），避免它们在解码线程还在投递时被 join 卡住
-    ppeTask_->requestStop();
-    ppeTask2_->requestStop();
-    ppeTask3_->requestStop();
+    // 1) 先请求所有推理任务退出（关队列唤醒，不阻塞）
+    for (PpeTask *task : tasks_) {
+        task->requestStop();
+    }
 
-    // 再停止解码线程（interrupt_callback 中断 av_read_frame，线程处理完当前帧后退出）
+    // 2) 停解码线程（interrupt_callback 中断 av_read_frame，处理完当前帧即退出）
     if (thread_)
     {
         thread_->quit();
@@ -244,56 +300,15 @@ void FFmpegVideoDecoder::stop()
         thread_ = nullptr;
     }
 
-    // 最后回收推理线程（此时解码线程已停，不会再投递新任务）
-    ppeTask_->join();
-    ppeTask2_->join();
-    ppeTask3_->join();
+    // 3) 有界回收推理线程：最多等 1.5s，超时 detach，绝不阻塞 UI 线程
+    //    （否则 npu 忙时 PpeTask::join 会把主线程卡死——之前卡死根因）
+    for (PpeTask *task : tasks_) {
+        task->stopBestEffort(1500);
+    }
 
     running_ = true;  // 重置，为下次 start() 准备
 }
 
-void FFmpegVideoDecoder::doInfer()
-{
-    TIMER t;
-    while (running_)
-    {
-        image_buffer_t frame;
-        if (frameQueue_->wait_and_pop(frame))
-        {
-            printf("do infer \n");
-            t.tik();
-            std::shared_ptr<YOLO11Model> model1 = modelPool_->getModel("1");
-            object_detect_result_list od_results1;
-            if (!running_)
-            {
-                break;
-            }
-            
-            model1->detect(&frame, &od_results1, true);
-            od_results1.time = frame.time;
-            detectResultQueue_->push(od_results1);
-            t.tok();
-            t.print_time("model1->detect");
-            t.tik();
-
-            std::shared_ptr<YOLO11Model> model2 = modelPool_->getModel("2");
-            object_detect_result_list od_results2;
-            if (!running_)
-            {
-                break;
-            }
-            //model2->detect(&frame, &od_results2, true);
-            //od_results2.time = frame.time;
-            //detectResultQueue_->push(od_results2);
-            
-            dmaBufferPool_->release(frame.dmaBuffer);
-            t.tok();
-            t.print_time("model2->detect");
-        }
-    }
-    
-
-}
 void FFmpegVideoDecoder::decodeLoop()
 {
     int ret;
@@ -523,12 +538,15 @@ void FFmpegVideoDecoder::decodeLoop()
                             auto t = chrono::system_clock::now();
                             image->time = t.time_since_epoch().count();
 
-                            std::shared_ptr<TaskData> taskData = std::make_shared<TaskData>(t.time_since_epoch().count(),
-                                                                                    image,
-                                                                                    this->detectResultQueue_);
-                            ppeTask_->put(taskData);
-                            ppeTask2_->put(taskData);
-                            ppeTask3_->put(taskData);
+                            // 每 3 帧做一次推理；把这一帧同时派给"所有已启用的级联模型"
+                            // 每个模型一个独立 TaskData（共享同一张图像），各自排队推理，
+                            // 结果写回各自的 slotQueues_[k]，解码线程按模型上色画框
+                            auto now = chrono::system_clock::now();
+                            long ts = now.time_since_epoch().count();
+                            for (size_t k = 0; k < tasks_.size(); ++k) {
+                                auto td = std::make_shared<TaskData>(ts, image, slotQueues_[k]);
+                                tasks_[k]->put(td);
+                            }
                             //timer_.tok();
                             //timer_.print_time("frameQueue_->pushAndReplace(image);");
                             // object_detect_result_list od_results;
@@ -549,60 +567,63 @@ void FFmpegVideoDecoder::decodeLoop()
                     // rgaBufferPool_->release(rgabufer);
                     //detectFrameBufer->release();
 
-                    // 画框和概率
-                    object_detect_result_list od_results;
-                    if (detectResultQueue_->tryPop(od_results))
-                    {
-                        image_buffer_t dislayImage;
-                        dislayImage.format = image_format_t::IMAGE_FORMAT_RGBA8888;
-                        dislayImage.virt_addr = (unsigned char*)dst_buf->ptr();
-                        dislayImage.width = dst_buf->width();
-                        dislayImage.height = dst_buf->height();
+                    // ============ 级联结果合并画框（整帧 + 分工） ============
+                    // 每个启用模型的推理结果在各自的 slotQueues_[k] 里，
+                    // 这里依次取出并用不同颜色画到同一帧上：
+                    //   模型1=蓝, 2=绿, 3=红, 4=黄, 5=橙 —— 一眼能分清是哪个模型检出的
+                    // 文字前缀 M{槽位}，如 "M1 person 87.3%"
+                    const int kSlotColors[5] = {
+                        (int)COLOR_BLUE, (int)COLOR_GREEN, (int)COLOR_RED,
+                        (int)COLOR_YELLOW, (int)COLOR_ORANGE
+                    };
 
+                    image_buffer_t dislayImage;
+                    dislayImage.format = image_format_t::IMAGE_FORMAT_RGBA8888;
+                    dislayImage.virt_addr = (unsigned char*)dst_buf->ptr();
+                    dislayImage.width = dst_buf->width();
+                    dislayImage.height = dst_buf->height();
+
+                    for (size_t k = 0; k < slotQueues_.size(); ++k) {
+                        // 取出该模型最新一次结果（tryPop 不清空，取最新的一批）
+                        object_detect_result_list od;
+                        if (!slotQueues_[k]->tryPop(od)) continue;
+
+                        int color = kSlotColors[(int)k % 5];
                         char text[256];
-                        for (int i = 0; i < od_results.count; i++)
-                        {
-                            object_detect_result *det_result = &(od_results.results[i]);
+                        for (int i = 0; i < od.count; i++) {
+                            const object_detect_result &d = od.results[i];
+                            draw_rectangle(&dislayImage,
+                                           d.box.left, d.box.top,
+                                           d.box.right - d.box.left,
+                                           d.box.bottom - d.box.top,
+                                           color, 3);
 
-                            int x1 = det_result->box.left;
-                            int y1 = det_result->box.top;   
-                            int x2 = det_result->box.right;
-                            int y2 = det_result->box.bottom;
-
-                            draw_rectangle(&dislayImage, x1, y1, x2 - x1, y2 - y1, COLOR_BLUE, 3);
-
-                            const auto &cls = yolo11->getClassNames();
-                            if (det_result->cls_id >= 0 && det_result->cls_id < (int)cls.size())
-                                snprintf(text, sizeof(text), "%s %.1f%%", cls[det_result->cls_id].c_str(), det_result->prop * 100);
+                            if (d.cls_id >= 0 && d.cls_id < (int)classNames_.size())
+                                snprintf(text, sizeof(text), "M%zu %s %.1f%%",
+                                         k + 1, classNames_[d.cls_id].c_str(), d.prop * 100);
                             else
-                                snprintf(text, sizeof(text), "cls_%d %.1f%%", det_result->cls_id, det_result->prop * 100);
-                            draw_text(&dislayImage, text, x1, y1 - 20, COLOR_RED, 10);
+                                snprintf(text, sizeof(text), "M%zu cls_%d %.1f%%",
+                                         k + 1, d.cls_id, d.prop * 100);
+                            draw_text(&dislayImage, text, d.box.left, d.box.top - 20, color, 10);
                         }
 
-                        // ============ 报警判定 + 截图 ============
-                        // 1) ingest(): 把检测结果交给报警管理器做"统计 + 报警判定"
-                        //    - 累加各类别检测数量（看板用）
-                        //    - 判断检测到的类别是否在报警名单里（config.json alarm.classes）
-                        //    - 同一个通道同一类别在 2 秒内只算一次报警（去重限流）
-                        //    返回值 newAlarms 是"这次真正要上报的报警"列表（可能为空）
+                        // ============ 报警判定 + 截图（每个模型的结果都检查一遍） ============
+                        // ingest(): 统计 + 判断是否命中报警类别 + 2秒去重限流。
+                        // 多个相同模型对同一目标会重复命中，但去重限流保证同通道同类 2s 只报 1 次，
+                        // 所以相同模型实验下不会产生重复报警。
                         QVector<AlarmRecord> newAlarms =
-                            AlarmManager::instance().ingest(channel_, od_results);
-
-                        // 2) 如果有新报警，就把"当前这一帧"的像素交给后台线程写盘
-                        //    这里只拷贝像素+提交，不做 PNG 编码/写盘，避免拖慢解码线程
+                            AlarmManager::instance().ingest(channel_, od);
                         if (!newAlarms.isEmpty()) {
-                            QString snap = submitAlarmSnapshot(
-                                channel_,
-                                newAlarms.front().className,
-                                dislayImage.width,
-                                dislayImage.height,
-                                (const unsigned char *)dislayImage.virt_addr);
-                            // 同一帧的多个报警共用同一张截图
-                            for (auto &a : newAlarms) {
-                                a.imgPath = snap;
+                            QString snap;
+                            if (AlarmManager::instance().screenshotsEnabled()) {
+                                // 只拷贝像素提交给后台线程写盘，不阻塞解码线程
+                                snap = submitAlarmSnapshot(
+                                    channel_, newAlarms.front().className,
+                                    dislayImage.width, dislayImage.height,
+                                    (const unsigned char *)dislayImage.virt_addr);
                             }
-                            // 3) storeAndNotify(): 真正入库并通知界面
-                            //    -> 界面收到 alarmGenerated 信号：弹 toast、报警列表自动插入新行
+                            for (auto &a : newAlarms) a.imgPath = snap;
+                            // 入库并通知界面（弹 toast / 报警列表新增）
                             AlarmManager::instance().storeAndNotify(newAlarms);
                         }
                     }

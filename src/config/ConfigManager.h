@@ -17,6 +17,7 @@
  */
 
 #include <QString>
+#include <QStringList>
 #include <QJsonObject>
 
 class ConfigManager
@@ -52,6 +53,41 @@ public:
      * @param path 视频文件路径或RTSP地址
      */
     void setVideoChannel(int ch, const QString &path);
+
+    // ========== 视频通道备注 ==========
+
+    /**
+     * @brief 获取指定通道的备注文字
+     * @param ch 通道号（1-4），无备注返回空
+     */
+    QString channelNote(int ch) const;
+
+    /**
+     * @brief 设置指定通道的备注文字
+     */
+    void setChannelNote(int ch, const QString &note);
+
+    // ========== 级联模型配置 ==========
+
+    /**
+     * @brief 获取第 idx 个级联模型的路径（1~5），无则返回空串（表示不用）
+     */
+    QString cascadeModelPath(int idx) const;
+
+    /**
+     * @brief 设置第 idx 个级联模型的路径
+     */
+    void setCascadeModelPath(int idx, const QString &path);
+
+    /**
+     * @brief 获取第 idx 个级联模型的备注
+     */
+    QString cascadeModelNote(int idx) const;
+
+    /**
+     * @brief 设置第 idx 个级联模型的备注
+     */
+    void setCascadeModelNote(int idx, const QString &note);
 
     // ========== 模型配置 ==========
 

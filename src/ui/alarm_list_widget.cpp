@@ -6,29 +6,59 @@
 #include <QHeaderView>
 #include <QDateTime>
 #include <QMessageBox>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QShowEvent>
 
 AlarmListWidget::AlarmListWidget(QWidget *parent)
     : QWidget(parent)
 {
     setupUi();
-    // 报警实时刷新
+    // 报警实时刷新（防抖）：新报警先更新统计数字，表格用定时器合并刷新，
+    // 避免"报警很频繁时每条都整表重建"把主线程拖卡
+    refreshTimer_ = new QTimer(this);
+    refreshTimer_->setSingleShot(true);
+    refreshTimer_->setInterval(300);   // 300ms 内的多条报警合并成一次刷新
+    connect(refreshTimer_, &QTimer::timeout, this, &AlarmListWidget::onDebouncedRefresh);
+
     connect(&AlarmManager::instance(), &AlarmManager::alarmGenerated,
-            this, &AlarmListWidget::refreshTable);
+            this, [this](const AlarmRecord &) {
+                onStatsUpdated();          // 数字立刻更新
+                if (isVisible()) {
+                    refreshTimer_->start();  // 表格防抖刷新
+                }
+            });
     connect(&AlarmManager::instance(), &AlarmManager::statsUpdated,
             this, &AlarmListWidget::onStatsUpdated);
+    refreshTable();
+}
+
+void AlarmListWidget::onDebouncedRefresh()
+{
     refreshTable();
 }
 
 void AlarmListWidget::onStatsUpdated()
 {
     // 仅刷新顶部统计数字，不重建表格（避免频繁打断筛选操作）
+    // 注意用 alarmCount() 只取数量，不要整表拷贝，否则报警多时会拖慢主线程
     AlarmManager &mgr = AlarmManager::instance();
-    lblTotal_->setText(QString("共 %1 条").arg(mgr.alarms().size()));
+    lblTotal_->setText(QString("共 %1 条").arg(mgr.alarmCount()));
     int unack = mgr.unacknowledgedCount();
     lblUnack_->setText(QString("未确认: %1 条").arg(unack));
     lblUnack_->setStyleSheet(unack > 0
         ? "color: #ff9800; font-size: 13px;"
         : "color: #4caf50; font-size: 13px;");
+}
+
+void AlarmListWidget::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    // 页面重新可见时做一次完整刷新（因为不可见期间只更新了统计数字）
+    refreshTable();
 }
 
 void AlarmListWidget::setupUi()
@@ -98,6 +128,31 @@ void AlarmListWidget::setupUi()
     connect(btnClear, &QPushButton::clicked, this, &AlarmListWidget::onClear);
     toolLay->addWidget(btnClear);
 
+    // 打开报警截图目录（用系统文件管理器查看截图文件）
+    QPushButton *btnOpenDir = new QPushButton("打开截图目录");
+    btnOpenDir->setStyleSheet("color: #fff; background: #ff9800; border-radius: 4px; padding: 6px 16px;");
+    connect(btnOpenDir, &QPushButton::clicked, this, &AlarmListWidget::onOpenDir);
+    toolLay->addWidget(btnOpenDir);
+
+    // 报警截图开关：可勾选，关掉后新报警不再自动截图
+    snapBtn_ = new QPushButton();
+    snapBtn_->setCheckable(true);
+    bool snapOn = AlarmManager::instance().screenshotsEnabled();
+    snapBtn_->setChecked(snapOn);
+    snapBtn_->setText(snapOn ? "截图: 开" : "截图: 关");
+    snapBtn_->setStyleSheet(snapOn
+        ? "color: #fff; background: #4caf50; border-radius: 4px; padding: 6px 16px;"
+        : "color: #aaa; background: #555; border-radius: 4px; padding: 6px 16px;");
+    connect(snapBtn_, &QPushButton::toggled, this, [this](bool on) {
+        // 截图开关：状态存到 AlarmManager，解码线程报警时据此决定是否截图
+        AlarmManager::instance().setScreenshotsEnabled(on);
+        snapBtn_->setText(on ? "截图: 开" : "截图: 关");
+        snapBtn_->setStyleSheet(on
+            ? "color: #fff; background: #4caf50; border-radius: 4px; padding: 6px 16px;"
+            : "color: #aaa; background: #555; border-radius: 4px; padding: 6px 16px;");
+    });
+    toolLay->addWidget(snapBtn_);
+
     mainLay->addLayout(toolLay);
 
     // 报警表格
@@ -114,12 +169,25 @@ void AlarmListWidget::setupUi()
         "QHeaderView::section { background: #2d2d3d; color: #aaa; padding: 6px; border: 1px solid #333; }"
     );
     table_->verticalHeader()->setVisible(false);
+    // 双击某一行：直接用系统看图程序打开该报警的截图
+    connect(table_, &QTableWidget::cellDoubleClicked,
+            this, &AlarmListWidget::onRowDoubleClicked);
     mainLay->addWidget(table_, 1);
 }
 
 void AlarmListWidget::refreshTable()
 {
     AlarmManager &mgr = AlarmManager::instance();
+
+    // 当前页不可见时：只更新顶部统计数字，不重建表格。
+    // 原因是报警刷新会整表重建(每次最多1000行)，若报警很频繁，
+    // 即使切到别的页面也会在主线程反复重建，把界面拖到"看起来卡死"。
+    // 切回本页时 showEvent() 会做一次完整刷新。
+    if (!isVisible()) {
+        onStatsUpdated();
+        return;
+    }
+
     QVector<AlarmRecord> alarms = mgr.alarms();
 
     // 更新统计
@@ -155,13 +223,21 @@ void AlarmListWidget::refreshTable()
     }
 
     // 填充表格（倒序，最新在前）
-    table_->setRowCount(filtered.size());
-    for (int i = 0; i < filtered.size(); i++) {
-        const AlarmRecord &a = filtered[filtered.size() - 1 - i];
+    // 只显示最近 kMaxRows 条，防止报警上万条时整表重建把主线程拖卡
+    const int kMaxRows = 500;
+    int total = filtered.size();
+    int shown = qMin(total, kMaxRows);          // 本次显示的行数
+
+    table_->setRowCount(shown);
+    for (int i = 0; i < shown; i++) {
+        const AlarmRecord &a = filtered[total - 1 - i];
 
         QDateTime dt;
         dt.setMSecsSinceEpoch(a.timestamp / 1000000);  // ns -> ms
-        table_->setItem(i, 0, new QTableWidgetItem(dt.toString("yyyy-MM-dd HH:mm:ss")));
+        QTableWidgetItem *timeItem = new QTableWidgetItem(dt.toString("yyyy-MM-dd HH:mm:ss"));
+        // 把截图路径存在这一格的自定义数据里，双击时取出来打开
+        timeItem->setData(Qt::UserRole, a.imgPath);
+        table_->setItem(i, 0, timeItem);
         table_->setItem(i, 1, new QTableWidgetItem(QString("通道 %1").arg(a.channel + 1)));
         table_->setItem(i, 2, new QTableWidgetItem(a.className));
 
@@ -194,5 +270,35 @@ void AlarmListWidget::onClear()
     if (QMessageBox::question(this, "确认", "确定要清空所有报警记录吗？") == QMessageBox::Yes) {
         AlarmManager::instance().clearAlarms();
         refreshTable();
+    }
+}
+
+void AlarmListWidget::onOpenDir()
+{
+    // 用系统文件管理器打开报警截图目录（没有截图时也创建目录再打开）
+    QDir dir("alarms");
+    if (!dir.exists()) dir.mkpath(".");
+    QString path = dir.absolutePath();
+
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path))) {
+        QMessageBox::information(this, "截图目录",
+                                 QString("无法打开文件管理器，截图目录：\n%1").arg(path));
+    }
+}
+
+void AlarmListWidget::onRowDoubleClicked(int row, int)
+{
+    // 双击行 -> 打开该条报警对应的截图
+    QTableWidgetItem *it = table_->item(row, 0);
+    if (!it) return;
+    QString imgPath = it->data(Qt::UserRole).toString();
+    if (imgPath.isEmpty() || !QFile::exists(imgPath)) {
+        QMessageBox::information(this, "截图", "该报警没有截图记录");
+        return;
+    }
+    QString abs = QFileInfo(imgPath).absoluteFilePath();
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(abs))) {
+        QMessageBox::information(this, "截图",
+                                 QString("无法打开图片：\n%1").arg(abs));
     }
 }

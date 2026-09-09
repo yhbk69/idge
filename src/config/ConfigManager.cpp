@@ -38,13 +38,23 @@ void ConfigManager::load(const QString &path)
             {"channel1", "192.mp4"},
             {"channel2", "192.mp4"},
             {"channel3", "192.mp4"},
-            {"channel4", "192.mp4"}
+            {"channel4", "192.mp4"},
+            {"notes", QJsonArray{"", "", "", ""}}
         };
         root_["model"] = QJsonObject{
             {"path", "model/yolo11n.rknn"},
             {"label", "model/coco_80_labels_list.txt"},
             {"input_size", "640x640"},
             {"type", "YOLO11"}
+        };
+        root_["cascade"] = QJsonObject{
+            {"models", QJsonArray{
+                QJsonObject{{"path", ""}, {"note", ""}},
+                QJsonObject{{"path", ""}, {"note", ""}},
+                QJsonObject{{"path", ""}, {"note", ""}},
+                QJsonObject{{"path", ""}, {"note", ""}},
+                QJsonObject{{"path", ""}, {"note", ""}}
+            }}
         };
         root_["detect"] = QJsonObject{
             {"conf_threshold", 0.25},
@@ -106,6 +116,89 @@ void ConfigManager::setVideoChannel(int ch, const QString &path)
     QJsonObject video = root_["video"].toObject();
     video[QString("channel%1").arg(ch)] = path;
     root_["video"] = video;
+}
+
+// ==========================================
+// 视频通道备注
+// ==========================================
+
+QString ConfigManager::channelNote(int ch) const
+{
+    QJsonObject video = root_["video"].toObject();
+    QJsonArray notes = video["notes"].toArray();
+    if (ch >= 1 && ch <= notes.size()) {
+        return notes[ch - 1].toString();
+    }
+    return QString();
+}
+
+void ConfigManager::setChannelNote(int ch, const QString &note)
+{
+    QJsonObject video = root_["video"].toObject();
+    QJsonArray notes = video["notes"].toArray();
+    // 补齐到4个
+    while (notes.size() < 4) notes.append("");
+    if (ch >= 1 && ch <= notes.size()) {
+        notes[ch - 1] = note;
+    }
+    video["notes"] = notes;
+    root_["video"] = video;
+}
+
+// ==========================================
+// 级联模型配置
+// config.json 里存成 5 个对象数组：
+//   "cascade": { "models": [ {"path":"..","note":".."}, ... ] }  长度5
+// ==========================================
+
+static QJsonObject cascadeModelObject(const QJsonObject &cascade, int idx)
+{
+    // idx: 1~5，取第 idx 个对象，越界返回空对象
+    QJsonArray arr = cascade["models"].toArray();
+    if (idx >= 1 && idx <= arr.size()) {
+        return arr[idx - 1].toObject();
+    }
+    return QJsonObject();
+}
+
+QString ConfigManager::cascadeModelPath(int idx) const
+{
+    QJsonObject cascade = root_["cascade"].toObject();
+    return cascadeModelObject(cascade, idx)["path"].toString();
+}
+
+void ConfigManager::setCascadeModelPath(int idx, const QString &path)
+{
+    QJsonObject cascade = root_["cascade"].toObject();
+    QJsonArray arr = cascade["models"].toArray();
+    while (arr.size() < 5) arr.append(QJsonObject());      // 补齐到5个
+    if (idx >= 1 && idx <= 5) {
+        QJsonObject o = arr[idx - 1].toObject();
+        o["path"] = path;
+        arr[idx - 1] = o;
+    }
+    cascade["models"] = arr;
+    root_["cascade"] = cascade;
+}
+
+QString ConfigManager::cascadeModelNote(int idx) const
+{
+    QJsonObject cascade = root_["cascade"].toObject();
+    return cascadeModelObject(cascade, idx)["note"].toString();
+}
+
+void ConfigManager::setCascadeModelNote(int idx, const QString &note)
+{
+    QJsonObject cascade = root_["cascade"].toObject();
+    QJsonArray arr = cascade["models"].toArray();
+    while (arr.size() < 5) arr.append(QJsonObject());      // 补齐到5个
+    if (idx >= 1 && idx <= 5) {
+        QJsonObject o = arr[idx - 1].toObject();
+        o["note"] = note;
+        arr[idx - 1] = o;
+    }
+    cascade["models"] = arr;
+    root_["cascade"] = cascade;
 }
 
 // ==========================================

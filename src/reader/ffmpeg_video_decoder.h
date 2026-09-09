@@ -4,8 +4,12 @@
 
 #include <QObject>
 #include <QThread>
+#include <QString>
 #include <atomic>
 #include <thread>
+#include <vector>
+#include <string>
+#include <memory>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -39,29 +43,23 @@ signals:
     void frameReady(RenderFrame frame);
     void finished();
     void error(QString msg);
-    void detectionResult(int channel, object_detect_result_list results);
     void statusChanged(int channel, int online);
 
 private:
     void decodeLoop();
-    void doInfer();
+    // 从 config.json 读取"模型路径1 + 级联模型2~5"，为每个非空模型建一个推理任务
+    void buildCascadeTasks();
 
     QString url_;
     int channel_ = 0;
     QThread* thread_ = nullptr;
     std::atomic<bool> running_{false};
-    std::shared_ptr<PriorityQueue<object_detect_result_list>> detectResultQueue_; 
     std::shared_ptr<DmaBufferPool> dmaBufferPool_;
-    TIMER timer_;
-    YOLO11Model* yolo11;
-    std::shared_ptr<FrameQueue> frameQueue_;
-    std::thread inferThread;
-    std::shared_ptr<ModelPool> modelPool_;
-    PpeTask* ppeTask_;
-    PpeTask* ppeTask2_;
-    PpeTask* ppeTask3_;
 
-    
+    // ===== 级联多模型：每个非空模型一个推理任务 + 一个结果队列 =====
+    std::vector<PpeTask*> tasks_;                  // 推理任务(每个一个线程)
+    std::vector<std::shared_ptr<PriorityQueue<object_detect_result_list>>> slotQueues_; // 各任务的结果
+    std::vector<std::string> classNames_;          // 类别名(所有模型共用同一标签文件)
 };
 
 #endif

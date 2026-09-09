@@ -8,6 +8,7 @@
 #include <QMap>
 #include <QStringList>
 #include <QSet>
+#include <atomic>
 #include "common.hpp"
 
 struct AlarmRecord {
@@ -58,6 +59,10 @@ public:
     void setChannelOnline(int channel, bool online);
     int onlineChannelCount() const;
 
+    // 报警时是否截图存档（界面按钮可开关）
+    void setScreenshotsEnabled(bool on);
+    bool screenshotsEnabled() const;
+
 signals:
     void alarmGenerated(const AlarmRecord &alarm);
     void statsUpdated();
@@ -73,6 +78,7 @@ private:
     QStringList alarmClasses_;
     QMap<QString, long> lastAlarmTime_;   // key: "ch:cls" -> 上次报警时间(ns)
     QSet<int> onlineChannels_;            // 当前在线通道
+    std::atomic<bool> screenshotsOn_{true};  // 报警是否截图
 };
 
 #endif // ALARM_MANAGER_H

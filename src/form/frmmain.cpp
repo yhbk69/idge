@@ -39,6 +39,12 @@
 #include <QPushButton>
 #include <QGuiApplication>
 #include <QScreen>
+#include <QLineEdit>
+#include <QGroupBox>
+#include <QGridLayout>
+#include <QHBoxLayout>
+#include <QVBoxLayout>
+#include <QFileDialog>
 
 // ==========================================
 // 构造 / 析构
@@ -272,6 +278,7 @@ void frmMain::initForm()
 
     // 9. 加载配置文件
     ConfigManager::instance().load("config.json");
+    AlarmManager::instance().setAlarmClasses(ConfigManager::instance().alarmClasses());
 
     // 10. 从配置加载视频到4个通道（必须在 config 加载之后）
     ConfigManager &cfg = ConfigManager::instance();
@@ -679,6 +686,45 @@ void frmMain::initDebugPage()
     ui->labClassNumVal->setText(QString::number(cfg.classNum()));
     ui->labThreadsVal->setText(QString::number(cfg.threads()));
 
+    // ========== 通道备注 + 每路"清空"（追加到"模型配置"分组框内每路末尾） ==========
+    {
+        QGridLayout *gl = ui->gridLayout_model;   // 现有通道所在的分组框网格
+        QLineEdit *chEdit[4] = {ui->lineEditCh1, ui->lineEditCh2,
+                                ui->lineEditCh3, ui->lineEditCh4};
+        for (int i = 0; i < 4; ++i) {
+            // 备注输入框（编辑完自动保存）
+            chNoteEdit_[i] = new QLineEdit(cfg.channelNote(i + 1));
+            chNoteEdit_[i]->setPlaceholderText("备注");
+            chNoteEdit_[i]->setMaximumWidth(180);
+            chNoteEdit_[i]->setStyleSheet("color:#fff;background:#3d3d4d;"
+                                          "border:1px solid #555;border-radius:4px;padding:2px 6px;");
+            connect(chNoteEdit_[i], &QLineEdit::editingFinished, this, [this, i]() {
+                ConfigManager::instance().setChannelNote(i + 1, chNoteEdit_[i]->text().trimmed());
+                ConfigManager::instance().save();
+            });
+            gl->addWidget(chNoteEdit_[i], i, 3);
+
+            // 清空按钮：清掉该路的视频路径 + 备注
+            QPushButton *clearBtn = new QPushButton("清空");
+            clearBtn->setMaximumWidth(64);
+            clearBtn->setStyleSheet("color:#fff;background:#f44336;"
+                                    "border-radius:4px;padding:3px 8px;");
+            connect(clearBtn, &QPushButton::clicked, this, [this, i, chEdit]() {
+                chEdit[i]->clear();
+                chNoteEdit_[i]->clear();
+                ConfigManager &c = ConfigManager::instance();
+                c.setVideoChannel(i + 1, "");
+                c.setChannelNote(i + 1, "");
+                c.save();
+                log("system", QString("通道%1 视频源与备注已清空").arg(i + 1));
+            });
+            gl->addWidget(clearBtn, i, 4);
+        }
+    }
+
+    // ========== 级联模型配置区（5个槽位 + 备注 + 清空） ==========
+    initCascadeUi();
+
     // ========== 初始日志（带颜色） ==========
     log("system", "系统启动");
     log("system", "平台: RK3588, NPU核心数: " + QString::number(NPU_CORE_NUM));
@@ -686,6 +732,152 @@ void frmMain::initDebugPage()
     log("info", "标签加载: " + cfg.labelPath());
     log("system", "视频解码器初始化完成");
     log("system", "推理线程池启动, 线程数: " + QString::number(cfg.threads()));
+}
+
+// ============================================================
+// 模型路径区（就是 5 个"模型路径"，级联模式，不单独分组）
+// 布局（都在"模型配置"grpModelInfo 分组框内）：
+//   模型路径1: 复用原有单行(原"模型路径")，另加 备注|清空
+//   模型路径2~5: 新增，每行 = 路径 | 浏览 | 备注 | 清空
+//   之后再把"标签文件""输入尺寸/类型"两行顺延到最下面
+// 约定：模型路径1 = 全局 model.path；2~5 存 cascade.models 的 2~5
+// ============================================================
+void frmMain::initCascadeUi()
+{
+    ConfigManager &cfg = ConfigManager::instance();
+    QGridLayout *gl = ui->gridLayout_model;
+
+    // 把一个控件从原行列挪到新行列（不删除，只是重新排布）
+    auto moveTo = [gl](QWidget *w, int r, int c) {
+        if (!w) return;
+        gl->removeWidget(w);
+        gl->addWidget(w, r, c);
+    };
+
+    // 先把"标签文件"(row5)和"输入尺寸/类型"(row6)两行挪到临时行 20，
+    // 腾出 row5~8 给模型路径2~5，稍后再挪到最下方
+    moveTo(ui->labLabelPath,    20, 0);
+    moveTo(ui->lineEditLabelPath, 20, 1);
+    moveTo(ui->btnBrowseLabel,  20, 2);
+    moveTo(ui->labInputSize,    20, 0);
+    moveTo(ui->labInputSizeVal, 20, 1);
+    moveTo(ui->labModelType,    20, 2);
+    moveTo(ui->labModelTypeVal, 20, 3);
+
+    // ===== 模型路径1：复用原来的"模型路径"行 =====
+    cascadePathEdit_[0] = ui->lineEditModelPath;
+    ui->labModelPath->setText("模型路径1:");
+    // 编辑完自动保存到 model.path
+    connect(ui->lineEditModelPath, &QLineEdit::editingFinished, this, [this]() {
+        ConfigManager &c = ConfigManager::instance();
+        c.setModelPath(ui->lineEditModelPath->text().trimmed());
+        c.save();
+    });
+    // 模型路径1 的备注（存 cascade idx1 的 note）
+    cascadeNoteEdit_[0] = new QLineEdit(cfg.cascadeModelNote(1));
+    cascadeNoteEdit_[0]->setPlaceholderText("备注");
+    cascadeNoteEdit_[0]->setMaximumWidth(180);
+    cascadeNoteEdit_[0]->setStyleSheet("color:#fff;background:#2d2d3d;"
+                                       "border:1px solid #555;border-radius:4px;padding:2px 6px;");
+    connect(cascadeNoteEdit_[0], &QLineEdit::editingFinished, this, [this]() {
+        ConfigManager &c = ConfigManager::instance();
+        c.setCascadeModelNote(1, cascadeNoteEdit_[0]->text().trimmed());
+        c.save();
+    });
+    gl->addWidget(cascadeNoteEdit_[0], 4, 3);
+    QPushButton *clear1 = new QPushButton("清空");
+    clear1->setMaximumWidth(64);
+    clear1->setStyleSheet("color:#fff;background:#f44336;border-radius:4px;padding:3px 8px;");
+    connect(clear1, &QPushButton::clicked, this, [this]() {
+        ui->lineEditModelPath->clear();
+        cascadeNoteEdit_[0]->clear();
+        ConfigManager &c = ConfigManager::instance();
+        c.setModelPath("");
+        c.setCascadeModelNote(1, "");
+        c.save();
+        log("system", "模型路径1 已清空");
+    });
+    gl->addWidget(clear1, 4, 4);
+
+    // ===== 模型路径2~5：新行，占 row5~8 =====
+    // 说明：空路径 = 该路模型不用（级联只跑非空的行）
+    for (int i = 1; i < 5; ++i) {          // i = 数组下标(1..4)，对应界面模型2~5
+        int row = 4 + i;                   // 模型2在row5 ... 模型5在row8
+
+        QLabel *lbl = new QLabel(QString("模型路径%1:").arg(i + 1));
+        lbl->setStyleSheet("color:#ccc;font-size:13px;");
+        gl->addWidget(lbl, row, 0);
+
+        cascadePathEdit_[i] = new QLineEdit(cfg.cascadeModelPath(i + 1));
+        // 便于先验证级联：模型路径2 默认也填同一个模型（空则回退用全局模型）
+        if (i == 1 && cascadePathEdit_[i]->text().isEmpty()) {
+            cascadePathEdit_[i]->setText(cfg.modelPath());
+        }
+        cascadePathEdit_[i]->setPlaceholderText("模型路径(*.rknn)，留空不用");
+        cascadePathEdit_[i]->setStyleSheet("color:#fff;background:#2d2d3d;"
+                                           "border:1px solid #555;border-radius:4px;padding:2px 6px;");
+        connect(cascadePathEdit_[i], &QLineEdit::editingFinished,
+                this, [this, i]() {
+                    ConfigManager &c = ConfigManager::instance();
+                    c.setCascadeModelPath(i + 1, cascadePathEdit_[i]->text().trimmed());
+                    c.save();
+                });
+        gl->addWidget(cascadePathEdit_[i], row, 1);
+
+        QPushButton *browse = new QPushButton("浏览...");
+        browse->setMaximumWidth(80);
+        browse->setStyleSheet("color:#fff;background:#4a6fa5;border-radius:4px;padding:3px 8px;");
+        connect(browse, &QPushButton::clicked, this, [this, i]() {
+            QString f = QFileDialog::getOpenFileName(
+                this, QString("选择模型路径%1").arg(i + 1), "model", "RKNN 模型 (*.rknn)");
+            if (!f.isEmpty()) {
+                cascadePathEdit_[i]->setText(f);
+                ConfigManager &c = ConfigManager::instance();
+                c.setCascadeModelPath(i + 1, f);
+                c.save();
+                log("system", QString("模型路径%1 已设置: %2").arg(i + 1).arg(f));
+            }
+        });
+        gl->addWidget(browse, row, 2);
+
+        cascadeNoteEdit_[i] = new QLineEdit(cfg.cascadeModelNote(i + 1));
+        cascadeNoteEdit_[i]->setPlaceholderText("备注");
+        cascadeNoteEdit_[i]->setMaximumWidth(180);
+        cascadeNoteEdit_[i]->setStyleSheet("color:#fff;background:#2d2d3d;"
+                                           "border:1px solid #555;border-radius:4px;padding:2px 6px;");
+        connect(cascadeNoteEdit_[i], &QLineEdit::editingFinished,
+                this, [this, i]() {
+                    ConfigManager &c = ConfigManager::instance();
+                    c.setCascadeModelNote(i + 1, cascadeNoteEdit_[i]->text().trimmed());
+                    c.save();
+                });
+        gl->addWidget(cascadeNoteEdit_[i], row, 3);
+
+        QPushButton *clearBtn = new QPushButton("清空");
+        clearBtn->setMaximumWidth(64);
+        clearBtn->setStyleSheet("color:#fff;background:#f44336;border-radius:4px;padding:3px 8px;");
+        connect(clearBtn, &QPushButton::clicked, this, [this, i]() {
+            cascadePathEdit_[i]->clear();
+            cascadeNoteEdit_[i]->clear();
+            ConfigManager &c = ConfigManager::instance();
+            c.setCascadeModelPath(i + 1, "");
+            c.setCascadeModelNote(i + 1, "");
+            c.save();
+            log("system", QString("模型路径%1 已清空").arg(i + 1));
+        });
+        gl->addWidget(clearBtn, row, 4);
+    }
+
+    // ===== 把"标签文件"(原row5)挪到 row9，输入尺寸/类型(原row6)挪到 row10 =====
+    moveTo(ui->labLabelPath,      9, 0);
+    moveTo(ui->lineEditLabelPath, 9, 1);
+    moveTo(ui->btnBrowseLabel,    9, 2);
+    moveTo(ui->labInputSize,      10, 0);
+    moveTo(ui->labInputSizeVal,   10, 1);
+    moveTo(ui->labModelType,      10, 2);
+    moveTo(ui->labModelTypeVal,   10, 3);
+
+    log("system", "模型路径配置加载完成（模型1/模型2 默认相同，先验证级联）");
 }
 
 // ==========================================
