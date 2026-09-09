@@ -2,6 +2,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 
 /**
  * @brief 获取单例实例
@@ -50,6 +51,9 @@ void ConfigManager::load(const QString &path)
             {"nms_threshold", 0.45},
             {"class_num", 80},
             {"threads", 3}
+        };
+        root_["alarm"] = QJsonObject{
+            {"classes", QJsonArray{"person"}}
         };
         save();
         return;
@@ -226,4 +230,29 @@ int ConfigManager::classNum() const
 int ConfigManager::threads() const
 {
     return root_["detect"].toObject()["threads"].toInt(3);
+}
+
+// ==========================================
+// 报警配置
+// ==========================================
+
+QStringList ConfigManager::alarmClasses() const
+{
+    QJsonArray arr = root_["alarm"].toObject()["classes"].toArray();
+    QStringList list;
+    for (const auto &v : arr) {
+        list.append(v.toString());
+    }
+    return list;
+}
+
+void ConfigManager::setAlarmClasses(const QStringList &classes)
+{
+    QJsonObject alarm = root_["alarm"].toObject();
+    QJsonArray arr;
+    for (const auto &s : classes) {
+        arr.append(s);
+    }
+    alarm["classes"] = arr;
+    root_["alarm"] = alarm;
 }

@@ -26,9 +26,14 @@
 #include "ConfigManager.h"
 #include "frmvideowindow.h"
 #include "player_widget.h"
+#include "dashboard_widget.h"
+#include "alarm_list_widget.h"
+#include "alarm_manager.h"
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QLabel>
+#include <QTimer>
 
 // ==========================================
 // 构造 / 析构
@@ -39,6 +44,7 @@ frmMain::frmMain(QWidget *parent) : QWidget(parent), ui(new Ui::frmMain)
     ui->setupUi(this);
     this->initForm();
     this->initStyle();
+    this->initNewPages();
     this->initLeftMain();
     this->initLeftConfig();
     this->on_btnMenu_Max_clicked();
@@ -289,18 +295,142 @@ void frmMain::initStyle()
     this->darkTextColor = normalTextColor;
 }
 
+void frmMain::initNewPages()
+{
+    // 跨线程队列连接需要注册元类型
+    qRegisterMetaType<object_detect_result_list>("object_detect_result_list");
+    qRegisterMetaType<AlarmRecord>("AlarmRecord");
+
+    // ===== 顶部导航收敛为 5 项 =====
+    ui->btnMain->setText("视频监控");
+    ui->btnRoll->setText("数据看板");
+    ui->btnEquipCheck->setText("报警数据");
+    ui->btnHelp->setText("调试设置");
+    ui->btnExit->setText("退出");
+    // 隐藏多余的占位按钮（人员点名/设备盘点原义、报警查询、系统设置）
+    ui->btnData->hide();
+    ui->btnConfig->hide();
+
+    // 向 stackedWidget 添加数据看板和报警记录页面
+    dashboardWidget_ = new DashboardWidget();
+    alarmListWidget_ = new AlarmListWidget();
+
+    // 插入到 page1(视频监控) 之后：index 1=数据看板, 2=报警数据
+    ui->stackedWidget->insertWidget(1, dashboardWidget_);
+    ui->stackedWidget->insertWidget(2, alarmListWidget_);
+
+    // 设置背景
+    dashboardWidget_->setStyleSheet("background: #1e1e2e;");
+    alarmListWidget_->setStyleSheet("background: #1e1e2e;");
+
+    // ===== 悬浮报警提示 toast =====
+    alarmToast_ = new QLabel(this);
+    alarmToast_->setStyleSheet(
+        "QLabel { background: rgba(220,50,50,0.92); color: white;"
+        " border-radius: 6px; padding: 10px 16px; font-size: 14px; font-weight: bold; }");
+    alarmToast_->setVisible(false);
+    alarmToast_->setWordWrap(true);
+    alarmToast_->adjustSize();
+    toastTimer_ = new QTimer(this);
+    toastTimer_->setSingleShot(true);
+    connect(toastTimer_, &QTimer::timeout, alarmToast_, &QLabel::hide);
+
+    // ===== 未确认报警角标 =====
+    alarmBadge_ = new QLabel(ui->btnEquipCheck);
+    alarmBadge_->setStyleSheet(
+        "QLabel { background: #f44336; color: white; border-radius: 8px;"
+        " font-size: 10px; font-weight: bold; min-width: 15px; max-width: 40px;"
+        " padding: 1px 3px; }");
+    alarmBadge_->setAlignment(Qt::AlignCenter);
+    alarmBadge_->setVisible(false);
+    alarmBadge_->raise();
+
+    // 连接所有 4 路解码器的检测结果信号到 AlarmManager
+    for (int ch = 0; ch < 4; ch++) {
+        PlayerWidget *pw = videoWindow->playerWidget(ch);
+        if (pw && pw->decoder()) {
+            connect(pw->decoder(), &FFmpegVideoDecoder::detectionResult,
+                    &AlarmManager::instance(), &AlarmManager::onDetectionResult);
+            connect(pw->decoder(), &FFmpegVideoDecoder::statusChanged,
+                    this, [this](int ch, int online) {
+                        AlarmManager::instance().setChannelOnline(ch, online != 0);
+                    });
+        }
+    }
+
+    // 报警信号 -> 悬浮提示 / 角标刷新
+    connect(&AlarmManager::instance(), &AlarmManager::alarmGenerated,
+            this, &frmMain::showAlarmToast);
+    connect(&AlarmManager::instance(), &AlarmManager::statsUpdated,
+            this, &frmMain::updateAlarmBadge);
+
+    // 设置类名到 AlarmManager（从模型加载）
+    QStringList classNames;
+    QFile labelFile(ConfigManager::instance().labelPath());
+    if (labelFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        while (!labelFile.atEnd()) {
+            QString line = QString::fromUtf8(labelFile.readLine()).trimmed();
+            if (!line.isEmpty()) classNames.append(line);
+        }
+        labelFile.close();
+    }
+    AlarmManager::instance().setClassNames(classNames);
+
+    updateAlarmBadge();
+}
+
+void frmMain::showAlarmToast(const AlarmRecord &alarm)
+{
+    if (!alarmToast_) return;
+
+    QDateTime dt = QDateTime::fromMSecsSinceEpoch(alarm.timestamp / 1000000);
+    alarmToast_->setText(QString("⚠ 通道%1 检测到 %2 (%3%%)  %4")
+        .arg(alarm.channel + 1)
+        .arg(alarm.className)
+        .arg(alarm.confidence * 100, 0, 'f', 1)
+        .arg(dt.toString("HH:mm:ss")));
+    alarmToast_->adjustSize();
+    // 右下角悬浮显示
+    int x = this->width() - alarmToast_->width() - 20;
+    int y = this->height() - alarmToast_->height() - 20;
+    alarmToast_->move(x > 0 ? x : 0, y > 0 ? y : 0);
+    alarmToast_->show();
+    alarmToast_->raise();
+    toastTimer_->start(3000);
+
+    // 新报警到达时若正在看报警页也刷新（列表内部已自行刷新）
+    updateAlarmBadge();
+}
+
+void frmMain::updateAlarmBadge()
+{
+    if (!alarmBadge_) return;
+    int unack = AlarmManager::instance().unacknowledgedCount();
+    if (unack > 0) {
+        alarmBadge_->setText(QString::number(unack > 99 ? 99 : unack));
+        alarmBadge_->adjustSize();
+        // 定位到按钮右上角
+        int bw = ui->btnEquipCheck->width();
+        alarmBadge_->move(bw - alarmBadge_->width() - 2, 2);
+        alarmBadge_->show();
+        alarmBadge_->raise();
+    } else {
+        alarmBadge_->hide();
+    }
+}
+
 // ==========================================
 // 导航按钮点击处理
 // ==========================================
 
 /**
  * @brief 顶部导航按钮点击处理
- * 根据按钮文字切换 stackedWidget 页面：
+ * 根据按钮文字切换 stackedWidget 页面（用 setCurrentWidget 按控件指针切换，避免索引漂移）：
  *   - "视频监控" -> page1（视频监控页）
- *   - "系统设置" -> page2（系统设置页）
- *   - "报警查询" -> page3（报警查询页）
- *   - "使用帮助" -> page4（调试帮助页）
- *   - "用户退出" -> 退出确认
+ *   - "数据看板" -> dashboardWidget_（数据看板）
+ *   - "报警数据" -> alarmListWidget_（报警数据）
+ *   - "调试设置" -> page4（调试帮助页）
+ *   - "退出"     -> 退出确认
  */
 void frmMain::buttonClick()
 {
@@ -315,14 +445,14 @@ void frmMain::buttonClick()
 
     // 切换页面
     if (name == "视频监控") {
-        ui->stackedWidget->setCurrentIndex(0);
-    } else if (name == "系统设置") {
-        ui->stackedWidget->setCurrentIndex(1);
-    } else if (name == "报警查询") {
-        ui->stackedWidget->setCurrentIndex(2);
-    } else if (name == "使用帮助") {
-        ui->stackedWidget->setCurrentIndex(3);
-    } else if (name == "用户退出") {
+        ui->stackedWidget->setCurrentWidget(ui->page1);
+    } else if (name == "数据看板") {
+        ui->stackedWidget->setCurrentWidget(dashboardWidget_);
+    } else if (name == "报警数据") {
+        ui->stackedWidget->setCurrentWidget(alarmListWidget_);
+    } else if (name == "调试设置") {
+        ui->stackedWidget->setCurrentWidget(ui->page4);
+    } else if (name == "退出") {
         systemExit();
     }
 }

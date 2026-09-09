@@ -117,6 +117,18 @@ public:
      */
     int threads() const;
 
+    // ========== 报警配置 ==========
+
+    /**
+     * @brief 获取触发报警的类别列表
+     */
+    QStringList alarmClasses() const;
+
+    /**
+     * @brief 设置触发报警的类别列表
+     */
+    void setAlarmClasses(const QStringList &classes);
+
 private:
     /**
      * @brief 私有构造函数（单例模式）

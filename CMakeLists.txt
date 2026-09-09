@@ -87,6 +87,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/core_helper
     ${CMAKE_SOURCE_DIR}/src/core_qss
     ${CMAKE_SOURCE_DIR}/src/mpp
+    ${CMAKE_SOURCE_DIR}/src/alarm
     ${CMAKE_SOURCE_DIR}/src/rga
     ${CMAKE_SOURCE_DIR}/src/infer
     ${CMAKE_SOURCE_DIR}/src/player

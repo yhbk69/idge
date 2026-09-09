@@ -53,7 +53,7 @@ void frmVideoWindow::openVideo(int ch, const QString &path)
 {
     PlayerWidget *pw = playerWidget(ch);
     if (pw && !path.isEmpty()) {
-        pw->open(path.toStdString());
+        pw->open(path.toStdString(), ch);
     }
 }
 

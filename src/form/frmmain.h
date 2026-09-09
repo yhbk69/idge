@@ -24,6 +24,11 @@
 
 class QAbstractButton;
 class frmVideoWindow;
+class DashboardWidget;
+class AlarmListWidget;
+class QLabel;
+class QTimer;
+struct AlarmRecord;
 
 namespace Ui {
 class frmMain;
@@ -50,7 +55,12 @@ protected:
 
 private:
     Ui::frmMain *ui;
-    frmVideoWindow *videoWindow;   ///< 视频监控窗口指针（用于打开视频）
+    frmVideoWindow *videoWindow;
+    DashboardWidget *dashboardWidget_ = nullptr;
+    AlarmListWidget *alarmListWidget_ = nullptr;
+    QLabel *alarmToast_ = nullptr;   ///< 悬浮报警提示
+    QLabel *alarmBadge_ = nullptr;   ///< 未确认报警角标
+    QTimer *toastTimer_ = nullptr;   ///< 悬浮提示消失定时器
 
     QList<int> iconsMain;          ///< 主导航图标列表
     QList<QAbstractButton *> btnsMain;  ///< 主导航按钮列表
@@ -115,7 +125,10 @@ private:
 private slots:
     void initForm();               ///< 初始化窗体（无边框、图标、标题、导航）
     void initStyle();              ///< 加载 QSS 样式表并提取颜色
+    void initNewPages();           ///< 初始化数据看板和报警记录页面
     void buttonClick();            ///< 顶部导航按钮点击处理
+    void showAlarmToast(const AlarmRecord &alarm);  ///< 悬浮报警提示
+    void updateAlarmBadge();       ///< 更新未确认报警角标
     void initLeftMain();           ///< 初始化视频监控页左侧导航
     void initLeftConfig();         ///< 初始化系统设置页左侧导航
     void leftMainClick();          ///< 视频监控页左侧按钮点击

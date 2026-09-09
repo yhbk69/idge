@@ -33,17 +33,21 @@ public:
 
     void start(const QString& url);
     void stop();
+    void setChannel(int ch) { channel_ = ch; }
 
 signals:
     void frameReady(RenderFrame frame);
     void finished();
     void error(QString msg);
+    void detectionResult(int channel, object_detect_result_list results);
+    void statusChanged(int channel, int online);
 
 private:
     void decodeLoop();
     void doInfer();
 
     QString url_;
+    int channel_ = 0;
     QThread* thread_ = nullptr;
     std::atomic<bool> running_{false};
     std::shared_ptr<PriorityQueue<object_detect_result_list>> detectResultQueue_; 

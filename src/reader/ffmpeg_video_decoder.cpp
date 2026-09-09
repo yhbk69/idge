@@ -220,6 +220,8 @@ void FFmpegVideoDecoder::decodeLoop()
     int vid_h = dec_ctx->height;
     qDebug() << "Decoder:" << codec->name << vid_w << "x" << vid_h;
 
+    emit statusChanged(channel_, 1);
+
     // ===== 3. 分配 RGA 输出 RGBA Buffer =====
     // 打开 DRM 设备用于分配 DUMB buffer
     int drm_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
@@ -430,6 +432,8 @@ void FFmpegVideoDecoder::decodeLoop()
                             draw_text(&dislayImage, text, x1, y1 - 20, COLOR_RED, 10);
                         }
 
+                        // 发送检测结果给报警管理器
+                        emit detectionResult(channel_, od_results);
                     }
 
                     
@@ -464,6 +468,8 @@ void FFmpegVideoDecoder::decodeLoop()
     }
 
     qDebug() << "Decode finished, frames:" << frame_count;
+
+    emit statusChanged(channel_, 0);
 
     // ===== 5. 清理 =====
     for (int i = 0; i < 2; i++)

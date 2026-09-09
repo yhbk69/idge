@@ -64,8 +64,9 @@ PlayerWidget::PlayerWidget(QWidget* parent)
     
 }
 
-void PlayerWidget::open(std::string url)
+void PlayerWidget::open(std::string url, int channel)
 {
+    decoder_->setChannel(channel);
     decoder_->start(QString::fromStdString(url));
 }
 

@@ -16,8 +16,9 @@ class PlayerWidget : public QWidget {
 public:
     explicit PlayerWidget(QWidget* parent = nullptr);
     ~PlayerWidget();
-    void open(std::string url);
+    void open(std::string url, int channel = 0);
     void stopDecoder();
+    FFmpegVideoDecoder* decoder() const { return decoder_; }
 
 private:
 
