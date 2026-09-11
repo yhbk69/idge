@@ -60,7 +60,10 @@ public:
     void openVideo(int ch, const QString &path);
 
 private:
+    void setExpandedMode(int channel, bool expanded);
+
     Ui::frmVideoWindow *ui;  // Qt Designer 生成的界面对象指针
+    int expandedChannel_ = -1;  // 当前放大的通道，-1表示无放大
 
 private slots:
     /** @brief 初始化表单：连接信号与槽 */

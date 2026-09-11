@@ -75,16 +75,83 @@ void frmVideoWindow::openVideo(int ch, const QString &path)
 // ============================================================================
 // btnClicked —— 播放器按钮点击事件处理
 // ============================================================================
-// 作用：当播放器内部按钮被点击时，在界面 label 上显示当前点击的控件和按钮信息
+// 作用：当播放器内部按钮被点击时，处理放大/缩小操作
 //       通过 sender() 获取触发信号的对象，从而确定是哪个通道的播放器
 // ============================================================================
 void frmVideoWindow::btnClicked(const QString &objName)
 {
-    // sender() 返回发送信号的对象，将其转换为 PlayerWidget 类型
     PlayerWidget *videoWindow = (PlayerWidget *)sender();
-    // 格式化显示文本：包含控件名称和按钮名称
-    QString str = QString("当前单击了控件 %1 的按钮 %2").arg(videoWindow->objectName()).arg(objName);
-    ui->label->setText(str);  // 更新界面标签文本
+    
+    if (objName == "expand") {
+        // 判断当前是否已放大
+        if (expandedChannel_ >= 0) {
+            // 已放大，恢复四宫格
+            setExpandedMode(expandedChannel_, false);
+        } else {
+            // 未放大，找到该通道号并放大
+            int ch = -1;
+            if (videoWindow == ui->videoWindow1) ch = 0;
+            else if (videoWindow == ui->videoWindow2) ch = 1;
+            else if (videoWindow == ui->videoWindow3) ch = 2;
+            else if (videoWindow == ui->videoWindow4) ch = 3;
+            
+            if (ch >= 0) {
+                setExpandedMode(ch, true);
+            }
+        }
+    } else {
+        // 其他按钮，保持原有逻辑
+        QString str = QString("当前单击了控件 %1 的按钮 %2").arg(videoWindow->objectName()).arg(objName);
+        ui->label->setText(str);
+    }
+}
+
+// ============================================================================
+// setExpandedMode —— 设置放大/缩小模式
+// ============================================================================
+// 作用：切换视频窗口的放大和缩小状态
+//       放大时只显示选中的通道，缩小恢复2x2网格
+// @param channel 要放大的通道号（0-3），-1表示恢复
+// @param expanded true=放大，false=缩小
+// ============================================================================
+void frmVideoWindow::setExpandedMode(int channel, bool expanded)
+{
+    PlayerWidget* players[4] = {
+        ui->videoWindow1, ui->videoWindow2,
+        ui->videoWindow3, ui->videoWindow4
+    };
+    
+    if (expanded) {
+        // 放大模式：隐藏其他通道，只显示选中通道
+        expandedChannel_ = channel;
+        
+        for (int i = 0; i < 4; i++) {
+            if (i == channel) {
+                players[i]->show();
+                players[i]->setExpanded(true);
+            } else {
+                players[i]->hide();
+            }
+        }
+        
+        // 隐藏底部label
+        if (ui->label) {
+            ui->label->hide();
+        }
+    } else {
+        // 恢复四宫格模式
+        expandedChannel_ = -1;
+        
+        for (int i = 0; i < 4; i++) {
+            players[i]->show();
+            players[i]->setExpanded(false);
+        }
+        
+        // 显示底部label
+        if (ui->label) {
+            ui->label->show();
+        }
+    }
 }
 
 // ============================================================================

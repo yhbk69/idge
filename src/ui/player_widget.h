@@ -63,14 +63,25 @@ public:
     */
     FFmpegVideoDecoder* decoder() const { return decoder_; }
 
+public:
+    // 设置放大状态
+    void setExpanded(bool expanded);
+    bool isExpanded() const { return expanded_; }
+
+protected:
+    void resizeEvent(QResizeEvent *event) override;
+
 private:
+    void setupExpandButton();
 
     GLVideoWidget* video_widget_;  // OpenGL视频显示组件
     QLabel* overlayLabel;  // 覆盖层标签（用于显示叠加信息）
     FFmpegVideoDecoder* decoder_;  // FFmpeg视频解码器
+    QPushButton* expandBtn_;  // 放大/缩小按钮
+    bool expanded_ = false;  // 当前是否放大状态
 
-     //工具栏单击
 private slots:
+    void onExpandClicked();
     /* 
     ====================================================
     作用：处理按钮点击槽函数

@@ -60,6 +60,9 @@ PlayerWidget::PlayerWidget(QWidget* parent)
     mainLayout->addWidget(video_widget_, 0, 0);  // 视频显示组件
     mainLayout->addWidget(overlayLabel, 0, 0);   // 覆盖层
 
+    // 初始化放大按钮
+    setupExpandButton();
+
 
     /* 
     ====================================================
@@ -79,6 +82,87 @@ PlayerWidget::PlayerWidget(QWidget* parent)
     });
 
     
+}
+
+/* 
+====================================================
+作用：窗口大小改变事件
+说明：保持放大按钮在右上角位置
+====================================================
+*/
+void PlayerWidget::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    if (expandBtn_) {
+        int x = width() - expandBtn_->width() - 10;
+        int y = 10;
+        expandBtn_->move(x, y);
+    }
+}
+
+/* 
+====================================================
+作用：设置放大按钮
+说明：创建右上角悬浮的放大/缩小按钮
+====================================================
+*/
+void PlayerWidget::setupExpandButton()
+{
+    expandBtn_ = new QPushButton(this);
+    expandBtn_->setObjectName("expandBtn");
+    expandBtn_->setFixedSize(32, 32);
+    expandBtn_->setCursor(Qt::PointingHandCursor);
+    
+    // 初始状态：放大图标
+    expandBtn_->setText("⊕");
+    
+    // 半透明悬浮样式
+    expandBtn_->setStyleSheet(
+        "QPushButton {"
+        "   background-color: rgba(0, 0, 0, 120);"
+        "   border: none;"
+        "   border-radius: 4px;"
+        "   color: white;"
+        "   font-size: 16px;"
+        "}"
+        "QPushButton:hover {"
+        "   background-color: rgba(0, 0, 0, 180);"
+        "}"
+    );
+    
+    // 按钮位置：右上角，留10px边距
+    expandBtn_->setGeometry(0, 0, 32, 32);
+    expandBtn_->raise();  // 显示在最上层
+    
+    connect(expandBtn_, &QPushButton::clicked, this, &PlayerWidget::onExpandClicked);
+}
+
+/* 
+====================================================
+作用：放大按钮点击处理
+说明：发送放大请求信号给父窗口
+====================================================
+*/
+void PlayerWidget::onExpandClicked()
+{
+    Q_EMIT btnClicked("expand");
+}
+
+/* 
+====================================================
+作用：设置放大状态
+说明：更新按钮文本和状态
+参数：expanded - true为放大，false为缩小
+====================================================
+*/
+void PlayerWidget::setExpanded(bool expanded)
+{
+    expanded_ = expanded;
+    if (expanded) {
+        expandBtn_->setText("⊖");
+    } else {
+        expandBtn_->setText("⊕");
+    }
 }
 
 /* 
