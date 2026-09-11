@@ -12,7 +12,6 @@
 #define SHAREDTYPES_H
 
 #include <string>
-using namespace std;
 
 /* 
 ====================================================
@@ -95,14 +94,14 @@ struct AppConfig {
     
     // RKNN（Rockchip Neural Network）模型路径
     // RKNN是Rockchip的AI推理框架，用于NPU加速
-    string model_path = "";
+    std::string model_path = "";
     
     // 输入源路径（视频文件路径或摄像头设备号）
-    string input = "";
+    std::string input = "";
     
     // 解码器类型，默认为 h264_rkmpp
     // h264_rkmpp是Rockchip的硬件H.264解码器，利用MPP（Media Process Platform）加速
-    string decodec = "h264_rkmpp";
+    std::string decodec = "h264_rkmpp";
 };
 
 

@@ -15,6 +15,9 @@
 //
 // ============================================================================
 
+#ifndef HEAD_H
+#define HEAD_H
+
 #include <QtCore>      // Qt 核心模块（QObject, QString, QVector 等）
 #include <QtGui>       // Qt GUI 模块（QImage, QColor, QFont 等）
 
@@ -31,3 +34,5 @@
 // 设置源文件编码为 UTF-8
 // 确保中文字符串（如 "检测"、"报警"）在编译时不乱码
 #pragma execution_character_set("utf-8")
+
+#endif // HEAD_H

@@ -250,12 +250,18 @@ private:
                 buf->rga_handle = importbuffer_fd(buf->fd, &infer_param);
                 if (buf->rga_handle == 0)
                 {
-                    // RGA 导入失败，释放已分配的 DMA 内存
+                    // RGA 导入失败，释放已分配的 DMA 内存和 DmaBuffer 对象
                     dma_buf_free(size, &(buf->fd), buf->va);
+                    delete buf;
                 }else
                 {
                     available_buffers.push(buf);  // 成功，加入可用队列
                 }
+            }
+            else
+            {
+                // DMA 分配失败，释放 DmaBuffer 对象
+                delete buf;
             }
         }
     }

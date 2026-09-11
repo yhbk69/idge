@@ -37,9 +37,13 @@ public:
     std::shared_ptr<YOLO11Model> getModel(std::string modelId)
     {
         if (modelId.empty()) {
-            return NULL;
+            return nullptr;
         }
-        return m_models[modelId];
+        auto it = m_models.find(modelId);
+        if (it == m_models.end()) {
+            return nullptr;
+        }
+        return it->second;
     }
 
     // ============================================================================
@@ -56,7 +60,7 @@ public:
     // ============================================================================
     // getModelCount - 获取已加载的模型数量
     // ============================================================================
-    int getModelCount() const
+    size_t getModelCount() const
     {
         return m_models.size();
     }

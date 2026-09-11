@@ -226,4 +226,6 @@ PpeTask::~PpeTask()
     if (thread_.joinable()) {
         stop();
     }
+    delete taskQueue_;
+    taskQueue_ = nullptr;
 }

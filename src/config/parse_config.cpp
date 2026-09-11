@@ -26,12 +26,14 @@
 
 #include "parse_config.hpp"
 
+using namespace std;
+
 /**
  * @Description: 检查输入源是否存在
- * @param {string&} name: 文件路径
+ * @param {const string&} name: 文件路径
  * @return {bool} 文件是否存在
  */
-static bool isFileExists(string& name) {
+static bool isFileExists(const string& name) {
     ifstream f(name.c_str());
     return f.good();
 }
@@ -166,12 +168,15 @@ AppConfig ConfigParser::parse_arguments(int argc, char *argv[]) const {
                         config.input_format = INPUT_FORMAT::IN_VIDEO;
                     }
                 } catch (const exception &e) {
+                    cerr << "Error: " << e.what() << endl;
                     exit(EXIT_FAILURE);
                 }
-                // 检查文件是否存在
-                if (!isFileExists(temp_optarg)) {
-                    cerr << "Error: File not found: " << temp_optarg << endl;
-                    exit(EXIT_FAILURE);
+                // 只对视频文件检查文件是否存在，摄像头设备跳过检查
+                if (config.input_format == INPUT_FORMAT::IN_VIDEO) {
+                    if (!isFileExists(temp_optarg)) {
+                        cerr << "Error: File not found: " << temp_optarg << endl;
+                        exit(EXIT_FAILURE);
+                    }
                 }
                 config.input = temp_optarg;
                 break;
@@ -189,6 +194,7 @@ AppConfig ConfigParser::parse_arguments(int argc, char *argv[]) const {
                     if (config.accels_2D != ACCELS_2D::ACC_OPENCV && config.accels_2D != ACCELS_2D::ACC_RGA) 
                         throw invalid_argument("Unsupported hwaccel type.");
                 } catch (const exception &e) {
+                    cerr << "Error: " << e.what() << endl;
                     exit(EXIT_FAILURE);
                 }
                 break;
@@ -199,7 +205,12 @@ AppConfig ConfigParser::parse_arguments(int argc, char *argv[]) const {
                     cerr << "Error: Missing argument for option: " << static_cast<char>(opt) << endl;
                     exit(EXIT_FAILURE);
                 }
-                config.threads = stoi(temp_optarg);
+                try {
+                    config.threads = stoi(temp_optarg);
+                } catch (const exception &e) {
+                    cerr << "Error: Invalid thread count: " << temp_optarg << endl;
+                    exit(EXIT_FAILURE);
+                }
                 break;
             }
             case 'c': {

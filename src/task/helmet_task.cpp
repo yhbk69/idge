@@ -42,7 +42,18 @@ void HelmetTask::run(image_buffer_t& image, DetectContext context)
     object_detect_result_list results1;
 
     // 从模型池获取模型 "1"（对应 NPU 核心 0）
+    if (!dpool::context) {
+        std::cerr << "[HelmetTask] 错误: context 为空，当前线程不是工作线程" << std::endl;
+        context.dmaBufferPool->release(image.dmaBuffer);
+        return;
+    }
+
     std::shared_ptr<YOLO11Model> model = dpool::context->getModel("1");
+    if (!model) {
+        std::cerr << "[HelmetTask] 错误: 模型 '1' 未加载" << std::endl;
+        context.dmaBufferPool->release(image.dmaBuffer);
+        return;
+    }
     
     auto t1 = chrono::system_clock::now();
     model->detect(&image, &results1, true);  // 执行推理（RKNN NPU）

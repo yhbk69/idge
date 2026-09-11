@@ -35,8 +35,10 @@
 #include "rknn_api.h"
 #include "SharedTypes.hpp"
 
+using namespace std;
+
 // NPU 核心掩码数组（循环分配：0 → 1 → 2 → 0 → 1）
-static const rknn_core_mask NPU_CORES[] = {
+inline constexpr rknn_core_mask NPU_CORES[] = {
     RKNN_NPU_CORE_0,
     RKNN_NPU_CORE_1,
     RKNN_NPU_CORE_2,
@@ -113,7 +115,7 @@ public:
             std::cout << "[ExecuteContext] 加载模型 " << modelId
                       << ": path=" << cfg.modelPath
                       << ", label=" << cfg.labelPath
-                      << ", core=" << (i % 3)
+                      << ", core=" << i
                       << ", note=" << cfg.note
                       << std::endl;
 
@@ -133,9 +135,13 @@ public:
     std::shared_ptr<YOLO11Model> getModel(std::string modelId)
     {
         if (modelId.empty()) {
-            return NULL;
+            return nullptr;
         }
-        return m_models[modelId];
+        auto it = m_models.find(modelId);
+        if (it == m_models.end()) {
+            return nullptr;
+        }
+        return it->second;
     }
 
     // 获取指定 ID 模型的类别名称列表
@@ -396,7 +402,7 @@ namespace dpool
         std::queue<Task> tasks_;             // 任务队列
         std::queue<ThreadID> finishedThreadIDs_;  // 已退出线程的 ID
         std::unordered_map<ThreadID, Thread> threads_;  // 线程表
-        AppConfig config;                    // 配置信息
+        AppConfig config{};                    // 配置信息（零初始化）
         std::vector<ModelConfig> modelConfigs_;  // 模型配置列表
     };
 

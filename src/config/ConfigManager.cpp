@@ -126,8 +126,15 @@ void ConfigManager::load(const QString &path)
     // 读取并解析 JSON 文件
     if (file.open(QIODevice::ReadOnly)) {
         QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
-        root_ = doc.object();
+        if (doc.isNull()) {
+            qWarning() << "[ConfigManager] JSON 解析失败:" << path;
+            root_ = QJsonObject();
+        } else {
+            root_ = doc.object();
+        }
         file.close();
+    } else {
+        qWarning() << "[ConfigManager] 文件打开失败:" << path;
     }
 }
 

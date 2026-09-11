@@ -18,7 +18,6 @@
 #include "file_utils.h"
 #include "image_drawing.h"
 #include "image_utils.h"
-#include "rknn_api.h"
 
 /**
  * @brief YOLOv11 detector implementation for Rockchip RK3588 platform
@@ -49,7 +48,11 @@ public:
         // 加载类别名称
         classNames_ = loadClassNames(labelsPath);
 
-        init_yolo11_model(modelPath.c_str(), &this->app_ctx, core_mask);
+        int ret = init_yolo11_model(modelPath.c_str(), &this->app_ctx, core_mask);
+        if (ret < 0) {
+            std::cerr << "[YOLO11Model] 模型加载失败: " << modelPath << std::endl;
+            throw std::runtime_error("Failed to load model: " + modelPath);
+        }
     }
 
     int init_yolo11_model(const char *model_path, rknn_app_context_t *app_ctx, rknn_core_mask core_mask)
@@ -804,7 +807,7 @@ public:
      */
     cv::Size getInputSize() const
     {
-        return cv::Size(10, 10);
+        return cv::Size(app_ctx.model_width, app_ctx.model_height);
     }
 
     /**
@@ -845,7 +848,7 @@ public:
                                   float nmsThreshold = 0.45f)
     {
 
-        infer(&this->app_ctx, img, od_results, converted);
+        infer(&this->app_ctx, img, od_results, converted, confThreshold, nmsThreshold);
 
 
     }
@@ -857,18 +860,18 @@ public:
                                   float nmsThreshold = 0.45f)
     {
 
-        infer(&this->app_ctx, img.get(), od_results, converted);
+        infer(&this->app_ctx, img.get(), od_results, converted, confThreshold, nmsThreshold);
 
 
     }
     
-    int infer(rknn_app_context_t *app_ctx, image_buffer_t *img, object_detect_result_list *od_results, bool converted)
+    int infer(rknn_app_context_t *app_ctx, image_buffer_t *img, object_detect_result_list *od_results, bool converted, float confThreshold = 0.25f, float nmsThreshold = 0.45f)
     {
         int ret;
         image_buffer_t dst_img;
         letterbox_t letter_box;
-        const float nms_threshold = NMS_THRESH;      // 默认的NMS阈值
-        const float box_conf_threshold = BOX_THRESH; // 默认的置信度阈值
+        const float nms_threshold = nmsThreshold;
+        const float box_conf_threshold = confThreshold;
         int bg_color = 114;
 
         if ((!app_ctx) || !(img) || (!od_results))
