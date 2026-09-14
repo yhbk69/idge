@@ -55,6 +55,7 @@ struct AlarmRecord {
     float confidence;        // 置信度
     bool acknowledged;       // 是否已确认
     QString imgPath;         // 报警截图路径（可为空）
+    bool isFenceAlarm = false;  // 是否为电子围栏报警
 };
 
 // 注册自定义类型（用于 Qt 信号/槽跨线程传递）

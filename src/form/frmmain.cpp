@@ -29,6 +29,7 @@
 #include "dashboard_widget.h"
 #include "alarm_list_widget.h"
 #include "alarm_manager.h"
+#include "fence_manager.h"
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
@@ -287,6 +288,13 @@ void frmMain::initForm()
     videoWindow->openVideo(1, cfg.videoChannel(2));
     videoWindow->openVideo(2, cfg.videoChannel(3));
     videoWindow->openVideo(3, cfg.videoChannel(4));
+
+    // 10.1 设置各通道围栏覆盖层的通道号
+    for (int i = 0; i < 4; ++i) {
+        PlayerWidget *pw = videoWindow->playerWidget(i);
+        if (pw) pw->setChannel(i);
+    }
+    geofence::FenceManager::instance().loadFromConfig();
 
     // 11. 初始化调试帮助页（从 config 读取配置填充 UI）
     initDebugPage();

@@ -1,5 +1,6 @@
 #include "alarm_list_widget.h"
 #include "alarm_manager.h"
+#include "fence_manager.h"
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -66,6 +67,7 @@ AlarmListWidget::AlarmListWidget(QWidget *parent)
 void AlarmListWidget::onDebouncedRefresh()
 {
     refreshTable();
+    refreshFenceTable();
 }
 
 /* 
@@ -229,28 +231,60 @@ void AlarmListWidget::setupUi()
 
     /* 
     ====================================================
-    告警表格
-    说明：显示告警详细信息，支持筛选和操作
+    Tab 切换（类别报警 / 电子围栏）
+    ====================================================
+    */
+    tabWidget_ = new QTabWidget(this);
+    tabWidget_->setStyleSheet(
+        "QTabWidget::pane { border: 1px solid #444; background: #1e1e2e; }"
+        "QTabBar::tab { background: #2d2d3d; color: #aaa; padding: 8px 20px;"
+        "  border: 1px solid #444; border-bottom: none; }"
+        "QTabBar::tab:selected { background: #1e1e2e; color: #fff; }"
+    );
+
+    /* 
+    ====================================================
+    告警表格（类别报警 Tab）
     ====================================================
     */
     table_ = new QTableWidget();
-    table_->setColumnCount(6);  // 6列
+    table_->setColumnCount(6);
     table_->setHorizontalHeaderLabels({"时间", "通道", "类别", "置信度", "状态", "ID"});
-    table_->horizontalHeader()->setStretchLastSection(true);  // 最后一列拉伸
-    table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);  // 时间列拉伸
-    table_->setSelectionBehavior(QAbstractItemView::SelectRows);  // 选择整行
-    table_->setAlternatingRowColors(true);  // 交替行颜色
+    table_->horizontalHeader()->setStretchLastSection(true);
+    table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    table_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table_->setAlternatingRowColors(true);
     table_->setStyleSheet(
         "QTableWidget { background: #1e1e2e; color: #ccc; gridline-color: #333; }"
         "QTableWidget::item:selected { background: #3d5a80; }"
         "QHeaderView::section { background: #2d2d3d; color: #aaa; padding: 6px; border: 1px solid #333; }"
     );
-    table_->verticalHeader()->setVisible(false);  // 隐藏行号
-    
-    // 双击行事件处理
+    table_->verticalHeader()->setVisible(false);
     connect(table_, &QTableWidget::cellDoubleClicked,
             this, &AlarmListWidget::onRowDoubleClicked);
-    mainLay->addWidget(table_, 1);  // 表格占据剩余空间
+    tabWidget_->addTab(table_, "类别报警");
+
+    /* 
+    ====================================================
+    围栏报警表格（电子围栏 Tab）
+    ====================================================
+    */
+    fenceTable_ = new QTableWidget();
+    fenceTable_->setColumnCount(5);
+    fenceTable_->setHorizontalHeaderLabels({"时间", "通道", "类别", "置信度", "围栏"});
+    fenceTable_->horizontalHeader()->setStretchLastSection(true);
+    fenceTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    fenceTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    fenceTable_->setAlternatingRowColors(true);
+    fenceTable_->setStyleSheet(
+        "QTableWidget { background: #1e1e2e; color: #ccc; gridline-color: #333; }"
+        "QTableWidget::item:selected { background: #3d5a80; }"
+        "QHeaderView::section { background: #2d2d3d; color: #aaa; padding: 6px; border: 1px solid #333; }"
+    );
+    fenceTable_->verticalHeader()->setVisible(false);
+    tabWidget_->addTab(fenceTable_, "电子围栏");
+
+    mainLay->addWidget(tabWidget_, 1);
 }
 
 /* 
@@ -447,5 +481,40 @@ void AlarmListWidget::onRowDoubleClicked(int row, int)
     if (!QDesktopServices::openUrl(QUrl::fromLocalFile(abs))) {
         QMessageBox::information(this, "截图",
                                  QString("无法打开图片：\n%1").arg(abs));
+    }
+}
+
+void AlarmListWidget::refreshFenceTable()
+{
+    AlarmManager &mgr = AlarmManager::instance();
+    QVector<AlarmRecord> alarms = mgr.alarms();
+
+    QVector<AlarmRecord> fenceAlarms;
+    for (const auto &a : alarms) {
+        if (a.isFenceAlarm) fenceAlarms.append(a);
+    }
+
+    const int kMaxRows = 500;
+    int total = fenceAlarms.size();
+    int shown = qMin(total, kMaxRows);
+
+    fenceTable_->setRowCount(shown);
+    for (int i = 0; i < shown; i++) {
+        const AlarmRecord &a = fenceAlarms[total - 1 - i];
+
+        QDateTime dt;
+        dt.setMSecsSinceEpoch(a.timestamp / 1000000);
+        QTableWidgetItem *timeItem = new QTableWidgetItem(dt.toString("yyyy-MM-dd HH:mm:ss"));
+        timeItem->setData(Qt::UserRole, a.imgPath);
+        fenceTable_->setItem(i, 0, timeItem);
+
+        fenceTable_->setItem(i, 1, new QTableWidgetItem(QString("通道 %1").arg(a.channel + 1)));
+        fenceTable_->setItem(i, 2, new QTableWidgetItem(a.className));
+
+        QTableWidgetItem *confItem = new QTableWidgetItem(QString("%1%").arg(a.confidence * 100, 0, 'f', 1));
+        confItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        fenceTable_->setItem(i, 3, confItem);
+
+        fenceTable_->setItem(i, 4, new QTableWidgetItem("围栏"));
     }
 }

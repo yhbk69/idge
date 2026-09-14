@@ -89,6 +89,8 @@
 #include "ThreadPool.hpp"
 #include "helmet_task.h"
 #include "alarm_manager.h"
+#include "fence_manager.h"
+#include "fence_checker.h"
 // X11 头文件把 None/Null/Bool 等定义成宏(0/int)，会顶掉 Qt 头文件里同名的
 // 枚举成员（如 QUrl::None、QJsonValue::Null），这里统一去掉这些宏避免解析报错
 #undef None
@@ -866,7 +868,36 @@ void FFmpegVideoDecoder::decodeLoop()
                             draw_text(&dislayImage, text, d.box.left, d.box.top - 20, color, 10);
                         }
 
-                        // ===== 4.10 告警判定 + 截图 =====
+                        // ===== 4.10 电子围栏判断 + 告警 =====
+                        auto &fenceMgr = geofence::FenceManager::instance();
+                        bool hasFence = fenceMgr.enabled() && fenceMgr.hasFence(channel_);
+                        bool alarmInside = (fenceMgr.mode() == "inside_alarm");
+
+                        QVector<AlarmRecord> newAlarms;
+                        if (hasFence) {
+                            const geofence::ChannelFence &cf = fenceMgr.channelFence(channel_);
+                            int oW = 0, oH = 0;
+                            fenceMgr.overlaySize(channel_, oW, oH);
+                            object_detect_result_list filteredOd;
+                            filteredOd.id = od.id;
+                            filteredOd.time = od.time;
+                            filteredOd.count = 0;
+                            for (int i = 0; i < od.count; i++) {
+                                if (geofence::FenceChecker::checkDetection(
+                                        od.results[i],
+                                        dislayImage.width, dislayImage.height,
+                                        640, 640, oW, oH,
+                                        cf, alarmInside)) {
+                                    if (filteredOd.count < OBJ_NUMB_MAX_SIZE) {
+                                        filteredOd.results[filteredOd.count++] = od.results[i];
+                                    }
+                                }
+                            }
+                            newAlarms = AlarmManager::instance().ingest(channel_, filteredOd);
+                            for (auto &a : newAlarms) a.isFenceAlarm = true;
+                        } else {
+                            newAlarms = AlarmManager::instance().ingest(channel_, od);
+                        }
                         //
                         // AlarmManager::ingest():
                         //   - 统计检测结果
@@ -877,8 +908,6 @@ void FFmpegVideoDecoder::decodeLoop()
                         //   - 解码线程只负责拷贝像素 + 提交（不阻塞）
                         //   - PNG/JPEG 编码在独立后台线程完成
                         //   - 避免编码耗时拖低帧率
-                        QVector<AlarmRecord> newAlarms =
-                            AlarmManager::instance().ingest(channel_, od);
                         if (!newAlarms.isEmpty()) {
                             QString snap;
                             if (AlarmManager::instance().screenshotsEnabled()) {

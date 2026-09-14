@@ -8,6 +8,7 @@
 #include <QLabel>
 #include "gl_video_widget.h"
 #include "ffmpeg_video_decoder.h"
+#include "fence_overlay.h"
 
 /* 
 ====================================================
@@ -62,6 +63,8 @@ public:
     ====================================================
     */
     FFmpegVideoDecoder* decoder() const { return decoder_; }
+    geofence::FenceOverlay* fenceOverlay() const { return fenceOverlay_; }
+    void setChannel(int channel);
 
 public:
     // 设置放大状态
@@ -76,6 +79,7 @@ private:
 
     GLVideoWidget* video_widget_;  // OpenGL视频显示组件
     QLabel* overlayLabel;  // 覆盖层标签（用于显示叠加信息）
+    geofence::FenceOverlay* fenceOverlay_;  // 电子围栏覆盖层
     FFmpegVideoDecoder* decoder_;  // FFmpeg视频解码器
     QPushButton* expandBtn_;  // 放大/缩小按钮
     bool expanded_ = false;  // 当前是否放大状态

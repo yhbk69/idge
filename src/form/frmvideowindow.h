@@ -10,8 +10,9 @@
  */
 
 #include <QWidget>
+#include <QPushButton>
+#include <QButtonGroup>
 
-// 前向声明播放器控件类，避免不必要的头文件包含
 class PlayerWidget;
 
 // Qt UI 命名空间，存放由 Qt Designer 生成的界面类
@@ -61,15 +62,21 @@ public:
 
 private:
     void setExpandedMode(int channel, bool expanded);
+    void setupFenceToolbar();
 
     Ui::frmVideoWindow *ui;  // Qt Designer 生成的界面对象指针
     int expandedChannel_ = -1;  // 当前放大的通道，-1表示无放大
+    int currentFenceChannel_ = 0;  // 当前围栏操作的通道
+    QButtonGroup *fenceToolGroup_ = nullptr;
+    QPushButton *fenceChannelBtns_[4] = {nullptr};
 
 private slots:
     /** @brief 初始化表单：连接信号与槽 */
     void initForm();
     /** @brief 处理播放器按钮点击事件 */
     void btnClicked(const QString &objName);
+    void onFenceToolClicked(int id);
+    void onFenceChannelClicked(int ch);
 };
 
 #endif // FRMVIDEOWINDOW_H

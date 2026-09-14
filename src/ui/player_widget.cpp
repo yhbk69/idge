@@ -18,6 +18,7 @@
 #include <QTextBrowser>
 #include <QDateTime>
 #include <QScrollBar>
+#include "fence_overlay.h"
 
 /* 
 ====================================================
@@ -59,6 +60,10 @@ PlayerWidget::PlayerWidget(QWidget* parent)
     // 将组件添加到布局
     mainLayout->addWidget(video_widget_, 0, 0);  // 视频显示组件
     mainLayout->addWidget(overlayLabel, 0, 0);   // 覆盖层
+
+    // 创建电子围栏覆盖层
+    fenceOverlay_ = new geofence::FenceOverlay(this);
+    mainLayout->addWidget(fenceOverlay_, 0, 0);  // 围栏覆盖层（最上层）
 
     // 初始化放大按钮
     setupExpandButton();
@@ -209,4 +214,9 @@ void PlayerWidget::btnClicked()
 */
 PlayerWidget::~PlayerWidget() {
      decoder_->stop();  // 停止解码器
+}
+
+void PlayerWidget::setChannel(int channel)
+{
+    fenceOverlay_->setChannel(channel);
 }

@@ -175,6 +175,17 @@ public:
      */
     void setAlarmClasses(const QStringList &classes);
 
+    // ========== 电子围栏配置 ==========
+
+    bool geofenceEnabled() const;
+    void setGeofenceEnabled(bool enabled);
+
+    QString geofenceMode() const;
+    void setGeofenceMode(const QString &mode);
+
+    QJsonObject geofenceChannels() const;
+    void setGeofenceChannels(const QJsonObject &channels);
+
 private:
     /**
      * @brief 私有构造函数（单例模式）

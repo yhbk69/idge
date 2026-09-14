@@ -455,3 +455,43 @@ void ConfigManager::setAlarmClasses(const QStringList &classes)
     alarm["classes"] = arr;
     root_["alarm"] = alarm;
 }
+
+// ==========================================
+// 电子围栏配置
+// ==========================================
+
+bool ConfigManager::geofenceEnabled() const
+{
+    return root_["geofence"].toObject()["enabled"].toBool(false);
+}
+
+void ConfigManager::setGeofenceEnabled(bool enabled)
+{
+    QJsonObject gf = root_["geofence"].toObject();
+    gf["enabled"] = enabled;
+    root_["geofence"] = gf;
+}
+
+QString ConfigManager::geofenceMode() const
+{
+    return root_["geofence"].toObject()["mode"].toString("inside_alarm");
+}
+
+void ConfigManager::setGeofenceMode(const QString &mode)
+{
+    QJsonObject gf = root_["geofence"].toObject();
+    gf["mode"] = mode;
+    root_["geofence"] = gf;
+}
+
+QJsonObject ConfigManager::geofenceChannels() const
+{
+    return root_["geofence"].toObject()["channels"].toObject();
+}
+
+void ConfigManager::setGeofenceChannels(const QJsonObject &channels)
+{
+    QJsonObject gf = root_["geofence"].toObject();
+    gf["channels"] = channels;
+    root_["geofence"] = gf;
+}

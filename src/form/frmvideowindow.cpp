@@ -8,12 +8,20 @@
  *   - 4个 PlayerWidget 组成 2x2 网格
  *   - 每个通道独立解码和显示
  *   - 通过 openVideo(int ch, QString path) 从外部加载视频
+ *   - 电子围栏工具栏：矩形/多边形绘制、删除、清空
  */
 
 #include "frmvideowindow.h"
 #include "ui_frmvideowindow.h"
 #include <QTimer>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QPushButton>
+#include <QButtonGroup>
+#include <QFrame>
 #include "player_widget.h"
+#include "fence_overlay.h"
+#include "fence_manager.h"
 
 // ============================================================================
 // 构造函数
@@ -23,6 +31,7 @@
 frmVideoWindow::frmVideoWindow(QWidget *parent) : QWidget(parent), ui(new Ui::frmVideoWindow)
 {
     ui->setupUi(this);       // 加载 Qt Designer 设计的界面布局
+    this->setupFenceToolbar();
     this->initForm();        // 初始化信号连接
 }
 
@@ -171,4 +180,112 @@ PlayerWidget *frmVideoWindow::playerWidget(int ch)
         case 3: return ui->videoWindow4;  // 通道3 → 第四个播放器
         default: return nullptr;          // 无效通道返回空指针
     }
+}
+
+void frmVideoWindow::setupFenceToolbar()
+{
+    QFrame *toolbar = new QFrame(this);
+    toolbar->setFrameStyle(QFrame::StyledPanel);
+    toolbar->setFixedHeight(36);
+    toolbar->setStyleSheet(
+        "QFrame { background: #2a2a2a; border: 1px solid #444; }"
+        "QPushButton { background: #3a3a3a; color: #ddd; border: 1px solid #555;"
+        "  border-radius: 3px; padding: 2px 8px; font-size: 12px; }"
+        "QPushButton:hover { background: #4a4a4a; }"
+        "QPushButton:checked { background: #0078d4; color: white; }"
+        "QLabel { color: #aaa; font-size: 12px; }"
+    );
+
+    QHBoxLayout *lay = new QHBoxLayout(toolbar);
+    lay->setContentsMargins(6, 2, 6, 2);
+    lay->setSpacing(4);
+
+    lay->addWidget(new QLabel("通道:", toolbar));
+
+    fenceToolGroup_ = new QButtonGroup(this);
+    fenceToolGroup_->setExclusive(false);
+
+    for (int i = 0; i < 4; ++i) {
+        QPushButton *btn = new QPushButton(QString::number(i + 1), toolbar);
+        btn->setCheckable(true);
+        btn->setFixedSize(28, 24);
+        if (i == 0) btn->setChecked(true);
+        fenceChannelBtns_[i] = btn;
+        fenceToolGroup_->addButton(btn, i);
+        lay->addWidget(btn);
+        connect(btn, &QPushButton::clicked, this, [this, i]() { onFenceChannelClicked(i); });
+    }
+
+    lay->addSpacing(10);
+    lay->addWidget(new QLabel("|", toolbar));
+
+    QPushButton *rectBtn = new QPushButton("矩形", toolbar);
+    rectBtn->setObjectName("fenceRect");
+    rectBtn->setCheckable(true);
+    lay->addWidget(rectBtn);
+
+    QPushButton *polyBtn = new QPushButton("多边形", toolbar);
+    polyBtn->setObjectName("fencePoly");
+    polyBtn->setCheckable(true);
+    lay->addWidget(polyBtn);
+
+    QPushButton *deleteBtn = new QPushButton("删除", toolbar);
+    deleteBtn->setObjectName("fenceDelete");
+    deleteBtn->setCheckable(true);
+    lay->addWidget(deleteBtn);
+
+    QPushButton *clearBtn = new QPushButton("清空", toolbar);
+    clearBtn->setObjectName("fenceClear");
+    lay->addWidget(clearBtn);
+
+    lay->addStretch();
+
+    QButtonGroup *drawGroup = new QButtonGroup(this);
+    drawGroup->setExclusive(true);
+    drawGroup->addButton(rectBtn, 0);
+    drawGroup->addButton(polyBtn, 1);
+    drawGroup->addButton(deleteBtn, 2);
+
+    connect(rectBtn, &QPushButton::clicked, this, [this]() { onFenceToolClicked(0); });
+    connect(polyBtn, &QPushButton::clicked, this, [this]() { onFenceToolClicked(1); });
+    connect(deleteBtn, &QPushButton::clicked, this, [this]() { onFenceToolClicked(2); });
+    connect(clearBtn, &QPushButton::clicked, this, [this]() {
+        geofence::FenceManager::instance().clearChannel(currentFenceChannel_);
+        playerWidget(currentFenceChannel_)->fenceOverlay()->loadFences();
+    });
+
+    // 插入到 gridLayout 的第 2 行（视频下方，label 上方）
+    ui->gridLayout->addWidget(toolbar, 2, 0, 1, 2);
+    // 将 label 移到第 3 行
+    ui->gridLayout->removeWidget(ui->label);
+    ui->gridLayout->addWidget(ui->label, 3, 0, 1, 2);
+}
+
+void frmVideoWindow::onFenceToolClicked(int id)
+{
+    DrawMode mode = DrawMode::NoMode;
+    if (id == 0) mode = DrawMode::RectDraw;
+    else if (id == 1) mode = DrawMode::PolyDraw;
+    else if (id == 2) mode = DrawMode::DeleteMode;
+
+    PlayerWidget *pw = playerWidget(currentFenceChannel_);
+    if (pw) {
+        pw->fenceOverlay()->setDrawMode(mode);
+    }
+}
+
+void frmVideoWindow::onFenceChannelClicked(int ch)
+{
+    currentFenceChannel_ = ch;
+    for (int i = 0; i < 4; ++i) {
+        fenceChannelBtns_[i]->setChecked(i == ch);
+    }
+    // 取消所有绘制模式
+    PlayerWidget *pw = playerWidget(ch);
+    if (pw) {
+        pw->fenceOverlay()->setDrawMode(DrawMode::NoMode);
+    }
+    // 取消工具栏选中状态
+    QAbstractButton *checkedBtn = fenceToolGroup_->checkedButton();
+    if (checkedBtn) checkedBtn->setChecked(false);
 }

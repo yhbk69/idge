@@ -7,6 +7,7 @@
 #include <QComboBox>
 #include <QPushButton>
 #include <QTimer>
+#include <QTabWidget>
 
 /* 
 ====================================================
@@ -34,6 +35,7 @@ public:
     ====================================================
     */
     void refreshTable();
+    void refreshFenceTable();
 
 protected:
     /* 
@@ -118,6 +120,8 @@ private:
     ====================================================
     */
     QTableWidget *table_ = nullptr;        // 告警列表表格
+    QTableWidget *fenceTable_ = nullptr;   // 围栏报警表格
+    QTabWidget *tabWidget_ = nullptr;      // Tab 切换
     QComboBox *filterChannel_ = nullptr;   // 频道筛选下拉框
     QComboBox *filterClass_ = nullptr;     // 类别筛选下拉框
     QLabel *lblTotal_ = nullptr;           // 总数标签

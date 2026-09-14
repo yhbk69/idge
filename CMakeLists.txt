@@ -220,6 +220,9 @@ include_directories(
     # --- 报警模块 ---
     ${CMAKE_SOURCE_DIR}/src/alarm                   # 报警管理（去重、限流）
 
+    # --- 电子围栏模块 ---
+    ${CMAKE_SOURCE_DIR}/src/geofence                # 电子围栏（形状、检测、覆盖层）
+
     # --- UI 模块 ---
     ${CMAKE_SOURCE_DIR}/src/ui                      # OpenGL 渲染、EGL、数据看板
 )
