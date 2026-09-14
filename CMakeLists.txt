@@ -63,9 +63,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)     # 强制要求编译器支持 C++17
 # -g: 生成调试信息
 # -O0: 关闭优化（便于调试）
 # -pg: 生成性能分析信息（gprof）
-set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -pg")
-set(CMAKE_C_FLAGS_DEBUG "-g -O0 -pg")
+set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
 
+set(CMAKE_C_FLAGS_DEBUG "-g -O0")
 # ============================================================================
 # Address Sanitizer (ASan) 支持
 # ============================================================================

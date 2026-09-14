@@ -34,6 +34,7 @@ public:
     ====================================================
     */
     void refreshStats();
+    void stop();
 
 private slots:
     /* 

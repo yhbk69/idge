@@ -1277,11 +1277,7 @@ QString QtHelper::getExistingDirectory(const QString &dirName, bool native, int 
     initDialog(&dialog, "选择目录", "选择(&S)", dirName, native, width, height);
     dialog.setOption(QFileDialog::ReadOnly);
     // 仅显示目录
-#if (QT_VERSION < QT_VERSION_CHECK(6,0,0))
-    dialog.setFileMode(QFileDialog::DirectoryOnly);
-#else
     dialog.setFileMode(QFileDialog::Directory);
-#endif
     dialog.setOption(QFileDialog::ShowDirsOnly);
     return getDialogResult(&dialog);
 }

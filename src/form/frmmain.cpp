@@ -45,6 +45,7 @@
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QFileDialog>
+#include <QApplication>
 
 // ==========================================
 // 构造 / 析构
@@ -627,6 +628,10 @@ void frmMain::systemExit()
 
 void frmMain::closeEvent(QCloseEvent *event)
 {
+    // 停止数据看板刷新定时器
+    if (dashboardWidget_) {
+        dashboardWidget_->stop();
+    }
     // 停止所有 4 路解码器和推理任务
     if (videoWindow) {
         for (int ch = 0; ch < 4; ch++) {
@@ -637,6 +642,7 @@ void frmMain::closeEvent(QCloseEvent *event)
         }
     }
     event->accept();
+    qApp->quit();
 }
 
 void frmMain::on_pageRoll_customContextMenuRequested(const QPoint &pos)

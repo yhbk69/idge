@@ -217,7 +217,12 @@ void DashboardWidget::onTimer()
     refreshStats();
 }
 
-/* 
+void DashboardWidget::stop()
+{
+    refreshTimer_.stop();
+}
+
+/*
 ====================================================
 作用：刷新统计信息
 说明：从AlarmManager获取最新数据并更新UI显示
