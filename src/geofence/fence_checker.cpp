@@ -62,37 +62,32 @@ bool FenceChecker::pointInShape(int x, int y, const FenceShape &shape) {
 }
 
 // ============================================================================
-// mapBoxToOriginal - 检测框坐标映射
+// mapBoxToOriginal - 检测框坐标映射（兼容旧接口）
 // ============================================================================
-// 将检测框从模型输入空间 (modelW x modelH) 线性映射到原始视频空间 (srcW x srcH)
-//
-// 例如：模型输入 640x640，视频 1920x1080
-//   scaleX = 1920/640 = 3.0
-//   scaleY = 1080/640 = 1.6875
-//   模型坐标 (100, 100, 200, 200) → 视频坐标 (300, 168, 600, 337)
+// 检测结果的 box 坐标已经在原始视频空间（RKNN 后处理已做逆 letterbox 变换）。
+// 此函数直接返回原始坐标，不做额外缩放。
 // ============================================================================
 void FenceChecker::mapBoxToOriginal(const image_rect_t &box,
                                     int srcW, int srcH,
                                     int modelW, int modelH,
                                     int &outLeft, int &outTop,
                                     int &outRight, int &outBottom) {
-    float scaleX = static_cast<float>(srcW) / modelW;
-    float scaleY = static_cast<float>(srcH) / modelH;
-
-    outLeft   = static_cast<int>(box.left * scaleX);
-    outTop    = static_cast<int>(box.top * scaleY);
-    outRight  = static_cast<int>(box.right * scaleX);
-    outBottom = static_cast<int>(box.bottom * scaleY);
+    (void)srcW; (void)srcH; (void)modelW; (void)modelH;
+    outLeft   = box.left;
+    outTop    = box.top;
+    outRight  = box.right;
+    outBottom = box.bottom;
 }
 
 // ============================================================================
 // isInsideFence - 检测目标是否在围栏内
 // ============================================================================
 // 步骤：
-//   1. 将检测框从模型空间映射到原始视频空间
-//   2. 取检测框底边中点（代表"脚"的位置）
-//   3. 将围栏坐标从 overlay 空间映射到原始视频空间
-//   4. 判断脚部点是否在映射后的围栏内
+//   1. 将检测框从模型空间映射到原始视频空间 (srcW x srcH)
+//   2. 取检测框底边中点（代表"脚"的位置）—— 在帧坐标系中
+//   3. 将脚部坐标从帧坐标系映射到 overlay widget 坐标系
+//      （考虑 GLVideoWidget 的 letterbox 宽高比保持）
+//   4. 判断脚部点是否在围栏内（围栏坐标本身就在 overlay widget 坐标系）
 //
 // 为什么用底边中点？
 //   围栏判断的是"人站在哪里"，脚的位置最准确。
@@ -108,7 +103,7 @@ bool FenceChecker::isInsideFence(const object_detect_result &det,
     mapBoxToOriginal(det.box, srcW, srcH, modelW, modelH,
                      left, top, right, bottom);
 
-    // 步骤 2: 取底边中点（脚部位置）
+    // 步骤 2: 取底边中点（脚部位置）—— 帧坐标系
     int footX = (left + right) / 2;
     int footY = bottom;
 
@@ -117,18 +112,37 @@ bool FenceChecker::isInsideFence(const object_detect_result &det,
         return pointInShape(footX, footY, fence);
     }
 
-    // 步骤 3: 将围栏坐标从 overlay 空间映射到原始视频空间
-    //   用户在 overlay widget 上绘制围栏，坐标是 widget 像素
-    //   需要按比例缩放到原始视频分辨率
-    float fenceScaleX = static_cast<float>(srcW) / overlayW;
-    float fenceScaleY = static_cast<float>(srcH) / overlayH;
+    // 步骤 3: 将脚部坐标从帧坐标系映射到 overlay widget 坐标系
+    //   GLVideoWidget 保持宽高比渲染，视频内容可能不占满整个 widget（有黑边）
+    //   需要考虑 letterbox 偏移，才能将帧坐标正确映射到 widget 坐标
+    float videoAspect = static_cast<float>(srcW) / srcH;
+    float viewAspect  = static_cast<float>(overlayW) / overlayH;
 
+    float renderW, renderH, xOffset, yOffset;
+    if (videoAspect > viewAspect) {
+        // 视频更宽 → 左右满，上下黑边
+        renderW = static_cast<float>(overlayW);
+        renderH = overlayW * srcH / static_cast<float>(srcW);
+        xOffset = 0.0f;
+        yOffset = (overlayH - renderH) / 2.0f;
+    } else {
+        // 视频更高 → 上下满，左右黑边
+        renderH = static_cast<float>(overlayH);
+        renderW = overlayH * srcW / static_cast<float>(srcH);
+        xOffset = (overlayW - renderW) / 2.0f;
+        yOffset = 0.0f;
+    }
+
+    // 帧坐标 → widget 坐标
+    float widgetX = footX * renderW / srcW + xOffset;
+    float widgetY = footY * renderH / srcH + yOffset;
+
+    // 步骤 4: 判断 widget 坐标是否在围栏内
     if (fence.type == ShapeType::Rectangle && fence.points.size() >= 2) {
-        // 矩形：映射两个对角点
-        int fx1 = static_cast<int>(fence.points[0].x * fenceScaleX);
-        int fy1 = static_cast<int>(fence.points[0].y * fenceScaleY);
-        int fx2 = static_cast<int>(fence.points[1].x * fenceScaleX);
-        int fy2 = static_cast<int>(fence.points[1].y * fenceScaleY);
+        int fx1 = fence.points[0].x;
+        int fy1 = fence.points[0].y;
+        int fx2 = fence.points[1].x;
+        int fy2 = fence.points[1].y;
         int rx1 = std::min(fx1, fx2);
         int ry1 = std::min(fy1, fy2);
         int rx2 = std::max(fx1, fx2);
@@ -138,16 +152,10 @@ bool FenceChecker::isInsideFence(const object_detect_result &det,
         rect.top = ry1;
         rect.right = rx2;
         rect.bottom = ry2;
-        return pointInRect(footX, footY, rect);
+        return pointInRect(static_cast<int>(widgetX), static_cast<int>(widgetY), rect);
     } else {
-        // 多边形：逐点映射
-        std::vector<Point> scaled;
-        scaled.reserve(fence.points.size());
-        for (const auto &p : fence.points) {
-            scaled.push_back(Point(static_cast<int>(p.x * fenceScaleX),
-                                   static_cast<int>(p.y * fenceScaleY)));
-        }
-        return pointInPolygon(footX, footY, scaled);
+        // 多边形直接用 overlay 坐标比较（围栏坐标已在 widget 空间）
+        return pointInPolygon(static_cast<int>(widgetX), static_cast<int>(widgetY), fence.points);
     }
 }
 

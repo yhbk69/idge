@@ -68,6 +68,7 @@ private:
     int expandedChannel_ = -1;  // 当前放大的通道，-1表示无放大
     int currentFenceChannel_ = 0;  // 当前围栏操作的通道
     QButtonGroup *fenceToolGroup_ = nullptr;
+    QButtonGroup *fenceDrawGroup_ = nullptr;  // 绘制工具按钮组（矩形/多边形/删除）
     QPushButton *fenceChannelBtns_[4] = {nullptr};
 
 private slots:

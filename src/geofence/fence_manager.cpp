@@ -44,6 +44,7 @@ void FenceManager::loadFromConfig()
     ConfigManager &cfg = ConfigManager::instance();
     enabled_ = cfg.geofenceEnabled();
     mode_ = cfg.geofenceMode();
+    alarmClasses_ = cfg.geofenceAlarmClasses();
 
     fences_.clear();
     overlaySizes_.clear();
@@ -85,6 +86,19 @@ void FenceManager::loadFromConfig()
 
         fences_[ch] = cf;
     }
+
+    // 如果有围栏数据，自动启用
+    if (!fences_.empty()) {
+        for (auto it = fences_.begin(); it != fences_.end(); ++it) {
+            if (!it.value().shapes.empty()) {
+                enabled_ = true;
+                break;
+            }
+        }
+    }
+
+    qDebug() << "[Fence] loadFromConfig: enabled=" << enabled_
+             << "channels=" << fences_.size();
 }
 
 // ============================================================================
@@ -125,6 +139,7 @@ void FenceManager::saveToConfig()
     // 写入 ConfigManager 并保存文件
     ConfigManager::instance().setGeofenceEnabled(enabled_);
     ConfigManager::instance().setGeofenceMode(mode_);
+    ConfigManager::instance().setGeofenceAlarmClasses(alarmClasses_);
     ConfigManager::instance().setGeofenceChannels(channels);
     ConfigManager::instance().save();
 }
@@ -139,6 +154,17 @@ void FenceManager::setEnabled(bool enabled) { enabled_ = enabled; }
 QString FenceManager::mode() const { return mode_; }
 
 void FenceManager::setMode(const QString &mode) { mode_ = mode; }
+
+// ============================================================================
+// 围栏报警类别
+// ============================================================================
+QStringList FenceManager::alarmClasses() const { return alarmClasses_; }
+
+void FenceManager::setAlarmClasses(const QStringList &classes)
+{
+    alarmClasses_ = classes;
+    if (alarmClasses_.isEmpty()) alarmClasses_.append("person");
+}
 
 // ============================================================================
 // 通道围栏操作
@@ -164,6 +190,7 @@ void FenceManager::addShape(int channel, const FenceShape &shape)
 {
     fences_[channel].shapes.push_back(shape);
     fences_[channel].enabled = true;
+    enabled_ = true;  // 有围栏时自动启用全局开关
     emit fenceChanged(channel);
 }
 
@@ -216,6 +243,14 @@ void FenceManager::overlaySize(int channel, int &w, int &h) const
         w = 0;
         h = 0;
     }
+}
+
+// ============================================================================
+// 发送围栏日志到 UI（通过信号槽跨线程安全传递）
+// ============================================================================
+void FenceManager::postLog(const QString &category, const QString &message)
+{
+    emit logMessage(category, message);
 }
 
 } // namespace geofence

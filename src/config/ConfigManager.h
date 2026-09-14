@@ -186,6 +186,9 @@ public:
     QJsonObject geofenceChannels() const;
     void setGeofenceChannels(const QJsonObject &channels);
 
+    QStringList geofenceAlarmClasses() const;
+    void setGeofenceAlarmClasses(const QStringList &classes);
+
 private:
     /**
      * @brief 私有构造函数（单例模式）

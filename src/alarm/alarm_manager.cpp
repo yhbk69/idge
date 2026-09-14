@@ -81,7 +81,8 @@ void AlarmManager::setClassNames(const QStringList &names)
 //   5. 创建 AlarmRecord 并添加到新报警列表
 //
 // ============================================================================
-QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_result_list &results)
+QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_result_list &results,
+                                         bool bypassThrottle)
 {
     QVector<AlarmRecord> newAlarms;
     {
@@ -104,12 +105,12 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
 
             // 检查是否需要生成报警
             if (alarmClasses_.contains(className)) {
-                // 去重限流：同通道同类别在限流窗口内只报一次
+                // 去重限流：同通道同类别在限流窗口内只报一次（围栏报警不限流）
                 // key 格式: "通道号:类别ID"，如 "0:0" 表示通道 0 的 person
                 QString key = QString("%1:%2").arg(channel).arg(det.cls_id);
                 long last = lastAlarmTime_.value(key, 0);
-                // 检查是否在限流窗口内（2 秒）
-                if (results.time - last < kAlarmThrottleNs) {
+                // 检查是否在限流窗口内（2 秒），围栏报警跳过此检查
+                if (!bypassThrottle && results.time - last < kAlarmThrottleNs) {
                     continue;  // 在限流窗口内，跳过
                 }
                 lastAlarmTime_[key] = results.time;  // 更新最后报警时间

@@ -82,6 +82,9 @@ public:
     // 设置类别名称列表（用于将 cls_id 转换为类别名称）
     void setClassNames(const QStringList &names);
 
+    // 获取类别名称列表
+    const QStringList &classNames() const { return classNames_; }
+
     // ============================================================================
     // ingest: 接收检测结果，判断是否需要生成报警
     // ============================================================================
@@ -91,10 +94,12 @@ public:
     // 参数：
     //   - channel: 视频通道编号
     //   - results: 检测结果列表
+    //   - bypassThrottle: 是否跳过去重限流（围栏报警不限流）
     //
     // 返回：新生成的报警列表
     // ============================================================================
-    QVector<AlarmRecord> ingest(int channel, const object_detect_result_list &results);
+    QVector<AlarmRecord> ingest(int channel, const object_detect_result_list &results,
+                                bool bypassThrottle = false);
 
     // ============================================================================
     // storeAndNotify: 存储新报警并发出信号

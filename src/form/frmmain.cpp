@@ -160,6 +160,8 @@ void frmMain::log(const QString &category, const QString &message)
         color = QColor(50, 120, 220);   // 蓝色 - 系统操作
     } else if (cat_lower == "info") {
         color = QColor(50, 180, 50);    // 绿色 - 信息
+    } else if (cat_lower == "fence") {
+        color = QColor(200, 120, 255);  // 紫色 - 围栏检测
     } else {
         color = QColor(180, 180, 180);  // 灰色 - 默认
     }
@@ -391,6 +393,12 @@ void frmMain::initNewPages()
             this, &frmMain::showAlarmToast);
     connect(&AlarmManager::instance(), &AlarmManager::statsUpdated,
             this, &frmMain::updateAlarmBadge);
+
+    // 围栏日志信号 -> 调试页面日志
+    connect(&geofence::FenceManager::instance(), &geofence::FenceManager::logMessage,
+            this, [this](const QString &cat, const QString &msg) {
+                log(cat, msg);
+            });
 
     // 设置类名到 AlarmManager（从模型加载）
     QStringList classNames;
@@ -761,6 +769,65 @@ void frmMain::initDebugPage()
         });
     }
 
+    // ========== 电子围栏报警类别（动态创建，保存后实时生效） ==========
+    {
+        QGroupBox *grpFence = new QGroupBox("电子围栏配置");
+        grpFence->setStyleSheet("QGroupBox{font-size:14px; font-weight:bold;}"
+                                "QLabel{font-size:12px;}"
+                                "QLineEdit{font-size:12px;}"
+                                "QPushButton{font-size:12px;}");
+        QGridLayout *glFence = new QGridLayout(grpFence);
+        glFence->setHorizontalSpacing(20);
+        glFence->setVerticalSpacing(6);
+
+        // 围栏报警类别
+        QLabel *labFenceClasses = new QLabel("围栏报警类别:");
+        labFenceClasses->setMinimumWidth(120);
+        glFence->addWidget(labFenceClasses, 0, 0);
+
+        fenceClassesEdit_ = new QLineEdit();
+        fenceClassesEdit_->setPlaceholderText("person");
+        glFence->addWidget(fenceClassesEdit_, 0, 1);
+
+        QPushButton *btnSaveFenceClasses = new QPushButton("保存配置");
+        btnSaveFenceClasses->setMinimumWidth(80);
+        glFence->addWidget(btnSaveFenceClasses, 0, 2);
+
+        QLabel *labFenceHint = new QLabel("逗号分隔，留空默认只报 person。可用: person, bicycle, car 等");
+        labFenceHint->setStyleSheet("color: #888; font-size: 11px;");
+        labFenceHint->setWordWrap(true);
+        glFence->addWidget(labFenceHint, 1, 1, 1, 2);
+
+        // 初始值
+        fenceClassesEdit_->setText(cfg.geofenceAlarmClasses().join(", "));
+
+        connect(btnSaveFenceClasses, &QPushButton::clicked, this, [this]() {
+            QString text = fenceClassesEdit_->text().trimmed();
+            QStringList classes;
+            if (!text.isEmpty()) {
+                for (const auto &s : text.split(",", Qt::SkipEmptyParts)) {
+                    QString trimmed = s.trimmed();
+                    if (!trimmed.isEmpty()) classes.append(trimmed);
+                }
+            }
+            ConfigManager &c = ConfigManager::instance();
+            c.setGeofenceAlarmClasses(classes);
+            c.save();
+            geofence::FenceManager::instance().setAlarmClasses(classes);
+            QString display = classes.isEmpty() ? "(默认 person)" : classes.join(", ");
+            log("system", QString("围栏报警类别已更新: %1").arg(display));
+        });
+
+        // 插入到 page4 的垂直布局中（在 stackedWidget 之前）
+        QVBoxLayout *page4Layout = qobject_cast<QVBoxLayout *>(
+            ui->page4->layout());
+        if (page4Layout) {
+            // 在运行日志分组框之前插入围栏配置
+            int count = page4Layout->count();
+            page4Layout->insertWidget(count - 1, grpFence);  // 倒数第二个（最后是日志）
+        }
+    }
+
     // ========== 初始日志（带颜色） ==========
     log("system", "系统启动");
     log("system", "平台: RK3588, NPU核心数: " + QString::number(NPU_CORE_NUM));
@@ -768,6 +835,15 @@ void frmMain::initDebugPage()
     log("info", "标签加载: " + cfg.labelPath());
     log("system", "视频解码器初始化完成");
     log("system", "推理线程池启动, 线程数: " + QString::number(cfg.threads()));
+
+    // 围栏配置信息
+    {
+        auto &fm = geofence::FenceManager::instance();
+        log("fence", QString("围栏配置: 启用=%1, 模式=%2, 报警类别=%3")
+            .arg(fm.enabled() ? "是" : "否")
+            .arg(fm.mode())
+            .arg(fm.alarmClasses().join(",")));
+    }
 }
 
 // ============================================================

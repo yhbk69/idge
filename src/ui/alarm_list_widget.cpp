@@ -47,9 +47,7 @@ AlarmListWidget::AlarmListWidget(QWidget *parent)
     connect(&AlarmManager::instance(), &AlarmManager::alarmGenerated,
             this, [this](const AlarmRecord &) {
                 onStatsUpdated();          // 立即更新统计数字
-                if (isVisible()) {
-                    refreshTimer_->start();  // 表格防抖刷新
-                }
+                refreshTimer_->start();    // 表格防抖刷新
             });
     // 统计更新信号 -> 处理函数
     connect(&AlarmManager::instance(), &AlarmManager::statsUpdated,
@@ -104,7 +102,8 @@ void AlarmListWidget::onStatsUpdated()
 void AlarmListWidget::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
-    refreshTable();  // 完整刷新表格
+    refreshTable();      // 完整刷新类别报警表格
+    refreshFenceTable(); // 完整刷新围栏报警表格
 }
 
 /* 

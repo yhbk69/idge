@@ -145,6 +145,7 @@ private:
     QLineEdit *cascadePathEdit_[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
     QLineEdit *cascadeNoteEdit_[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
     QLineEdit *chNoteEdit_[4] = {nullptr, nullptr, nullptr, nullptr};  // 每路通道备注
+    QLineEdit *fenceClassesEdit_ = nullptr;  // 围栏报警类别编辑框
 
 private slots:
     // ========== 4路视频浏览按钮 ==========

@@ -870,31 +870,93 @@ void FFmpegVideoDecoder::decodeLoop()
 
                         // ===== 4.10 电子围栏判断 + 告警 =====
                         auto &fenceMgr = geofence::FenceManager::instance();
-                        bool hasFence = fenceMgr.enabled() && fenceMgr.hasFence(channel_);
+                        bool fenceEnabled = fenceMgr.enabled();
+                        bool hasFence = fenceEnabled && fenceMgr.hasFence(channel_);
                         bool alarmInside = (fenceMgr.mode() == "inside_alarm");
 
                         QVector<AlarmRecord> newAlarms;
                         if (hasFence) {
                             const geofence::ChannelFence &cf = fenceMgr.channelFence(channel_);
+                            const QStringList &fenceClasses = fenceMgr.alarmClasses();
                             int oW = 0, oH = 0;
                             fenceMgr.overlaySize(channel_, oW, oH);
+
+                            // 汇总信息
+                            const QStringList &alarmCls = AlarmManager::instance().alarmClasses();
+                            fenceMgr.postLog("fence",
+                                QString("[通道%1] 围栏检测: %2个目标, 模式=%3, 围栏类别=%4, 报警类别=%5, 围栏=%6个")
+                                    .arg(channel_ + 1).arg(od.count).arg(fenceMgr.mode())
+                                    .arg(fenceClasses.isEmpty() ? "person" : fenceClasses.join(","))
+                                    .arg(alarmCls.isEmpty() ? "(空)" : alarmCls.join(","))
+                                    .arg(cf.shapes.size()));
+
                             object_detect_result_list filteredOd;
                             filteredOd.id = od.id;
                             filteredOd.time = od.time;
                             filteredOd.count = 0;
                             for (int i = 0; i < od.count; i++) {
-                                if (geofence::FenceChecker::checkDetection(
-                                        od.results[i],
+                                const auto &d = od.results[i];
+                                QString clsName;
+                                const QStringList &classNames = AlarmManager::instance().classNames();
+                                if (d.cls_id >= 0 && d.cls_id < classNames.size())
+                                    clsName = classNames[d.cls_id];
+                                else
+                                    clsName = QString("cls_%1").arg(d.cls_id);
+
+                                // 类别检查
+                                bool classMatch = fenceClasses.isEmpty() ||
+                                                  fenceClasses.contains(clsName);
+                                if (!classMatch) {
+                                    fenceMgr.postLog("fence",
+                                        QString("  [通道%1] 目标%2: %3 不在围栏类别中，跳过")
+                                            .arg(channel_ + 1).arg(i).arg(clsName));
+                                    continue;
+                                }
+
+                                // 围栏判定
+                                bool inside = geofence::FenceChecker::checkDetection(
+                                        d,
                                         dislayImage.width, dislayImage.height,
                                         640, 640, oW, oH,
-                                        cf, alarmInside)) {
+                                        cf, alarmInside);
+
+                                int footX = (d.box.left + d.box.right) / 2;
+                                int footY = d.box.bottom;
+                                fenceMgr.postLog("fence",
+                                    QString("  [通道%1] 目标%2: %3  foot=(%4,%5) %6")
+                                        .arg(channel_ + 1).arg(i).arg(clsName)
+                                        .arg(footX).arg(footY)
+                                        .arg(inside ? "→ 在围栏内 ✓" : "→ 在围栏外"));
+
+                                if (inside) {
                                     if (filteredOd.count < OBJ_NUMB_MAX_SIZE) {
-                                        filteredOd.results[filteredOd.count++] = od.results[i];
+                                        filteredOd.results[filteredOd.count++] = d;
                                     }
                                 }
                             }
-                            newAlarms = AlarmManager::instance().ingest(channel_, filteredOd);
+
+                            // 过滤汇总
+                            fenceMgr.postLog("fence",
+                                QString("  [通道%1] 过滤结果: %2/%3 个目标在围栏内")
+                                    .arg(channel_ + 1).arg(filteredOd.count).arg(od.count));
+
+                            newAlarms = AlarmManager::instance().ingest(channel_, filteredOd, true);
                             for (auto &a : newAlarms) a.isFenceAlarm = true;
+
+                            // 报警结果
+                            if (!newAlarms.isEmpty()) {
+                                fenceMgr.postLog("alarm",
+                                    QString("  [通道%1] ★ 围栏报警触发: %2 (置信度 %3%)")
+                                        .arg(channel_ + 1)
+                                        .arg(newAlarms.front().className)
+                                        .arg(newAlarms.front().confidence * 100, 0, 'f', 1));
+                            } else if (filteredOd.count > 0) {
+                                // ingest 返回空，说明类别不在 alarmClasses 中
+                                fenceMgr.postLog("warning",
+                                    QString("  [通道%1] ⚠ 有%2个目标在围栏内但未生成报警 - "
+                                            "请检查'报警类别'是否包含围栏检测的目标类别")
+                                        .arg(channel_ + 1).arg(filteredOd.count));
+                            }
                         } else {
                             newAlarms = AlarmManager::instance().ingest(channel_, od);
                         }

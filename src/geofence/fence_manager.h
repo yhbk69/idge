@@ -79,6 +79,13 @@ public:
     bool hasFence(int channel) const;
 
     // ========================================================================
+    // 围栏报警类别
+    // ========================================================================
+    // 哪些检测类别会触发围栏报警（默认 "person"）
+    QStringList alarmClasses() const;
+    void setAlarmClasses(const QStringList &classes);
+
+    // ========================================================================
     // overlay 尺寸管理（用于坐标映射）
     // ========================================================================
     // 围栏坐标是在 overlay widget 像素空间中绘制的。
@@ -86,15 +93,21 @@ public:
     void setOverlaySize(int channel, int w, int h);
     void overlaySize(int channel, int &w, int &h) const;
 
+    // 发送围栏日志到 UI
+    void postLog(const QString &category, const QString &message);
+
 signals:
     // 围栏数据变化信号（通知 overlay 刷新）
     void fenceChanged(int channel);
+    // 围栏日志信号（通知 UI 显示）
+    void logMessage(const QString &category, const QString &message);
 
 private:
     FenceManager() = default;
 
     bool enabled_ = false;                                  // 围栏总开关
     QString mode_ = "inside_alarm";                         // 报警模式
+    QStringList alarmClasses_ = {"person"};                 // 触发围栏报警的类别
     QMap<int, ChannelFence> fences_;                        // 各通道围栏数据
     QMap<int, QPair<int,int>> overlaySizes_;                // 各通道 overlay 尺寸
 };

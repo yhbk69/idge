@@ -240,11 +240,11 @@ void frmVideoWindow::setupFenceToolbar()
 
     lay->addStretch();
 
-    QButtonGroup *drawGroup = new QButtonGroup(this);
-    drawGroup->setExclusive(true);
-    drawGroup->addButton(rectBtn, 0);
-    drawGroup->addButton(polyBtn, 1);
-    drawGroup->addButton(deleteBtn, 2);
+    fenceDrawGroup_ = new QButtonGroup(this);
+    fenceDrawGroup_->setExclusive(true);
+    fenceDrawGroup_->addButton(rectBtn, 0);
+    fenceDrawGroup_->addButton(polyBtn, 1);
+    fenceDrawGroup_->addButton(deleteBtn, 2);
 
     connect(rectBtn, &QPushButton::clicked, this, [this]() { onFenceToolClicked(0); });
     connect(polyBtn, &QPushButton::clicked, this, [this]() { onFenceToolClicked(1); });
@@ -276,16 +276,26 @@ void frmVideoWindow::onFenceToolClicked(int id)
 
 void frmVideoWindow::onFenceChannelClicked(int ch)
 {
+    // 取消上一个通道的绘制模式
+    PlayerWidget *oldPw = playerWidget(currentFenceChannel_);
+    if (oldPw && currentFenceChannel_ != ch) {
+        oldPw->fenceOverlay()->setDrawMode(DrawMode::NoMode);
+    }
+
     currentFenceChannel_ = ch;
     for (int i = 0; i < 4; ++i) {
         fenceChannelBtns_[i]->setChecked(i == ch);
     }
-    // 取消所有绘制模式
-    PlayerWidget *pw = playerWidget(ch);
-    if (pw) {
-        pw->fenceOverlay()->setDrawMode(DrawMode::NoMode);
+
+    // 保留绘制工具选中状态，让用户可以直接在新通道上画
+    // 如果之前选了矩形/多边形/删除，切换通道后继续生效
+    QAbstractButton *checkedDrawBtn = fenceDrawGroup_->checkedButton();
+    if (checkedDrawBtn) {
+        // 重新应用当前工具到新通道
+        onFenceToolClicked(fenceDrawGroup_->id(checkedDrawBtn));
     }
-    // 取消工具栏选中状态
-    QAbstractButton *checkedBtn = fenceToolGroup_->checkedButton();
-    if (checkedBtn) checkedBtn->setChecked(false);
+
+    // 加载新通道的围栏数据并刷新显示
+    PlayerWidget *pw = playerWidget(ch);
+    if (pw) pw->fenceOverlay()->loadFences();
 }

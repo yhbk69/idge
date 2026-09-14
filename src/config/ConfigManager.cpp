@@ -495,3 +495,28 @@ void ConfigManager::setGeofenceChannels(const QJsonObject &channels)
     gf["channels"] = channels;
     root_["geofence"] = gf;
 }
+
+QStringList ConfigManager::geofenceAlarmClasses() const
+{
+    QJsonArray arr = root_["geofence"].toObject()["alarmClasses"].toArray();
+    QStringList result;
+    for (const auto &v : arr) {
+        QString s = v.toString().trimmed();
+        if (!s.isEmpty()) result.append(s);
+    }
+    if (result.isEmpty()) {
+        result.append("person");  // 默认触发类别
+    }
+    return result;
+}
+
+void ConfigManager::setGeofenceAlarmClasses(const QStringList &classes)
+{
+    QJsonObject gf = root_["geofence"].toObject();
+    QJsonArray arr;
+    for (const auto &s : classes) {
+        if (!s.trimmed().isEmpty()) arr.append(s.trimmed());
+    }
+    gf["alarmClasses"] = arr;
+    root_["geofence"] = gf;
+}
