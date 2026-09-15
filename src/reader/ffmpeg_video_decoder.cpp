@@ -940,7 +940,8 @@ void FFmpegVideoDecoder::decodeLoop()
                                 QString("  [通道%1] 过滤结果: %2/%3 个目标在围栏内")
                                     .arg(channel_ + 1).arg(filteredOd.count).arg(od.count));
 
-                            newAlarms = AlarmManager::instance().ingest(channel_, filteredOd, true);
+                            // 使用正常限流（2秒内同通道同类别只报1次），避免报警洪水
+                            newAlarms = AlarmManager::instance().ingest(channel_, filteredOd, false);
                             for (auto &a : newAlarms) a.isFenceAlarm = true;
 
                             // 报警结果

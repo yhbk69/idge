@@ -251,7 +251,8 @@ void frmVideoWindow::setupFenceToolbar()
     connect(deleteBtn, &QPushButton::clicked, this, [this]() { onFenceToolClicked(2); });
     connect(clearBtn, &QPushButton::clicked, this, [this]() {
         geofence::FenceManager::instance().clearChannel(currentFenceChannel_);
-        playerWidget(currentFenceChannel_)->fenceOverlay()->loadFences();
+        if (auto *pw = playerWidget(currentFenceChannel_))
+            if (pw->fenceOverlay()) pw->fenceOverlay()->loadFences();
     });
 
     // 插入到 gridLayout 的第 2 行（视频下方，label 上方）

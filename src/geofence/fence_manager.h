@@ -60,8 +60,8 @@ public:
     // ========================================================================
     // 通道围栏操作
     // ========================================================================
-    // 获取指定通道的围栏配置（只读）
-    const ChannelFence &channelFence(int channel) const;
+    // 获取指定通道的围栏配置（按值返回，线程安全）
+    ChannelFence channelFence(int channel) const;
 
     // 设置指定通道的围栏配置（替换）
     void setChannelFence(int channel, const ChannelFence &fence);

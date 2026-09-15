@@ -171,11 +171,10 @@ void FenceManager::setAlarmClasses(const QStringList &classes)
 // ============================================================================
 
 // 获取指定通道的围栏配置（不存在则返回空配置）
-const ChannelFence &FenceManager::channelFence(int channel) const
+ChannelFence FenceManager::channelFence(int channel) const
 {
-    static const ChannelFence empty;
     auto it = fences_.find(channel);
-    return (it != fences_.end()) ? it.value() : empty;
+    return (it != fences_.end()) ? it.value() : ChannelFence();
 }
 
 // 设置指定通道的围栏配置（替换整个通道的围栏）
