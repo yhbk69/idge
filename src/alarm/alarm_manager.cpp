@@ -233,6 +233,17 @@ void AlarmManager::clearAlarms()
     alarms_.clear();
 }
 
+// 删除单条报警（用于误报标记）
+bool AlarmManager::removeAlarm(int index)
+{
+    QMutexLocker lock(&mutex_);
+    if (index < 0 || index >= alarms_.size()) {
+        return false;
+    }
+    alarms_.removeAt(index);
+    return true;
+}
+
 // 获取各类别检测统计
 QMap<QString, int> AlarmManager::classStatistics() const
 {

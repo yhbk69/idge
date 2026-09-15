@@ -124,6 +124,9 @@ public:
     // 清空所有报警
     void clearAlarms();
 
+    // 删除单条报警（用于误报标记）
+    bool removeAlarm(int index);
+
     // 获取各类别检测统计
     QMap<QString, int> classStatistics() const;
 

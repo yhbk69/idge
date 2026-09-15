@@ -1,5 +1,6 @@
 #include "alarm_list_widget.h"
 #include "alarm_manager.h"
+#include "alarm_detail_dialog.h"
 #include "fence_manager.h"
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -13,6 +14,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QShowEvent>
+#include <QPushButton>
 
 /* 
 ====================================================
@@ -247,8 +249,8 @@ void AlarmListWidget::setupUi()
     ====================================================
     */
     table_ = new QTableWidget();
-    table_->setColumnCount(6);
-    table_->setHorizontalHeaderLabels({"时间", "通道", "类别", "置信度", "状态", "ID"});
+    table_->setColumnCount(7);
+    table_->setHorizontalHeaderLabels({"时间", "通道", "类别", "置信度", "状态", "操作", "ID"});
     table_->horizontalHeader()->setStretchLastSection(true);
     table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -369,11 +371,15 @@ void AlarmListWidget::refreshTable()
     for (int i = 0; i < shown; i++) {
         const AlarmRecord &a = filtered[total - 1 - i];  // 倒序获取
 
+        // 存储原始报警索引（用于后续删除操作）
+        int originalIndex = total - 1 - i;
+
         // 时间列
         QDateTime dt;
         dt.setMSecsSinceEpoch(a.timestamp / 1000000);  // 纳秒转换为毫秒
         QTableWidgetItem *timeItem = new QTableWidgetItem(dt.toString("yyyy-MM-dd HH:mm:ss"));
         timeItem->setData(Qt::UserRole, a.imgPath);  // 存储截图路径
+        timeItem->setData(Qt::UserRole + 1, originalIndex);  // 存储原始索引
         table_->setItem(i, 0, timeItem);
         
         // 通道列
@@ -393,8 +399,19 @@ void AlarmListWidget::refreshTable()
         statusItem->setForeground(a.acknowledged ? QColor(76, 175, 80) : QColor(255, 152, 0));  // 颜色区分
         table_->setItem(i, 4, statusItem);
 
+        // 操作列（详情按钮）
+        QPushButton *btnDetail = new QPushButton("详情");
+        btnDetail->setStyleSheet(
+            "QPushButton { color: #fff; background: #4a6fa5; border-radius: 4px; padding: 4px 12px; }"
+            "QPushButton:hover { background: #5a8fc5; }"
+        );
+        connect(btnDetail, &QPushButton::clicked, this, [this, i]() {
+            showAlarmDetail(i);
+        });
+        table_->setCellWidget(i, 5, btnDetail);
+
         // ID列
-        table_->setItem(i, 5, new QTableWidgetItem(QString::number(i)));
+        table_->setItem(i, 6, new QTableWidgetItem(QString::number(i)));
     }
 }
 
@@ -459,28 +476,12 @@ void AlarmListWidget::onOpenDir()
 /* 
 ====================================================
 作用：表格行双击槽函数
-说明：双击行时用系统看图程序打开该告警的截图
+说明：双击行时打开告警详情Dialog
 ====================================================
 */
 void AlarmListWidget::onRowDoubleClicked(int row, int)
 {
-    // 获取该行的时间单元格（存储了截图路径）
-    QTableWidgetItem *it = table_->item(row, 0);
-    if (!it) return;
-    
-    // 获取截图路径
-    QString imgPath = it->data(Qt::UserRole).toString();
-    if (imgPath.isEmpty() || !QFile::exists(imgPath)) {
-        QMessageBox::information(this, "截图", "该报警没有截图记录");
-        return;
-    }
-    
-    // 获取绝对路径并打开
-    QString abs = QFileInfo(imgPath).absoluteFilePath();
-    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(abs))) {
-        QMessageBox::information(this, "截图",
-                                 QString("无法打开图片：\n%1").arg(abs));
-    }
+    showAlarmDetail(row);
 }
 
 void AlarmListWidget::refreshFenceTable()
@@ -516,4 +517,30 @@ void AlarmListWidget::refreshFenceTable()
 
         fenceTable_->setItem(i, 4, new QTableWidgetItem("围栏"));
     }
+}
+
+/* 
+====================================================
+作用：显示告警详情Dialog
+说明：打开详情对话框，支持误报标记
+参数：row - 表格行号
+====================================================
+*/
+void AlarmListWidget::showAlarmDetail(int row)
+{
+    QTableWidgetItem *timeItem = table_->item(row, 0);
+    if (!timeItem) return;
+
+    int originalIndex = timeItem->data(Qt::UserRole + 1).toInt();
+    QVector<AlarmRecord> alarms = AlarmManager::instance().alarms();
+    if (originalIndex < 0 || originalIndex >= alarms.size()) return;
+
+    AlarmRecord alarm = alarms[originalIndex];
+
+    AlarmDetailDialog dlg(alarm, originalIndex, this);
+    connect(&dlg, &AlarmDetailDialog::alarmRemoved, this, [this](int idx) {
+        AlarmManager::instance().removeAlarm(idx);
+        refreshTable();
+    });
+    dlg.exec();
 }
