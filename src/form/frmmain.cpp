@@ -506,7 +506,7 @@ void frmMain::buttonClick()
     // 切换页面
     if (name == "视频监控") {
         ui->stackedWidget->setCurrentWidget(ui->pageMonitor);
-        videoAlarmWidget_->refreshAlarms();
+        if (videoAlarmWidget_) videoAlarmWidget_->refreshAlarms();
     } else if (name == "数据看板") {
         ui->stackedWidget->setCurrentWidget(dashboardWidget_);
     } else if (name == "报警数据") {
