@@ -363,9 +363,8 @@ void frmMain::initNewPages()
         rightLayout->setContentsMargins(0, 0, 0, 0);
         rightLayout->addWidget(videoAlarmWidget_);
 
-        // 连接报警移除信号
-        connect(videoAlarmWidget_, &VideoAlarmWidget::alarmRemoved, this, [this](int idx) {
-            AlarmManager::instance().removeAlarm(idx);
+        // 连接报警更新信号
+        connect(videoAlarmWidget_, &VideoAlarmWidget::alarmUpdated, this, [this]() {
             alarmListWidget_->refreshTable();
             updateAlarmBadge();
         });

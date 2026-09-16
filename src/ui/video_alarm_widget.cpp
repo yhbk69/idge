@@ -58,17 +58,23 @@ void VideoAlarmWidget::refreshAlarms()
         delete item;
     }
 
-    // 获取报警记录
+    // 获取报警记录，过滤掉误报
     QVector<AlarmRecord> alarms = AlarmManager::instance().alarms();
+    QVector<QPair<AlarmRecord, int>> filteredAlarms;
+    for (int i = 0; i < alarms.size(); i++) {
+        if (!alarms[i].isFalsePositive) {
+            filteredAlarms.append(qMakePair(alarms[i], i));
+        }
+    }
 
     // 只显示最近的报警（最多20条）
     const int maxDisplay = 20;
-    int total = alarms.size();
+    int total = filteredAlarms.size();
     int shown = qMin(total, maxDisplay);
 
     for (int i = 0; i < shown; i++) {
-        const AlarmRecord &a = alarms[total - 1 - i];
-        int originalIndex = total - 1 - i;
+        const AlarmRecord &a = filteredAlarms[total - 1 - i].first;
+        int originalIndex = filteredAlarms[total - 1 - i].second;
         addAlarmItem(a, originalIndex);
     }
 
@@ -127,10 +133,7 @@ void VideoAlarmWidget::addAlarmItem(const AlarmRecord &alarm, int originalIndex)
 
     itemLayout->addLayout(infoLayout, 1);
 
-    // 操作按钮
-    QVBoxLayout *btnLayout = new QVBoxLayout();
-    btnLayout->setSpacing(4);
-
+    // 操作按钮（详情）
     QPushButton *btnDetail = new QPushButton("详情");
     btnDetail->setStyleSheet(
         "QPushButton { color: #fff; background: #4a6fa5; border-radius: 4px; padding: 3px 8px; font-size: 11px; }"
@@ -139,19 +142,7 @@ void VideoAlarmWidget::addAlarmItem(const AlarmRecord &alarm, int originalIndex)
     connect(btnDetail, &QPushButton::clicked, this, [this, originalIndex]() {
         onAlarmClicked(originalIndex);
     });
-    btnLayout->addWidget(btnDetail);
-
-    QPushButton *btnRemove = new QPushButton("误报");
-    btnRemove->setStyleSheet(
-        "QPushButton { color: #fff; background: #f44336; border-radius: 4px; padding: 3px 8px; font-size: 11px; }"
-        "QPushButton:hover { background: #d32f2f; }"
-    );
-    connect(btnRemove, &QPushButton::clicked, this, [this, originalIndex]() {
-        onRemoveClicked(originalIndex);
-    });
-    btnLayout->addWidget(btnRemove);
-
-    itemLayout->addLayout(btnLayout);
+    itemLayout->addWidget(btnDetail);
 
     contentLayout_->addWidget(itemWidget);
 }
@@ -164,32 +155,14 @@ void VideoAlarmWidget::onAlarmClicked(int index)
     AlarmRecord alarm = alarms[index];
 
     AlarmDetailDialog dlg(alarm, index, this);
-    connect(&dlg, &AlarmDetailDialog::alarmRemoved, this, &VideoAlarmWidget::alarmRemoved);
+    connect(&dlg, &AlarmDetailDialog::alarmMarkedFalsePositive, this, [](int idx) {
+        AlarmManager::instance().markAsFalsePositive(idx);
+    });
+    connect(&dlg, &AlarmDetailDialog::alarmAcknowledged, this, [](int idx) {
+        AlarmManager::instance().acknowledgeAlarm(idx);
+    });
     dlg.exec();
 
     refreshAlarms();
-}
-
-void VideoAlarmWidget::onRemoveClicked(int index)
-{
-    QMessageBox box(QMessageBox::Question, tr("确认误报"), tr("确定将此报警标记为误报？\n标记后将从记录中删除。"),
-                    QMessageBox::Ok | QMessageBox::Cancel, nullptr);
-    box.setWindowFlags(box.windowFlags() | Qt::WindowStaysOnTopHint);
-    QAbstractButton *okBtn = box.button(QMessageBox::Ok);
-    if (okBtn) okBtn->setText(tr("确定"));
-    QAbstractButton *cancelBtn = box.button(QMessageBox::Cancel);
-    if (cancelBtn) cancelBtn->setText(tr("取消"));
-    box.adjustSize();
-
-    if (QScreen *screen = QGuiApplication::primaryScreen()) {
-        QRect scr = screen->availableGeometry();
-        box.move(scr.center() - box.rect().center());
-    }
-    box.raise();
-    box.activateWindow();
-
-    if (box.exec() == QMessageBox::Ok) {
-        emit alarmRemoved(index);
-        refreshAlarms();
-    }
+    emit alarmUpdated();
 }

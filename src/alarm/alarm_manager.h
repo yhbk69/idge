@@ -54,6 +54,7 @@ struct AlarmRecord {
     QString className;       // 类别名称
     float confidence;        // 置信度
     bool acknowledged;       // 是否已确认
+    bool isFalsePositive;    // 是否为误报
     QString imgPath;         // 报警截图路径（可为空）
     bool isFenceAlarm = false;  // 是否为电子围栏报警
 };
@@ -121,11 +122,17 @@ public:
     // 确认所有报警（将所有报警标记为已确认）
     void acknowledgeAll();
 
+    // 确认单条报警（标记为已确认）
+    bool acknowledgeAlarm(int index);
+
     // 清空所有报警
     void clearAlarms();
 
     // 删除单条报警（用于误报标记）
     bool removeAlarm(int index);
+
+    // 标记为误报
+    bool markAsFalsePositive(int index);
 
     // 获取各类别检测统计
     QMap<QString, int> classStatistics() const;

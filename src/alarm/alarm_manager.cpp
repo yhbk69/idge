@@ -212,7 +212,7 @@ int AlarmManager::unacknowledgedCount() const
     QMutexLocker lock(&mutex_);
     int count = 0;
     for (const auto &a : alarms_) {
-        if (!a.acknowledged) count++;
+        if (!a.acknowledged && !a.isFalsePositive) count++;
     }
     return count;
 }
@@ -224,6 +224,17 @@ void AlarmManager::acknowledgeAll()
     for (auto &a : alarms_) {
         a.acknowledged = true;
     }
+}
+
+// 确认单条报警（标记为已确认）
+bool AlarmManager::acknowledgeAlarm(int index)
+{
+    QMutexLocker lock(&mutex_);
+    if (index < 0 || index >= alarms_.size()) {
+        return false;
+    }
+    alarms_[index].acknowledged = true;
+    return true;
 }
 
 // 清空所有报警
@@ -241,6 +252,17 @@ bool AlarmManager::removeAlarm(int index)
         return false;
     }
     alarms_.removeAt(index);
+    return true;
+}
+
+// 标记为误报
+bool AlarmManager::markAsFalsePositive(int index)
+{
+    QMutexLocker lock(&mutex_);
+    if (index < 0 || index >= alarms_.size()) {
+        return false;
+    }
+    alarms_[index].isFalsePositive = true;
     return true;
 }
 

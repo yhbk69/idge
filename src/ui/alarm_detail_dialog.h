@@ -13,10 +13,12 @@ public:
     explicit AlarmDetailDialog(const AlarmRecord &alarm, int alarmIndex, QWidget *parent = nullptr);
 
 signals:
-    void alarmRemoved(int index);
+    void alarmMarkedFalsePositive(int index);
+    void alarmAcknowledged(int index);
 
 private slots:
     void onMarkFalsePositive();
+    void onMarkNormal();
 
 private:
     void setupUi();
@@ -25,10 +27,6 @@ private:
     AlarmRecord alarm_;
     int alarmIndex_;
     QLabel *imageLabel_ = nullptr;
-    QLabel *timeLabel_ = nullptr;
-    QLabel *channelLabel_ = nullptr;
-    QLabel *classLabel_ = nullptr;
-    QLabel *confidenceLabel_ = nullptr;
     QLabel *statusLabel_ = nullptr;
 };
 

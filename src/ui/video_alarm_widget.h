@@ -17,11 +17,10 @@ public:
     void refreshAlarms();
 
 signals:
-    void alarmRemoved(int index);
+    void alarmUpdated();
 
 private slots:
     void onAlarmClicked(int index);
-    void onRemoveClicked(int index);
 
 private:
     void setupUi();

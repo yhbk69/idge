@@ -68,25 +68,35 @@ void AlarmDetailDialog::setupUi()
 
     mainLay->addStretch();
 
-    // 按钮区域
+    // 按钮区域：确认误报 | 不是误报 | 取消
     QHBoxLayout *btnLay = new QHBoxLayout();
-    btnLay->addStretch();
+    btnLay->setSpacing(12);
 
-    QPushButton *btnFalse = new QPushButton("误报");
+    QPushButton *btnFalse = new QPushButton("确认误报");
     btnFalse->setStyleSheet(
-        "QPushButton { color: #fff; background: #f44336; border-radius: 4px; padding: 8px 24px; font-size: 14px; }"
+        "QPushButton { color: #fff; background: #f44336; border-radius: 4px; padding: 8px 20px; font-size: 14px; }"
         "QPushButton:hover { background: #d32f2f; }"
     );
     connect(btnFalse, &QPushButton::clicked, this, &AlarmDetailDialog::onMarkFalsePositive);
     btnLay->addWidget(btnFalse);
 
-    QPushButton *btnClose = new QPushButton("关闭");
-    btnClose->setStyleSheet(
-        "QPushButton { color: #fff; background: #555; border-radius: 4px; padding: 8px 24px; font-size: 14px; }"
+    QPushButton *btnNormal = new QPushButton("不是误报");
+    btnNormal->setStyleSheet(
+        "QPushButton { color: #fff; background: #4caf50; border-radius: 4px; padding: 8px 20px; font-size: 14px; }"
+        "QPushButton:hover { background: #388e3c; }"
+    );
+    connect(btnNormal, &QPushButton::clicked, this, &AlarmDetailDialog::onMarkNormal);
+    btnLay->addWidget(btnNormal);
+
+    btnLay->addStretch();
+
+    QPushButton *btnCancel = new QPushButton("取消");
+    btnCancel->setStyleSheet(
+        "QPushButton { color: #fff; background: #555; border-radius: 4px; padding: 8px 20px; font-size: 14px; }"
         "QPushButton:hover { background: #666; }"
     );
-    connect(btnClose, &QPushButton::clicked, this, &QDialog::close);
-    btnLay->addWidget(btnClose);
+    connect(btnCancel, &QPushButton::clicked, this, &QDialog::reject);
+    btnLay->addWidget(btnCancel);
 
     mainLay->addLayout(btnLay);
 }
@@ -110,7 +120,7 @@ void AlarmDetailDialog::loadScreenshot()
 
 void AlarmDetailDialog::onMarkFalsePositive()
 {
-    QMessageBox box(QMessageBox::Question, tr("确认误报"), tr("确定将此报警标记为误报？\n标记后将从记录中删除。"),
+    QMessageBox box(QMessageBox::Question, tr("确认误报"), tr("确定将此报警标记为误报？\n标记后状态将变为误报。"),
                     QMessageBox::Ok | QMessageBox::Cancel, nullptr);
     box.setWindowFlags(box.windowFlags() | Qt::WindowStaysOnTopHint);
     QAbstractButton *okBtn = box.button(QMessageBox::Ok);
@@ -127,7 +137,13 @@ void AlarmDetailDialog::onMarkFalsePositive()
     box.activateWindow();
 
     if (box.exec() == QMessageBox::Ok) {
-        emit alarmRemoved(alarmIndex_);
+        emit alarmMarkedFalsePositive(alarmIndex_);
         accept();
     }
+}
+
+void AlarmDetailDialog::onMarkNormal()
+{
+    emit alarmAcknowledged(alarmIndex_);
+    accept();
 }
