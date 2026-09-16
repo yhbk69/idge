@@ -1218,6 +1218,12 @@
                                         <string>运行日志</string>
                                     </property>
                                     <layout class="QVBoxLayout" name="verticalLayout_log">
+                                        <property name="spacing">
+                                            <number>0</number>
+                                        </property>
+                                        <property name="margin">
+                                            <number>0</number>
+                                        </property>
                                         <item>
                                             <widget class="QTextBrowser" name="textBrowserLog">
                                                 <property name="minimumSize">
@@ -1226,8 +1232,20 @@
                                                         <height>150</height>
                                                     </size>
                                                 </property>
+                                                <property name="maximumSize">
+                                                    <size>
+                                                        <width>16777215</width>
+                                                        <height>16777215</height>
+                                                    </size>
+                                                </property>
                                                 <property name="readOnly">
                                                     <bool>true</bool>
+                                                </property>
+                                                <property name="verticalScrollBarPolicy">
+                                                    <enum>Qt::ScrollBarAlwaysOn</enum>
+                                                </property>
+                                                <property name="horizontalScrollBarPolicy">
+                                                    <enum>Qt::ScrollBarAlwaysOff</enum>
                                                 </property>
                                             </widget>
                                         </item>

@@ -8,6 +8,7 @@
 #include <QPushButton>
 #include <QTimer>
 #include <QTabWidget>
+#include <QMenu>
 
 /* 
 ====================================================
@@ -114,6 +115,15 @@ private slots:
     */
     void onDebouncedRefresh();
 
+    /* 
+    ====================================================
+    作用：表格标题行点击槽函数
+    说明：点击标题时弹出筛选菜单
+    参数：logicalIndex - 列号
+    ====================================================
+    */
+    void onHeaderSectionClicked(int logicalIndex);
+
 private:
     /* 
     ====================================================
@@ -131,12 +141,18 @@ private:
     QTableWidget *table_ = nullptr;        // 告警列表表格
     QTableWidget *fenceTable_ = nullptr;   // 围栏报警表格
     QTabWidget *tabWidget_ = nullptr;      // Tab 切换
-    QComboBox *filterChannel_ = nullptr;   // 频道筛选下拉框
-    QComboBox *filterClass_ = nullptr;     // 类别筛选下拉框
     QLabel *lblTotal_ = nullptr;           // 总数标签
     QLabel *lblUnack_ = nullptr;           // 未确认数标签
     QPushButton *snapBtn_ = nullptr;       // 截图开关按钮
     QTimer *refreshTimer_ = nullptr;       // 防抖刷新定时器
+
+    /* 
+    ====================================================
+    筛选状态
+    ====================================================
+    */
+    int filterChannel_ = -1;               // 通道筛选（-1表示全部）
+    QString filterClass_;                  // 类别筛选（空表示全部）
 };
 
 #endif // ALARM_LIST_WIDGET_H

@@ -146,37 +146,11 @@ void AlarmListWidget::setupUi()
 
     /* 
     ====================================================
-    筛选工具栏
-    说明：提供通道和类别筛选功能
+    工具栏
     ====================================================
     */
     QHBoxLayout *toolLay = new QHBoxLayout();
     toolLay->setSpacing(12);
-
-    // 通道筛选标签和下拉框
-    QLabel *chLbl = new QLabel("通道:");
-    chLbl->setStyleSheet("color: #aaa; font-size: 12px;");
-    toolLay->addWidget(chLbl);
-
-    filterChannel_ = new QComboBox();
-    filterChannel_->addItem("全部", -1);  // 全部通道
-    filterChannel_->addItem("通道 1", 0);  // 通道1
-    filterChannel_->addItem("通道 2", 1);  // 通道2
-    filterChannel_->addItem("通道 3", 2);  // 通道3
-    filterChannel_->addItem("通道 4", 3);  // 通道4
-    filterChannel_->setStyleSheet("color: #fff; background: #3d3d4d; border: 1px solid #555; border-radius: 4px; padding: 4px 8px;");
-    toolLay->addWidget(filterChannel_);
-
-    // 类别筛选标签和下拉框
-    QLabel *clsLbl = new QLabel("类别:");
-    clsLbl->setStyleSheet("color: #aaa; font-size: 12px;");
-    toolLay->addWidget(clsLbl);
-
-    filterClass_ = new QComboBox();
-    filterClass_->addItem("全部", "");  // 全部类别
-    filterClass_->setStyleSheet("color: #fff; background: #3d3d4d; border: 1px solid #555; border-radius: 4px; padding: 4px 8px;");
-    toolLay->addWidget(filterClass_);
-
     toolLay->addStretch();  // 弹性空间
 
     // 刷新按钮
@@ -263,6 +237,8 @@ void AlarmListWidget::setupUi()
     table_->verticalHeader()->setVisible(false);
     connect(table_, &QTableWidget::cellDoubleClicked,
             this, &AlarmListWidget::onRowDoubleClicked);
+    connect(table_->horizontalHeader(), &QHeaderView::sectionClicked,
+            this, &AlarmListWidget::onHeaderSectionClicked);
     tabWidget_->addTab(table_, "类别报警");
 
     /* 
@@ -313,48 +289,24 @@ void AlarmListWidget::refreshTable()
     // 获取所有告警记录
     QVector<AlarmRecord> alarms = mgr.alarms();
 
+    // 应用筛选条件
+    QVector<AlarmRecord> filtered;
+    for (const auto &a : alarms) {
+        if (filterChannel_ >= 0 && a.channel != filterChannel_) continue;
+        if (!filterClass_.isEmpty() && a.className != filterClass_) continue;
+        filtered.append(a);
+    }
+
     // 更新统计信息
-    lblTotal_->setText(QString("共 %1 条").arg(alarms.size()));
-    int unack = mgr.unacknowledgedCount();
+    lblTotal_->setText(QString("共 %1 条").arg(filtered.size()));
+    int unack = 0;
+    for (const auto &a : filtered) {
+        if (!a.acknowledged) unack++;
+    }
     lblUnack_->setText(QString("未确认: %1 条").arg(unack));
     lblUnack_->setStyleSheet(unack > 0
         ? "color: #ff9800; font-size: 13px;"
         : "color: #4caf50; font-size: 13px;");
-
-    /* 
-    ====================================================
-    更新类别筛选下拉框
-    说明：从告警记录中提取所有类别，填充下拉框
-    ====================================================
-    */
-    QSet<QString> classes;
-    for (const auto &a : alarms)
-        classes.insert(a.className);  // 收集所有类别
-    
-    QString currentClass = filterClass_->currentText();  // 记住当前选择
-    filterClass_->clear();
-    filterClass_->addItem("全部", "");  // 添加"全部"选项
-    for (const auto &cls : classes) {
-        filterClass_->addItem(cls, cls);  // 添加各个类别
-    }
-    int idx = filterClass_->findText(currentClass);
-    if (idx >= 0) filterClass_->setCurrentIndex(idx);  // 恢复选择
-
-    /* 
-    ====================================================
-    应用筛选条件
-    说明：根据用户选择的通道和类别筛选告警记录
-    ====================================================
-    */
-    int filterCh = filterChannel_->currentData().toInt();  // 获取通道筛选值
-    QString filterCls = filterClass_->currentData().toString();  // 获取类别筛选值
-
-    QVector<AlarmRecord> filtered;
-    for (const auto &a : alarms) {
-        if (filterCh >= 0 && a.channel != filterCh) continue;  // 通道不匹配
-        if (!filterCls.isEmpty() && a.className != filterCls) continue;  // 类别不匹配
-        filtered.append(a);  // 符合条件
-    }
 
     /* 
     ====================================================
@@ -543,4 +495,67 @@ void AlarmListWidget::showAlarmDetail(int row)
         refreshTable();
     });
     dlg.exec();
+}
+
+/* 
+====================================================
+作用：表格标题行点击槽函数
+说明：点击标题时弹出筛选菜单
+参数：logicalIndex - 列号
+====================================================
+*/
+void AlarmListWidget::onHeaderSectionClicked(int logicalIndex)
+{
+    // 只处理通道列(1)和类别列(2)
+    if (logicalIndex != 1 && logicalIndex != 2) return;
+
+    QMenu menu(this);
+    menu.setStyleSheet(
+        "QMenu { background: #2d2d3d; color: #ccc; border: 1px solid #444; }"
+        "QMenu::item:selected { background: #3d5a80; }"
+    );
+
+    if (logicalIndex == 1) {
+        // 通道筛选
+        menu.addAction("全部通道", this, [this]() {
+            filterChannel_ = -1;
+            refreshTable();
+        });
+        menu.addAction("通道 1", this, [this]() {
+            filterChannel_ = 0;
+            refreshTable();
+        });
+        menu.addAction("通道 2", this, [this]() {
+            filterChannel_ = 1;
+            refreshTable();
+        });
+        menu.addAction("通道 3", this, [this]() {
+            filterChannel_ = 2;
+            refreshTable();
+        });
+        menu.addAction("通道 4", this, [this]() {
+            filterChannel_ = 3;
+            refreshTable();
+        });
+    } else if (logicalIndex == 2) {
+        // 类别筛选
+        QSet<QString> classes;
+        QVector<AlarmRecord> alarms = AlarmManager::instance().alarms();
+        for (const auto &a : alarms) {
+            classes.insert(a.className);
+        }
+
+        menu.addAction("全部类别", this, [this]() {
+            filterClass_.clear();
+            refreshTable();
+        });
+        for (const auto &cls : classes) {
+            menu.addAction(cls, this, [this, cls]() {
+                filterClass_ = cls;
+                refreshTable();
+            });
+        }
+    }
+
+    menu.exec(QCursor::pos());
 }

@@ -47,6 +47,7 @@
 #include <QVBoxLayout>
 #include <QFileDialog>
 #include <QApplication>
+#include <QScrollArea>
 
 // ==========================================
 // 构造 / 析构
@@ -690,6 +691,38 @@ void frmMain::initDebugPage()
     ui->labVideoInVal->setText("RTSP / V4L2");
     ui->labMaxChannelsVal->setText("4");
 
+    // ========== 为 page4 添加滚动支持 ==========
+    {
+        QVBoxLayout *page4Layout = qobject_cast<QVBoxLayout *>(ui->page4->layout());
+        if (page4Layout) {
+            QScrollArea *scrollArea = new QScrollArea(ui->page4);
+            scrollArea->setWidgetResizable(true);
+            scrollArea->setFrameShape(QFrame::NoFrame);
+            scrollArea->setStyleSheet("QScrollArea { background: transparent; border: none; }");
+
+            QWidget *scrollContent = new QWidget();
+            scrollContent->setStyleSheet("background: transparent;");
+            QVBoxLayout *contentLayout = new QVBoxLayout(scrollContent);
+            contentLayout->setContentsMargins(0, 0, 0, 0);
+            contentLayout->setSpacing(6);
+
+            // 将 page4 中已有的控件移到 scrollContent
+            QLayoutItem *item;
+            while ((item = page4Layout->takeAt(0)) != nullptr) {
+                if (item->widget()) {
+                    contentLayout->addWidget(item->widget());
+                } else if (item->layout()) {
+                    contentLayout->addLayout(item->layout());
+                }
+                delete item;
+            }
+            contentLayout->addStretch();
+
+            scrollArea->setWidget(scrollContent);
+            page4Layout->addWidget(scrollArea);
+        }
+    }
+
     // ========== 视频通道（从 config.json 读取） ==========
     ui->lineEditCh1->setText(cfg.videoChannel(1));
     ui->lineEditCh2->setText(cfg.videoChannel(2));
@@ -707,6 +740,43 @@ void frmMain::initDebugPage()
     ui->spinBoxNmsThresh->setValue(cfg.nmsThreshold());
     ui->labClassNumVal->setText(QString::number(cfg.classNum()));
     ui->labThreadsVal->setText(QString::number(cfg.threads()));
+
+    // ========== 统一UI样式 ==========
+    {
+        QString lineEditStyle = "color:#fff;background:#3d3d4d;"
+                                "border:1px solid #555;border-radius:4px;padding:4px 8px;font-size:12px;";
+        QString pushBtnStyle = "color:#fff;background:#4a6fa5;"
+                               "border-radius:4px;padding:4px 12px;font-size:12px;"
+                               "QPushButton:hover{background:#5a8fc5;}";
+        QString spinBoxStyle = "color:#fff;background:#3d3d4d;"
+                               "border:1px solid #555;border-radius:4px;padding:4px 8px;font-size:12px;";
+
+        // 视频通道输入框
+        ui->lineEditCh1->setStyleSheet(lineEditStyle);
+        ui->lineEditCh2->setStyleSheet(lineEditStyle);
+        ui->lineEditCh3->setStyleSheet(lineEditStyle);
+        ui->lineEditCh4->setStyleSheet(lineEditStyle);
+
+        // 模型路径输入框
+        ui->lineEditModelPath->setStyleSheet(lineEditStyle);
+        ui->lineEditLabelPath->setStyleSheet(lineEditStyle);
+
+        // 报警类别输入框
+        ui->editAlarmClasses->setStyleSheet(lineEditStyle);
+
+        // 浏览按钮
+        ui->btnBrowseCh1->setStyleSheet(pushBtnStyle);
+        ui->btnBrowseCh2->setStyleSheet(pushBtnStyle);
+        ui->btnBrowseCh3->setStyleSheet(pushBtnStyle);
+        ui->btnBrowseCh4->setStyleSheet(pushBtnStyle);
+        ui->btnBrowseModel->setStyleSheet(pushBtnStyle);
+        ui->btnBrowseLabel->setStyleSheet(pushBtnStyle);
+        ui->btnSaveAlarmClasses->setStyleSheet(pushBtnStyle);
+
+        // 数值输入框
+        ui->spinBoxConfThresh->setStyleSheet(spinBoxStyle);
+        ui->spinBoxNmsThresh->setStyleSheet(spinBoxStyle);
+    }
 
     // ========== 通道备注 + 每路"清空"（追加到"模型配置"分组框内每路末尾） ==========
     {
