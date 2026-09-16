@@ -111,7 +111,7 @@ void frmVideoWindow::btnClicked(const QString &objName)
     } else {
         // 其他按钮，保持原有逻辑
         QString str = QString("当前单击了控件 %1 的按钮 %2").arg(videoWindow->objectName()).arg(objName);
-        ui->label->setText(str);
+        qDebug() << str;
     }
 }
 
@@ -142,11 +142,6 @@ void frmVideoWindow::setExpandedMode(int channel, bool expanded)
                 players[i]->hide();
             }
         }
-        
-        // 隐藏底部label
-        if (ui->label) {
-            ui->label->hide();
-        }
     } else {
         // 恢复四宫格模式
         expandedChannel_ = -1;
@@ -154,11 +149,6 @@ void frmVideoWindow::setExpandedMode(int channel, bool expanded)
         for (int i = 0; i < 4; i++) {
             players[i]->show();
             players[i]->setExpanded(false);
-        }
-        
-        // 显示底部label
-        if (ui->label) {
-            ui->label->show();
         }
     }
 }
@@ -182,84 +172,134 @@ PlayerWidget *frmVideoWindow::playerWidget(int ch)
     }
 }
 
+/**
+ * @brief 设置电子围栏工具栏
+ *
+ * 功能：创建视频监控页面下方的电子围栏操作工具栏
+ *       工具栏包含：通道选择按钮（1-4）、绘制工具（矩形/多边形/删除）、清空按钮
+ *       用户可以通过工具栏选择通道并绘制电子围栏区域
+ *
+ * 布局结构：
+ *   [通道:][1][2][3][4] | [矩形][多边形][删除][清空]
+ *
+ * 位置：插入到主网格布局的第2行（视频画面下方，底部标签上方）
+ */
 void frmVideoWindow::setupFenceToolbar()
 {
-    QFrame *toolbar = new QFrame(this);
-    toolbar->setFrameStyle(QFrame::StyledPanel);
-    toolbar->setFixedHeight(36);
+    // ========================================================================
+    // 第一步：创建工具栏容器
+    // ========================================================================
+    QFrame *toolbar = new QFrame(this);           // 创建工具栏框架容器
+    toolbar->setFrameStyle(QFrame::StyledPanel);  // 设置边框样式为带阴影的面板
+    toolbar->setFixedHeight(36);                   // 固定工具栏高度为36像素
+
+    // 设置工具栏的暗色主题样式
     toolbar->setStyleSheet(
-        "QFrame { background: #2a2a2a; border: 1px solid #444; }"
-        "QPushButton { background: #3a3a3a; color: #ddd; border: 1px solid #555;"
-        "  border-radius: 3px; padding: 2px 8px; font-size: 12px; }"
-        "QPushButton:hover { background: #4a4a4a; }"
-        "QPushButton:checked { background: #0078d4; color: white; }"
-        "QLabel { color: #aaa; font-size: 12px; }"
+        "QFrame { background: #2a2a2a; border: 1px solid #444; }"        // 框架背景和边框
+        "QPushButton { background: #3a3a3a; color: #ddd; border: 1px solid #555;"  // 按钮默认样式
+        "  border-radius: 3px; padding: 2px 8px; font-size: 12px; }"    // 圆角、内边距、字体
+        "QPushButton:hover { background: #4a4a4a; }"                    // 鼠标悬停样式
+        "QPushButton:checked { background: #0078d4; color: white; }"    // 选中状态样式（蓝色）
+        "QLabel { color: #aaa; font-size: 12px; }"                      // 标签文字样式
     );
 
-    QHBoxLayout *lay = new QHBoxLayout(toolbar);
-    lay->setContentsMargins(6, 2, 6, 2);
-    lay->setSpacing(4);
+    // ========================================================================
+    // 第二步：创建水平布局并设置间距
+    // ========================================================================
+    QHBoxLayout *lay = new QHBoxLayout(toolbar);  // 创建水平布局，父对象为工具栏
+    lay->setContentsMargins(2, 2, 2, 2);          // 设置布局边距：左2、上2、右2、下2（左边留小空白）
+    lay->setSpacing(4);                           // 设置控件间距为4像素
 
-    lay->addWidget(new QLabel("通道:", toolbar));
+    // ========================================================================
+    // 第三步：添加通道选择区域
+    // ========================================================================
+    lay->addWidget(new QLabel("通道:", toolbar));  // 添加"通道:"文字标签
 
+    // 创建通道选择按钮组（非互斥，因为支持多选）
     fenceToolGroup_ = new QButtonGroup(this);
-    fenceToolGroup_->setExclusive(false);
+    fenceToolGroup_->setExclusive(false);  // 设置为非互斥模式
 
+    // 循环创建4个通道选择按钮（1、2、3、4）
     for (int i = 0; i < 4; ++i) {
-        QPushButton *btn = new QPushButton(QString::number(i + 1), toolbar);
-        btn->setCheckable(true);
-        btn->setFixedSize(28, 24);
-        if (i == 0) btn->setChecked(true);
-        fenceChannelBtns_[i] = btn;
-        fenceToolGroup_->addButton(btn, i);
-        lay->addWidget(btn);
+        QPushButton *btn = new QPushButton(QString::number(i + 1), toolbar);  // 创建按钮，显示通道号
+        btn->setCheckable(true);           // 设置按钮可选中（开关样式）
+        btn->setFixedSize(28, 24);         // 设置按钮固定尺寸
+        if (i == 0) btn->setChecked(true); // 默认选中通道1
+        fenceChannelBtns_[i] = btn;        // 保存按钮指针到数组
+        fenceToolGroup_->addButton(btn, i); // 添加到按钮组，ID为i
+        lay->addWidget(btn);               // 添加到布局
+        // 连接点击信号到通道切换槽函数
         connect(btn, &QPushButton::clicked, this, [this, i]() { onFenceChannelClicked(i); });
     }
 
-    lay->addSpacing(10);
-    lay->addWidget(new QLabel("|", toolbar));
+    // ========================================================================
+    // 第四步：添加分隔符
+    // ========================================================================
+    lay->addSpacing(10);                    // 添加10像素间距作为分隔
+    lay->addWidget(new QLabel("|", toolbar)); // 添加竖线分隔符
 
-    QPushButton *rectBtn = new QPushButton("矩形", toolbar);
-    rectBtn->setObjectName("fenceRect");
-    rectBtn->setCheckable(true);
-    lay->addWidget(rectBtn);
+    // ========================================================================
+    // 第五步：创建绘制工具按钮（矩形、多边形、删除）
+    // ========================================================================
+    // 矩形绘制按钮
+    QPushButton *rectBtn = new QPushButton("矩形", toolbar);   // 创建"矩形"按钮
+    rectBtn->setObjectName("fenceRect");                       // 设置对象名（用于样式识别）
+    rectBtn->setCheckable(true);                               // 设置可选中
+    lay->addWidget(rectBtn);                                   // 添加到布局
 
-    QPushButton *polyBtn = new QPushButton("多边形", toolbar);
-    polyBtn->setObjectName("fencePoly");
-    polyBtn->setCheckable(true);
-    lay->addWidget(polyBtn);
+    // 多边形绘制按钮
+    QPushButton *polyBtn = new QPushButton("多边形", toolbar); // 创建"多边形"按钮
+    polyBtn->setObjectName("fencePoly");                       // 设置对象名
+    polyBtn->setCheckable(true);                               // 设置可选中
+    lay->addWidget(polyBtn);                                   // 添加到布局
 
-    QPushButton *deleteBtn = new QPushButton("删除", toolbar);
-    deleteBtn->setObjectName("fenceDelete");
-    deleteBtn->setCheckable(true);
-    lay->addWidget(deleteBtn);
+    // 删除按钮
+    QPushButton *deleteBtn = new QPushButton("删除", toolbar); // 创建"删除"按钮
+    deleteBtn->setObjectName("fenceDelete");                   // 设置对象名
+    deleteBtn->setCheckable(true);                             // 设置可选中
+    lay->addWidget(deleteBtn);                                 // 添加到布局
 
-    QPushButton *clearBtn = new QPushButton("清空", toolbar);
-    clearBtn->setObjectName("fenceClear");
-    lay->addWidget(clearBtn);
+    // ========================================================================
+    // 第六步：创建清空按钮（非选中类型）
+    // ========================================================================
+    QPushButton *clearBtn = new QPushButton("清空", toolbar);  // 创建"清空"按钮
+    clearBtn->setObjectName("fenceClear");                     // 设置对象名
+    lay->addWidget(clearBtn);                                  // 添加到布局
 
-    lay->addStretch();
+    // ========================================================================
+    // 第七步：创建绘制工具按钮组（互斥，同一时间只能选一个工具）
+    // ========================================================================
+    fenceDrawGroup_ = new QButtonGroup(this);   // 创建绘制工具按钮组
+    fenceDrawGroup_->setExclusive(true);        // 设置为互斥模式（单选）
+    fenceDrawGroup_->addButton(rectBtn, 0);     // 矩形按钮，ID=0
+    fenceDrawGroup_->addButton(polyBtn, 1);     // 多边形按钮，ID=1
+    fenceDrawGroup_->addButton(deleteBtn, 2);   // 删除按钮，ID=2
 
-    fenceDrawGroup_ = new QButtonGroup(this);
-    fenceDrawGroup_->setExclusive(true);
-    fenceDrawGroup_->addButton(rectBtn, 0);
-    fenceDrawGroup_->addButton(polyBtn, 1);
-    fenceDrawGroup_->addButton(deleteBtn, 2);
+    // ========================================================================
+    // 第八步：连接绘制工具按钮的点击信号
+    // ========================================================================
+    connect(rectBtn, &QPushButton::clicked, this, [this]() { onFenceToolClicked(0); });    // 矩形
+    connect(polyBtn, &QPushButton::clicked, this, [this]() { onFenceToolClicked(1); });    // 多边形
+    connect(deleteBtn, &QPushButton::clicked, this, [this]() { onFenceToolClicked(2); });  // 删除
 
-    connect(rectBtn, &QPushButton::clicked, this, [this]() { onFenceToolClicked(0); });
-    connect(polyBtn, &QPushButton::clicked, this, [this]() { onFenceToolClicked(1); });
-    connect(deleteBtn, &QPushButton::clicked, this, [this]() { onFenceToolClicked(2); });
+    // 清空按钮：清空当前通道的所有围栏
     connect(clearBtn, &QPushButton::clicked, this, [this]() {
+        // 调用FenceManager清空当前通道的围栏数据
         geofence::FenceManager::instance().clearChannel(currentFenceChannel_);
+        // 刷新当前通道的围栏显示
         if (auto *pw = playerWidget(currentFenceChannel_))
             if (pw->fenceOverlay()) pw->fenceOverlay()->loadFences();
     });
 
-    // 插入到 gridLayout 的第 2 行（视频下方，label 上方）
-    ui->gridLayout->addWidget(toolbar, 2, 0, 1, 2);
-    // 将 label 移到第 3 行
-    ui->gridLayout->removeWidget(ui->label);
-    ui->gridLayout->addWidget(ui->label, 3, 0, 1, 2);
+    // ========================================================================
+    // 第九步：将工具栏插入到主网格布局
+    // ========================================================================
+    // 插入到 gridLayout 的第2行，跨2列（视频画面下方）
+    ui->gridLayout->addWidget(toolbar, 2, 0, 1, 1);  // 工具栏占第0列
+
+    // 在右边添加弹簧控件，让工具栏居左显示
+    QSpacerItem *spacer = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Minimum);
+    ui->gridLayout->addItem(spacer, 2, 1, 1, 1);  // 弹簧占第1列
 }
 
 void frmVideoWindow::onFenceToolClicked(int id)
