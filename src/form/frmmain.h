@@ -28,6 +28,7 @@ class QLineEdit;
 class frmVideoWindow;
 class DashboardWidget;
 class AlarmListWidget;
+class VideoAlarmWidget;
 class QLabel;
 class QTimer;
 struct AlarmRecord;
@@ -60,6 +61,7 @@ private:
     frmVideoWindow *videoWindow;
     DashboardWidget *dashboardWidget_ = nullptr;
     AlarmListWidget *alarmListWidget_ = nullptr;
+    VideoAlarmWidget *videoAlarmWidget_ = nullptr;
     QLabel *alarmToast_ = nullptr;   ///< 悬浮报警提示
     QLabel *alarmBadge_ = nullptr;   ///< 未确认报警角标
     QTimer *toastTimer_ = nullptr;   ///< 悬浮提示消失定时器

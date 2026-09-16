@@ -367,7 +367,7 @@
                     <property name="currentIndex">
                         <number>0</number>
                     </property>
-                    <widget class="QWidget" name="page1">
+                    <widget class="QWidget" name="pageMonitor">
                         <layout class="QHBoxLayout" name="horizontalLayout">
                             <property name="spacing">
                                 <number>0</number>
@@ -435,13 +435,13 @@
                                 <widget class="QWidget" name="widgetRightMain" native="true">
                                     <property name="minimumSize">
                                         <size>
-                                            <width>120</width>
+                                            <width>280</width>
                                             <height>0</height>
                                         </size>
                                     </property>
                                     <property name="maximumSize">
                                         <size>
-                                            <width>90</width>
+                                            <width>280</width>
                                             <height>16777215</height>
                                         </size>
                                     </property>
@@ -607,7 +607,7 @@
                             </item>
                         </layout>
                     </widget>
-                    <widget class="QWidget" name="page4">
+                    <widget class="QWidget" name="pageSettings">
                         <layout class="QVBoxLayout" name="verticalLayout_4">
                             <property name="spacing">
                                 <number>6</number>

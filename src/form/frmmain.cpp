@@ -29,6 +29,7 @@
 #include "dashboard_widget.h"
 #include "alarm_list_widget.h"
 #include "alarm_manager.h"
+#include "video_alarm_widget.h"
 #include "fence_manager.h"
 #include <QDateTime>
 #include <QDir>
@@ -274,7 +275,7 @@ void frmMain::initForm()
     // 7. 左侧导航按钮样式
     ui->widgetLeftMain->setProperty("flag", "left");
     ui->widgetLeftConfig->setProperty("flag", "left");
-    ui->page1->setStyleSheet(QString("QWidget[flag=\"left\"] QAbstractButton{min-height:%1px;max-height:%1px;}").arg(60));
+    ui->pageMonitor->setStyleSheet(QString("QWidget[flag=\"left\"] QAbstractButton{min-height:%1px;max-height:%1px;}").arg(60));
     ui->page2->setStyleSheet(QString("QWidget[flag=\"left\"] QAbstractButton{min-height:%1px;max-height:%1px;}").arg(25));
 
     // 8. 获取视频监控窗口指针（用于后续打开视频）
@@ -347,13 +348,36 @@ void frmMain::initNewPages()
     dashboardWidget_ = new DashboardWidget();
     alarmListWidget_ = new AlarmListWidget();
 
-    // 插入到 page1(视频监控) 之后：index 1=数据看板, 2=报警数据
+    // 插入到 pageMonitor(视频监控) 之后：index 1=数据看板, 2=报警数据
     ui->stackedWidget->insertWidget(1, dashboardWidget_);
     ui->stackedWidget->insertWidget(2, alarmListWidget_);
 
     // 设置背景
     dashboardWidget_->setStyleSheet("background: #1e1e2e;");
     alarmListWidget_->setStyleSheet("background: #1e1e2e;");
+
+    // ===== 视频监控页面右侧报警列表 =====
+    if (ui->widgetRightMain) {
+        videoAlarmWidget_ = new VideoAlarmWidget(ui->widgetRightMain);
+        QVBoxLayout *rightLayout = new QVBoxLayout(ui->widgetRightMain);
+        rightLayout->setContentsMargins(0, 0, 0, 0);
+        rightLayout->addWidget(videoAlarmWidget_);
+
+        // 连接报警移除信号
+        connect(videoAlarmWidget_, &VideoAlarmWidget::alarmRemoved, this, [this](int idx) {
+            AlarmManager::instance().removeAlarm(idx);
+            alarmListWidget_->refreshTable();
+            updateAlarmBadge();
+        });
+
+        // 连接新报警信号，刷新视频监控页面的报警列表
+        connect(&AlarmManager::instance(), &AlarmManager::alarmGenerated,
+                this, [this](const AlarmRecord &) {
+                    if (videoAlarmWidget_ && ui->stackedWidget->currentWidget() == ui->pageMonitor) {
+                        videoAlarmWidget_->refreshAlarms();
+                    }
+                });
+    }
 
     // ===== 悬浮报警提示 toast =====
     alarmToast_ = new QLabel(this);
@@ -462,10 +486,10 @@ void frmMain::updateAlarmBadge()
 /**
  * @brief 顶部导航按钮点击处理
  * 根据按钮文字切换 stackedWidget 页面（用 setCurrentWidget 按控件指针切换，避免索引漂移）：
- *   - "视频监控" -> page1（视频监控页）
+ *   - "视频监控" -> pageMonitor（视频监控页）
  *   - "数据看板" -> dashboardWidget_（数据看板）
  *   - "报警数据" -> alarmListWidget_（报警数据）
- *   - "调试设置" -> page4（调试帮助页）
+ *   - "调试设置" -> pageSettings（调试帮助页）
  *   - "退出"     -> 退出确认
  */
 void frmMain::buttonClick()
@@ -481,13 +505,14 @@ void frmMain::buttonClick()
 
     // 切换页面
     if (name == "视频监控") {
-        ui->stackedWidget->setCurrentWidget(ui->page1);
+        ui->stackedWidget->setCurrentWidget(ui->pageMonitor);
+        videoAlarmWidget_->refreshAlarms();
     } else if (name == "数据看板") {
         ui->stackedWidget->setCurrentWidget(dashboardWidget_);
     } else if (name == "报警数据") {
         ui->stackedWidget->setCurrentWidget(alarmListWidget_);
     } else if (name == "调试设置") {
-        ui->stackedWidget->setCurrentWidget(ui->page4);
+        ui->stackedWidget->setCurrentWidget(ui->pageSettings);
     } else if (name == "退出") {
         systemExit();
     }
@@ -690,6 +715,38 @@ void frmMain::initDebugPage()
     ui->labVideoInVal->setText("RTSP / V4L2");
     ui->labMaxChannelsVal->setText("4");
 
+    // ========== 为 pageSettings 添加滚动支持 ==========
+    {
+        QVBoxLayout *pageSettingsLayout = qobject_cast<QVBoxLayout *>(ui->pageSettings->layout());
+        if (pageSettingsLayout) {
+            QScrollArea *scrollArea = new QScrollArea(ui->pageSettings);
+            scrollArea->setWidgetResizable(true);
+            scrollArea->setFrameShape(QFrame::NoFrame);
+            scrollArea->setStyleSheet("QScrollArea { background: transparent; border: none; }");
+
+            QWidget *scrollContent = new QWidget();
+            scrollContent->setStyleSheet("background: transparent;");
+            QVBoxLayout *contentLayout = new QVBoxLayout(scrollContent);
+            contentLayout->setContentsMargins(0, 0, 0, 0);
+            contentLayout->setSpacing(6);
+
+            // 将 pageSettings 中已有的控件移到 scrollContent
+            QLayoutItem *item;
+            while ((item = pageSettingsLayout->takeAt(0)) != nullptr) {
+                if (item->widget()) {
+                    contentLayout->addWidget(item->widget());
+                } else if (item->layout()) {
+                    contentLayout->addLayout(item->layout());
+                }
+                delete item;
+            }
+            contentLayout->addStretch();
+
+            scrollArea->setWidget(scrollContent);
+            pageSettingsLayout->addWidget(scrollArea);
+        }
+    }
+
     // ========== 视频通道（从 config.json 读取） ==========
     ui->lineEditCh1->setText(cfg.videoChannel(1));
     ui->lineEditCh2->setText(cfg.videoChannel(2));
@@ -818,13 +875,13 @@ void frmMain::initDebugPage()
             log("system", QString("围栏报警类别已更新: %1").arg(display));
         });
 
-        // 插入到 page4 的垂直布局中（在 stackedWidget 之前）
-        QVBoxLayout *page4Layout = qobject_cast<QVBoxLayout *>(
-            ui->page4->layout());
-        if (page4Layout) {
+        // 插入到 pageSettings 的垂直布局中（在 stackedWidget 之前）
+        QVBoxLayout *pageSettingsLayout = qobject_cast<QVBoxLayout *>(
+            ui->pageSettings->layout());
+        if (pageSettingsLayout) {
             // 在运行日志分组框之前插入围栏配置
-            int count = page4Layout->count();
-            page4Layout->insertWidget(count - 1, grpFence);  // 倒数第二个（最后是日志）
+            int count = pageSettingsLayout->count();
+            pageSettingsLayout->insertWidget(count - 1, grpFence);  // 倒数第二个（最后是日志）
         }
     }
 
