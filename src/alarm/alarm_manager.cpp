@@ -4,19 +4,35 @@
 //
 // 作用：
 //   管理报警的生成、存储、去重和通知。
+//   是整个报警系统的核心组件，连接检测层和存储/展示层。
 //
 // 核心功能：
-//   1. 接收检测结果，判断是否需要生成报警
-//   2. 去重限流：同通道同类目标在限流窗口内只报一次
-//   3. 存储报警记录（最多 1000 条）
-//   4. 通过 Qt 信号通知界面更新
+//   1. ingest(): 接收检测结果，判断是否需要生成报警
+//   2. storeAndNotify(): 存储报警到内存+数据库，并通知UI更新
+//   3. 去重限流：同通道同类目标在限流窗口内只报一次
+//   4. 报警类别过滤：只有配置的类别才触发报警
 //
-// 报警生成流程：
-//   1. ingest(): 接收检测结果
-//   2. 检查检测到的类别是否在报警类别列表中
-//   3. 检查是否在限流窗口内（默认 2 秒）
-//   4. 如果需要报警，创建 AlarmRecord
-//   5. storeAndNotify(): 存储报警记录并通知界面
+// 报警生成完整流程：
+//   ┌─────────────────────────────────────────────────────────────┐
+//   │  ffmpeg_video_decoder.cpp::decodeLoop()                    │
+//   │    │                                                       │
+//   │    ├── 每3帧做一次YOLO检测                                  │
+//   │    │                                                       │
+//   │    ├── 判断是否有电子围栏                                    │
+//   │    │   ├── 有围栏 → 过滤出围栏内目标 → ingest(filtered)      │
+//   │    │   └── 无围栏 → 直接 ingest(全部检测结果)                │
+//   │    │                                                       │
+//   │    ├── AlarmManager::ingest(channel, results)              │
+//   │    │   ├── 遍历检测结果                                      │
+//   │    │   ├── 检查类别是否在 alarmClasses_ 中                   │
+//   │    │   ├── 检查是否在限流窗口内（2秒）                        │
+//   │    │   └── 生成 AlarmRecord 列表返回                         │
+//   │    │                                                       │
+//   │    └── AlarmManager::storeAndNotify(newAlarms)             │
+//   │        ├── 添加到内存 alarms_ 列表（最多1000条）              │
+//   │        ├── AlarmDAO::insertAlarms() → 写入SQLite数据库       │
+//   │        └── emit alarmGenerated() → 通知UI显示报警            │
+//   └─────────────────────────────────────────────────────────────┘
 //
 // ============================================================================
 
@@ -68,20 +84,30 @@ void AlarmManager::setClassNames(const QStringList &names)
 // ============================================================================
 // ingest: 接收检测结果，判断是否需要生成报警
 // ============================================================================
+// 这是报警系统的入口函数，由解码线程调用。
+//
 // 参数：
 //   - channel: 视频通道编号（0, 1, 2, ...）
-//   - results: 检测结果列表
+//   - results: 检测结果列表（包含多个目标的类别、置信度、位置）
+//   - bypassThrottle: 是否跳过去重限流（围栏报警默认不限流）
 //
-// 返回：新生成的报警列表
+// 返回：新生成的报警列表（未存储，由调用方决定何时存储）
 //
 // 处理流程：
-//   1. 遍历所有检测结果
-//   2. 将 cls_id 转换为类别名称
-//   3. 统计各类别检测次数
-//   4. 检查是否需要生成报警：
-//      a. 类别在报警类别列表中
-//      b. 不在限流窗口内（同通道同类 2 秒只报 1 次）
-//   5. 创建 AlarmRecord 并添加到新报警列表
+//   1. 加锁保护共享数据（mutex_）
+//   2. 遍历所有检测结果：
+//      a. 将 cls_id 转换为类别名称（如 "person"、"helmet"）
+//      b. 统计各类别检测次数（用于仪表盘展示）
+//      c. 检查是否需要生成报警：
+//         - 类别必须在 alarmClasses_ 列表中
+//         - 同通道同类别必须超过限流间隔（2秒）
+//         - bypassThrottle=true 时跳过限流检查
+//      d. 创建 AlarmRecord 结构体
+//   3. 返回新报警列表
+//
+// 线程安全：
+//   - 整个函数在 mutex_ 保护下执行
+//   - 只在解码线程调用，不存在竞争
 //
 // ============================================================================
 QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_result_list &results,
@@ -161,14 +187,24 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
 // ============================================================================
 // storeAndNotify: 存储报警记录并通知界面
 // ============================================================================
+// 这是报警系统的出口函数，由解码线程调用。
+//
 // 流程：
-//   1. 将新报警添加到报警列表
+//   1. 加锁，将新报警添加到内存列表 alarms_
 //   2. 限制报警数量（最多 1000 条，超出时删除最早的）
-//   3. 通过 Qt 信号通知界面更新
+//   3. 解锁（避免发信号时死锁）
+//   4. 写入 SQLite 数据库（通过 AlarmDAO）
+//   5. 发送 alarmGenerated 信号通知UI显示新报警
+//   6. 发送 statsUpdated 信号通知UI刷新统计数据
+//
+// 线程安全：
+//   - alarms_ 的读写在 mutex_ 保护下
+//   - 信号/槽跨线程时自动排队，Qt 保证线程安全
+//   - 先解锁再发信号，避免死锁
 //
 // 注意：
-//   - 先解锁，再发信号，避免死锁
-//   - 信号/槽在不同线程执行时会自动排队
+//   - 如果数据库未初始化（dbInitialized_=false），只存内存不写数据库
+//   - 截图路径 imagePath 已由调用方（ffmpeg_video_decoder）填充
 //
 // ============================================================================
 void AlarmManager::storeAndNotify(const QVector<AlarmRecord> &alarms)
@@ -367,7 +403,18 @@ bool AlarmManager::initDatabase(const QString &dbPath)
 }
 
 // ============================================================================
-// loadAlarmsFromDatabase: 从数据库加载历史报警
+// loadAlarmsFromDatabase: 从数据库加载历史报警（程序启动时调用）
+// ============================================================================
+// 流程：
+//   1. 通过 AlarmDAO 查询所有报警（按时间倒序）
+//   2. 加锁，将数据库报警合并到内存列表（避免重复）
+//   3. 去重逻辑：比较 id（UUID主键）
+//   4. 限制总数量不超过 1000 条
+//
+// 使用场景：
+//   - 程序启动时调用，恢复上次退出前的报警记录
+//   - 重启后用户仍可查看所有状态的报警（包括已确认、已处置的）
+//
 // ============================================================================
 void AlarmManager::loadAlarmsFromDatabase(int limit)
 {
@@ -376,16 +423,14 @@ void AlarmManager::loadAlarmsFromDatabase(int limit)
     }
 
     AlarmDAO dao;
-    QVector<AlarmRecord> dbAlarms = dao.queryUnacknowledged(limit);
+    QVector<AlarmRecord> dbAlarms = dao.queryAll(limit);
 
     QMutexLocker lock(&mutex_);
     // 合并数据库报警到内存（避免重复）
     for (const AlarmRecord &alarm : dbAlarms) {
         bool exists = false;
         for (const AlarmRecord &existing : alarms_) {
-            if (existing.timestamp == alarm.timestamp &&
-                existing.channel == alarm.channel &&
-                existing.className == alarm.className) {
+            if (existing.id == alarm.id) {
                 exists = true;
                 break;
             }
@@ -404,7 +449,16 @@ void AlarmManager::loadAlarmsFromDatabase(int limit)
 }
 
 // ============================================================================
-// syncToDatabase: 同步内存报警到数据库
+// syncToDatabase: 同步内存报警到数据库（程序退出时调用）
+// ============================================================================
+// 将内存中所有报警记录批量写入数据库，确保不丢失。
+//
+// 使用场景：
+//   - 程序正常退出时调用（main.cpp 的 cleanup 逻辑）
+//   - 保证内存中的报警数据持久化
+//
+// 注意：必须先复制数据再解锁，避免与 DAO 的锁产生死锁
+//
 // ============================================================================
 void AlarmManager::syncToDatabase()
 {
@@ -412,13 +466,17 @@ void AlarmManager::syncToDatabase()
         return;
     }
 
-    QMutexLocker lock(&mutex_);
-    if (alarms_.isEmpty()) {
-        return;
-    }
+    QVector<AlarmRecord> alarmsCopy;
+    {
+        QMutexLocker lock(&mutex_);
+        if (alarms_.isEmpty()) {
+            return;
+        }
+        alarmsCopy = alarms_;  // 复制数据
+    } // 解锁后再调用 DAO
 
     AlarmDAO dao;
-    int64_t inserted = dao.insertAlarms(alarms_);
+    int64_t inserted = dao.insertAlarms(alarmsCopy);
     qInfo() << "AlarmManager: Synced" << inserted << "alarms to database";
 }
 

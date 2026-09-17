@@ -4,6 +4,21 @@
 //
 // 作用：
 //   管理 SQLite 数据库连接、初始化、表创建和维护。
+//   是整个数据库层的核心组件，提供线程安全的数据库访问。
+//
+// 架构：
+//   ┌─────────────────────────────────────────────────────────────┐
+//   │                    DatabaseManager (单例)                   │
+//   │   - initialize(): 打开SQLite连接 + 启用WAL模式 + 建表        │
+//   │   - database(): 返回 QSqlDatabase 供 DAO 使用               │
+//   │   - vacuum/backup/clean: 数据库维护功能                      │
+//   └─────────────────────────────────────────────────────────────┘
+//         │                    │                    │
+//         ▼                    ▼                    ▼
+//   ┌───────────┐      ┌──────────────┐      ┌──────────────┐
+//   │ AlarmDAO  │      │ DetectionDAO │      │   其他DAO    │
+//   │ 报警表CRUD │      │  检测表CRUD   │      │  扩展用      │
+//   └───────────┘      └──────────────┘      └──────────────┘
 //
 // ============================================================================
 
@@ -139,7 +154,25 @@ QSqlDatabase DatabaseManager::database() const
 }
 
 // ============================================================================
-// createTables: 创建所有表
+// createTables: 创建所有表（程序启动时自动调用）
+// ============================================================================
+// 使用 CREATE TABLE IF NOT EXISTS，重复运行不会报错。
+//
+// 表结构：
+//   1. detections: AI检测结果表
+//      - 记录每帧的检测结果（类别、置信度、位置框）
+//      - 用于统计分析，不直接展示给用户
+//
+//   2. alarms: 报警信息表
+//      - 记录触发报警的检测结果（含处置状态）
+//      - 用于报警列表展示、统计、处置跟踪
+//
+// 索引设计：
+//   - 按时间查询：idx_alarms_time, idx_detections_timestamp
+//   - 按通道查询：idx_alarms_channel, idx_detections_channel
+//   - 按状态筛选：idx_alarms_status（快速查未处理报警）
+//   - 按类别统计：idx_alarms_type, idx_detections_class
+//
 // ============================================================================
 bool DatabaseManager::createTables()
 {
@@ -293,6 +326,15 @@ int64_t DatabaseManager::databaseSize() const
 // ============================================================================
 // cleanOldDetections: 清理N天前的检测数据
 // ============================================================================
+// 删除 create_time 早于 cutoff 的所有检测记录。
+//
+// 使用场景：
+//   - 定期调用（如每天凌晨），防止数据库无限增长
+//   - 默认保留 30 天（可通过 setRetentionDays() 配置）
+//
+// 返回：实际删除的记录数
+//
+// ============================================================================
 int DatabaseManager::cleanOldDetections(int daysToKeep)
 {
     QMutexLocker lock(&mutex_);
@@ -323,6 +365,13 @@ int DatabaseManager::cleanOldDetections(int daysToKeep)
 // ============================================================================
 // cleanOldAlarms: 清理N天前的报警数据
 // ============================================================================
+// 删除 create_time 早于 cutoff 的所有报警记录。
+//
+// 注意：
+//   - 删除前应考虑是否需要归档（备份重要报警）
+//   - 删除后数据库空间不会立即释放，需要 VACUUM 回收
+//
+// ============================================================================
 int DatabaseManager::cleanOldAlarms(int daysToKeep)
 {
     QMutexLocker lock(&mutex_);
@@ -330,13 +379,13 @@ int DatabaseManager::cleanOldAlarms(int daysToKeep)
         return 0;
     }
 
-    // 计算截止时间戳（毫秒）
+    // 计算截止时间（ISO8601格式，与alarms表的create_time字段格式一致）
     QDateTime cutoff = QDateTime::currentDateTime().addDays(-daysToKeep);
-    long cutoffMs = cutoff.toMSecsSinceEpoch();
+    QString cutoffStr = cutoff.toString(Qt::ISODate);
 
     QSqlQuery query(db_);
-    query.prepare("DELETE FROM alarms WHERE timestamp < :cutoff");
-    query.bindValue(":cutoff", static_cast<qlonglong>(cutoffMs));
+    query.prepare("DELETE FROM alarms WHERE create_time < :cutoff");
+    query.bindValue(":cutoff", cutoffStr);
 
     if (!query.exec()) {
         qWarning() << "Clean alarms failed:" << query.lastError().text();

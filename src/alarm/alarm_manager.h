@@ -227,7 +227,7 @@ private:
                                                // key: "通道号:类别ID" -> 上次报警时间(ns)
     QSet<int> onlineChannels_;                 // 当前在线通道集合
     std::atomic<bool> screenshotsOn_{true};    // 报警是否截图（原子变量，线程安全）
-    bool dbInitialized_ = false;               // 数据库是否已初始化
+    std::atomic<bool> dbInitialized_{false};   // 数据库是否已初始化（原子变量，线程安全）
 };
 
 #endif // ALARM_MANAGER_H

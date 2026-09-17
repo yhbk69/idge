@@ -49,6 +49,9 @@ public:
     // 查询待处理报警 (status='pending')
     QVector<AlarmRecord> queryUnacknowledged(int limit = 1000);
 
+    // 查询所有报警（按时间倒序）
+    QVector<AlarmRecord> queryAll(int limit = 1000);
+
     // 按状态查询
     QVector<AlarmRecord> queryByStatus(const QString &status, int limit = 1000);
 

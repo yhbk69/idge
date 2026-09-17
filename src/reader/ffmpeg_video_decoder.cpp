@@ -869,6 +869,11 @@ void FFmpegVideoDecoder::decodeLoop()
                         }
 
                         // ===== 4.10 电子围栏判断 + 告警 =====
+                        // 流程：
+                        //   1. 检查围栏是否启用且该通道有围栏
+                        //   2. 如果有围栏：过滤出在围栏内的目标，再判断是否触发报警
+                        //   3. 如果没有围栏：直接使用全部检测结果判断报警
+                        //   4. 围栏模式下，只统计在围栏内的目标（inside_alarm模式）
                         auto &fenceMgr = geofence::FenceManager::instance();
                         bool fenceEnabled = fenceMgr.enabled();
                         bool hasFence = fenceEnabled && fenceMgr.hasFence(channel_);
@@ -876,12 +881,13 @@ void FFmpegVideoDecoder::decodeLoop()
 
                         QVector<AlarmRecord> newAlarms;
                         if (hasFence) {
+                            // 围栏模式：需要先过滤出在围栏内的目标
                             const geofence::ChannelFence &cf = fenceMgr.channelFence(channel_);
                             const QStringList &fenceClasses = fenceMgr.alarmClasses();
                             int oW = 0, oH = 0;
                             fenceMgr.overlaySize(channel_, oW, oH);
 
-                            // 汇总信息
+                            // 汇总信息：输出围栏检测的配置参数
                             const QStringList &alarmCls = AlarmManager::instance().alarmClasses();
                             fenceMgr.postLog("fence",
                                 QString("[通道%1] 围栏检测: %2个目标, 模式=%3, 围栏类别=%4, 报警类别=%5, 围栏=%6个")
@@ -903,7 +909,7 @@ void FFmpegVideoDecoder::decodeLoop()
                                 else
                                     clsName = QString("cls_%1").arg(d.cls_id);
 
-                                // 类别检查
+                                // 类别检查：只处理围栏类别中定义的目标
                                 bool classMatch = fenceClasses.isEmpty() ||
                                                   fenceClasses.contains(clsName);
                                 if (!classMatch) {
@@ -913,7 +919,8 @@ void FFmpegVideoDecoder::decodeLoop()
                                     continue;
                                 }
 
-                                // 围栏判定
+                                // 围栏判定：检查目标中心点是否在围栏区域内
+                                // alarmInside=true：目标在围栏内报警；false：目标在围栏外报警
                                 bool inside = geofence::FenceChecker::checkDetection(
                                         d,
                                         dislayImage.width, dislayImage.height,
@@ -928,6 +935,7 @@ void FFmpegVideoDecoder::decodeLoop()
                                         .arg(footX).arg(footY)
                                         .arg(inside ? "→ 在围栏内 ✓" : "→ 在围栏外"));
 
+                                // 只保留在围栏内的目标
                                 if (inside) {
                                     if (filteredOd.count < OBJ_NUMB_MAX_SIZE) {
                                         filteredOd.results[filteredOd.count++] = d;
@@ -935,16 +943,17 @@ void FFmpegVideoDecoder::decodeLoop()
                                 }
                             }
 
-                            // 过滤汇总
+                            // 过滤汇总：输出围栏内目标数量
                             fenceMgr.postLog("fence",
                                 QString("  [通道%1] 过滤结果: %2/%3 个目标在围栏内")
                                     .arg(channel_ + 1).arg(filteredOd.count).arg(od.count));
 
                             // 使用正常限流（2秒内同通道同类别只报1次），避免报警洪水
+                            // bypassThrottle=false：围栏报警也受2秒限流
                             newAlarms = AlarmManager::instance().ingest(channel_, filteredOd, false);
                             for (auto &a : newAlarms) a.isFenceAlarm = true;
 
-                            // 报警结果
+                            // 报警结果：输出围栏报警触发信息
                             if (!newAlarms.isEmpty()) {
                                 fenceMgr.postLog("alarm",
                                     QString("  [通道%1] ★ 围栏报警触发: %2 (置信度 %3%)")
@@ -959,13 +968,16 @@ void FFmpegVideoDecoder::decodeLoop()
                                         .arg(channel_ + 1).arg(filteredOd.count));
                             }
                         } else {
+                            // 无围栏模式：直接使用全部检测结果判断报警
+                            // bypassThrottle=false：普通检测报警也受2秒限流
                             newAlarms = AlarmManager::instance().ingest(channel_, od);
                         }
                         //
-                        // AlarmManager::ingest():
-                        //   - 统计检测结果
-                        //   - 判断是否命中告警类别（如：未戴安全帽）
-                        //   - 2秒去重限流：同通道同类目标 2秒 只报1次
+                        // AlarmManager::ingest() 处理流程：
+                        //   1. 统计各类别检测次数
+                        //   2. 检查类别是否在报警类别列表中
+                        //   3. 去重限流：同通道同类别 2 秒只报 1 次（bypassThrottle=true 时跳过限流）
+                        //   4. 创建 AlarmRecord 并返回
                         //
                         // 截图机制：
                         //   - 解码线程只负责拷贝像素 + 提交（不阻塞）
@@ -979,9 +991,14 @@ void FFmpegVideoDecoder::decodeLoop()
                                     channel_, newAlarms.front().className,
                                     dislayImage.width, dislayImage.height,
                                     (const unsigned char *)dislayImage.virt_addr);
+                                // 只在截图成功时设置路径
+                                for (auto &a : newAlarms) a.imagePath = snap;
                             }
-                            for (auto &a : newAlarms) a.imagePath = snap;
                             // 入库并通知界面（弹 toast / 报警列表新增）
+                            // storeAndNotify 流程：
+                            //   1. 将报警添加到内存列表（最多保留1000条）
+                            //   2. 写入 SQLite 数据库
+                            //   3. 发送 alarmGenerated 信号通知界面刷新
                             AlarmManager::instance().storeAndNotify(newAlarms);
                         }
                     }

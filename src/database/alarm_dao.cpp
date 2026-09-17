@@ -1,6 +1,16 @@
 // ============================================================================
 // alarm_dao.cpp - 报警信息数据访问对象实现
 // ============================================================================
+// 职责：
+//   封装 alarms 表的所有数据库操作（CRUD + 统计），
+//   提供给 AlarmManager 调用。
+//
+// 设计要点：
+//   1. 所有操作通过 DatabaseManager 获取共享的 QSqlDatabase 连接
+//   2. 批量插入使用事务（db.transaction/commit）提高性能
+//   3. 查询结果通过 recordFromQuery() 统一转换为 AlarmRecord 结构体
+//   4. 时间字段使用 ISO8601 格式字符串存储（SQLite 无原生时间类型）
+//
 // 参考 wvp_safety_alarm 表结构
 // ============================================================================
 
@@ -35,6 +45,16 @@ static QString currentDateTimeStr()
 
 // ============================================================================
 // insertAlarm: 插入单条报警记录
+// ============================================================================
+// 流程：
+//   1. 获取数据库连接（通过 DatabaseManager 单例）
+//   2. 如果 alarm.id 为空，自动生成 UUID 作为主键
+//   3. 准备 SQL INSERT 语句，绑定 20 个字段参数
+//   4. 执行插入，返回 1 表示成功，-1 表示失败
+//
+// 注意：
+//   - SQLite 不支持 lastInsertId for TEXT primary key，所以固定返回 1
+//   - createTime 如果为空，自动填充当前时间
 // ============================================================================
 int64_t AlarmDAO::insertAlarm(const AlarmRecord &alarm)
 {
@@ -93,7 +113,20 @@ int64_t AlarmDAO::insertAlarm(const AlarmRecord &alarm)
 }
 
 // ============================================================================
-// insertAlarms: 批量插入报警记录
+// insertAlarms: 批量插入报警记录（使用事务，性能优化）
+// ============================================================================
+// 流程：
+//   1. 获取数据库连接
+//   2. 开启事务（db.transaction()）—— 批量插入必须用事务，否则每条都写磁盘
+//   3. 遍历所有报警记录，逐条执行 INSERT
+//   4. 提交事务（db.commit()）—— 一次性写入磁盘
+//   5. 如果提交失败，回滚事务（db.rollback()）
+//
+// 性能说明：
+//   - 不用事务：每条 INSERT 都触发一次 fsync → 100条 = 100次磁盘IO
+//   - 使用事务：100条 INSERT + 1次 fsync → 提速 50-100 倍
+//
+// 返回：实际成功插入的记录数
 // ============================================================================
 int64_t AlarmDAO::insertAlarms(const QVector<AlarmRecord> &alarms)
 {
@@ -111,7 +144,7 @@ int64_t AlarmDAO::insertAlarms(const QVector<AlarmRecord> &alarms)
 
     QSqlQuery query(db);
     query.prepare(R"(
-        INSERT INTO alarms (id, alarm_type, alarm_level, alarm_time, channel,
+        INSERT OR REPLACE INTO alarms (id, alarm_type, alarm_level, alarm_time, channel,
                            class_id, class_name, confidence, image_path, video_path,
                            status, dispose_result, dispose_user_id, dispose_user_name,
                            dispose_time, dispose_photo, remark, read_time,
@@ -292,6 +325,34 @@ QVector<AlarmRecord> AlarmDAO::queryUnacknowledged(int limit)
     return results;
 }
 
+// ============================================================================
+// queryAll: 查询所有报警（按时间倒序）
+// ============================================================================
+// 用于程序启动时加载历史报警，重启后用户可查看所有状态的报警记录
+// ============================================================================
+QVector<AlarmRecord> AlarmDAO::queryAll(int limit)
+{
+    QVector<AlarmRecord> results;
+    QSqlDatabase db = DatabaseManager::instance().database();
+    if (!db.isOpen()) return results;
+
+    QSqlQuery query(db);
+    query.prepare(R"(
+        SELECT * FROM alarms
+        ORDER BY alarm_time DESC
+        LIMIT :limit
+    )");
+    query.bindValue(":limit", limit);
+
+    if (query.exec()) {
+        while (query.next()) {
+            results.append(recordFromQuery(query));
+        }
+    }
+
+    return results;
+}
+
 QVector<AlarmRecord> AlarmDAO::queryByStatus(const QString &status, int limit)
 {
     QVector<AlarmRecord> results;
@@ -361,6 +422,12 @@ AlarmRecord AlarmDAO::queryById(const QString &id)
 
 // ============================================================================
 // 更新操作
+// ============================================================================
+// 所有更新操作遵循相同模式：
+//   1. 获取数据库连接
+//   2. 准备 UPDATE SQL，绑定参数
+//   3. 执行并检查 numRowsAffected() 判断是否真的更新了数据
+//   4. 同时更新 update_time 字段（审计追踪）
 // ============================================================================
 
 bool AlarmDAO::updateStatus(const QString &id, const QString &status)
@@ -531,6 +598,8 @@ bool AlarmDAO::updateVideoPath(const QString &id, const QString &videoPath)
 // ============================================================================
 // 删除操作
 // ============================================================================
+// 注意：SQLite 不支持 TRUNCATE，使用 DELETE FROM 等效
+// ============================================================================
 
 bool AlarmDAO::remove(const QString &id)
 {
@@ -585,6 +654,12 @@ int AlarmDAO::cleanOldAlarms(int daysToKeep)
 
 // ============================================================================
 // 统计操作
+// ============================================================================
+// 所有统计操作使用 SELECT COUNT(*) 或 GROUP BY 查询
+// 返回 QMap 便于界面展示（key=维度，value=数量）
+//
+// 注意：startTime/endTime 参数预留但当前未使用（简化实现），
+//       如需按时间范围统计，可扩展 WHERE 子句
 // ============================================================================
 
 int AlarmDAO::totalAlarmCount(long startTime, long endTime)
@@ -733,7 +808,19 @@ QMap<QString, int> AlarmDAO::statusStatistics()
 }
 
 // ============================================================================
-// recordFromQuery: 从查询结果构建 AlarmRecord
+// recordFromQuery: 从 SQL 查询结果构建 AlarmRecord 结构体
+// ============================================================================
+// 将 QSqlQuery 当前行的各列映射到 AlarmRecord 的成员变量：
+//   - 数据库字段名（snake_case）→ C++ 成员名（camelCase）
+//   - 例如：alarm_type → alarmType, class_name → className
+//
+// 兼容旧字段处理：
+//   - timestamp: 从 alarmTime 字符串反向解析为毫秒时间戳
+//   - isFenceAlarm: 根据 alarmType 是否为 "fence" 推断
+//
+// 使用场景：
+//   - 所有查询操作（queryByTimeRange, queryByChannel 等）都调用此函数
+//   - 统一了 数据库行 → 内存对象 的转换逻辑
 // ============================================================================
 AlarmRecord AlarmDAO::recordFromQuery(QSqlQuery &query)
 {
