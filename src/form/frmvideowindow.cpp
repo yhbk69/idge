@@ -130,16 +130,21 @@ void frmVideoWindow::setExpandedMode(int channel, bool expanded)
         ui->videoWindow3, ui->videoWindow4
     };
     
+    QGridLayout* gridLayout = ui->gridLayout;
+    
     if (expanded) {
-        // 放大模式：隐藏其他通道，只显示选中通道
+        // 放大模式：隐藏其他通道，只显示选中通道，并占满整个网格
         expandedChannel_ = channel;
         
         for (int i = 0; i < 4; i++) {
             if (i == channel) {
                 players[i]->show();
                 players[i]->setExpanded(true);
+                gridLayout->removeWidget(players[i]);
+                gridLayout->addWidget(players[i], 0, 0, 2, 2);
             } else {
                 players[i]->hide();
+                gridLayout->removeWidget(players[i]);
             }
         }
     } else {
@@ -149,7 +154,12 @@ void frmVideoWindow::setExpandedMode(int channel, bool expanded)
         for (int i = 0; i < 4; i++) {
             players[i]->show();
             players[i]->setExpanded(false);
+            gridLayout->removeWidget(players[i]);
         }
+        gridLayout->addWidget(players[0], 0, 0);
+        gridLayout->addWidget(players[1], 0, 1);
+        gridLayout->addWidget(players[2], 1, 0);
+        gridLayout->addWidget(players[3], 1, 1);
     }
 }
 

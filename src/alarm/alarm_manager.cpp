@@ -26,6 +26,7 @@
 #include "database/alarm_dao.h"
 #include <QDateTime>
 #include <QDebug>
+#include <QUuid>
 
 // 获取单例实例
 // 使用静态局部变量实现线程安全的单例
@@ -119,15 +120,37 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
 
                 // 创建报警记录
                 AlarmRecord alarm;
-                alarm.timestamp = results.time;
+                alarm.id = QUuid::createUuid().toString().remove('{').remove('}').remove('-');
                 alarm.channel = channel;
                 alarm.clsId = det.cls_id;
                 alarm.className = className;
                 alarm.confidence = det.prop;
                 alarm.alarmType = bypassThrottle ? "fence" : "detection";
-                alarm.alarmLevel = bypassThrottle ? 2 : 3;  // 围栏报警紧急，普通报警一般
-                alarm.alarmTime = QDateTime::fromMSecsSinceEpoch(results.time).toString(Qt::ISODate);
+                alarm.alarmLevel = bypassThrottle ? 2 : 3;
+
+                // 确保timestamp有效
+                long ts = results.time;
+                if (ts <= 0 || ts > 9999999999999LL) {
+                    ts = QDateTime::currentMSecsSinceEpoch();
+                }
+                alarm.timestamp = ts;
+
+                // 确保alarmTime有效
+                QDateTime dt = QDateTime::fromMSecsSinceEpoch(ts);
+                if (!dt.isValid() || dt.date().year() < 2020) {
+                    dt = QDateTime::currentDateTime();
+                }
+                alarm.alarmTime = dt.toString(Qt::ISODate);
+
                 alarm.status = "pending";
+
+                // 调试输出
+                qDebug() << "AlarmManager: Creating alarm - id:" << alarm.id
+                         << "timestamp:" << alarm.timestamp
+                         << "alarmTime:" << alarm.alarmTime
+                         << "channel:" << alarm.channel
+                         << "className:" << alarm.className;
+
                 newAlarms.append(alarm);
             }
         }
