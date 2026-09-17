@@ -154,8 +154,8 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
                 alarm.alarmType = bypassThrottle ? "fence" : "detection";
                 alarm.alarmLevel = bypassThrottle ? 2 : 3;
 
-                // 确保timestamp有效
-                long ts = results.time;
+                // 确保timestamp有效(毫秒)
+                long ts = results.time / 1000000LL;
                 if (ts <= 0 || ts > 9999999999999LL) {
                     ts = QDateTime::currentMSecsSinceEpoch();
                 }

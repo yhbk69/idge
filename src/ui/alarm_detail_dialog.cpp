@@ -50,14 +50,14 @@ void AlarmDetailDialog::setupUi()
         return val;
     };
 
-    QDateTime dt;
-    dt.setMSecsSinceEpoch(alarm_.timestamp / 1000000);
+    QDateTime dt = QDateTime::fromString(alarm_.alarmTime, Qt::ISODate);
 
     addRow(0, "时间:", dt.toString("yyyy-MM-dd HH:mm:ss"));
     addRow(1, "通道:", QString("通道 %1").arg(alarm_.channel + 1));
     addRow(2, "类别:", alarm_.className);
     addRow(3, "置信度:", QString("%1%").arg(alarm_.confidence * 100, 0, 'f', 1));
-    statusLabel_ = addRow(4, "状态:", alarm_.status == "rectified" ? "已确认" : "未确认");
+    addRow(4, "ID:", alarm_.id);
+    statusLabel_ = addRow(5, "状态:", alarm_.status == "rectified" ? "已确认" : "未确认");
     if (alarm_.status != "rectified") {
         statusLabel_->setStyleSheet("color: #ff9800; font-size: 13px; font-weight: bold;");
     } else {

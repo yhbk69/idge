@@ -337,8 +337,7 @@ void AlarmListWidget::refreshTable()
         int originalIndex = total - 1 - i;
 
         // 时间列
-        QDateTime dt;
-        dt.setMSecsSinceEpoch(a.timestamp / 1000000);  // 纳秒转换为毫秒
+        QDateTime dt = QDateTime::fromString(a.alarmTime, Qt::ISODate);
         QTableWidgetItem *timeItem = new QTableWidgetItem(dt.toString("yyyy-MM-dd HH:mm:ss"));
         timeItem->setData(Qt::UserRole, a.imagePath);  // 存储截图路径
         timeItem->setData(Qt::UserRole + 1, originalIndex);  // 存储原始索引
@@ -381,7 +380,7 @@ void AlarmListWidget::refreshTable()
         table_->setCellWidget(i, 5, btnDetail);
 
         // ID列
-        table_->setItem(i, 6, new QTableWidgetItem(QString::number(i)));
+        table_->setItem(i, 6, new QTableWidgetItem(a.id));
     }
 }
 
@@ -472,8 +471,7 @@ void AlarmListWidget::refreshFenceTable()
     for (int i = 0; i < shown; i++) {
         const AlarmRecord &a = fenceAlarms[total - 1 - i];
 
-        QDateTime dt;
-        dt.setMSecsSinceEpoch(a.timestamp / 1000000);
+        QDateTime dt = QDateTime::fromString(a.alarmTime, Qt::ISODate);
         QTableWidgetItem *timeItem = new QTableWidgetItem(dt.toString("yyyy-MM-dd HH:mm:ss"));
         timeItem->setData(Qt::UserRole, a.imagePath);
         fenceTable_->setItem(i, 0, timeItem);

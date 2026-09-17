@@ -114,9 +114,7 @@ void VideoAlarmWidget::addAlarmItem(const AlarmRecord &alarm, int originalIndex)
     QVBoxLayout *infoLayout = new QVBoxLayout();
     infoLayout->setSpacing(2);
 
-    QDateTime dt;
-    dt.setMSecsSinceEpoch(alarm.timestamp / 1000000);
-
+    QDateTime dt = QDateTime::fromString(alarm.alarmTime, Qt::ISODate);
     QLabel *timeLabel = new QLabel(dt.toString("HH:mm:ss"));
     timeLabel->setStyleSheet("color: #aaa; font-size: 11px;");
     infoLayout->addWidget(timeLabel);
