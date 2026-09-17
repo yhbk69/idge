@@ -34,3 +34,7 @@ install/
 gmon.out
 plan/
 config.json
+
+# Test
+test_database
+test_*.cpp

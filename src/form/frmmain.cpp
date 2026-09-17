@@ -442,7 +442,7 @@ void frmMain::showAlarmToast(const AlarmRecord &alarm)
 {
     if (!alarmToast_) return;
 
-    QDateTime dt = QDateTime::fromMSecsSinceEpoch(alarm.timestamp / 1000000);
+    QDateTime dt = QDateTime::fromString(alarm.alarmTime, Qt::ISODate);
     alarmToast_->setText(QString("⚠ 通道%1 检测到 %2 (%3%%)  %4")
         .arg(alarm.channel + 1)
         .arg(alarm.className)

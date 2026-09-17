@@ -85,7 +85,7 @@ void AlarmListWidget::onStatsUpdated()
     QVector<AlarmRecord> alarms = mgr.alarms();
     int fpCount = 0;
     for (const auto &a : alarms) {
-        if (a.isFalsePositive) fpCount++;
+        if (a.status == "false_alarm") fpCount++;
     }
     QString statsText = QString("共 %1 条").arg(alarms.size());
     if (fpCount > 0) statsText += QString(" (误报 %1)").arg(fpCount);
@@ -295,7 +295,7 @@ void AlarmListWidget::refreshTable()
     QVector<AlarmRecord> alarms = mgr.alarms();
     QVector<AlarmRecord> filtered;
     for (const auto &a : alarms) {
-        if (a.isFalsePositive) continue;
+        if (a.status == "false_alarm") continue;
         if (filterChannel_ >= 0 && a.channel != filterChannel_) continue;
         if (!filterClass_.isEmpty() && a.className != filterClass_) continue;
         filtered.append(a);
@@ -307,8 +307,8 @@ void AlarmListWidget::refreshTable()
     int unack = 0;
     int fpCount = 0;
     for (const auto &a : alarms) {
-        if (a.isFalsePositive) fpCount++;
-        else if (!a.acknowledged) unack++;
+        if (a.status == "false_alarm") fpCount++;
+        else if (a.status != "rectified") unack++;
     }
     QString statsText = QString("共 %1 条").arg(totalAll);
     if (fpCount > 0) statsText += QString(" (误报 %1)").arg(fpCount);
@@ -340,7 +340,7 @@ void AlarmListWidget::refreshTable()
         QDateTime dt;
         dt.setMSecsSinceEpoch(a.timestamp / 1000000);  // 纳秒转换为毫秒
         QTableWidgetItem *timeItem = new QTableWidgetItem(dt.toString("yyyy-MM-dd HH:mm:ss"));
-        timeItem->setData(Qt::UserRole, a.imgPath);  // 存储截图路径
+        timeItem->setData(Qt::UserRole, a.imagePath);  // 存储截图路径
         timeItem->setData(Qt::UserRole + 1, originalIndex);  // 存储原始索引
         table_->setItem(i, 0, timeItem);
         
@@ -357,10 +357,10 @@ void AlarmListWidget::refreshTable()
 
         // 状态列
         QTableWidgetItem *statusItem;
-        if (a.isFalsePositive) {
+        if (a.status == "false_alarm") {
             statusItem = new QTableWidgetItem("误报");
             statusItem->setForeground(QColor(158, 158, 158));  // 灰色
-        } else if (a.acknowledged) {
+        } else if (a.status == "rectified") {
             statusItem = new QTableWidgetItem("已确认");
             statusItem->setForeground(QColor(76, 175, 80));   // 绿色
         } else {
@@ -475,7 +475,7 @@ void AlarmListWidget::refreshFenceTable()
         QDateTime dt;
         dt.setMSecsSinceEpoch(a.timestamp / 1000000);
         QTableWidgetItem *timeItem = new QTableWidgetItem(dt.toString("yyyy-MM-dd HH:mm:ss"));
-        timeItem->setData(Qt::UserRole, a.imgPath);
+        timeItem->setData(Qt::UserRole, a.imagePath);
         fenceTable_->setItem(i, 0, timeItem);
 
         fenceTable_->setItem(i, 1, new QTableWidgetItem(QString("通道 %1").arg(a.channel + 1)));
@@ -564,7 +564,7 @@ void AlarmListWidget::onHeaderSectionClicked(int logicalIndex)
         QSet<QString> classes;
         QVector<AlarmRecord> alarms = AlarmManager::instance().alarms();
         for (const auto &a : alarms) {
-            if (!a.isFalsePositive) classes.insert(a.className);
+            if (a.status != "false_alarm") classes.insert(a.className);
         }
 
         menu.addAction("全部类别", this, [this]() {

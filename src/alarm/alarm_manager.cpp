@@ -22,6 +22,8 @@
 
 #include "alarm_manager.h"
 #include "ConfigManager.h"
+#include "database/database_manager.h"
+#include "database/alarm_dao.h"
 #include <QDateTime>
 #include <QDebug>
 
@@ -122,7 +124,10 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
                 alarm.clsId = det.cls_id;
                 alarm.className = className;
                 alarm.confidence = det.prop;
-                alarm.acknowledged = false;  // 未确认
+                alarm.alarmType = bypassThrottle ? "fence" : "detection";
+                alarm.alarmLevel = bypassThrottle ? 2 : 3;  // 围栏报警紧急，普通报警一般
+                alarm.alarmTime = QDateTime::fromMSecsSinceEpoch(results.time).toString(Qt::ISODate);
+                alarm.status = "pending";
                 newAlarms.append(alarm);
             }
         }
@@ -156,6 +161,15 @@ void AlarmManager::storeAndNotify(const QVector<AlarmRecord> &alarms)
             alarms_.removeFirst();  // 删除最早的报警
         }
     } // 解锁后再发信号，避免死锁
+
+    // 写入数据库
+    if (dbInitialized_ && !alarms.isEmpty()) {
+        AlarmDAO dao;
+        int64_t inserted = dao.insertAlarms(alarms);
+        qDebug() << "AlarmManager: Inserted" << inserted << "alarms to database";
+    } else if (!dbInitialized_) {
+        qWarning() << "AlarmManager: Database not initialized, alarms not saved";
+    }
 
     // 通知界面更新
     for (const AlarmRecord &alarm : alarms)
@@ -212,7 +226,7 @@ int AlarmManager::unacknowledgedCount() const
     QMutexLocker lock(&mutex_);
     int count = 0;
     for (const auto &a : alarms_) {
-        if (!a.acknowledged && !a.isFalsePositive) count++;
+        if (a.status == "pending") count++;
     }
     return count;
 }
@@ -222,7 +236,8 @@ void AlarmManager::acknowledgeAll()
 {
     QMutexLocker lock(&mutex_);
     for (auto &a : alarms_) {
-        a.acknowledged = true;
+        a.status = "rectified";
+        a.updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
     }
 }
 
@@ -233,7 +248,8 @@ bool AlarmManager::acknowledgeAlarm(int index)
     if (index < 0 || index >= alarms_.size()) {
         return false;
     }
-    alarms_[index].acknowledged = true;
+    alarms_[index].status = "rectified";
+    alarms_[index].updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
     return true;
 }
 
@@ -262,7 +278,8 @@ bool AlarmManager::markAsFalsePositive(int index)
     if (index < 0 || index >= alarms_.size()) {
         return false;
     }
-    alarms_[index].isFalsePositive = true;
+    alarms_[index].status = "false_alarm";
+    alarms_[index].updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
     return true;
 }
 
@@ -300,4 +317,98 @@ QStringList AlarmManager::alarmClasses() const
 {
     QMutexLocker lock(&mutex_);
     return alarmClasses_;
+}
+
+// ============================================================================
+// 数据库支持
+// ============================================================================
+
+// ============================================================================
+// initDatabase: 初始化数据库连接
+// ============================================================================
+bool AlarmManager::initDatabase(const QString &dbPath)
+{
+    QMutexLocker lock(&mutex_);
+    if (dbInitialized_) {
+        return true;
+    }
+
+    if (DatabaseManager::instance().initialize(dbPath)) {
+        dbInitialized_ = true;
+        qInfo() << "AlarmManager: Database initialized:" << dbPath;
+        return true;
+    }
+
+    qWarning() << "AlarmManager: Failed to initialize database";
+    return false;
+}
+
+// ============================================================================
+// loadAlarmsFromDatabase: 从数据库加载历史报警
+// ============================================================================
+void AlarmManager::loadAlarmsFromDatabase(int limit)
+{
+    if (!dbInitialized_) {
+        return;
+    }
+
+    AlarmDAO dao;
+    QVector<AlarmRecord> dbAlarms = dao.queryUnacknowledged(limit);
+
+    QMutexLocker lock(&mutex_);
+    // 合并数据库报警到内存（避免重复）
+    for (const AlarmRecord &alarm : dbAlarms) {
+        bool exists = false;
+        for (const AlarmRecord &existing : alarms_) {
+            if (existing.timestamp == alarm.timestamp &&
+                existing.channel == alarm.channel &&
+                existing.className == alarm.className) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            alarms_.append(alarm);
+        }
+    }
+
+    // 限制报警数量
+    while (alarms_.size() > 1000) {
+        alarms_.removeFirst();
+    }
+
+    qInfo() << "AlarmManager: Loaded" << dbAlarms.size() << "alarms from database";
+}
+
+// ============================================================================
+// syncToDatabase: 同步内存报警到数据库
+// ============================================================================
+void AlarmManager::syncToDatabase()
+{
+    if (!dbInitialized_) {
+        return;
+    }
+
+    QMutexLocker lock(&mutex_);
+    if (alarms_.isEmpty()) {
+        return;
+    }
+
+    AlarmDAO dao;
+    int64_t inserted = dao.insertAlarms(alarms_);
+    qInfo() << "AlarmManager: Synced" << inserted << "alarms to database";
+}
+
+// ============================================================================
+// cleanOldData: 清理N天前的数据库数据
+// ============================================================================
+void AlarmManager::cleanOldData(int daysToKeep)
+{
+    if (!dbInitialized_) {
+        return;
+    }
+
+    DatabaseManager::instance().cleanOldDetections(daysToKeep);
+    DatabaseManager::instance().cleanOldAlarms(daysToKeep);
+    qInfo() << "AlarmManager: Cleaned data older than" << daysToKeep << "days";
 }

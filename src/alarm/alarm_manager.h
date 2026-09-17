@@ -34,6 +34,9 @@
 #include <atomic>
 #include "common.hpp"
 
+// 前向声明
+class QSqlDatabase;
+
 // ============================================================================
 // AlarmRecord - 报警记录结构体
 // ============================================================================
@@ -48,15 +51,30 @@
 //
 // ============================================================================
 struct AlarmRecord {
-    long timestamp;          // 报警时间戳
-    int channel;             // 视频通道编号
-    int clsId;               // 类别 ID
-    QString className;       // 类别名称
-    float confidence;        // 置信度
-    bool acknowledged;       // 是否已确认
-    bool isFalsePositive;    // 是否为误报
-    QString imgPath;         // 报警截图路径（可为空）
-    bool isFenceAlarm = false;  // 是否为电子围栏报警
+    QString id;               // UUID 主键
+    QString alarmType;        // 报警类型 (no_helmet, fire, fence等)
+    int alarmLevel = 3;       // 报警级别: 1紧急 2重要 3一般 4提示
+    QString alarmTime;        // 报警发生时间
+    int channel;              // 视频通道编号
+    int clsId;                // 类别 ID
+    QString className;        // 类别名称
+    float confidence;         // 置信度
+    QString imagePath;        // 报警图片路径
+    QString videoPath;        // 报警视频路径
+    QString status = "pending";  // 状态: pending/rectified/false_alarm
+    QString disposeResult;    // 处置结果
+    int disposeUserId = 0;    // 处置人ID
+    QString disposeUserName;  // 处置人姓名
+    QString disposeTime;      // 处置时间
+    QString disposePhoto;     // 现场处置照片路径
+    QString remark;           // 补充说明
+    QString readTime;         // 已读时间
+    QString createTime;       // 入库时间
+    QString updateTime;       // 更新时间
+
+    // 兼容旧字段
+    long timestamp = 0;       // 时间戳(毫秒)
+    bool isFenceAlarm = false;
 };
 
 // 注册自定义类型（用于 Qt 信号/槽跨线程传递）
@@ -169,6 +187,25 @@ public:
     void setScreenshotsEnabled(bool on);
     bool screenshotsEnabled() const;
 
+    // ============================================================================
+    // 数据库支持
+    // ============================================================================
+
+    // 初始化数据库连接
+    bool initDatabase(const QString &dbPath = "idge.db");
+
+    // 数据库是否已初始化
+    bool isDatabaseInitialized() const { return dbInitialized_; }
+
+    // 从数据库加载历史报警（程序启动时调用）
+    void loadAlarmsFromDatabase(int limit = 1000);
+
+    // 同步内存报警到数据库（程序退出时调用）
+    void syncToDatabase();
+
+    // 清理N天前的数据库数据
+    void cleanOldData(int daysToKeep = 30);
+
 signals:
     // 报警生成信号（通知界面显示新报警）
     void alarmGenerated(const AlarmRecord &alarm);
@@ -190,6 +227,7 @@ private:
                                                // key: "通道号:类别ID" -> 上次报警时间(ns)
     QSet<int> onlineChannels_;                 // 当前在线通道集合
     std::atomic<bool> screenshotsOn_{true};    // 报警是否截图（原子变量，线程安全）
+    bool dbInitialized_ = false;               // 数据库是否已初始化
 };
 
 #endif // ALARM_MANAGER_H

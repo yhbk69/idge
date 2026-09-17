@@ -172,6 +172,9 @@ include_directories(
     # === libjpeg-turbo JPEG 解码库 ===
     ${CMAKE_SOURCE_DIR}/3rdparty/jpeg_turbo/include
 
+    # === SQLite 嵌入式数据库 ===
+    ${CMAKE_SOURCE_DIR}/3rdparty/sqlite/sqlite
+
     # ====================================================================
     # 项目源码目录（按模块分组）
     # ====================================================================
@@ -391,6 +394,7 @@ target_link_libraries(${PROJECT_NAME}
     # ==================== 第三方库 ====================
     mk_api                      # ZLMediaKit 流媒体 API
     jsoncpp                     # JsonCpp JSON 解析库
+    sqlite3                     # SQLite 嵌入式数据库
 
     # ==================== Rockchip 硬件加速库 ====================
     rknnrt                      # RKNN NPU 推理运行时（3 核心，18 TOPS）
@@ -439,3 +443,33 @@ target_link_options(${PROJECT_NAME} PRIVATE "LINKER:--allow-shlib-undefined" "LI
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg-rkmpp/lib/
         DESTINATION lib
         FILES_MATCHING PATTERN "*.so*")
+
+# ============================================================================
+# 测试程序
+# ============================================================================
+# 数据库模块测试
+add_executable(test_database
+    tests/test_database.cpp
+    src/database/database_manager.cpp
+    src/database/detection_dao.cpp
+    src/database/alarm_dao.cpp
+)
+
+target_include_directories(test_database PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/database
+    ${CMAKE_SOURCE_DIR}/src/yolo11
+    ${CMAKE_SOURCE_DIR}/src/alarm
+    ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/include
+    ${CMAKE_SOURCE_DIR}/3rdparty/sqlite
+)
+
+target_link_libraries(test_database
+    Qt5::Core
+    Qt5::Sql
+    sqlite3
+    ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/lib/libjsoncpp.a
+    pthread
+)
+
+target_compile_definitions(test_database PRIVATE ZERO_COPY)

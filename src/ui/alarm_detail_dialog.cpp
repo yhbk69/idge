@@ -57,8 +57,8 @@ void AlarmDetailDialog::setupUi()
     addRow(1, "通道:", QString("通道 %1").arg(alarm_.channel + 1));
     addRow(2, "类别:", alarm_.className);
     addRow(3, "置信度:", QString("%1%").arg(alarm_.confidence * 100, 0, 'f', 1));
-    statusLabel_ = addRow(4, "状态:", alarm_.acknowledged ? "已确认" : "未确认");
-    if (!alarm_.acknowledged) {
+    statusLabel_ = addRow(4, "状态:", alarm_.status == "rectified" ? "已确认" : "未确认");
+    if (alarm_.status != "rectified") {
         statusLabel_->setStyleSheet("color: #ff9800; font-size: 13px; font-weight: bold;");
     } else {
         statusLabel_->setStyleSheet("color: #4caf50; font-size: 13px; font-weight: bold;");
@@ -103,12 +103,12 @@ void AlarmDetailDialog::setupUi()
 
 void AlarmDetailDialog::loadScreenshot()
 {
-    if (alarm_.imgPath.isEmpty() || !QFile::exists(alarm_.imgPath)) {
+    if (alarm_.imagePath.isEmpty() || !QFile::exists(alarm_.imagePath)) {
         imageLabel_->setText("无截图");
         return;
     }
 
-    QPixmap pix(alarm_.imgPath);
+    QPixmap pix(alarm_.imagePath);
     if (pix.isNull()) {
         imageLabel_->setText("截图加载失败");
         return;

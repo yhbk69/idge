@@ -62,7 +62,7 @@ void VideoAlarmWidget::refreshAlarms()
     QVector<AlarmRecord> alarms = AlarmManager::instance().alarms();
     QVector<QPair<AlarmRecord, int>> filteredAlarms;
     for (int i = 0; i < alarms.size(); i++) {
-        if (!alarms[i].isFalsePositive) {
+        if (alarms[i].status != "false_alarm") {
             filteredAlarms.append(qMakePair(alarms[i], i));
         }
     }
@@ -97,8 +97,8 @@ void VideoAlarmWidget::addAlarmItem(const AlarmRecord &alarm, int originalIndex)
     imageLabel->setStyleSheet("background: #1e1e2e; border: 1px solid #444; border-radius: 4px;");
     imageLabel->setAlignment(Qt::AlignCenter);
 
-    if (!alarm.imgPath.isEmpty() && QFile::exists(alarm.imgPath)) {
-        QPixmap pix(alarm.imgPath);
+    if (!alarm.imagePath.isEmpty() && QFile::exists(alarm.imagePath)) {
+        QPixmap pix(alarm.imagePath);
         if (!pix.isNull()) {
             QPixmap scaled = pix.scaled(64, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation);
             imageLabel->setPixmap(scaled);

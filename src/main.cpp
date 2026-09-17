@@ -63,6 +63,7 @@
 
 #include "config/parse_config.hpp"
 #include "yolo11/yolo11_model.hpp"
+#include "alarm_manager.h"
 
 //std::shared_ptr<dpool::ThreadPool> detectPool;
 
@@ -268,6 +269,10 @@ int main(int argc, char *argv[])
     QtHelper::setFont();
     QtHelper::setCode();
 
+    // 初始化数据库
+    AlarmManager::instance().initDatabase("idge.db");
+    AlarmManager::instance().loadAlarmsFromDatabase();
+
     // 创建并显示主窗口
     frmMain w;
 
@@ -276,6 +281,10 @@ int main(int argc, char *argv[])
 
     // 进入 Qt 事件循环
     a.exec();
+
+    // 程序退出前清理和同步
+    AlarmManager::instance().cleanOldData(30);
+    AlarmManager::instance().syncToDatabase();
 
     return 0;
 }

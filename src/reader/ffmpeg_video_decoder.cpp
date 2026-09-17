@@ -980,7 +980,7 @@ void FFmpegVideoDecoder::decodeLoop()
                                     dislayImage.width, dislayImage.height,
                                     (const unsigned char *)dislayImage.virt_addr);
                             }
-                            for (auto &a : newAlarms) a.imgPath = snap;
+                            for (auto &a : newAlarms) a.imagePath = snap;
                             // 入库并通知界面（弹 toast / 报警列表新增）
                             AlarmManager::instance().storeAndNotify(newAlarms);
                         }
