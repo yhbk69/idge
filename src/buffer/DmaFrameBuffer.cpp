@@ -192,9 +192,17 @@ void DmaFrameBuffer::free_drm_buffer() {
         m_fd= -1;
     }
     if (m_handle != 0) {
-        struct drm_mode_destroy_dumb destroy = {};
-        destroy.handle = m_handle;
-        ioctl(m_drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);  // 释放显存
+        // 需要重新打开 DRM 设备来释放显存（因为 alloc_drm_buffer 中已关闭 m_drm_fd）
+        int drm_fd = open("/dev/dri/card0", O_RDWR);
+        if (drm_fd < 0) {
+            drm_fd = open("/dev/dri/renderD128", O_RDWR);
+        }
+        if (drm_fd >= 0) {
+            struct drm_mode_destroy_dumb destroy = {};
+            destroy.handle = m_handle;
+            ioctl(drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);  // 释放显存
+            close(drm_fd);
+        }
         m_handle = 0;
     }
     m_size = 0;

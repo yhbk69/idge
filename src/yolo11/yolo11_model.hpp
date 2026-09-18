@@ -227,11 +227,14 @@ public:
 
     void dump_tensor_attr(rknn_tensor_attr *attr)
     {
-        char dims[128] = {0};
+        char dims[256] = {0};
+        int offset = 0;
         for (int i = 0; i < attr->n_dims; ++i)
         {
-            int idx = strlen(dims);
-            sprintf(&dims[idx], "%d%s", attr->dims[i], (i == attr->n_dims - 1) ? "" : ", ");
+            int written = snprintf(dims + offset, sizeof(dims) - offset, "%d%s", 
+                                   attr->dims[i], (i == attr->n_dims - 1) ? "" : ", ");
+            if (written > 0) offset += written;
+            if (offset >= (int)sizeof(dims)) break;
         }
         printf("  index=%d, name=%s, n_dims=%d, dims=[%s], n_elems=%d, size=%d, w_stride = %d, size_with_stride = %d, "
                "fmt=%s, type=%s, qnt_type=%s, "

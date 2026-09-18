@@ -16,8 +16,9 @@
 //   FenceManager::instance().saveToConfig();      // 保存到文件
 //
 // 线程安全：
-//   loadFromConfig/saveToConfig 在主线程调用
-//   checkDetection 在解码线程调用（只读访问，无写冲突）
+//   通过 QMutex 保护所有成员变量的读写
+//   UI 线程可调用 setEnabled/setMode/addShape 等写操作
+//   解码线程同时调用 checkDetection 读取数据
 //
 // ============================================================================
 
@@ -25,6 +26,8 @@
 #include <QObject>
 #include <QMap>
 #include <QPair>
+#include <QMutex>
+#include <QMutexLocker>
 
 class ConfigManager;
 
@@ -105,6 +108,7 @@ signals:
 private:
     FenceManager() = default;
 
+    mutable QMutex mutex_;                                  // 保护所有成员变量的互斥锁
     bool enabled_ = false;                                  // 围栏总开关
     QString mode_ = "inside_alarm";                         // 报警模式
     QStringList alarmClasses_ = {"person"};                 // 触发围栏报警的类别

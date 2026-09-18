@@ -74,6 +74,7 @@ ConfigManager &ConfigManager::instance()
 // ============================================================================
 void ConfigManager::load(const QString &path)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     configPath_ = path;
     QFile file(path);
 
@@ -119,7 +120,7 @@ void ConfigManager::load(const QString &path)
             {"classes", QJsonArray{"person"}}  // 报警类别（检测到人时报警）
         };
 
-        save();  // 保存默认配置
+        saveUnsafe();  // 保存默认配置
         return;
     }
 
@@ -139,11 +140,9 @@ void ConfigManager::load(const QString &path)
 }
 
 // ============================================================================
-// 将当前配置保存到 JSON 文件
+// 将当前配置保存到 JSON 文件（内部不加锁版本）
 // ============================================================================
-// 使用 Indented 格式写入，便于人工阅读和编辑
-// ============================================================================
-void ConfigManager::save()
+void ConfigManager::saveUnsafe()
 {
     QFile file(configPath_);
     if (file.open(QIODevice::WriteOnly)) {
@@ -151,6 +150,17 @@ void ConfigManager::save()
         file.write(doc.toJson(QJsonDocument::Indented));
         file.close();
     }
+}
+
+// ============================================================================
+// 将当前配置保存到 JSON 文件
+// ============================================================================
+// 使用 Indented 格式写入，便于人工阅读和编辑
+// ============================================================================
+void ConfigManager::save()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    saveUnsafe();
 }
 
 // ==========================================
@@ -169,6 +179,7 @@ void ConfigManager::save()
 // ============================================================================
 QString ConfigManager::videoChannel(int ch) const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject video = root_["video"].toObject();
     return video.value(QString("channel%1").arg(ch)).toString();
 }
@@ -183,6 +194,7 @@ QString ConfigManager::videoChannel(int ch) const
 // ============================================================================
 void ConfigManager::setVideoChannel(int ch, const QString &path)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject video = root_["video"].toObject();
     video[QString("channel%1").arg(ch)] = path;
     root_["video"] = video;
@@ -195,6 +207,7 @@ void ConfigManager::setVideoChannel(int ch, const QString &path)
 // 获取指定通道的备注
 QString ConfigManager::channelNote(int ch) const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject video = root_["video"].toObject();
     QJsonArray notes = video["notes"].toArray();
     if (ch >= 1 && ch <= notes.size()) {
@@ -206,6 +219,7 @@ QString ConfigManager::channelNote(int ch) const
 // 设置指定通道的备注
 void ConfigManager::setChannelNote(int ch, const QString &note)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject video = root_["video"].toObject();
     QJsonArray notes = video["notes"].toArray();
     // 补齐到 4 个
@@ -243,6 +257,7 @@ static QJsonObject cascadeModelObject(const QJsonObject &cascade, int idx)
 // 获取级联模型路径
 QString ConfigManager::cascadeModelPath(int idx) const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject cascade = root_["cascade"].toObject();
     return cascadeModelObject(cascade, idx)["path"].toString();
 }
@@ -250,6 +265,7 @@ QString ConfigManager::cascadeModelPath(int idx) const
 // 设置级联模型路径
 void ConfigManager::setCascadeModelPath(int idx, const QString &path)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject cascade = root_["cascade"].toObject();
     QJsonArray arr = cascade["models"].toArray();
     // 补齐到 5 个
@@ -266,6 +282,7 @@ void ConfigManager::setCascadeModelPath(int idx, const QString &path)
 // 获取级联模型备注
 QString ConfigManager::cascadeModelNote(int idx) const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject cascade = root_["cascade"].toObject();
     return cascadeModelObject(cascade, idx)["note"].toString();
 }
@@ -273,6 +290,7 @@ QString ConfigManager::cascadeModelNote(int idx) const
 // 设置级联模型备注
 void ConfigManager::setCascadeModelNote(int idx, const QString &note)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject cascade = root_["cascade"].toObject();
     QJsonArray arr = cascade["models"].toArray();
     // 补齐到 5 个
@@ -289,6 +307,7 @@ void ConfigManager::setCascadeModelNote(int idx, const QString &note)
 // 获取级联模型标签文件路径
 QString ConfigManager::cascadeModelLabel(int idx) const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject cascade = root_["cascade"].toObject();
     return cascadeModelObject(cascade, idx)["label"].toString();
 }
@@ -296,6 +315,7 @@ QString ConfigManager::cascadeModelLabel(int idx) const
 // 设置级联模型标签文件路径
 void ConfigManager::setCascadeModelLabel(int idx, const QString &label)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject cascade = root_["cascade"].toObject();
     QJsonArray arr = cascade["models"].toArray();
     // 补齐到 5 个
@@ -316,12 +336,14 @@ void ConfigManager::setCascadeModelLabel(int idx, const QString &label)
 // 获取 RKNN 模型文件路径
 QString ConfigManager::modelPath() const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     return root_["model"].toObject()["path"].toString();
 }
 
 // 设置 RKNN 模型文件路径
 void ConfigManager::setModelPath(const QString &path)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject model = root_["model"].toObject();
     model["path"] = path;
     root_["model"] = model;
@@ -330,12 +352,14 @@ void ConfigManager::setModelPath(const QString &path)
 // 获取标签文件路径
 QString ConfigManager::labelPath() const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     return root_["model"].toObject()["label"].toString();
 }
 
 // 设置标签文件路径
 void ConfigManager::setLabelPath(const QString &path)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject model = root_["model"].toObject();
     model["label"] = path;
     root_["model"] = model;
@@ -344,12 +368,14 @@ void ConfigManager::setLabelPath(const QString &path)
 // 获取模型输入尺寸（格式如 "640x640"）
 QString ConfigManager::inputSize() const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     return root_["model"].toObject()["input_size"].toString();
 }
 
 // 获取模型类型名称（如 "YOLO11"）
 QString ConfigManager::modelType() const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     return root_["model"].toObject()["type"].toString();
 }
 
@@ -368,12 +394,14 @@ QString ConfigManager::modelType() const
 // ============================================================================
 double ConfigManager::confThreshold() const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     return root_["detect"].toObject()["conf_threshold"].toDouble(0.25);
 }
 
 // 设置置信度阈值
 void ConfigManager::setConfThreshold(double val)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject detect = root_["detect"].toObject();
     detect["conf_threshold"] = val;
     root_["detect"] = detect;
@@ -396,12 +424,14 @@ void ConfigManager::setConfThreshold(double val)
 // ============================================================================
 double ConfigManager::nmsThreshold() const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     return root_["detect"].toObject()["nms_threshold"].toDouble(0.45);
 }
 
 // 设置 NMS 阈值
 void ConfigManager::setNmsThreshold(double val)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject detect = root_["detect"].toObject();
     detect["nms_threshold"] = val;
     root_["detect"] = detect;
@@ -410,6 +440,7 @@ void ConfigManager::setNmsThreshold(double val)
 // 获取检测类别数量（默认 80，COCO 数据集）
 int ConfigManager::classNum() const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     return root_["detect"].toObject()["class_num"].toInt(80);
 }
 
@@ -421,6 +452,7 @@ int ConfigManager::classNum() const
 // ============================================================================
 int ConfigManager::threads() const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     return root_["detect"].toObject()["threads"].toInt(3);
 }
 
@@ -436,6 +468,7 @@ int ConfigManager::threads() const
 // ============================================================================
 QStringList ConfigManager::alarmClasses() const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonArray arr = root_["alarm"].toObject()["classes"].toArray();
     QStringList list;
     for (const auto &v : arr) {
@@ -447,6 +480,7 @@ QStringList ConfigManager::alarmClasses() const
 // 设置报警类别列表
 void ConfigManager::setAlarmClasses(const QStringList &classes)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject alarm = root_["alarm"].toObject();
     QJsonArray arr;
     for (const auto &s : classes) {
@@ -462,11 +496,13 @@ void ConfigManager::setAlarmClasses(const QStringList &classes)
 
 bool ConfigManager::geofenceEnabled() const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     return root_["geofence"].toObject()["enabled"].toBool(false);
 }
 
 void ConfigManager::setGeofenceEnabled(bool enabled)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject gf = root_["geofence"].toObject();
     gf["enabled"] = enabled;
     root_["geofence"] = gf;
@@ -474,11 +510,13 @@ void ConfigManager::setGeofenceEnabled(bool enabled)
 
 QString ConfigManager::geofenceMode() const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     return root_["geofence"].toObject()["mode"].toString("inside_alarm");
 }
 
 void ConfigManager::setGeofenceMode(const QString &mode)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject gf = root_["geofence"].toObject();
     gf["mode"] = mode;
     root_["geofence"] = gf;
@@ -486,11 +524,13 @@ void ConfigManager::setGeofenceMode(const QString &mode)
 
 QJsonObject ConfigManager::geofenceChannels() const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     return root_["geofence"].toObject()["channels"].toObject();
 }
 
 void ConfigManager::setGeofenceChannels(const QJsonObject &channels)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject gf = root_["geofence"].toObject();
     gf["channels"] = channels;
     root_["geofence"] = gf;
@@ -498,6 +538,7 @@ void ConfigManager::setGeofenceChannels(const QJsonObject &channels)
 
 QStringList ConfigManager::geofenceAlarmClasses() const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonArray arr = root_["geofence"].toObject()["alarmClasses"].toArray();
     QStringList result;
     for (const auto &v : arr) {
@@ -512,6 +553,7 @@ QStringList ConfigManager::geofenceAlarmClasses() const
 
 void ConfigManager::setGeofenceAlarmClasses(const QStringList &classes)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     QJsonObject gf = root_["geofence"].toObject();
     QJsonArray arr;
     for (const auto &s : classes) {

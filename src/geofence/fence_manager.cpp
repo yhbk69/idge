@@ -41,6 +41,7 @@ FenceManager &FenceManager::instance()
 // ============================================================================
 void FenceManager::loadFromConfig()
 {
+    QMutexLocker locker(&mutex_);
     ConfigManager &cfg = ConfigManager::instance();
     enabled_ = cfg.geofenceEnabled();
     mode_ = cfg.geofenceMode();
@@ -106,6 +107,7 @@ void FenceManager::loadFromConfig()
 // ============================================================================
 void FenceManager::saveToConfig()
 {
+    QMutexLocker locker(&mutex_);
     QJsonObject channels;
     for (auto it = fences_.begin(); it != fences_.end(); ++it) {
         QJsonObject chObj;
@@ -147,21 +149,22 @@ void FenceManager::saveToConfig()
 // ============================================================================
 // 围栏开关和模式
 // ============================================================================
-bool FenceManager::enabled() const { return enabled_; }
+bool FenceManager::enabled() const { QMutexLocker locker(&mutex_); return enabled_; }
 
-void FenceManager::setEnabled(bool enabled) { enabled_ = enabled; }
+void FenceManager::setEnabled(bool enabled) { QMutexLocker locker(&mutex_); enabled_ = enabled; }
 
-QString FenceManager::mode() const { return mode_; }
+QString FenceManager::mode() const { QMutexLocker locker(&mutex_); return mode_; }
 
-void FenceManager::setMode(const QString &mode) { mode_ = mode; }
+void FenceManager::setMode(const QString &mode) { QMutexLocker locker(&mutex_); mode_ = mode; }
 
 // ============================================================================
 // 围栏报警类别
 // ============================================================================
-QStringList FenceManager::alarmClasses() const { return alarmClasses_; }
+QStringList FenceManager::alarmClasses() const { QMutexLocker locker(&mutex_); return alarmClasses_; }
 
 void FenceManager::setAlarmClasses(const QStringList &classes)
 {
+    QMutexLocker locker(&mutex_);
     alarmClasses_ = classes;
     if (alarmClasses_.isEmpty()) alarmClasses_.append("person");
 }
@@ -173,6 +176,7 @@ void FenceManager::setAlarmClasses(const QStringList &classes)
 // 获取指定通道的围栏配置（不存在则返回空配置）
 ChannelFence FenceManager::channelFence(int channel) const
 {
+    QMutexLocker locker(&mutex_);
     auto it = fences_.find(channel);
     return (it != fences_.end()) ? it.value() : ChannelFence();
 }
@@ -180,25 +184,31 @@ ChannelFence FenceManager::channelFence(int channel) const
 // 设置指定通道的围栏配置（替换整个通道的围栏）
 void FenceManager::setChannelFence(int channel, const ChannelFence &fence)
 {
+    QMutexLocker locker(&mutex_);
     fences_[channel] = fence;
+    locker.unlock();
     emit fenceChanged(channel);
 }
 
 // 添加一个围栏形状到指定通道
 void FenceManager::addShape(int channel, const FenceShape &shape)
 {
+    QMutexLocker locker(&mutex_);
     fences_[channel].shapes.push_back(shape);
     fences_[channel].enabled = true;
     enabled_ = true;  // 有围栏时自动启用全局开关
+    locker.unlock();
     emit fenceChanged(channel);
 }
 
 // 删除指定通道的第 index 个围栏形状
 void FenceManager::removeShape(int channel, int index)
 {
+    QMutexLocker locker(&mutex_);
     auto it = fences_.find(channel);
     if (it != fences_.end() && index >= 0 && index < static_cast<int>(it.value().shapes.size())) {
         it.value().shapes.erase(it.value().shapes.begin() + index);
+        locker.unlock();
         emit fenceChanged(channel);
     }
 }
@@ -206,9 +216,11 @@ void FenceManager::removeShape(int channel, int index)
 // 清空指定通道的所有围栏
 void FenceManager::clearChannel(int channel)
 {
+    QMutexLocker locker(&mutex_);
     auto it = fences_.find(channel);
     if (it != fences_.end()) {
         it.value().shapes.clear();
+        locker.unlock();
         emit fenceChanged(channel);
     }
 }
@@ -216,6 +228,7 @@ void FenceManager::clearChannel(int channel)
 // 指定通道是否有围栏
 bool FenceManager::hasFence(int channel) const
 {
+    QMutexLocker locker(&mutex_);
     auto it = fences_.find(channel);
     return it != fences_.end() && !it.value().shapes.empty();
 }
@@ -229,11 +242,13 @@ bool FenceManager::hasFence(int channel) const
 
 void FenceManager::setOverlaySize(int channel, int w, int h)
 {
+    QMutexLocker locker(&mutex_);
     overlaySizes_[channel] = qMakePair(w, h);
 }
 
 void FenceManager::overlaySize(int channel, int &w, int &h) const
 {
+    QMutexLocker locker(&mutex_);
     auto it = overlaySizes_.find(channel);
     if (it != overlaySizes_.end()) {
         w = it.value().first;

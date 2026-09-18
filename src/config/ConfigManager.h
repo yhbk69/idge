@@ -19,6 +19,7 @@
 #include <QString>
 #include <QStringList>
 #include <QJsonObject>
+#include <mutex>
 
 class ConfigManager
 {
@@ -195,8 +196,11 @@ private:
      */
     ConfigManager() {}
 
+    void saveUnsafe();  ///< 内部不加锁的保存方法
+
     QString configPath_;   ///< 配置文件路径
     QJsonObject root_;     ///< JSON 根对象
+    mutable std::mutex mutex_;  ///< 保护 root_ 的互斥锁
 };
 
 #endif // CONFIGMANAGER_H

@@ -397,67 +397,73 @@ bool AlarmManager::markAsFalsePositive(int index)
 bool AlarmManager::acknowledgeAlarmById(const QString &id)
 {
     if (id.isEmpty()) return false;
+    bool found = false;
     {
         QMutexLocker lock(&mutex_);
         for (auto &a : alarms_) {
             if (a.id == id) {
                 a.status = "rectified";
                 a.updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
+                found = true;
                 break;
             }
         }
     }
     // 写入数据库
-    if (dbInitialized_) {
+    if (dbInitialized_ && found) {
         AlarmDAO dao;
         dao.updateStatus(id, "rectified");
     }
     emit statsUpdated();
-    return true;
+    return found;
 }
 
 // 删除单条报警（按ID）
 bool AlarmManager::removeAlarmById(const QString &id)
 {
     if (id.isEmpty()) return false;
+    bool found = false;
     {
         QMutexLocker lock(&mutex_);
         for (int i = 0; i < alarms_.size(); ++i) {
             if (alarms_[i].id == id) {
                 alarms_.removeAt(i);
+                found = true;
                 break;
             }
         }
     }
     // 从数据库删除
-    if (dbInitialized_) {
+    if (dbInitialized_ && found) {
         AlarmDAO dao;
         dao.remove(id);
     }
-    return true;
+    return found;
 }
 
 // 标记为误报（按ID）- 推荐使用
 bool AlarmManager::markAsFalsePositiveById(const QString &id)
 {
     if (id.isEmpty()) return false;
+    bool found = false;
     {
         QMutexLocker lock(&mutex_);
         for (auto &a : alarms_) {
             if (a.id == id) {
                 a.status = "false_alarm";
                 a.updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
+                found = true;
                 break;
             }
         }
     }
     // 写入数据库
-    if (dbInitialized_) {
+    if (dbInitialized_ && found) {
         AlarmDAO dao;
         dao.markFalseAlarm(id);
     }
     emit statsUpdated();
-    return true;
+    return found;
 }
 
 // 获取各类别检测统计

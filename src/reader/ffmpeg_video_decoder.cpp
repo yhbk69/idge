@@ -496,6 +496,8 @@ void FFmpegVideoDecoder::decodeLoop()
     ret = avformat_open_input(&fmt_ctx, url_.toUtf8().constData(), nullptr, nullptr);
     if (ret < 0)
     {
+        avformat_free_context(fmt_ctx);
+        fmt_ctx = nullptr;
         emit error("Cannot open file");
         return;
     }

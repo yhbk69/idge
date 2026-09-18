@@ -56,14 +56,14 @@ class DmaFrameBuffer
 private:
     int m_drm_fd = -1;         // DRM 设备文件描述符
     int m_fd = -1;             // DMA 缓冲区文件描述符
-    uint8_t* m_ptr;            // DMA 缓冲区的虚拟地址映射
-    size_t m_size;             // 缓冲区大小（字节）
-    AVFrame* m_frame;          // 关联的 FFmpeg 帧对象
-    int m_width;               // 帧宽度
-    int m_height;              // 帧高度
-    int m_format;              // 像素格式（如 NV12、RGBA 等）
+    uint8_t* m_ptr = nullptr;  // DMA 缓冲区的虚拟地址映射
+    size_t m_size = 0;         // 缓冲区大小（字节）
+    AVFrame* m_frame = nullptr;// 关联的 FFmpeg 帧对象
+    int m_width = 0;           // 帧宽度
+    int m_height = 0;          // 帧高度
+    int m_format = 0;          // 像素格式（如 NV12、RGBA 等）
     int m_stride = 0;          // 行步长（字节），考虑对齐后的宽度
-    uint32_t m_handle;         // DRM 缓冲区句柄
+    uint32_t m_handle = 0;     // DRM 缓冲区句柄
 
 public:
     // 默认构造函数
@@ -97,9 +97,9 @@ public:
      */
     void release ();
     
-    // 拷贝构造和赋值（使用默认实现，浅拷贝）
-    DmaFrameBuffer(const DmaFrameBuffer&) = default;
-    DmaFrameBuffer& operator=(const DmaFrameBuffer&) = default;
+    // 禁用拷贝构造和赋值（防止浅拷贝导致 double-free）
+    DmaFrameBuffer(const DmaFrameBuffer&) = delete;
+    DmaFrameBuffer& operator=(const DmaFrameBuffer&) = delete;
 
     /**
      * @brief 移动构造函数
@@ -180,5 +180,5 @@ public:
 };
 
 // 向 Qt 元对象系统注册类型，使 DmaFrameBuffer 可在信号槽中传递
-Q_DECLARE_METATYPE(DmaFrameBuffer);
+// 注意：DmaFrameBuffer 管理 DRM 资源，不支持拷贝，只通过指针或 shared_ptr 使用
 Q_DECLARE_METATYPE(std::shared_ptr<DmaFrameBuffer>);
