@@ -29,12 +29,29 @@
 //
 // ============================================================================
 
+/**
+ * @brief 带参数的构造函数 - 创建指定尺寸和格式的帧缓冲区
+ *
+ * @param width:  帧宽度（像素）
+ * @param height: 帧高度（像素）
+ * @param format: 像素格式（DRM_FORMAT_NV12/RGBA8888 等）
+ *
+ * @note 仅设置参数，不分配内存。需要调用 alloc() 分配缓冲区。
+ */
 DmaFrameBuffer::DmaFrameBuffer(int width, int height, int format)
         : m_width(width), m_height(height), m_format(format)
 {
     
 }
 
+/**
+ * @brief 分配 DMA-BUF 缓冲区
+ *
+ * 调用 alloc_drm_buffer() 通过 DRM 子系统分配物理连续内存。
+ * 分配后的缓冲区可同时被 CPU、GPU、RGA、NPU 访问（零拷贝）。
+ *
+ * @return: DMA-BUF 文件描述符（成功），-1（失败）
+ */
 int DmaFrameBuffer::alloc()
 {
     m_fd = alloc_drm_buffer();
@@ -42,12 +59,18 @@ int DmaFrameBuffer::alloc()
 
 }
 
+/**
+ * @brief 析构函数 - 自动释放 DMA-BUF 资源
+ */
 DmaFrameBuffer::~DmaFrameBuffer()
 {
     
     release();
 }
 
+/**
+ * @brief 释放缓冲区资源（munmap + close fd + destroy DRM buffer）
+ */
 void DmaFrameBuffer::release ()
 {
     free_drm_buffer();
@@ -166,6 +189,13 @@ int DmaFrameBuffer::alloc_drm_buffer() {
     return fd;
 }
 
+/**
+ * @brief 释放 DMA 缓冲区（空实现）
+ *
+ * @note 实际释放逻辑在 free_drm_buffer() 中。
+ *       此函数保留作为接口兼容，但不执行任何操作。
+ *       DMA 缓冲区通过 DRM DUMB Buffer 分配，释放由 free_drm_buffer() 处理。
+ */
 void DmaFrameBuffer::free_dma_buffer() {
     
 
@@ -210,16 +240,43 @@ void DmaFrameBuffer::free_drm_buffer() {
 
 }
 
+// ============================================================================
+// Getter/Setter 方法
+// ============================================================================
+
+/** @brief 获取 DMA 缓冲区的文件描述符（用于 RGA/NPU 硬件访问） */
 int DmaFrameBuffer::fd() const {return m_fd;}
+
+/** @brief 获取 DMA 缓冲区的虚拟地址指针（用于 CPU 读写） */
 uint8_t* DmaFrameBuffer::ptr() const {return m_ptr;}
+
+/** @brief 获取缓冲区大小（字节） */
 size_t DmaFrameBuffer::size() const {return m_size;}
+
+/** @brief 获取帧宽度（像素） */
 int DmaFrameBuffer::width() const {return m_width;}
+
+/** @brief 设置帧宽度（像素） */
 void DmaFrameBuffer::setWidth(int width) {m_width = width;}
+
+/** @brief 获取帧高度（像素） */
 int DmaFrameBuffer::height() const {return m_height;}
+
+/** @brief 设置帧高度（像素） */
 void DmaFrameBuffer::setHeight(int height) {m_height = height;}
+
+/** @brief 获取像素格式（DRM_FORMAT_NV12/RGBA8888 等） */
 int DmaFrameBuffer::format() const {return m_format;}
+
+/** @brief 设置像素格式 */
 void DmaFrameBuffer::setFormat(int format) {m_format = format;}
+
+/** @brief 关联 FFmpeg AVFrame 对象（用于硬件解码输出） */
 void DmaFrameBuffer::setFrame(AVFrame* frame) {m_frame = frame;}
+
+/** @brief 获取 DRM 缓冲区句柄（用于 DRM ioctl 操作） */
 uint32_t DmaFrameBuffer::handle() {return m_handle;}
+
+/** @brief 获取行步长（字节，考虑 GPU 对齐后的实际宽度） */
 int DmaFrameBuffer::stride() const {return m_stride;}
 

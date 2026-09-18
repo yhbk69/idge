@@ -20,7 +20,24 @@
 #include "image_utils.h"
 
 /**
- * @brief YOLOv11 detector implementation for Rockchip RK3588 platform
+ * @brief YOLOv11 目标检测模型（Rockchip RK3588 NPU 加速）
+ *
+ * 支持功能：
+ *   - 多 NPU 核心并行推理（rknn_set_core_mask）
+ *   - 量化模型（int8/int8）和浮点模型（fp32）
+ *   - Letterbox 预处理（保持宽高比缩放）
+ *   - DFL（Distribution Focal Loss）解码
+ *   - NMS（Non-Maximum Suppression）后处理
+ *
+ * 推理流程：
+ *   1. convert_image_with_letterbox() - 预处理（RGB888 + Letterbox）
+ *   2. rknn_run() - NPU 推理
+ *   3. post_process() - 后处理（DFL 解码 + NMS）
+ *
+ * 模型输出格式（默认 3 分支）：
+ *   - 每个分支输出：[1, 4*DFL_LEN+NUM_CLASSES, H, W]
+ *   - DFL_LEN=16：每边 16 个分布值
+ *   - NUM_CLASSES=80：COCO 80 类
  */
 
 class YOLO11Model : public YoloBaseDetector
@@ -37,6 +54,17 @@ private:
     PreprocessType preprocessType_;
 
 public:
+    /**
+     * @brief 构造函数 - 创建 YOLO11 检测器实例
+     *
+     * @param model_path:  RKNN 模型文件路径（.rknn 格式）
+     * @param labels_path: 类别标签文件路径（每行一个类别名）
+     * @param core_mask:   NPU 核心掩码（RKNN_NPU_CORE_0/1/2/AUTO）
+     * @param num_classes: 检测类别数（默认 80，COCO 数据集）
+     * @param dfl_len:     DFL 分布长度（默认 16，与模型训练时一致）
+     *
+     * @note 构造时自动加载模型到 NPU，失败会抛出 std::runtime_error
+     */
     YOLO11Model(const std::string &modelPath,
                 const std::string &labelsPath,
                 rknn_core_mask core_mask,
@@ -55,6 +83,22 @@ public:
         }
     }
 
+    /**
+     * @brief 初始化 RKNN 模型
+     *
+     * 流程：
+     *   1. read_data_from_file() - 读取模型文件到内存
+     *   2. rknn_init() - 初始化 RKNN 上下文
+     *   3. rknn_set_core_mask() - 设置 NPU 核心（可选多核并行）
+     *   4. rknn_query(RKNN_QUERY_IN_OUT_NUM) - 查询输入输出数量
+     *   5. rknn_query(RKNN_QUERY_INPUT_ATTR/OUTPUT_ATTR) - 获取 tensor 属性
+     *   6. rknn_create_mem() - 分配 NPU 输入输出内存
+     *
+     * @param model_path: RKNN 模型文件路径
+     * @param app_ctx:    输出的模型上下文（包含 NPU 句柄、tensor 信息等）
+     * @param core_mask:  NPU 核心掩码（0=单核, 1/2/4=指定核, 7=三核并行）
+     * @return: 0 成功，负数失败
+     */
     int init_yolo11_model(const char *model_path, rknn_app_context_t *app_ctx, rknn_core_mask core_mask)
     {
         int ret;
@@ -335,6 +379,23 @@ public:
 
     
 
+    /**
+     * @brief 计算两个矩形的 IoU（Intersection over Union）
+     *
+     * 公式：IoU = 交集面积 / 并集面积
+     *
+     *   ┌─────────┐
+     *   │    A    │
+     *   │    ┌────┼────┐
+     *   │    │ 交集│    │
+     *   └────┼────┘    B
+     *        │         │
+     *        └─────────┘
+     *
+     * @param (xmin0,ymin0,xmax0,ymax0): 矩形 A 的左上角和右下角坐标
+     * @param (xmin1,ymin1,xmax1,ymax1): 矩形 B 的左上角和右下角坐标
+     * @return: IoU 值（0.0~1.0），0 表示无重叠
+     */
     static float CalculateOverlap(float xmin0, float ymin0, float xmax0, float ymax0, float xmin1, float ymin1, float xmax1,
                                   float ymax1)
     {
@@ -345,6 +406,27 @@ public:
         return u <= 0.f ? 0.f : (i / u);
     }
 
+    /**
+     * @brief NMS（Non-Maximum Suppression）非极大值抑制
+     *
+     * 算法流程：
+     *   1. 按置信度排序（调用前已完成）
+     *   2. 遍历所有检测框，同一类别内比较 IoU
+     *   3. IoU > threshold 的框被标记为 -1（抑制）
+     *   4. 只保留置信度最高且未被抑制的框
+     *
+     * 示例（threshold=0.5）：
+     *   框 A(0.9) 与 框 B(0.8) IoU=0.6 → B 被抑制
+     *   框 A(0.9) 与 框 C(0.7) IoU=0.3 → C 保留
+     *
+     * @param validCount:     有效检测框数量
+     * @param outputLocations: 检测框坐标数组 [x,y,w,h,...]（每4个元素一个框）
+     * @param classIds:       每个检测框的类别 ID
+     * @param order:          按置信度排序的索引数组（会被修改，-1 表示被抑制）
+     * @param filterId:       当前处理的类别 ID（NMS 按类别独立执行）
+     * @param threshold:      IoU 阈值（通常 0.45~0.5）
+     * @return: 0 成功
+     */
     static int nms(int validCount, std::vector<float> &outputLocations, std::vector<int> classIds, std::vector<int> &order,
                    int filterId, float threshold)
     {
@@ -383,6 +465,18 @@ public:
         return 0;
     }
 
+    /**
+     * @brief 快速排序（按值降序，同时维护索引映射）
+     *
+     * 用于 NMS 前按置信度排序检测框。
+     * 同时排序 values 和 indices，确保排序后能通过 indices 找到原始位置。
+     *
+     * @param input:   待排序的置信度数组（会被原地修改为降序）
+     * @param left:    左边界索引
+     * @param right:   右边界索引
+     * @param indices: 索引映射数组（与 input 同步排序）
+     * @return: 分割点位置
+     */
     static int quick_sort_indice_inverse(std::vector<float> &input, int left, int right, std::vector<int> &indices)
     {
         float key;
@@ -444,7 +538,23 @@ public:
 
     static float deqnt_affine_u8_to_f32(uint8_t qnt, int32_t zp, float scale) { return ((float)qnt - (float)zp) * scale; }
 
-    // 优化后的函数
+    /**
+     * @brief DFL（Distribution Focal Loss）解码
+     *
+     * YOLOv11 使用分布回归代替直接回归边界框坐标。
+     * 每条边（left/top/right/bottom）有 dfl_len 个分布值，
+     * 通过 softmax 归一化后计算期望值作为最终坐标。
+     *
+     * 公式：box[b] = Σ(exp(tensor[i]) * i) / Σ(exp(tensor[i]))
+     *       其中 i = 0, 1, ..., dfl_len-1
+     *
+     * 示例（dfl_len=16，输出 4.25）：
+     *   分布集中在索引 4 和 5 之间，表示该边偏移量为 4.25 倍 stride
+     *
+     * @param tensor: DFL 输出张量 [4 * dfl_len]（未归一化的 logits）
+     * @param dfl_len: 每边的分布长度（通常 16）
+     * @param box: 输出的 4 个边界框偏移 [left, top, right, bottom]
+     */
     static void compute_dfl(float *tensor, int dfl_len, float *box)
     {
         for (int b = 0; b < 4; b++)
@@ -462,6 +572,33 @@ public:
         }
     }
 
+    /**
+     * @brief 处理 uint8 量化模型输出
+     *
+     * 对 RKNN 量化模型（uint8）的输出进行反量化和解码：
+     *   1. 遍历每个网格单元，找到最大类别分数
+     *   2. 分数 > threshold 的网格进入 DFL 解码
+     *   3. DFL 解码得到边界框偏移，转换为原图坐标
+     *
+     * 输出张量布局（uint8，需反量化）：
+     *   - box_tensor:  [1, 4*DFL_LEN, H, W] - 边界框分布
+     *   - score_tensor: [1, NUM_CLASSES, H, W] - 类别分数
+     *   - score_sum_tensor: [1, 1, H, W] - 类别分数和（可选，加速过滤）
+     *
+     * @param box_tensor:      边界框输出张量
+     * @param box_zp/scale:    边界框量化参数（反量化用）
+     * @param score_tensor:    类别分数输出张量
+     * @param score_zp/score_scale: 分数量化参数
+     * @param score_sum_tensor: 分数和张量（可为 nullptr）
+     * @param grid_h/grid_w:   网格尺寸（如 80x80）
+     * @param stride:          特征图步长（如 8/16/32）
+     * @param dfl_len:         DFL 分布长度（16）
+     * @param boxes:           输出的检测框坐标 [x,y,w,h,...]
+     * @param objProbs:        输出的置信度
+     * @param classId:         输出的类别 ID
+     * @param threshold:       置信度阈值
+     * @return: 有效检测框数量
+     */
     static int process_u8(uint8_t *box_tensor, int32_t box_zp, float box_scale,
                           uint8_t *score_tensor, int32_t score_zp, float score_scale,
                           uint8_t *score_sum_tensor, int32_t score_sum_zp, float score_sum_scale,
@@ -682,6 +819,30 @@ public:
         return validCount;
     }
 
+    /**
+     * @brief 后处理：DFL 解码 + NMS + 坐标映射
+     *
+     * 处理流程：
+     *   1. 遍历 3 个特征图分支（P3/P4/P5，步长 8/16/32）
+     *   2. 每个分支调用 process_i8/process_fp32 解码边界框
+     *   3. 合并所有分支的检测结果
+     *   4. 按置信度排序（快速排序）
+     *   5. 按类别执行 NMS
+     *   6. 映射回原图坐标（减去 Letterbox 偏移，除以缩放比例）
+     *
+     * 输出格式：
+     *   - od_results->count: 检测到的目标数量
+     *   - od_results->results[i]: 每个目标的 box、cls_id、confidence
+     *   - box 坐标为原图像素坐标（left, top, right, bottom）
+     *
+     * @param app_ctx:       RKNN 模型上下文
+     * @param outputs:       NPU 原始输出（rknn_output 数组）
+     * @param letter_box:    Letterbox 预处理参数（偏移和缩放）
+     * @param conf_threshold: 置信度阈值（过滤低分框）
+     * @param nms_threshold:  NMS IoU 阈值（过滤重叠框）
+     * @param od_results:    输出的检测结果列表
+     * @return: 0 成功
+     */
     int post_process(rknn_app_context_t *app_ctx, void *outputs, letterbox_t *letter_box, float conf_threshold, float nms_threshold, object_detect_result_list *od_results)
     {
         rknn_output *_outputs = (rknn_output *)outputs;
@@ -868,6 +1029,25 @@ public:
 
     }
     
+    /**
+     * @brief 执行完整的检测推理流程
+     *
+     * 完整流程：
+     *   1. 分配输出缓冲区（NPU 输出内存）
+     *   2. convert_image_with_letterbox() - 预处理（缩放+填充到模型输入尺寸）
+     *   3. rknn_run() - NPU 硬件推理
+     *   4. rknn_outputs_get() - 获取 NPU 输出
+     *   5. post_process() - 后处理（DFL 解码 + NMS）
+     *   6. 释放输出缓冲区
+     *
+     * @param app_ctx:    RKNN 模型上下文
+     * @param img:        输入图像（RGB888 格式，支持 DMA-BUF fd）
+     * @param od_results: 输出的检测结果列表
+     * @param converted:  是否已做过 Letterbox 预处理
+     * @param confThreshold: 置信度阈值（默认 0.25）
+     * @param nmsThreshold:  NMS IoU 阈值（默认 0.45）
+     * @return: 0 成功，负数失败
+     */
     int infer(rknn_app_context_t *app_ctx, image_buffer_t *img, object_detect_result_list *od_results, bool converted, float confThreshold = 0.25f, float nmsThreshold = 0.45f)
     {
         int ret;

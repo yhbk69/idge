@@ -202,7 +202,22 @@ int64_t AlarmDAO::insertAlarms(const QVector<AlarmRecord> &alarms)
 // ============================================================================
 // 查询操作
 // ============================================================================
+// 所有查询方法的共同特点：
+//   1. 通过 DatabaseManager 获取共享的 QSqlDatabase 连接
+//   2. 结果按 alarm_time DESC 倒序排列（最新在前）
+//   3. 支持分页：limit 限制返回数量，offset 偏移量
+//   4. 返回 QVector<AlarmRecord>，查询失败返回空列表
+// ============================================================================
 
+/**
+ * @brief 按时间范围查询报警记录
+ *
+ * @param startTime: 起始时间（毫秒时间戳，如 QDateTime::currentMSecsSinceEpoch()）
+ * @param endTime:   结束时间（毫秒时间戳）
+ * @param limit:     最大返回数量（默认 1000）
+ * @param offset:    分页偏移量（默认 0，用于翻页）
+ * @return: 报警记录列表，按时间倒序，无结果返回空列表
+ */
 QVector<AlarmRecord> AlarmDAO::queryByTimeRange(long startTime, long endTime,
                                                  int limit, int offset)
 {
@@ -235,6 +250,16 @@ QVector<AlarmRecord> AlarmDAO::queryByTimeRange(long startTime, long endTime,
     return results;
 }
 
+/**
+ * @brief 按通道查询报警记录
+ *
+ * @param channel:   通道号（0-3，对应视频通道 1-4）
+ * @param startTime: 起始时间（毫秒时间戳）
+ * @param endTime:   结束时间（毫秒时间戳）
+ * @param limit:     最大返回数量（默认 1000）
+ * @param offset:    分页偏移量（默认 0）
+ * @return: 该通道的报警记录列表，按时间倒序
+ */
 QVector<AlarmRecord> AlarmDAO::queryByChannel(int channel,
                                                long startTime, long endTime,
                                                int limit, int offset)
@@ -268,6 +293,16 @@ QVector<AlarmRecord> AlarmDAO::queryByChannel(int channel,
     return results;
 }
 
+/**
+ * @brief 按类别查询报警记录
+ *
+ * @param className: 类别名称（如 "person"、"helmet"、"vest"）
+ * @param startTime: 起始时间（毫秒时间戳）
+ * @param endTime:   结束时间（毫秒时间戳）
+ * @param limit:     最大返回数量（默认 1000）
+ * @param offset:    分页偏移量（默认 0）
+ * @return: 该类别的报警记录列表，按时间倒序
+ */
 QVector<AlarmRecord> AlarmDAO::queryByClass(const QString &className,
                                             long startTime, long endTime,
                                             int limit, int offset)
@@ -301,6 +336,12 @@ QVector<AlarmRecord> AlarmDAO::queryByClass(const QString &className,
     return results;
 }
 
+/**
+ * @brief 查询未确认的报警记录（status='pending'）
+ *
+ * @param limit: 最大返回数量（默认 1000）
+ * @return: 未确认的报警记录列表，按时间倒序
+ */
 QVector<AlarmRecord> AlarmDAO::queryUnacknowledged(int limit)
 {
     QVector<AlarmRecord> results;
@@ -353,6 +394,13 @@ QVector<AlarmRecord> AlarmDAO::queryAll(int limit)
     return results;
 }
 
+/**
+ * @brief 按状态查询报警记录
+ *
+ * @param status: 报警状态（"pending"/"rectified"/"false_alarm"）
+ * @param limit:  最大返回数量（默认 1000）
+ * @return: 该状态的报警记录列表，按时间倒序
+ */
 QVector<AlarmRecord> AlarmDAO::queryByStatus(const QString &status, int limit)
 {
     QVector<AlarmRecord> results;
@@ -378,6 +426,19 @@ QVector<AlarmRecord> AlarmDAO::queryByStatus(const QString &status, int limit)
     return results;
 }
 
+/**
+ * @brief 按报警级别查询记录
+ *
+ * 级别定义：
+ *   - 1: 紧急（urgent） - 需立即处理
+ *   - 2: 重要（important） - 需尽快处理
+ *   - 3: 一般（general） - 正常处理
+ *   - 4: 信息（info） - 仅记录
+ *
+ * @param level: 报警级别（1-4）
+ * @param limit: 最大返回数量（默认 1000）
+ * @return: 该级别的报警记录列表，按时间倒序
+ */
 QVector<AlarmRecord> AlarmDAO::queryByLevel(int level, int limit)
 {
     QVector<AlarmRecord> results;

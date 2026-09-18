@@ -450,6 +450,15 @@ void AlarmListWidget::onRowDoubleClicked(int row, int)
     showAlarmDetail(row);
 }
 
+/**
+ * @brief 刷新电子围栏报警表格
+ *
+ * 流程：
+ *   1. 从 AlarmManager 获取所有报警记录
+ *   2. 过滤出 isFenceAlarm=true 的记录（围栏触发的报警）
+ *   3. 最多显示 500 条，倒序排列（最新在前）
+ *   4. 填充表格：时间、通道、类别、置信度、围栏标记
+ */
 void AlarmListWidget::refreshFenceTable()
 {
     AlarmManager &mgr = AlarmManager::instance();
@@ -491,6 +500,16 @@ void AlarmListWidget::refreshFenceTable()
 参数：row - 表格行号
 ====================================================
 */
+/**
+ * @brief 显示报警详情对话框
+ *
+ * 流程：
+ *   1. 通过报警 ID（非索引）精确查找报警记录
+ *   2. 创建 AlarmDetailDialog 显示详情（截图、时间、通道、状态等）
+ *   3. 连接对话框的误报/确认信号，更新报警状态
+ *
+ * @param row: 表格行号（从 0 开始）
+ */
 void AlarmListWidget::showAlarmDetail(int row)
 {
     QTableWidgetItem *timeItem = table_->item(row, 0);
@@ -530,6 +549,19 @@ void AlarmListWidget::showAlarmDetail(int row)
 参数：logicalIndex - 列号
 ====================================================
 */
+/**
+ * @brief 表格标题行点击槽函数（弹出筛选菜单）
+ *
+ * 支持的筛选列：
+ *   - 列 1（通道）：按通道号筛选（全部/1/2/3/4）
+ *   - 列 2（类别）：按检测类别筛选（动态生成菜单项）
+ *
+ * 筛选逻辑：
+ *   - 设置 filterChannel_/filterClass_ 成员变量
+ *   - 调用 refreshTable() 重新填充表格
+ *
+ * @param logicalIndex: 被点击的列号
+ */
 void AlarmListWidget::onHeaderSectionClicked(int logicalIndex)
 {
     // 只处理通道列(1)和类别列(2)

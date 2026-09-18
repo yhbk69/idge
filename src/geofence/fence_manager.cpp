@@ -9,7 +9,7 @@
 namespace geofence {
 
 // ============================================================================
-// 获取单例实例
+// 获取单例实例（线程安全，C++11 保证静态局部变量初始化线程安全）
 // ============================================================================
 FenceManager &FenceManager::instance()
 {
@@ -237,15 +237,37 @@ bool FenceManager::hasFence(int channel) const
 // overlay 尺寸管理
 // ============================================================================
 // 用户绘制围栏时，坐标是 overlay widget 的像素。
-// 检测时需要将这些坐标映射到原始视频空间，因此需要记录绘制时的 widget 尺寸。
+// 检测时需要将围栏坐标映射到原始视频空间，因此需要记录 overlay 尺寸。
+//
+// 坐标映射公式：
+//   video_x = fence_x * (video_width / overlay_width)
+//   video_y = fence_y * (video_height / overlay_height)
+//
+// 使用场景：
+//   - 用户在 overlay 上绘制围栏 → setOverlaySize() 记录 widget 尺寸
+//   - 检测线程收到检测结果 → 用 overlaySize() 获取缩放比例进行坐标映射
 // ============================================================================
 
+/**
+ * @brief 设置指定通道的 overlay widget 尺寸
+ *
+ * @param channel: 通道号（0-3）
+ * @param w: overlay widget 宽度（像素）
+ * @param h: overlay widget 高度（像素）
+ */
 void FenceManager::setOverlaySize(int channel, int w, int h)
 {
     QMutexLocker locker(&mutex_);
     overlaySizes_[channel] = qMakePair(w, h);
 }
 
+/**
+ * @brief 获取指定通道的 overlay widget 尺寸
+ *
+ * @param channel: 通道号（0-3）
+ * @param w: 输出的宽度（像素），无数据时返回 0
+ * @param h: 输出的高度（像素），无数据时返回 0
+ */
 void FenceManager::overlaySize(int channel, int &w, int &h) const
 {
     QMutexLocker locker(&mutex_);
@@ -259,9 +281,12 @@ void FenceManager::overlaySize(int channel, int &w, int &h) const
     }
 }
 
-// ============================================================================
-// 发送围栏日志到 UI（通过信号槽跨线程安全传递）
-// ============================================================================
+/**
+ * @brief 发送围栏日志到 UI（通过信号槽跨线程安全传递）
+ *
+ * @param category: 日志分类（如 "fence"、"detect"、"error"）
+ * @param message:  日志消息内容
+ */
 void FenceManager::postLog(const QString &category, const QString &message)
 {
     emit logMessage(category, message);

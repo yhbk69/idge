@@ -490,16 +490,47 @@ void ConfigManager::setAlarmClasses(const QStringList &classes)
     root_["alarm"] = alarm;
 }
 
-// ==========================================
+// ============================================================================
 // 电子围栏配置
-// ==========================================
+// ============================================================================
+// config.json 中的 geofence 段格式：
+// {
+//   "geofence": {
+//     "enabled": true,                    // 是否启用围栏检测
+//     "mode": "inside_alarm",             // 报警模式："inside_alarm"/"outside_alarm"
+//     "channels": {                       // 各通道围栏配置
+//       "0": {                            // 通道 0（通道 1）
+//         "shapes": [                     // 围栏形状列表
+//           {
+//             "type": "rectangle",        // 形状类型："rectangle"/"polygon"
+//             "points": [[100,50],[300,200]]  // 顶点坐标（overlay 像素坐标）
+//           }
+//         ]
+//       }
+//     },
+//     "alarmClasses": ["person"]          // 触发围栏报警的检测类别
+//   }
+// }
+//
+// 坐标系说明：
+//   - 围栏坐标是在 overlay widget 像素空间中绘制的
+//   - 检测时需要将坐标映射到原始视频空间（通过 overlaySize 缩放比例）
+// ============================================================================
 
+/**
+ * @brief 检查电子围栏是否启用
+ * @return: true=启用，false=禁用（默认 false）
+ */
 bool ConfigManager::geofenceEnabled() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return root_["geofence"].toObject()["enabled"].toBool(false);
 }
 
+/**
+ * @brief 设置电子围栏启用状态
+ * @param enabled: true=启用围栏检测，false=禁用
+ */
 void ConfigManager::setGeofenceEnabled(bool enabled)
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -508,12 +539,20 @@ void ConfigManager::setGeofenceEnabled(bool enabled)
     root_["geofence"] = gf;
 }
 
+/**
+ * @brief 获取围栏报警模式
+ * @return: "inside_alarm"（围栏内报警，默认）或 "outside_alarm"（围栏外报警）
+ */
 QString ConfigManager::geofenceMode() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return root_["geofence"].toObject()["mode"].toString("inside_alarm");
 }
 
+/**
+ * @brief 设置围栏报警模式
+ * @param mode: "inside_alarm"（围栏内报警）或 "outside_alarm"（围栏外报警）
+ */
 void ConfigManager::setGeofenceMode(const QString &mode)
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -522,12 +561,20 @@ void ConfigManager::setGeofenceMode(const QString &mode)
     root_["geofence"] = gf;
 }
 
+/**
+ * @brief 获取所有通道的围栏配置
+ * @return: QJsonObject，key 为通道号字符串（"0","1","2","3"），value 为该通道的围栏形状列表
+ */
 QJsonObject ConfigManager::geofenceChannels() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return root_["geofence"].toObject()["channels"].toObject();
 }
 
+/**
+ * @brief 设置所有通道的围栏配置
+ * @param channels: QJsonObject，key 为通道号字符串，value 为围栏形状列表
+ */
 void ConfigManager::setGeofenceChannels(const QJsonObject &channels)
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -536,6 +583,10 @@ void ConfigManager::setGeofenceChannels(const QJsonObject &channels)
     root_["geofence"] = gf;
 }
 
+/**
+ * @brief 获取触发围栏报警的检测类别列表
+ * @return: 类别名称列表（如 ["person", "helmet"]），默认 ["person"]
+ */
 QStringList ConfigManager::geofenceAlarmClasses() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -551,6 +602,10 @@ QStringList ConfigManager::geofenceAlarmClasses() const
     return result;
 }
 
+/**
+ * @brief 设置触发围栏报警的检测类别列表
+ * @param classes: 类别名称列表（如 ["person", "helmet"]），空列表时使用默认 ["person"]
+ */
 void ConfigManager::setGeofenceAlarmClasses(const QStringList &classes)
 {
     std::lock_guard<std::mutex> lock(mutex_);
