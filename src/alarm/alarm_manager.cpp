@@ -40,6 +40,7 @@
 #include "ConfigManager.h"
 #include "database/database_manager.h"
 #include "database/alarm_dao.h"
+#include "database/detection_dao.h"
 #include <QDateTime>
 #include <QDebug>
 #include <QUuid>
@@ -178,6 +179,20 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
                          << "className:" << alarm.className;
 
                 newAlarms.append(alarm);
+
+                // 将触发报警的检测数据也存入 detections 表
+                // 注意：只存报警相关的检测，而非所有检测结果，节省存储空间
+                // 可通过 config.json 的 database.storeDetections 控制开关
+                if (ConfigManager::instance().storeDetections() &&
+                    DatabaseManager::instance().database().isOpen()) {
+                    DetectionDAO detDao;
+                    object_detect_result_list singleResult;
+                    singleResult.time = results.time;
+                    singleResult.id = results.id;
+                    singleResult.count = 1;
+                    singleResult.results[0] = det;
+                    detDao.insertFromDetectResult(channel, singleResult, classNames_);
+                }
             }
         }
     }

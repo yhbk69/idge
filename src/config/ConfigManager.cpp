@@ -617,3 +617,59 @@ void ConfigManager::setGeofenceAlarmClasses(const QStringList &classes)
     gf["alarmClasses"] = arr;
     root_["geofence"] = gf;
 }
+
+// ============================================================================
+// 数据库配置
+// ============================================================================
+// config.json 中的 database 段格式：
+// {
+//   "database": {
+//     "storeDetections": true,        // 是否将报警相关的检测数据存入 detections 表
+//     "detectionRetentionDays": 30    // 检测数据保留天数（超过自动清理）
+//   }
+// }
+// ============================================================================
+
+/**
+ * @brief 是否启用检测数据存储
+ * @return: true=将报警相关的检测数据存入 detections 表，false=只存 alarms 表
+ */
+bool ConfigManager::storeDetections() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return root_["database"].toObject()["storeDetections"].toBool(true);
+}
+
+/**
+ * @brief 设置是否启用检测数据存储
+ * @param enabled: true=启用，false=禁用
+ */
+void ConfigManager::setStoreDetections(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject db = root_["database"].toObject();
+    db["storeDetections"] = enabled;
+    root_["database"] = db;
+}
+
+/**
+ * @brief 获取检测数据保留天数
+ * @return: 保留天数（默认 30 天）
+ */
+int ConfigManager::detectionRetentionDays() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return root_["database"].toObject()["detectionRetentionDays"].toInt(30);
+}
+
+/**
+ * @brief 设置检测数据保留天数
+ * @param days: 保留天数
+ */
+void ConfigManager::setDetectionRetentionDays(int days)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject db = root_["database"].toObject();
+    db["detectionRetentionDays"] = days;
+    root_["database"] = db;
+}

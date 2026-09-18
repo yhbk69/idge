@@ -47,5 +47,9 @@
     },
     "alarm": {
         "classes": ["person", "helmet", "vest"]
+    },
+    "database": {
+        "storeDetections": true,
+        "detectionRetentionDays": 30
     }
 }

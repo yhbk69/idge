@@ -190,6 +190,33 @@ public:
     QStringList geofenceAlarmClasses() const;
     void setGeofenceAlarmClasses(const QStringList &classes);
 
+    // ========== 数据库配置 ==========
+
+    /**
+     * @brief 是否启用检测数据存储
+     * @return: true=将报警相关的检测数据存入 detections 表，false=只存 alarms 表
+     * @note 默认 true，仅存报警相关的检测（非所有帧）
+     */
+    bool storeDetections() const;
+
+    /**
+     * @brief 设置是否启用检测数据存储
+     * @param enabled: true=启用，false=禁用
+     */
+    void setStoreDetections(bool enabled);
+
+    /**
+     * @brief 获取检测数据保留天数
+     * @return: 保留天数（默认 30 天）
+     */
+    int detectionRetentionDays() const;
+
+    /**
+     * @brief 设置检测数据保留天数
+     * @param days: 保留天数
+     */
+    void setDetectionRetentionDays(int days);
+
 private:
     /**
      * @brief 私有构造函数（单例模式）
