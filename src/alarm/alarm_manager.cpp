@@ -293,52 +293,170 @@ int AlarmManager::unacknowledgedCount() const
 // 确认所有报警（将所有报警标记为已确认）
 void AlarmManager::acknowledgeAll()
 {
-    QMutexLocker lock(&mutex_);
-    for (auto &a : alarms_) {
-        a.status = "rectified";
-        a.updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
+    QVector<QString> ids;
+    {
+        QMutexLocker lock(&mutex_);
+        for (auto &a : alarms_) {
+            if (a.status != "rectified") {
+                a.status = "rectified";
+                a.updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
+                ids.append(a.id);
+            }
+        }
     }
+    // 写入数据库
+    if (dbInitialized_ && !ids.isEmpty()) {
+        AlarmDAO dao;
+        for (const QString &id : ids) {
+            dao.updateStatus(id, "rectified");
+        }
+    }
+    emit statsUpdated();
 }
 
 // 确认单条报警（标记为已确认）
 bool AlarmManager::acknowledgeAlarm(int index)
 {
-    QMutexLocker lock(&mutex_);
-    if (index < 0 || index >= alarms_.size()) {
-        return false;
+    QString id;
+    {
+        QMutexLocker lock(&mutex_);
+        if (index < 0 || index >= alarms_.size()) {
+            return false;
+        }
+        alarms_[index].status = "rectified";
+        alarms_[index].updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
+        id = alarms_[index].id;
     }
-    alarms_[index].status = "rectified";
-    alarms_[index].updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
+    // 写入数据库
+    if (dbInitialized_ && !id.isEmpty()) {
+        AlarmDAO dao;
+        dao.updateStatus(id, "rectified");
+    }
+    emit statsUpdated();
     return true;
 }
 
 // 清空所有报警
 void AlarmManager::clearAlarms()
 {
-    QMutexLocker lock(&mutex_);
-    alarms_.clear();
+    {
+        QMutexLocker lock(&mutex_);
+        alarms_.clear();
+    }
+    // 清空数据库
+    if (dbInitialized_) {
+        AlarmDAO dao;
+        dao.clearAll();
+    }
+    emit statsUpdated();
 }
 
 // 删除单条报警（用于误报标记）
 bool AlarmManager::removeAlarm(int index)
 {
-    QMutexLocker lock(&mutex_);
-    if (index < 0 || index >= alarms_.size()) {
-        return false;
+    QString id;
+    {
+        QMutexLocker lock(&mutex_);
+        if (index < 0 || index >= alarms_.size()) {
+            return false;
+        }
+        id = alarms_[index].id;
+        alarms_.removeAt(index);
     }
-    alarms_.removeAt(index);
+    // 从数据库删除
+    if (dbInitialized_ && !id.isEmpty()) {
+        AlarmDAO dao;
+        dao.remove(id);
+    }
     return true;
 }
 
 // 标记为误报
 bool AlarmManager::markAsFalsePositive(int index)
 {
-    QMutexLocker lock(&mutex_);
-    if (index < 0 || index >= alarms_.size()) {
-        return false;
+    QString id;
+    {
+        QMutexLocker lock(&mutex_);
+        if (index < 0 || index >= alarms_.size()) {
+            return false;
+        }
+        alarms_[index].status = "false_alarm";
+        alarms_[index].updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
+        id = alarms_[index].id;
     }
-    alarms_[index].status = "false_alarm";
-    alarms_[index].updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
+    // 写入数据库
+    if (dbInitialized_ && !id.isEmpty()) {
+        AlarmDAO dao;
+        dao.markFalseAlarm(id);
+    }
+    emit statsUpdated();
+    return true;
+}
+
+// 确认单条报警（按ID，标记为已确认）- 推荐使用
+bool AlarmManager::acknowledgeAlarmById(const QString &id)
+{
+    if (id.isEmpty()) return false;
+    {
+        QMutexLocker lock(&mutex_);
+        for (auto &a : alarms_) {
+            if (a.id == id) {
+                a.status = "rectified";
+                a.updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
+                break;
+            }
+        }
+    }
+    // 写入数据库
+    if (dbInitialized_) {
+        AlarmDAO dao;
+        dao.updateStatus(id, "rectified");
+    }
+    emit statsUpdated();
+    return true;
+}
+
+// 删除单条报警（按ID）
+bool AlarmManager::removeAlarmById(const QString &id)
+{
+    if (id.isEmpty()) return false;
+    {
+        QMutexLocker lock(&mutex_);
+        for (int i = 0; i < alarms_.size(); ++i) {
+            if (alarms_[i].id == id) {
+                alarms_.removeAt(i);
+                break;
+            }
+        }
+    }
+    // 从数据库删除
+    if (dbInitialized_) {
+        AlarmDAO dao;
+        dao.remove(id);
+    }
+    return true;
+}
+
+// 标记为误报（按ID）- 推荐使用
+bool AlarmManager::markAsFalsePositiveById(const QString &id)
+{
+    if (id.isEmpty()) return false;
+    {
+        QMutexLocker lock(&mutex_);
+        for (auto &a : alarms_) {
+            if (a.id == id) {
+                a.status = "false_alarm";
+                a.updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
+                break;
+            }
+        }
+    }
+    // 写入数据库
+    if (dbInitialized_) {
+        AlarmDAO dao;
+        dao.markFalseAlarm(id);
+    }
+    emit statsUpdated();
     return true;
 }
 

@@ -20,11 +20,11 @@ signals:
     void alarmUpdated();
 
 private slots:
-    void onAlarmClicked(int index);
+    void onAlarmClicked(const QString &alarmId);
 
 private:
     void setupUi();
-    void addAlarmItem(const AlarmRecord &alarm, int originalIndex);
+    void addAlarmItem(const AlarmRecord &alarm);
 
     QScrollArea *scrollArea_ = nullptr;
     QWidget *contentWidget_ = nullptr;

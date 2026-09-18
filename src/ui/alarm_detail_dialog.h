@@ -10,11 +10,11 @@ class AlarmDetailDialog : public QDialog
 {
     Q_OBJECT
 public:
-    explicit AlarmDetailDialog(const AlarmRecord &alarm, int alarmIndex, QWidget *parent = nullptr);
+    explicit AlarmDetailDialog(const AlarmRecord &alarm, QWidget *parent = nullptr);
 
 signals:
-    void alarmMarkedFalsePositive(int index);
-    void alarmAcknowledged(int index);
+    void alarmMarkedFalsePositive(const QString &alarmId);
+    void alarmAcknowledged(const QString &alarmId);
 
 private slots:
     void onMarkFalsePositive();
@@ -25,7 +25,6 @@ private:
     void loadScreenshot();
 
     AlarmRecord alarm_;
-    int alarmIndex_;
     QLabel *imageLabel_ = nullptr;
     QLabel *statusLabel_ = nullptr;
 };

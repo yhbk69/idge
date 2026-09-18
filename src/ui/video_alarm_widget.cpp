@@ -60,10 +60,10 @@ void VideoAlarmWidget::refreshAlarms()
 
     // 获取报警记录，过滤掉误报
     QVector<AlarmRecord> alarms = AlarmManager::instance().alarms();
-    QVector<QPair<AlarmRecord, int>> filteredAlarms;
+    QVector<AlarmRecord> filteredAlarms;
     for (int i = 0; i < alarms.size(); i++) {
         if (alarms[i].status != "false_alarm") {
-            filteredAlarms.append(qMakePair(alarms[i], i));
+            filteredAlarms.append(alarms[i]);
         }
     }
 
@@ -73,15 +73,14 @@ void VideoAlarmWidget::refreshAlarms()
     int shown = qMin(total, maxDisplay);
 
     for (int i = 0; i < shown; i++) {
-        const AlarmRecord &a = filteredAlarms[total - 1 - i].first;
-        int originalIndex = filteredAlarms[total - 1 - i].second;
-        addAlarmItem(a, originalIndex);
+        const AlarmRecord &a = filteredAlarms[total - 1 - i];
+        addAlarmItem(a);
     }
 
     contentLayout_->addStretch();
 }
 
-void VideoAlarmWidget::addAlarmItem(const AlarmRecord &alarm, int originalIndex)
+void VideoAlarmWidget::addAlarmItem(const AlarmRecord &alarm)
 {
     QWidget *itemWidget = new QWidget();
     itemWidget->setStyleSheet("background: #2d2d3d; border-radius: 6px;");
@@ -137,27 +136,35 @@ void VideoAlarmWidget::addAlarmItem(const AlarmRecord &alarm, int originalIndex)
         "QPushButton { color: #fff; background: #4a6fa5; border-radius: 4px; padding: 3px 8px; font-size: 11px; }"
         "QPushButton:hover { background: #5a8fc5; }"
     );
-    connect(btnDetail, &QPushButton::clicked, this, [this, originalIndex]() {
-        onAlarmClicked(originalIndex);
+    connect(btnDetail, &QPushButton::clicked, this, [this, alarmId = alarm.id]() {
+        onAlarmClicked(alarmId);
     });
     itemLayout->addWidget(btnDetail);
 
     contentLayout_->addWidget(itemWidget);
 }
 
-void VideoAlarmWidget::onAlarmClicked(int index)
+void VideoAlarmWidget::onAlarmClicked(const QString &alarmId)
 {
     QVector<AlarmRecord> alarms = AlarmManager::instance().alarms();
-    if (index < 0 || index >= alarms.size()) return;
 
-    AlarmRecord alarm = alarms[index];
+    AlarmRecord alarm;
+    bool found = false;
+    for (const auto &a : alarms) {
+        if (a.id == alarmId) {
+            alarm = a;
+            found = true;
+            break;
+        }
+    }
+    if (!found) return;
 
-    AlarmDetailDialog dlg(alarm, index, this);
-    connect(&dlg, &AlarmDetailDialog::alarmMarkedFalsePositive, this, [](int idx) {
-        AlarmManager::instance().markAsFalsePositive(idx);
+    AlarmDetailDialog dlg(alarm, this);
+    connect(&dlg, &AlarmDetailDialog::alarmMarkedFalsePositive, this, [](const QString &id) {
+        AlarmManager::instance().markAsFalsePositiveById(id);
     });
-    connect(&dlg, &AlarmDetailDialog::alarmAcknowledged, this, [](int idx) {
-        AlarmManager::instance().acknowledgeAlarm(idx);
+    connect(&dlg, &AlarmDetailDialog::alarmAcknowledged, this, [](const QString &id) {
+        AlarmManager::instance().acknowledgeAlarmById(id);
     });
     dlg.exec();
 

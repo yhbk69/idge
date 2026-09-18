@@ -140,17 +140,26 @@ public:
     // 确认所有报警（将所有报警标记为已确认）
     void acknowledgeAll();
 
-    // 确认单条报警（标记为已确认）
+    // 确认单条报警（按索引，标记为已确认）
     bool acknowledgeAlarm(int index);
+
+    // 确认单条报警（按ID，标记为已确认）- 推荐使用
+    bool acknowledgeAlarmById(const QString &id);
 
     // 清空所有报警
     void clearAlarms();
 
-    // 删除单条报警（用于误报标记）
+    // 删除单条报警（按索引）
     bool removeAlarm(int index);
 
-    // 标记为误报
+    // 删除单条报警（按ID）- 推荐使用
+    bool removeAlarmById(const QString &id);
+
+    // 标记为误报（按索引）
     bool markAsFalsePositive(int index);
+
+    // 标记为误报（按ID）- 推荐使用
+    bool markAsFalsePositiveById(const QString &id);
 
     // 获取各类别检测统计
     QMap<QString, int> classStatistics() const;

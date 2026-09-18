@@ -333,14 +333,11 @@ void AlarmListWidget::refreshTable()
     for (int i = 0; i < shown; i++) {
         const AlarmRecord &a = filtered[total - 1 - i];  // 倒序获取
 
-        // 存储原始报警索引（用于后续删除操作）
-        int originalIndex = total - 1 - i;
-
         // 时间列
         QDateTime dt = QDateTime::fromString(a.alarmTime, Qt::ISODate);
         QTableWidgetItem *timeItem = new QTableWidgetItem(dt.toString("yyyy-MM-dd HH:mm:ss"));
         timeItem->setData(Qt::UserRole, a.imagePath);  // 存储截图路径
-        timeItem->setData(Qt::UserRole + 1, originalIndex);  // 存储原始索引
+        timeItem->setData(Qt::UserRole + 2, a.id);  // 存储报警ID（用于精确定位）
         table_->setItem(i, 0, timeItem);
         
         // 通道列
@@ -499,19 +496,28 @@ void AlarmListWidget::showAlarmDetail(int row)
     QTableWidgetItem *timeItem = table_->item(row, 0);
     if (!timeItem) return;
 
-    int originalIndex = timeItem->data(Qt::UserRole + 1).toInt();
+    // 使用 id 而不是索引来定位报警（索引不稳定）
+    QString alarmId = timeItem->data(Qt::UserRole + 2).toString();
     QVector<AlarmRecord> alarms = AlarmManager::instance().alarms();
-    if (originalIndex < 0 || originalIndex >= alarms.size()) return;
 
-    AlarmRecord alarm = alarms[originalIndex];
+    AlarmRecord alarm;
+    bool found = false;
+    for (const auto &a : alarms) {
+        if (a.id == alarmId) {
+            alarm = a;
+            found = true;
+            break;
+        }
+    }
+    if (!found) return;
 
-    AlarmDetailDialog dlg(alarm, originalIndex, this);
-    connect(&dlg, &AlarmDetailDialog::alarmMarkedFalsePositive, this, [this](int idx) {
-        AlarmManager::instance().markAsFalsePositive(idx);
+    AlarmDetailDialog dlg(alarm, this);
+    connect(&dlg, &AlarmDetailDialog::alarmMarkedFalsePositive, this, [this](const QString &id) {
+        AlarmManager::instance().markAsFalsePositiveById(id);
         refreshTable();
     });
-    connect(&dlg, &AlarmDetailDialog::alarmAcknowledged, this, [this](int idx) {
-        AlarmManager::instance().acknowledgeAlarm(idx);
+    connect(&dlg, &AlarmDetailDialog::alarmAcknowledged, this, [this](const QString &id) {
+        AlarmManager::instance().acknowledgeAlarmById(id);
         refreshTable();
     });
     dlg.exec();

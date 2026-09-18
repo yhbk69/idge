@@ -10,8 +10,8 @@
 #include <QScreen>
 #include <QGuiApplication>
 
-AlarmDetailDialog::AlarmDetailDialog(const AlarmRecord &alarm, int alarmIndex, QWidget *parent)
-    : QDialog(parent), alarm_(alarm), alarmIndex_(alarmIndex)
+AlarmDetailDialog::AlarmDetailDialog(const AlarmRecord &alarm, QWidget *parent)
+    : QDialog(parent), alarm_(alarm)
 {
     setupUi();
     loadScreenshot();
@@ -137,13 +137,13 @@ void AlarmDetailDialog::onMarkFalsePositive()
     box.activateWindow();
 
     if (box.exec() == QMessageBox::Ok) {
-        emit alarmMarkedFalsePositive(alarmIndex_);
+        emit alarmMarkedFalsePositive(alarm_.id);
         accept();
     }
 }
 
 void AlarmDetailDialog::onMarkNormal()
 {
-    emit alarmAcknowledged(alarmIndex_);
+    emit alarmAcknowledged(alarm_.id);
     accept();
 }
