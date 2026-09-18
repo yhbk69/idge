@@ -31,12 +31,15 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <sys/signal.h>
 #include <algorithm>
 #include <map>
 #include <thread>
 #include <chrono>
 #include <opencv2/opencv.hpp>
 #include <iostream>
+#include <QTimer>
+#include <QDateTime>
 
 // RGA (Rocket Graphics Acceleration) 头文件
 // 用于硬件加速的图像色彩转换和缩放
@@ -64,8 +67,24 @@
 #include "config/parse_config.hpp"
 #include "yolo11/yolo11_model.hpp"
 #include "alarm_manager.h"
+#include "database/database_manager.h"
 
 //std::shared_ptr<dpool::ThreadPool> detectPool;
+
+// ============================================================================
+// 信号处理 - 优雅关闭
+// ============================================================================
+// 处理 SIGTERM (kill) 和 SIGINT (Ctrl+C) 信号
+// 收到信号后设置标志位，让主循环优雅退出
+// ============================================================================
+static volatile sig_atomic_t g_shutdownRequested = 0;
+
+static void signalHandler(int signum)
+{
+    Q_UNUSED(signum);
+    g_shutdownRequested = 1;
+    qInfo() << "Shutdown signal received, cleaning up...";
+}
 
 // ============================================================================
 // 判断是否为 CLI 模式
@@ -273,8 +292,44 @@ int main(int argc, char *argv[])
     AlarmManager::instance().initDatabase("idge.db");
     AlarmManager::instance().loadAlarmsFromDatabase();
 
+    // 注册信号处理（优雅关闭）
+    signal(SIGTERM, signalHandler);  // kill 命令
+    signal(SIGINT, signalHandler);   // Ctrl+C
+
     // 创建并显示主窗口
     frmMain w;
+
+    // 定时备份数据库（每天凌晨 3 点）
+    // 使用 QTimer 定期检查是否需要备份
+    QTimer backupTimer;
+    QObject::connect(&backupTimer, &QTimer::timeout, []() {
+        QDateTime now = QDateTime::currentDateTime();
+        // 每天凌晨 3 点执行备份
+        if (now.time().hour() == 3 && now.time().minute() == 0) {
+            QString backupPath = QString("backups/idge_%1.db")
+                .arg(now.toString("yyyyMMdd"));
+            if (DatabaseManager::instance().backup(backupPath)) {
+                qInfo() << "Daily backup completed:" << backupPath;
+            }
+        }
+    });
+    backupTimer.start(60000);  // 每分钟检查一次
+
+    // 启动时立即执行一次备份（确保有备份）
+    {
+        QString backupPath = QString("backups/idge_%1.db")
+            .arg(QDateTime::currentDateTime().toString("yyyyMMdd"));
+        DatabaseManager::instance().backup(backupPath);
+    }
+
+    // 定时检查关闭信号（收到 SIGTERM/SIGINT 时优雅退出）
+    QTimer shutdownCheckTimer;
+    QObject::connect(&shutdownCheckTimer, &QTimer::timeout, []() {
+        if (g_shutdownRequested) {
+            qApp->quit();
+        }
+    });
+    shutdownCheckTimer.start(500);  // 每 500ms 检查一次
 
     QtHelper::setFormInCenter(&w);
     w.show();
@@ -283,8 +338,9 @@ int main(int argc, char *argv[])
     a.exec();
 
     // 程序退出前清理和同步
-    AlarmManager::instance().cleanOldData(30);
+    qInfo() << "Shutting down, cleaning up...";
     AlarmManager::instance().syncToDatabase();
+    AlarmManager::instance().cleanOldData(30);
 
     return 0;
 }

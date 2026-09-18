@@ -111,6 +111,8 @@ private:
     // 成员变量
     EglImageHelper egl_;  // EGL图像辅助类
     QOpenGLShaderProgram* shader_ = nullptr;  // 着色器程序
+    GLuint vbo_ = 0;  // 顶点缓冲对象（创建一次，复用）
+    GLuint ebo_ = 0;  // 索引缓冲对象（创建一次，复用）
 
     /* 
     ====================================================

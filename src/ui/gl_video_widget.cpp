@@ -105,6 +105,9 @@ GLVideoWidget::~GLVideoWidget()
         if (textures_[i])
             glDeleteTextures(1, &textures_[i]);
     }
+    // 清理 VBO/EBO
+    if (vbo_) { glDeleteBuffers(1, &vbo_); vbo_ = 0; }
+    if (ebo_) { glDeleteBuffers(1, &ebo_); ebo_ = 0; }
     delete shader_;
     doneCurrent();
 
@@ -135,6 +138,17 @@ void GLVideoWidget::initializeGL()
     }
 
     createShaderProgram();
+
+    // 创建 VBO 和 EBO（只创建一次，每帧复用）
+    // 之前每帧都 glGenBuffers + glDeleteBuffers，GPU 缓冲区频繁创建销毁开销很大
+    glGenBuffers(1, &vbo_);
+    glGenBuffers(1, &ebo_);
+
+    // EBO 索引数据固定（两个三角形组成四边形），只需上传一次
+    GLuint indices[] = {0, 1, 2, 2, 3, 0};
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 
     // 创建两个 OpenGL 纹理（双缓冲）
     // 纹理本身不分配内存，只是创建一个"容器"
@@ -295,16 +309,12 @@ void GLVideoWidget::drawQuad()
          sx,  sy,  1.0f, 0.0f,  // 右上角
         -sx,  sy,  0.0f, 0.0f,  // 左上角
     };
-    GLuint indices[] = {0, 1, 2, 2, 3, 0};  // 两个三角形
 
-    GLuint vbo, ebo;
-    glGenBuffers(1, &vbo);
-    glGenBuffers(1, &ebo);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    // 复用已创建的 VBO/EBO，只更新顶点数据（每帧顶点位置会变）
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_);
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_DYNAMIC_DRAW);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo_);
+    // EBO 数据固定（索引不变），只需在首次绑定，这里简化处理也一并更新
 
     // 顶点属性：位置（2 float）+ 纹理坐标（2 float），间隔 16 字节
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 16, (void*)0);
@@ -322,10 +332,9 @@ void GLVideoWidget::drawQuad()
     glDisableVertexAttribArray(0);
     glDisableVertexAttribArray(1);
     glBindTexture(GL_TEXTURE_2D, 0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
     shader_->release();
-
-    glDeleteBuffers(1, &vbo);
-    glDeleteBuffers(1, &ebo);
 
     // 绘制 FPS 文字
     QPainter painter(this);

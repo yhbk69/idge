@@ -291,6 +291,19 @@ bool DatabaseManager::backup(const QString &backupPath)
         return false;
     }
 
+    // 路径安全校验：防止 SQL 注入（VACUUM INTO 不支持参数化查询）
+    // 1. 路径不能为空
+    // 2. 不能包含单引号（SQL 字符串分隔符）
+    // 3. 不能包含分号（SQL 语句分隔符）
+    // 4. 不能包含路径遍历（../）
+    if (backupPath.isEmpty() ||
+        backupPath.contains('\'') ||
+        backupPath.contains(';') ||
+        backupPath.contains("..")) {
+        qWarning() << "Backup failed: invalid path (security check)";
+        return false;
+    }
+
     // 确保备份目录存在
     QFileInfo fileInfo(backupPath);
     QDir dir = fileInfo.absoluteDir();

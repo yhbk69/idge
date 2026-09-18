@@ -224,10 +224,19 @@ private:
     ConfigManager() {}
 
     void saveUnsafe();  ///< 内部不加锁的保存方法
+    void updateCache(); ///< 从 root_ 更新缓存值
 
     QString configPath_;   ///< 配置文件路径
     QJsonObject root_;     ///< JSON 根对象
     mutable std::mutex mutex_;  ///< 保护 root_ 的互斥锁
+
+    // 缓存的高频访问值（避免每次 getter 都反序列化 JSON）
+    double confThreshold_ = 0.25;      ///< 置信度阈值缓存
+    double nmsThreshold_ = 0.45;       ///< NMS 阈值缓存
+    int classNum_ = 80;                ///< 类别数缓存
+    int threads_ = 3;                  ///< 推理线程数缓存
+    bool storeDetections_ = true;      ///< 检测数据存储开关缓存
+    int detectionRetentionDays_ = 30;  ///< 检测数据保留天数缓存
 };
 
 #endif // CONFIGMANAGER_H

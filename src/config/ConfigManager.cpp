@@ -137,6 +137,28 @@ void ConfigManager::load(const QString &path)
     } else {
         qWarning() << "[ConfigManager] 文件打开失败:" << path;
     }
+
+    // 从 root_ 更新缓存值（避免每次 getter 都反序列化 JSON）
+    updateCache();
+}
+
+// ============================================================================
+// 从 root_ 更新缓存值
+// ============================================================================
+// 将高频访问的配置值缓存到成员变量，getter 直接返回缓存值
+// 避免每次调用 getter 都做 root_["xxx"].toObject()["yyy"] 的临时对象创建
+// ============================================================================
+void ConfigManager::updateCache()
+{
+    QJsonObject detect = root_["detect"].toObject();
+    confThreshold_ = detect["conf_threshold"].toDouble(0.25);
+    nmsThreshold_ = detect["nms_threshold"].toDouble(0.45);
+    classNum_ = detect["class_num"].toInt(80);
+    threads_ = detect["threads"].toInt(3);
+
+    QJsonObject db = root_["database"].toObject();
+    storeDetections_ = db["storeDetections"].toBool(true);
+    detectionRetentionDays_ = db["detectionRetentionDays"].toInt(30);
 }
 
 // ============================================================================
@@ -395,16 +417,18 @@ QString ConfigManager::modelType() const
 double ConfigManager::confThreshold() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    return root_["detect"].toObject()["conf_threshold"].toDouble(0.25);
+    return confThreshold_;  // 返回缓存值，避免每次反序列化 JSON
 }
 
 // 设置置信度阈值
 void ConfigManager::setConfThreshold(double val)
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    val = qBound(0.0, val, 1.0);  // 限制范围 0.0 ~ 1.0
     QJsonObject detect = root_["detect"].toObject();
     detect["conf_threshold"] = val;
     root_["detect"] = detect;
+    confThreshold_ = val;  // 更新缓存
 }
 
 // ============================================================================
@@ -425,23 +449,25 @@ void ConfigManager::setConfThreshold(double val)
 double ConfigManager::nmsThreshold() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    return root_["detect"].toObject()["nms_threshold"].toDouble(0.45);
+    return nmsThreshold_;  // 返回缓存值
 }
 
 // 设置 NMS 阈值
 void ConfigManager::setNmsThreshold(double val)
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    val = qBound(0.0, val, 1.0);  // 限制范围 0.0 ~ 1.0
     QJsonObject detect = root_["detect"].toObject();
     detect["nms_threshold"] = val;
     root_["detect"] = detect;
+    nmsThreshold_ = val;  // 更新缓存
 }
 
 // 获取检测类别数量（默认 80，COCO 数据集）
 int ConfigManager::classNum() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    return root_["detect"].toObject()["class_num"].toInt(80);
+    return classNum_;  // 返回缓存值
 }
 
 // ============================================================================
@@ -453,7 +479,7 @@ int ConfigManager::classNum() const
 int ConfigManager::threads() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    return root_["detect"].toObject()["threads"].toInt(3);
+    return threads_;  // 返回缓存值
 }
 
 // ==========================================
@@ -637,7 +663,7 @@ void ConfigManager::setGeofenceAlarmClasses(const QStringList &classes)
 bool ConfigManager::storeDetections() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    return root_["database"].toObject()["storeDetections"].toBool(true);
+    return storeDetections_;  // 返回缓存值
 }
 
 /**
@@ -650,6 +676,7 @@ void ConfigManager::setStoreDetections(bool enabled)
     QJsonObject db = root_["database"].toObject();
     db["storeDetections"] = enabled;
     root_["database"] = db;
+    storeDetections_ = enabled;  // 更新缓存
 }
 
 /**
@@ -659,7 +686,7 @@ void ConfigManager::setStoreDetections(bool enabled)
 int ConfigManager::detectionRetentionDays() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    return root_["database"].toObject()["detectionRetentionDays"].toInt(30);
+    return detectionRetentionDays_;  // 返回缓存值
 }
 
 /**
@@ -669,7 +696,9 @@ int ConfigManager::detectionRetentionDays() const
 void ConfigManager::setDetectionRetentionDays(int days)
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    days = qBound(1, days, 365);  // 限制范围 1 ~ 365 天
     QJsonObject db = root_["database"].toObject();
     db["detectionRetentionDays"] = days;
     root_["database"] = db;
+    detectionRetentionDays_ = days;  // 更新缓存
 }

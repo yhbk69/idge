@@ -98,6 +98,7 @@
 #undef Bool
 #include "ConfigManager.h"
 #include <fstream>
+#include <arm_neon.h>   // ARM NEON SIMD 加速
 
 // ============================================================
 // 报警截图异步写入器
@@ -140,10 +141,23 @@ public:
         job.rgb.resize((size_t)w * h * 3);
 
         // RGBA(4字节/像素) -> RGB(3字节/像素)，跳过 alpha 字节
+        // 使用 ARM NEON SIMD 加速，每次处理 8 个像素
         const unsigned char *s = rgba;
         unsigned char *d = job.rgb.data();
         size_t n = (size_t)w * h;
-        for (size_t i = 0; i < n; ++i) {
+        size_t i = 0;
+
+        // NEON 优化：每次处理 8 个 RGBA 像素 -> 8 个 RGB 像素
+        // vld4_u8 加载 32 字节（8×4），交错解包为 4 个 8×8 通道
+        for (; i + 8 <= n; i += 8) {
+            uint8x8x4_t rgba8 = vld4_u8(s);   // 加载 8 个像素的 R,G,B,A
+            vst3_u8(d, *(uint8x8x3_t*)&rgba8); // 存储 8 个像素的 R,G,B（丢弃 A）
+            s += 32;  // 8 像素 × 4 字节
+            d += 24;  // 8 像素 × 3 字节
+        }
+
+        // 处理剩余不足 8 个的像素
+        for (; i < n; ++i) {
             d[0] = s[0];
             d[1] = s[1];
             d[2] = s[2];
