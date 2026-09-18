@@ -31,6 +31,8 @@
 frmVideoWindow::frmVideoWindow(QWidget *parent) : QWidget(parent), ui(new Ui::frmVideoWindow)
 {
     ui->setupUi(this);       // 加载 Qt Designer 设计的界面布局
+    ui->gridLayout->setContentsMargins(0, 0, 0, 0);  // 去除 gridLayout 默认边距，消除左侧空白
+    ui->gridLayout->setSpacing(0);                     // 去除视频窗口之间的间距
     this->setupFenceToolbar();
     this->initForm();        // 初始化信号连接
 }
