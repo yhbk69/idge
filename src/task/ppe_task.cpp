@@ -31,6 +31,7 @@
 #include "ThreadPool.hpp"
 #include "DmaBufferPool.h"
 #include "easy_timer.h"
+#include <QDebug>
 
 PpeTask::PpeTask(TaskConfig config)
 {
@@ -228,4 +229,57 @@ PpeTask::~PpeTask()
     }
     delete taskQueue_;
     taskQueue_ = nullptr;
+}
+
+// ============================================================================
+// reloadModel: 热更新模型
+// ============================================================================
+// 安全地替换推理模型，流程：
+//   1. 停止推理线程（等待当前推理完成）
+//   2. 销毁旧模型（释放 NPU 资源）
+//   3. 创建新模型（加载到 NPU）
+//   4. 重启推理线程
+//
+// 如果新模型加载失败，旧模型保持不变，返回 false
+// ============================================================================
+bool PpeTask::reloadModel(const std::string &newPath,
+                           const std::string &newLabelPath,
+                           rknn_core_mask coreMask)
+{
+    qInfo() << "PpeTask: Reloading model from" << QString::fromStdString(newPath);
+
+    // 1. 停止推理线程
+    stopBestEffort(2000);
+    running_ = false;
+    finished_ = false;
+
+    // 2. 尝试创建新模型（如果失败，旧模型继续工作）
+    std::shared_ptr<YOLO11Model> newModel;
+    try {
+        newModel = std::make_shared<YOLO11Model>(newPath, newLabelPath, coreMask);
+    } catch (const std::exception &e) {
+        qWarning() << "PpeTask: Failed to load new model:" << e.what();
+        // 重启旧模型的推理线程
+        running_ = true;
+        finished_ = false;
+        taskQueue_->clear();
+        thread_ = std::thread(&PpeTask::run, this);
+        return false;
+    }
+
+    // 3. 替换模型（旧模型在 shared_ptr 析构时自动释放 NPU 资源）
+    model_ = newModel;
+    config.modelPath = newPath;
+    config.labelPath = newLabelPath;
+
+    // 4. 清空队列中残留的旧帧
+    taskQueue_->clear();
+
+    // 5. 重启推理线程
+    running_ = true;
+    finished_ = false;
+    thread_ = std::thread(&PpeTask::run, this);
+
+    qInfo() << "PpeTask: Model reloaded successfully";
+    return true;
 }

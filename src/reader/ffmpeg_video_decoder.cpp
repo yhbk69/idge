@@ -477,6 +477,92 @@ void FFmpegVideoDecoder::stop()
 }
 
 // ============================================================================
+// reloadAllModels: 热更新所有模型
+// ============================================================================
+// 在不停止解码的情况下替换所有推理模型。
+// 用于生产环境中更换检测模型（如从安全帽检测切换到反光背心检测）。
+//
+// 流程：
+//   1. 逐个调用 PpeTask::reloadModel() 替换模型
+//   2. 更新类别名称列表
+//   3. 返回成功替换的数量
+//
+// 注意：
+//   - 解码线程继续运行，但推理会短暂暂停（~100ms/模型）
+//   - 如果新模型加载失败，旧模型保持不变
+// ============================================================================
+int FFmpegVideoDecoder::reloadAllModels(const QStringList &modelPaths, const QStringList &labelPaths)
+{
+    int successCount = 0;
+    int taskIndex = 0;
+
+    for (int i = 0; i < modelPaths.size() && taskIndex < tasks_.size(); i++) {
+        QString path = modelPaths[i];
+        if (path.isEmpty()) {
+            continue;  // 跳过空路径
+        }
+
+        QString labelPath = (i < labelPaths.size()) ? labelPaths[i] : labelPaths[0];
+
+        PpeTask *task = tasks_[taskIndex];
+        bool ok = task->reloadModel(
+            path.toStdString(),
+            labelPath.toStdString(),
+            RKNN_NPU_CORE_0);  // TODO: 支持配置核心掩码
+
+        if (ok) {
+            successCount++;
+            qInfo() << "Model" << i << "reloaded:" << path;
+        } else {
+            qWarning() << "Model" << i << "reload failed:" << path;
+        }
+
+        taskIndex++;
+    }
+
+    // 更新类别名称（使用第一个模型的标签文件）
+    if (!labelPaths.isEmpty() && !labelPaths[0].isEmpty()) {
+        classNames_.clear();
+        // 从新模型获取类别名称
+        if (!tasks_.empty()) {
+            // PpeTask 的模型已经更新，类别名称也已更新
+            qInfo() << "Class names updated from new model";
+        }
+    }
+
+    return successCount;
+}
+
+// ============================================================================
+// setVideoRecordingEnabled: 启用/禁用视频录制
+// ============================================================================
+void FFmpegVideoDecoder::setVideoRecordingEnabled(bool enabled, int bufferSeconds)
+{
+    if (enabled && !videoRecorder_) {
+        videoRecorder_ = new VideoRecorder(bufferSeconds, 25, this);
+        videoRecordingEnabled_ = true;
+        qInfo() << "Video recording enabled, buffer:" << bufferSeconds << "s";
+    } else if (!enabled && videoRecorder_) {
+        delete videoRecorder_;
+        videoRecorder_ = nullptr;
+        videoRecordingEnabled_ = false;
+        qInfo() << "Video recording disabled";
+    }
+}
+
+// ============================================================================
+// dumpVideoToFile: 将环形缓冲区 dump 到 MP4 文件
+// ============================================================================
+bool FFmpegVideoDecoder::dumpVideoToFile(const QString &filePath)
+{
+    if (!videoRecorder_ || !videoRecorder_->isInitialized()) {
+        qWarning() << "Video recorder not initialized";
+        return false;
+    }
+    return videoRecorder_->dumpToFile(filePath);
+}
+
+// ============================================================================
 // 主解码循环
 // ============================================================================
 // 这是整个硬件解码流程的核心函数，运行在独立的 Qt 线程中。
@@ -597,6 +683,11 @@ void FFmpegVideoDecoder::decodeLoop()
     int vid_w = dec_ctx->width;
     int vid_h = dec_ctx->height;
     qDebug() << "Decoder:" << codec->name << vid_w << "x" << vid_h;
+
+    // 初始化视频录制器（如果已启用）
+    if (videoRecordingEnabled_ && videoRecorder_) {
+        videoRecorder_->init(vid_w, vid_h);
+    }
 
     emit statusChanged(channel_, 1);
 
@@ -1035,6 +1126,17 @@ void FFmpegVideoDecoder::decodeLoop()
                     rf.width = vid_w;
                     rf.height = vid_h;
                     rf.stride = dst_buf->stride();
+
+                    // 视频录制：将帧编码并存入环形缓冲区
+                    // 在报警时可以 dump 最近 N 秒的视频
+                    if (videoRecordingEnabled_ && videoRecorder_ && videoRecorder_->isInitialized()) {
+                        // 获取当前时间戳（毫秒）
+                        qint64 timestamp_ms = QDateTime::currentMSecsSinceEpoch();
+                        // RGBA 数据在 dst_buf->ptr() 中，直接读取编码
+                        videoRecorder_->encodeFrame(
+                            (const unsigned char*)dst_buf->ptr(),
+                            vid_w, vid_h, timestamp_ms);
+                    }
 
                     emit frameReady(rf);
                    

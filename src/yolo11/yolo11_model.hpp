@@ -84,6 +84,21 @@ public:
     }
 
     /**
+     * @brief 析构函数 - 释放 RKNN NPU 资源
+     *
+     * 必须调用 release_yolo11_model() 释放：
+     *   - rknn_context（NPU 句柄）
+     *   - 输入输出张量内存
+     *   - tensor 属性内存
+     *
+     * @note 之前缺失此析构函数导致 NPU 资源泄漏
+     */
+    ~YOLO11Model() override
+    {
+        release_yolo11_model(&app_ctx);
+    }
+
+    /**
      * @brief 初始化 RKNN 模型
      *
      * 流程：
