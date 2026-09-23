@@ -464,7 +464,10 @@ void IconHelper::setStyle1(QWidget *widget, QList<QAbstractButton *> btns, QList
         this->pixChecked << pixChecked;
     }
 
-    // 主动触发选中按钮的状态更新
+    // 主动触发选中按钮的状态更新：
+    // "toggled" 是按钮自身的信号，通过元对象调用等价于立即发射该信号，
+    // 借由上面 connect 的 SLOT(toggled(bool)) 让图标切到选中态，
+    // 而不是在此处直接 setIcon —— 保持状态刷新入口唯一
     if (checkedIndex >= 0) {
         QMetaObject::invokeMethod(btns.at(checkedIndex), "toggled", Q_ARG(bool, true));
     }

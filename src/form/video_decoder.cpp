@@ -20,6 +20,9 @@
 //   - 使用滑动窗口平滑显示耗时，避免卡顿
 //   - 支持暂停/恢复（通过互斥锁 + 定时器检查）
 //
+// 现状警示：本类当前无实例化点（历史录像回放方案，见 video_decoder.h
+// 顶部使用契约：停止必须先置位 m_isDecoding、等线程退出后再销毁）。
+//
 // ============================================================================
 
 #include "video_decoder.h"
@@ -247,6 +250,16 @@ void VideoDecoder::receiveStartDecoding()
     // ============================================================================
     // 7. 解码主循环
     // ============================================================================
+    // ⚠ 线程/重入警示：
+    //   - 本槽在解码线程内长时间阻塞运行，循环里的 processEvents 让该线程
+    //     也能投递/接收跨线程队列信号（frameDecoded 的接收方在 GUI 线程，
+    //     processEvents 服务的是本线程事件队列，如 receiveStopDecoding 等
+    //     直接连接槽与 m_pauseTimer）；
+    //   - 正因 processEvents 可重入，"停止"指令只能在循环顶部的 m_isDecoding
+    //     检查点生效；暂停分支用 50ms 轮询睡眠保持响应；
+    //   - 退出路径唯一：!m_isDecoding 或 av_read_frame 返回 <0（EOF/错误），
+    //     统一在循环后释放资源并 emit decodingFinished。
+    // ============================================================================
     while (true) {
         m_frameTimer.start();
 
@@ -341,6 +354,15 @@ void VideoDecoder::receiveStartDecoding()
                 );
 
                 // 构造 QImage 并发送到 UI 线程
+                // ⚠ 内存/线程安全警示（上轮审查确认，保持现状仅标注）：
+                //   此 QImage 是 m_rgbBuffer 外部内存的浅封装（不带析构回调、
+                //   不参与隐式共享引用计数），emit 按值传递也不会复制像素数据。
+                //   因此：1) 下一帧 sws_scale 会直接覆写正在显示/排队中的帧
+                //   （慢速 UI 下可见撕裂）；2) 若使用队列连接，帧在 GUI 队列中
+                //   滞留期间解码线程继续写缓冲；3) 停止/换源 freeFFmpegResources()
+                //   释放 m_rgbBuffer 后，事件队列里未消费的 frame 成为悬垂指针，
+                //   消费方（PlayerWidget）已用"先停线程后销毁"的时序规避。
+                //   任何改动不得提前释放 RGB 缓冲或改在回调内长期持有该 QImage。
                 QImage frame(
                     m_rgbFrame->data[0],
                     m_codecCtx->width,
@@ -360,11 +382,14 @@ void VideoDecoder::receiveStartDecoding()
                 if (m_frame->pts != AV_NOPTS_VALUE) {
                     if (m_lastFramePts != AV_NOPTS_VALUE) {
                         // 1. 计算单帧理论间隔（两帧 PTS 差 × 时间基）
+                        //    qBound(0,_,1000)：负值说明落后于节奏不等待，
+                        //    上限 1s 防止 PTS 异常跳变（花帧/坏流）导致长时间睡死
                         double frameDelay = av_q2d(videoStream->time_base) *
                                 (m_frame->pts - m_lastFramePts) * 1000;
                         frameDelay = qBound(0.0, frameDelay, 1000.0);
 
-                        // 2. 减去上一帧的显示耗时（单帧补偿）
+                        // 2. 减去上一帧的显示耗时（单帧补偿；
+                        //    尚无实测耗时时按 9ms 经验值保守估计）
                         frameDelay -= (m_lastDisplayCost > 0 ? m_lastDisplayCost : 9);
 
                         // 3. 全局时间偏差校准（防止长时间播放后音视频不同步）
@@ -377,7 +402,8 @@ void VideoDecoder::receiveStartDecoding()
                             frameDelay += qBound(-5, globalDiff / 5, 5);
                         }
 
-                        // 5. 执行休眠
+                        // 5. 执行休眠（remainingDelay 上限 100ms：落后过多时
+                        //    宁可加速丢节奏也不长时间睡死，避免暂停/停止响应迟钝）
                         int elapsed = m_frameTimer.restart();
                         int remainingDelay = frameDelay - elapsed;
                         remainingDelay = qBound(0, remainingDelay, 100);

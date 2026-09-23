@@ -135,8 +135,10 @@ int DmaFrameBuffer::alloc_drm_buffer() {
         return -1;
     }
 
-    m_stride = create.pitch;   // 实际 stride（可能因对齐而大于 width * bpp/8）
-    m_size = create.size;      // 总分配大小
+    m_stride = create.pitch;   // 实际 stride（DRM 驱动按行对齐后返回，
+                               //  通常向上对齐到 64 字节，故可能大于 width*bpp/8，
+                               //  后续 RGA/EGL 的 pitch 参数必须用它而非 width）
+    m_size = create.size;      // 总分配大小（内核已按页向上取整，含尾部填充）
     
     // 步骤4: 将 DRM handle 转换为 PRIME fd
     // DRM handle: 进程内部的句柄，不可跨进程共享
@@ -210,6 +212,16 @@ void DmaFrameBuffer::free_dma_buffer() {
 //   3. DRM_IOCTL_MODE_DESTROY_DUMB: 通知内核释放显存
 //
 // 注意：如果顺序错误（如先 destroy 再 munmap），会导致 use-after-free 崩溃
+//
+// ⚠【已知缺陷（仅警示）】alloc_drm_buffer() 步骤7 已 close(m_drm_fd) 但
+//   未把 m_drm_fd 复位为 -1，且 GEM handle 随 DRM 设备 fd 关闭即失效。
+//   因此这里的 DRM_IOCTL_MODE_DESTROY_DUMB 实际是对一个"已关闭（或已被
+//   其他线程 open 复用）的整数 fd"发 ioctl：
+//   - 通常直接 EBADF 失败，DUMB 内存随 prime fd 关闭由内核回收（侥幸无泄漏）；
+//   - 若该 fd 号已被别的文件复用，则属于对无关 fd 的误操作（潜在危害）。
+//   正确做法：在 close(m_drm_fd) 后置 m_drm_fd=-1，或保留打开的 DRM fd。
+// ⚠ munmap 使用 m_size：若对象经过不完整的移动构造（见头文件警示），
+//   m_size 可能为垃圾值，解除映射的长度将不正确。
 // ============================================================================
 void DmaFrameBuffer::free_drm_buffer() {
     std::lock_guard<std::mutex> lock(dma_mutex);   // 加锁，保护 close/munmap 并发

@@ -22,6 +22,19 @@ extern "C" {
 说明：在独立线程中运行，通过Qt信号槽机制与主线程通信
 ====================================================
 */
+// ⚠ 使用契约与现状警示：
+//   1. 本类经 CMake GLOB 参与编译，但当前工程内暂无实例化点
+//      （历史"录像回放"方案，实时播放走 src/ui/player_widget +
+//      src/reader/FFmpegVideoDecoder）。重新接线时须自行遵守以下约定；
+//   2. 标准用法：new VideoDecoder（无 parent）→ new QThread →
+//      moveToThread → started 触发 receiveStartDecoding → 各控制槽用
+//      信号跨线程调用；start()/receiveVideoPath 会阻塞跑完整个解码循环；
+//   3. 停止时序（关窗/切源必须遵守）：先经 receiveStopDecoding()（线程
+//      安全，仅置 m_isDecoding=false）打断解码循环，等待线程收到
+//      decodingFinished 并 quit()+wait() 后，才可 deleteLater 解码器；
+//      绝不允许在 isRunning 时销毁 QThread/解码器（Qt 直接 abort 崩溃）；
+//   4. frameDecoded 携带的 QImage 是内部 RGB 缓冲的浅封装（见 cpp 警示），
+//      接收方只允许"即时显示"，不得缓存该 QImage 超过下一帧到达。
 class VideoDecoder : public QObject
 {
     Q_OBJECT

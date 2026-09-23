@@ -6,14 +6,29 @@
  * @brief 统一配置管理器 - 单例模式
  *
  * 所有配置集中在 config.json 中管理，包括：
- *   - 视频通道路径（4路）
+ *   - 视频通道路径（4路）+ 通道备注
+ *   - 级联模型路径/标签/备注（最多 5 个，主模型占用第 1 槽）
  *   - 模型路径、标签路径、输入尺寸、模型类型
  *   - 检测参数（置信度阈值、NMS阈值、类别数、线程数）
+ *   - 报警类别、电子围栏整段（geofence）
  *
  * 使用方式：
  *   ConfigManager::instance().load("config.json");   // 启动时加载
  *   ConfigManager::instance().setVideoChannel(1, path); // 修改配置
  *   ConfigManager::instance().save();                 // 保存到文件
+ *
+ * 【使用约定·重要】
+ *   1. 内存态 vs 落盘：load() 把整个 JSON 读进 root_（内存 QJsonObject）；
+ *      所有 setXxx() 只改内存中的 root_，并不会自动写文件——必须显式调用 save()
+ *      才落盘。漏调 save() 会导致"改了但重启丢失"。getters 读的是内存 root_，
+ *      因此 getter 能立刻看到 setter 的效果，即便尚未 save()。
+ *   2. 无锁 + 主线程约定：本类内部无任何互斥保护。约定仅在"主线程/UI 线程"读写
+ *      配置对象；解码线程应只在启动时通过 getters 取一次快照（如 AlarmManager 构造
+ *      里读 alarmClasses()），运行期不要跨线程调 setter 或 save()，否则与 root_
+ *      的读改存在数据竞争。
+ *   3. 缺省值兜底：getter 多用 toDouble(0.25)/toInt(80)/toString("inside_alarm") 等
+ *      带默认值的形式，缺键时返回兜底值而非崩溃；但 save() 打开文件失败会被静默忽略
+ *      （仅 load 时 qWarning），落盘结果需自行保证可写路径。
  */
 
 #include <QString>

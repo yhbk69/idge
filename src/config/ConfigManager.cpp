@@ -125,6 +125,9 @@ void ConfigManager::load(const QString &path)
     }
 
     // 读取并解析 JSON 文件
+    // 解析失败/文件损坏时不抛异常，而是把 root_ 置为空对象：
+    // 此后所有 getter 会因取不到键而回退到内置默认值（0.25/0.45/80/3/"inside_alarm"...），
+    // 保证程序仍可带默认配置启动；但注意这会静默丢弃用户原有配置。
     if (file.open(QIODevice::ReadOnly)) {
         QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
         if (doc.isNull()) {

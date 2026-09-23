@@ -1,3 +1,6 @@
+// 文件：equipment_recognition_dialog.cpp
+// 职责：设备盘点识别结果对话框实现（caichao 分支合入），
+//       后台 QThread + Worker(moveToThread) 执行 NPU 设备检测，结果回 GUI 线程渲染
 #include "equipment_recognition_dialog.h"
 
 #include <QAbstractItemView>
@@ -14,6 +17,16 @@
 #include "../utils/qt_image_utils.h"
 
 namespace {
+/**
+ * @class EquipmentRecognitionWorker
+ * @brief 识别任务执行体：整段 processPhotos 在工作线程同步跑（含 NPU 推理与落盘），
+ *        仅通过 finished/failed 信号跨线程汇报，不触碰任何 Qt 控件。
+ *
+ * 路径转换用 toUtf8()（板端文件系统路径按 UTF-8 字节序处理）；
+ * 所有 C++ 异常在此拦截转为 QString 消息——绝不允许多态异常穿越线程边界。
+ * 注意 Worker 持有 service_ 的 shared_ptr：即使对话框提前销毁，
+ * 服务对象也会被 Worker 续命到 run() 结束，避免悬垂引用。
+ */
 class EquipmentRecognitionWorker : public QObject {
     Q_OBJECT
 public:
@@ -59,10 +72,14 @@ EquipmentRecognitionDialog::EquipmentRecognitionDialog(
       service_(std::move(service)), phase_(phase) {
     qRegisterMetaType<EquipmentTaskResult>("EquipmentTaskResult");
     setupUi();
+    // 用 singleShot(0) 把识别推迟到事件循环启动后：
+    // 先让 exec() 绘制出"正在识别中"+忙碌进度条，再进入耗时流程
     QTimer::singleShot(0, this, &EquipmentRecognitionDialog::startRecognition);
 }
 
 EquipmentRecognitionDialog::~EquipmentRecognitionDialog() {
+    // quit() 只结束工作线程的事件循环，无法打断正在执行的 processPhotos；
+    // wait() 会阻塞 GUI 直到识别自然结束——关窗表现为短暂无响应，属已知行为
     if (recognition_thread_ && recognition_thread_->isRunning()) {
         recognition_thread_->quit();
         recognition_thread_->wait();
@@ -124,6 +141,17 @@ void EquipmentRecognitionDialog::setupUi() {
     connect(confirm_button_, &QPushButton::clicked, this, &EquipmentRecognitionDialog::onConfirm);
 }
 
+/**
+ * @brief 启动识别后台线程（标准 Worker→QThread 模式）
+ *
+ * 线程安全要点：
+ *   - QThread 以 this 为 parent，随对话框析构统一回收；本对话框每个实例
+ *     只启动一条识别线程（"上一步"走 reject 后由调用方重建整个对话框）；
+ *   - worker 不 setParent，所有权交给线程：finished/failed → quit，
+ *     thread finished → worker deleteLater，闭环无泄漏；
+ *   - worker→dialog 的信号跨线程，Qt 自动按队列连接投递到 GUI 线程，
+ *     槽内可安全操作控件。
+ */
 void EquipmentRecognitionDialog::startRecognition() {
     if (!service_) {
         onRecognitionError(QStringLiteral("设备识别服务未初始化"));
@@ -179,6 +207,9 @@ void EquipmentRecognitionDialog::onRecognitionError(const QString& message) {
     previous_button_->setEnabled(true);
 }
 
+// 结果表逐行渲染：后处理图等比缩到 760x320（与表格行高 350 匹配），
+// 第二列固定宽 280px 放"标签: 数量"多行文本；图片同步解码，
+// loadPixmapSafe 失败时显示占位文字而不是崩溃
 void EquipmentRecognitionDialog::renderResults() {
     table_->setRowCount(0);
     for (const auto& photo : result_.photos) {
@@ -208,15 +239,18 @@ void EquipmentRecognitionDialog::renderResults() {
     }
 }
 
-void EquipmentRecognitionDialog::onPrevious() { reject(); }
+void EquipmentRecognitionDialog::onPrevious() { reject(); }  // Accepted 之外的标准码：调用方回到选照步骤
 
 void EquipmentRecognitionDialog::onCancel() {
+    // done(2) 为自定义结果码（既非 Accepted 也非 Rejected）：
+    // 登记流程中调用方据此把任务整体删除；注销流程仅关闭窗口
     if (QMessageBox::question(this, QStringLiteral("确认取消"),
                               QStringLiteral("确定取消当前设备任务吗？")) == QMessageBox::Yes)
         done(2);
 }
 
 void EquipmentRecognitionDialog::onConfirm() {
+    // 只有 saveResult 落库成功才 accept()；失败保留界面让用户重试/取消
     if (!service_->saveResult(result_)) {
         QMessageBox::critical(this, QStringLiteral("错误"), QStringLiteral("保存设备盘点结果失败"));
         return;
@@ -224,4 +258,6 @@ void EquipmentRecognitionDialog::onConfirm() {
     accept();
 }
 
+// EquipmentRecognitionWorker 带 Q_OBJECT 且定义在本 .cpp 内，
+// 必须尾部包含该 moc 产物，否则 vtable 链接失败（AUTOMOC 生成）
 #include "equipment_recognition_dialog.moc"

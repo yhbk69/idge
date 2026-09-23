@@ -1,3 +1,5 @@
+// 文件职责：轻量级软件绘图实现（不依赖 OpenCV），提供 RGB888/RGBA8888/YUV420SP 帧上的
+// 点、线、圆、矩形、旋转框(RBOX)与位阵字体文字绘制，供 RKNN 检测结果可视化直接使用。
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

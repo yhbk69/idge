@@ -19,6 +19,11 @@
 */
 struct RenderFrame {
     int fd = -1;          // DMA-BUF文件描述符（dup后的副本）
+                          // 所有权协议：fd 是 dup 副本，跨线程经队列信号
+                          // 投递后由本 widget 独占，最终由 close() 释放；
+                          // 生产者 close 自己的原 fd 不影响已投递副本。
+                          // ⚠ 若信号投递成功但 widget 已析构（槽永不执行），
+                          //   该副本 fd 泄漏，停机时需保证解码器先停。
     int width = 0;        // 图像宽度
     int height = 0;       // 图像高度
     int stride = 0;       // 行跨度（字节数）

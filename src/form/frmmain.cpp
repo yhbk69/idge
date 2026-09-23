@@ -491,6 +491,19 @@ void frmMain::updateAlarmBadge()
  * @brief 初始化人员点名/设备盘点页面
  * 复用导航栏中 main 分支隐藏的两个占位按钮 btnData/btnConfig，
  * 分别承载"人员点名"（pageRoll，.ui 已有）与"设备盘点"（代码创建页面）。
+ *
+ * 初始化顺序是硬约束：
+ *   1. 必须先 initRollCallService()——EquipmentInventoryService 的构造函数
+ *      以 RollCallService 为依赖（两者共用 roll_call.db 的同一张 task 表，
+ *      盘点任务也登记在该表，type="equipment_registration"）；
+ *   2. 点名服务初始化失败只弹 warning、不中断启动：RollCallWidget 收到空的
+ *      shared_ptr 后所有取数路径早退（service_ 判空），页面降级为空白列表，
+ *      保证主监控功能不受业务模块拖累；
+ *   3. 设备页需要再包一层 equipPage_ 容器：stackedWidget 以"页"为单位切换，
+ *      EquipmentInventoryWidget 自身直接铺满 layout，故用代码创建 QWidget
+ *      作页面壳（.ui 中没有它，索引追加在最后）。
+ * lab5 为 .ui 中 pageRoll 原占位标签，挂真实页面前隐藏。
+ * 按钮文本改回"人员点名/设备盘点"由 buttonClick() 按文本分发页面。
  */
 void frmMain::initBusinessPages()
 {
@@ -525,6 +538,9 @@ void frmMain::initBusinessPages()
     ui->btnConfig->show();
 }
 
+// 点名服务资源约定（根目录 = 环境变量 IDGE_WORKSPACE，缺省回退当前工作目录）：
+//   model/face/ 下三件套：face_recognition(可执行/库路径)、detection.rknn(SCRFD 检测)、
+//   recognition.rknn(特征比对)；数据统一放 roll_call_data/（SQLite: roll_call.db）
 bool frmMain::initRollCallService()
 {
     rollCallService_ = std::make_shared<RollCallService>();
@@ -539,6 +555,9 @@ bool frmMain::initRollCallService()
     return success;
 }
 
+// 设备盘点模型清单：coco(通用目标) 与 fire(明火) 两套 yolo11.rknn，
+// 均借 coco_80_labels_list.txt 出标签；预览期两个模型分别绑定 NPU 核0/核1
+// （与设备页构造 detector_configs 时的核分配一致，主检测流水线预算留核2）
 bool frmMain::initEquipmentService()
 {
     equipmentService_ = std::make_shared<EquipmentInventoryService>(rollCallService_);
@@ -752,6 +771,11 @@ void frmMain::systemExit()
 
 void frmMain::closeEvent(QCloseEvent *event)
 {
+    // 停止时序（必须全部先于 accept/quit）：窗口即将析构会级联销毁
+    // PlayerWidget→其内部解码线程对象，若线程仍在运行 Qt 会报
+    // "QThread: Destroyed while thread is still running" 并 abort。
+    // 因此这里逐一 stopDecoder()（转发 FFmpegVideoDecoder::stop() 通知解码线程
+    // 退出）后才放行关闭。
     // 停止数据看板刷新定时器
     if (dashboardWidget_) {
         dashboardWidget_->stop();

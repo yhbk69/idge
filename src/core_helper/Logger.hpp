@@ -75,7 +75,9 @@ enum class LogLevel {
 //       默认级别为 INFO，低于 INFO 的 DEBUG 日志不会输出。
 // ============================================================================
 
-/** @brief 获取全局日志级别的引用（线程局部静态变量） */
+/** @brief 获取全局日志级别的引用（函数内静态变量，进程内全线程共享；
+ *         C++11 magic statics 保证初始化线程安全，但读写本身不加锁，
+ *         仅适合"启动时设置一次、运行期只读"的用法） */
 inline LogLevel& getGlobalLogLevel() {
     static LogLevel level = LogLevel::INFO;  // 默认 INFO 级别
     return level;
@@ -182,7 +184,7 @@ private:
                 });
                 batch.swap(queue_);  // 批量取出消息
             }
-            // 写入 stderr（stderr 是行缓冲的，适合日志输出）
+            // 写入 stderr（C 运行时默认对 stderr 不加缓冲，日志即时可见）
             for (auto& m : batch)
                 fprintf(stderr, "%s", m.c_str());
         }

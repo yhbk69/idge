@@ -1,6 +1,21 @@
 /* 蔡超添加
 数据库相关管理。 
 */
+// ============================================================================
+// business_db_manager.cpp - 人员点名 / 设备盘点业务库实现
+// ============================================================================
+//
+// 全部使用原生 sqlite3 预编译语句（prepare_v2/bind/step/finalize），不使用 Qt SQL。
+// 生命周期约定：
+//   - 每个函数各自 sqlite3_prepare_v2 出局部 stmt，成功/失败路径都必须 sqlite3_finalize，
+//     避免语句泄漏（下面各查询严格成对 finalize）。
+//   - bind 文本一律用 SQLITE_TRANSIENT，让 sqlite 立即拷贝，避免临时 c_str() 悬垂。
+//   - SELECT 用列序号硬编码，依赖建表列顺序，改表结构需同步改这里。
+//
+// 事务：仅两个 replace* 方法显式开事务（BEGIN IMMEDIATE ... COMMIT），
+//       其余单语句操作依赖 sqlite 自动提交。未开启 WAL（journal 默认模式）。
+//
+// ============================================================================
 #include "business_db_manager.h"
 #include <iostream>
 #include <cstring>
@@ -15,6 +30,8 @@ BusinessDBManager::~BusinessDBManager() {
     close();
 }
 
+// 打开库文件：sqlite3_open 成功(含首次创建空文件)后立即建表；建表失败则回滚关闭句柄，
+// 保证 initialized_ 不会在库不完整时被置真。IF NOT EXISTS 使重复 open 幂等。
 bool BusinessDBManager::open(const std::string& db_path) {
     int ret = sqlite3_open(db_path.c_str(), &db_);
     if (ret != SQLITE_OK) {
@@ -31,6 +48,7 @@ bool BusinessDBManager::open(const std::string& db_path) {
     return true;
 }
 
+// 释放连接句柄并把指针置空，避免析构 + 手动 close 造成 double-close。
 void BusinessDBManager::close() {
     if (db_) {
         sqlite3_close(db_);
@@ -39,6 +57,17 @@ void BusinessDBManager::close() {
     initialized_ = false;
 }
 
+// ============================================================================
+// createTables - 幂等建立 6 张表（父表 tasks 在前，子表随后）
+// ============================================================================
+// tasks(1) ─┬─ face_records(N)
+//           ├─ cancellation_photos(N)
+//           ├─ cancellation_matches(N)
+//           └─ equipment_photos(N) ── equipment_detections(N)
+// 各外键写了 ON DELETE CASCADE，但本文件从未 PRAGMA foreign_keys=ON，
+// sqlite 默认关闭外键强制，因此这些 CASCADE 实际不生效——级联删除完全依赖
+// deleteTask()/deleteXxxByTask() 的手工 DELETE。切勿删掉那些手工删除语句。
+// ============================================================================
 bool BusinessDBManager::createTables() {
     const char* create_tasks_table = R"(
         CREATE TABLE IF NOT EXISTS tasks (
@@ -159,6 +188,10 @@ bool BusinessDBManager::createTables() {
     return true;
 }
 
+// 新建任务：返回自增 rowid（last_insert_rowid），失败返回 -1。
+// create_time 用本地时间格式化成 "%Y-%m-%d %H:%M:%S" 文本存列；
+// 注意 localtime() 返回静态缓冲、非线程安全，本类约定单线程使用故可接受。
+// type 由调用方决定，决定后续 getRegistrationTasks/getTasksByType 的归类。
 int BusinessDBManager::createTask(const std::string& name, const std::string& type, const std::string& folder_path) {
     if (!initialized_) return -1;
     
@@ -215,6 +248,10 @@ bool BusinessDBManager::updateTask(int task_id, int registered_count, int cancel
     return success;
 }
 
+// 删除任务：因外键/CASCADE 未生效（未 PRAGMA foreign_keys=ON），必须在此手工按序级联，
+// 先删各子表数据（cancellation/equipment/face），再删父表 tasks 行。
+// 这里各步是独立的自动提交语句、非单事务，中途失败可能残留部分删除（可接受，重删幂等）。
+// deleteEquipmentDataByTask 内部又按"先 detection 后 photo"两级删除，勿调换顺序。
 bool BusinessDBManager::deleteTask(int task_id) {
     if (!initialized_) return false;
 
@@ -326,6 +363,9 @@ std::vector<Task> BusinessDBManager::getRegistrationTasks() {
     return tasks;
 }
 
+// 插入人脸记录：feature 先经 featureToBlob 转裸字节 BLOB 再 bind。
+// is_duplicate/similar_to_id 由上层比对逻辑决定：重复项仍入库，只是置 is_duplicate=1
+// 并用 similar_to_id 指向首个唯一记录，从而保留"谁和谁撞脸"的可追溯链。
 int BusinessDBManager::insertFaceRecord(const FaceRecord& record) {
     if (!initialized_) return -1;
     
@@ -418,6 +458,8 @@ std::vector<FaceRecord> BusinessDBManager::getFaceRecordsByTask(int task_id) {
     return records;
 }
 
+// 取任务内"去重后"的人脸：仅 is_duplicate=0 的记录，用作点名/比对的基准人脸集，
+// 避免同一人被重复采集的多张图重复计入。getFaceRecordsByTask 则返回含重复项的全集。
 std::vector<FaceRecord> BusinessDBManager::getUniqueFacesByTask(int task_id) {
     std::vector<FaceRecord> records;
     if (!initialized_) return records;
@@ -454,9 +496,12 @@ std::vector<FaceRecord> BusinessDBManager::getUniqueFacesByTask(int task_id) {
     return records;
 }
 
+// 特征向量 <-> blob：把 std::vector<float> 按原始内存字节直接存/取（size/sizeof(float)
+// 决定浮点个数）。这是平台相关的裸拷贝，隐含"同机同浮点表示(IEEE754)、同字节序"假设，
+// 跨端导入库文件时不可移植；size 非 4 的整数倍时末字节被丢弃（截断对齐）。
 std::vector<float> BusinessDBManager::blobToFeature(const void* blob, int size) {
     std::vector<float> feature;
-    if (!blob || size == 0) return feature;
+    if (!blob || size == 0) return feature;   // 空/NULL blob 兜底返回空向量，不解引用
     
     int num_floats = size / sizeof(float);
     const float* data = static_cast<const float*>(blob);
@@ -505,12 +550,22 @@ bool BusinessDBManager::updateFaceRecord(int record_id, const FaceRecord& record
     return success;
 }
 
+// ============================================================================
+// replaceCancellationData - 原子替换某注销任务的取消照片与匹配结果
+// ============================================================================
+// "先删后插"必须是原子的：若中途某条 INSERT 失败，不希望库里停在"旧数据已删、
+// 新数据未全"的半更新态。故用事务包裹，任一步失败即 rollback() 整体撤销、返回 false。
+// 用 BEGIN IMMEDIATE 而非普通 BEGIN：进入事务即申请写锁，避免延迟到第一条写语句
+// 才发现锁冲突（SQLITE_BUSY），使加锁失败在 BEGIN 处就能明确报错并提前返回。
+// 复用了成员式的 rollback lambda，保证每条失败路径都成对 finalize 当前 stmt 再回滚。
+// ============================================================================
 bool BusinessDBManager::replaceCancellationData(
     int task_id,
     const std::vector<CancellationPhotoRecord>& photos,
     const std::vector<CancellationMatchRecord>& matches) {
     if (!initialized_) return false;
 
+    // 拿写锁的事务起点；失败（含并发写忙）立即返回，不进入后续删插
     if (sqlite3_exec(db_, "BEGIN IMMEDIATE TRANSACTION;", nullptr, nullptr, nullptr) != SQLITE_OK)
         return false;
 
@@ -683,6 +738,18 @@ std::vector<Task> BusinessDBManager::getTasksByType(const std::string& type) {
     return tasks;
 }
 
+// ============================================================================
+// replaceEquipmentData - 按 (task_id, phase) 原子替换装备盘点数据
+// ============================================================================
+// 调用方按"照片数组 + 检测数组"提交，检测项通过下标关联所属照片（不是真实 rowid）。
+// 关键：detections[].photo_id 在入参里是 photos 的数组下标(0..N-1)；本函数在事务内
+//   先逐条插入 photos 收集真实 rowid 到 photo_ids[]，再插入 detections 时用
+//   photo_ids[detection.photo_id] 把"下标"重映射成"真实 equipment_photos.rowid"写入。
+//   因此入参 photo_id 越界（<0 或 >=photos.size()）视为脏数据，立即回滚整批而非静默丢框。
+// 删除阶段先删 detection 再删 photo：equipment_detections 是二级子表且外键未强制，
+//   必须自己按依赖顺序清干净，否则留下指向已删 photo 的孤儿检测行。
+// 用 BEGIN IMMEDIATE 提前拿写锁、失败即 ROLLBACK，理由同 replaceCancellationData。
+// ============================================================================
 bool BusinessDBManager::replaceEquipmentData(
     int task_id, int phase,
     const std::vector<EquipmentPhotoRecord>& photos,
@@ -754,6 +821,8 @@ bool BusinessDBManager::replaceEquipmentData(
             rollback();
             return false;
         }
+        // 记录本行的真实 rowid；下标 i 处存的就是 photos[i] 对应的父行 id，
+        // 供下面把"入参下标 photo_id"翻译成真实外键。
         photo_ids.push_back(static_cast<int>(sqlite3_last_insert_rowid(db_)));
         sqlite3_reset(photo_stmt);
         sqlite3_clear_bindings(photo_stmt);
@@ -761,12 +830,14 @@ bool BusinessDBManager::replaceEquipmentData(
     sqlite3_finalize(photo_stmt);
 
     for (const auto& detection : detections) {
+        // 入参 photo_id 是 photos 下标，越界即脏数据：回滚整批，绝不写错父指向
         if (detection.photo_id < 0 ||
             detection.photo_id >= static_cast<int>(photo_ids.size())) {
             sqlite3_finalize(detection_stmt);
             rollback();
             return false;
         }
+        // 下标 → 真实 rowid 的重映射（本函数的核心正确性所在）
         sqlite3_bind_int(detection_stmt, 1, photo_ids[detection.photo_id]);
         sqlite3_bind_int(detection_stmt, 2, detection.class_index);
         sqlite3_bind_text(detection_stmt, 3, detection.label.c_str(), -1, SQLITE_TRANSIENT);
@@ -845,6 +916,9 @@ BusinessDBManager::getEquipmentDetectionsByPhoto(int photo_id) {
     return detections;
 }
 
+// 删除整个任务的装备数据：必须"先子后父"——先用子查询删光该 task 所有 photo 下的
+// detections，再删 photos。若删反顺序，detections 的 photo_id 子查询已无父行可匹配，
+// 会残留孤儿检测记录（外键 CASCADE 未启用，不会自动清理）。注意本函数跨 phase 全删。
 bool BusinessDBManager::deleteEquipmentDataByTask(int task_id) {
     if (!initialized_) return false;
     const char* detection_sql =

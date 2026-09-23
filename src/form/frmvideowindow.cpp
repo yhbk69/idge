@@ -195,6 +195,14 @@ PlayerWidget *frmVideoWindow::playerWidget(int ch)
  *   [通道:][1][2][3][4] | [矩形][多边形][删除][清空]
  *
  * 位置：插入到主网格布局的第2行（视频画面下方，底部标签上方）
+ *
+ * 实现要点（代码动态创建，不在 .ui 中）：
+ *   - 通道按钮 ×4（28x24）仅用于选中当前编辑通道，非互斥故 setExclusive(false)；
+ *     矩形/多边形/删除为互斥绘制工具组（fenceDrawGroup_）；
+ *     清空直接调 FenceManager::clearChannel + 刷新叠加层
+ *   - 工具栏高 36px、按钮 12px 字体为紧凑布局的经验尺寸
+ *   - addWidget(toolbar, 2, 0, 1, 2) 占满两列，再把原第 2 行的提示 label
+ *     挪到第 3 行，避免改动 .ui 文件
  */
 void frmVideoWindow::setupFenceToolbar()
 {

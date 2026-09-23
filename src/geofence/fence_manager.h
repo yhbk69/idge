@@ -91,8 +91,10 @@ public:
     // ========================================================================
     // overlay 尺寸管理（用于坐标映射）
     // ========================================================================
-    // 围栏坐标是在 overlay widget 像素空间中绘制的。
-    // 检测时需要将围栏坐标映射到原始视频空间，因此需要记录 overlay 尺寸。
+    // 围栏坐标是在 overlay widget 像素空间中绘制的，并被原样保存（不做归一化）。
+    // 检测时反向映射：把检测框脚点从视频帧空间换算到同一 widget 空间再比较，
+    // 这需要知道"当初绘制围栏时"的 widget 尺寸，故在此按通道记录 overlay 尺寸。
+    // 尺寸随窗口缩放而变，saveFences() 会带当前 width()/height() 一并落盘。
     void setOverlaySize(int channel, int w, int h);
     void overlaySize(int channel, int &w, int &h) const;
 

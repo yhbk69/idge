@@ -1,3 +1,5 @@
+// 文件职责：图像读取/缩放/裁剪/格式转换工具实现，优先使用 Rockchip RGA 硬件加速
+//（要求 16 像素对齐），失败时自动回退 CPU 实现；JPEG 解码走 turbojpeg，另含 letterbox 预处理。
 #include <stdio.h>
 #include <stdlib.h>
 #include <dirent.h>
@@ -73,6 +75,8 @@ static int read_image_jpeg(const char* path, image_buffer_t* image)
     struct timeval tv1, tv2;
 
     // 打开JPEG文件
+    // 注意（潜在风险，保持原逻辑不改）：fopen 失败后仅打印错误、未 return，
+    // 后续 fseek/ftell/fread 将对 NULL 指针操作，可能段错误；调用方需保证路径有效。
     if ((jpegFile = fopen(path, "rb")) == NULL) {
         printf("open input file failure\n");
     }
@@ -352,6 +356,7 @@ int write_image(const char* path, image_buffer_t* img)
         break;
     case IMAGE_FORMAT_RGB888:
         channel = 3;
+        // 注意：此处刻意缺 break，会穿透到 default；因两者均赋值 3，行为等价（原代码保持不动）。
     default:
         channel = 3;
         break;
@@ -612,6 +617,8 @@ int get_image_size(const image_buffer_t* image)
     case IMAGE_FORMAT_YUV420SP_NV21:
         return image->width * image->height * 3 / 2;   // YUV420: 1.5字节/像素
     default:
+        // 注意（原逻辑保持不改）：未知格式时 switch 后无 return，走到函数尾属未定义行为；
+        // 调用方应只传入上述受支持的格式。
         break;
     }
 }

@@ -20,8 +20,18 @@
 // ============================================================
 // 预处理相关常量定义
 // ============================================================
+// 审查注记（各常量的作用域）：
+//   - 下列阈值仅作为"文档性默认值"存在；推理链路上真正生效的是
+//     YoloBaseDetector::detect / YOLO11Model::detect 的形参默认值
+//     (conf 0.25 / nms 0.45)，两者数值口径保持一致（0.25=YOLO 官方
+//     验证集召回/误报平衡点，0.45=密集行人场景下避免误抑制的经验值）。
+//   - OBJ_CLASS_NUM 固定 80 参与后处理得分通道遍历（见 yolo11_model.hpp
+//     process_i8 的 c 循环），训练自定义模型若类别数≠80，得分通道会错位，
+//     需同步改此宏或换用带 score_sum 的导出。
 #define OBJ_NAME_MAX_SIZE 64       // 检测对象名称最大长度
-#define OBJ_NUMB_MAX_SIZE 128      // 单帧最大检测对象数量
+#define OBJ_NUMB_MAX_SIZE 128      // 单帧最大检测对象数量（决定结果结构体内存池：
+                                   // 128 × 24B ≈ 3KB/帧，队列深 8~12 时仍为定长
+                                   // 无堆分配设计，跨线程拷贝即整结构体赋值）
 #define OBJ_CLASS_NUM 80           // COCO数据集类别数
 #define NMS_THRESH 0.45            // NMS（非极大值抑制）默认IoU阈值
 #define BOX_THRESH 0.25            // 置信度默认阈值
@@ -240,7 +250,10 @@ struct image_buffer_t{
     DmaBuffer* dmaBuffer;           // DMA缓冲区指针（手动管理）
     std::shared_ptr<DmaBuffer> sp_dmaBuffer; // DMA缓冲区智能指针（自动管理）
 
-    long time;              // 时间戳，用于性能分析
+    long time;              // 帧采集时间戳（生产端为 epoch 纳秒）。注意：回填到
+                            // od_results.time 的实际是 TaskData::time 而非本字段，
+                            // 两者同单位、取样时刻相近；本字段主要留作帧级诊断。
+                            // 单位口径隐患见 object_detect_result_list::time 警示。
 
     // 析构函数 - 注意：DMA缓冲区由外部管理，此处不释放
     ~image_buffer_t()
@@ -318,8 +331,12 @@ typedef struct {
     rknn_dma_buf img_dma_buf;           // 输入图像DMA缓冲区（零拷贝）
     rknn_tensor_mem* input_mems[1];     // 输入张量内存（固定1个输入）
     rknn_tensor_mem* output_mems[9];    // 输出张量内存（YOLO最多9个输出头）
-    rknn_tensor_attr* input_native_attrs;   // 原始输入张量属性（量化前）
-    rknn_tensor_attr* output_native_attrs;  // 原始输出张量属性（量化前）
+                                        // 9 = 3 个 FPN 层级 × (box, score, score_sum)
+                                        // 审查点：容量 9 为定长数组，若导出模型
+                                        // 输出头 >9 个将在 init 时越界写，换模型需核查
+    rknn_tensor_attr* input_native_attrs;   // 原始输入张量属性（量化前，含
+                                            // w_stride/size_with_stride，供零拷贝 set_io_mem）
+    rknn_tensor_attr* output_native_attrs;  // 原始输出张量属性（量化前，NC1HWC2 布局）
     int model_channel;     // 模型输入通道数（RGB=3）
     int model_width;       // 模型输入宽度（如640）
     int model_height;      // 模型输入高度（如640）
@@ -349,14 +366,41 @@ typedef struct {
  *
  * 作用：存储单帧图像的所有检测结果，支持按时间戳排序。
  * 用于多线程场景下按时间顺序处理检测结果，确保时序正确性。
+ *
+ * 传递设计（Why results.time/坐标这样传）：
+ *   - 坐标：后处理阶段即由 YOLO11Model::post_process 依据 letterbox 的
+ *     scale/x_pad/y_pad 还原为"原始视频帧像素坐标"（int），下游画框、
+ *     围栏判定、报警截图全部直接使用该坐标，不再感知模型 640 空间；
+ *   - time：由生产端(解码线程)在提交 TaskData 时打点，PpeTask 推理完成后
+ *     原样回填——即"帧采集时刻"而非"推理完成时刻"，PriorityQueue 据此
+ *     丢旧保新、限流与端到端延迟统计才有统一时间基准；
+ *   - 定长 results 数组 + POD 结构：跨线程 push/pop 即整体值拷贝，
+ *     免锁引用计数、免二级堆分配（见上面对象数上限的内存估算）。
  */
 struct object_detect_result_list{
-    int id;                         // 帧ID/序列号
+    int id;                         // 结果路由ID（=TaskConfig.result_id，
+                                    // 区分多检测器共享同一结果队列时的来源槽位；
+                                    // 主流水线每槽独立队列，恒为默认值 0）
     int count;                      // 检测结果数量
-    long time;                      // 时间戳（毫秒）
+    // ⚠⚠【时间单位隐患·跨模块警示（勿改代码，先统一口径）】
+    //   本字段历史注释约定为"毫秒"，但实际生产端
+    //   (ffmpeg_video_decoder.cpp / camera_preview_decoder.cpp 的
+    //    chrono::system_clock::now().time_since_epoch().count()) 写入的是
+    //   epoch **纳秒**（Linux/libstdc++ 下 system_clock tick=1ns）；
+    //   而 src/alarm/alarm_manager.h 的限流常量 kAlarmThrottleNs=2e9 又
+    //   按纳秒语义与 time 差值比较。三方定义不一致：
+    //     · 若 time 为毫秒 → 毫秒差 < 2e9 恒成立约 23 天，限流被放大成
+    //       "首报后长期不复报"（限流失真）；
+    //     · 若 time 为纳秒 → 2e9ns=2s，行为与注释宣称的"2秒去重"一致，
+    //       但本文件"毫秒"文档仍是错的。
+    //   审查结论：当前实测语义接近纳秒；在核查并统一三处单位前，任何
+    //   依赖 time 的新代码都必须先确认取数口径。
+    long time;                      // 时间戳（文档单位：毫秒；实测生产值为纳秒，见上）
     object_detect_result results[OBJ_NUMB_MAX_SIZE]; // 检测结果数组（最大128个）
 
     // 重载小于运算符，用于按时间戳排序（升序）
+    // 配合 std::less 的 PriorityQueue：堆顶恒为 time 最大（最新）的元素，
+    // 队列满时自动淘汰堆底（最旧）结果——"永远展示最新一帧检测"的实现基础
     bool operator<(const object_detect_result_list &other) const
     {
         return time < other.time;

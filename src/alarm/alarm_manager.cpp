@@ -137,13 +137,17 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
             if (alarmClasses_.contains(className)) {
                 // 去重限流：同通道同类别在限流窗口内只报一次（围栏报警不限流）
                 // key 格式: "通道号:类别ID"，如 "0:0" 表示通道 0 的 person
+                // 用"通道:类别"作复合键，使不同通道、不同类别各自独立计数互不影响。
                 QString key = QString("%1:%2").arg(channel).arg(det.cls_id);
-                long last = lastAlarmTime_.value(key, 0);
-                // 检查是否在限流窗口内（2 秒），围栏报警跳过此检查
+                long last = lastAlarmTime_.value(key, 0);  // 首次为 0，必然放行
+                // 检查是否在限流窗口内（名义 2 秒），围栏报警跳过此检查
+                // 【单位隐患】kAlarmThrottleNs 是纳秒值，而 results.time / last 源自
+                //   common.hpp 注释为"毫秒"的时间戳，二者相减再与 ns 阈值比较，量纲
+                //   不一致会使窗口远大于 2 秒（详见 alarm_manager.h 常量处说明）。
                 if (!bypassThrottle && results.time - last < kAlarmThrottleNs) {
                     continue;  // 在限流窗口内，跳过
                 }
-                lastAlarmTime_[key] = results.time;  // 更新最后报警时间
+                lastAlarmTime_[key] = results.time;  // 更新最后报警时间（记录本次时间戳）
 
                 // 创建报警记录
                 AlarmRecord alarm;
@@ -206,7 +210,8 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
 //
 // 流程：
 //   1. 加锁，将新报警添加到内存列表 alarms_
-//   2. 限制报警数量（最多 1000 条，超出时删除最早的）
+//   2. 限制报警数量（最多 1000 条，超出时从头部 removeFirst 淘汰最旧的，
+//      FIFO 环形语义；removeFirst 为 O(n) 搬移，但容量小且报警低频，可接受）
 //   3. 解锁（避免发信号时死锁）
 //   4. 写入 SQLite 数据库（通过 AlarmDAO）
 //   5. 发送 alarmGenerated 信号通知UI显示新报警
@@ -214,8 +219,8 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
 //
 // 线程安全：
 //   - alarms_ 的读写在 mutex_ 保护下
-//   - 信号/槽跨线程时自动排队，Qt 保证线程安全
-//   - 先解锁再发信号，避免死锁
+//   - 信号/槽跨线程时自动排队（AlarmRecord 已 qRegisterMetaType），Qt 保证线程安全
+//   - 先解锁再发信号，避免信号槽同步回调重入本管理器取锁而死锁
 //
 // 注意：
 //   - 如果数据库未初始化（dbInitialized_=false），只存内存不写数据库

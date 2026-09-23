@@ -35,6 +35,16 @@
 //   mqtt_queue(16)  — 推理→MQTT，容量大避免 MQTT 网络延迟反压推理线程
 //
 // close() 后所有阻塞的 push/pop 立即返回 false，线程可据此退出循环。
+// close 是单向操作：closed_ 无复位接口，关闭后队列不可复用（如需复用请重建对象）。
+//
+// 复杂度与唤醒正确性：
+//   - push/pop 均为 O(1)：互斥锁内只做 deque 端点操作 + 单次 notify；
+//   - 双条件变量分离"非满/非空"两个等待集，避免 notify_all 惊群；
+//   - 所有 wait 都带谓词（predicate），虚假唤醒与关闭信号都会被重新求值，
+//     不会因丢失通知而永久挂起（前提是配套 close 的 notify_all）；
+//   - notify_one 语义假设每侧只有一个消费者/生产者（本项目各队列均为
+//     单线程读写）；若改为多消费者共享，push 侧的 notify_one 仍正确，
+//     但容量背压与丢帧统计需重新评估。
 template<typename T>
 class BlockingQueue {
 public:
@@ -84,6 +94,12 @@ public:
     //   - push_latest 丢弃旧帧，保证始终处理最新数据
     //
     // 参数 replaced：如果非空，记录被丢弃的帧数
+    //
+    // ⚠ 注意：被丢弃的旧项是直接 pop() 掉的——若 T 携带需要归还的资源
+    //   （如 DMA 缓冲指针），该资源不会被自动释放，调用方需自行回收；
+    //   当前用于按值传递的轻量结构体（帧元数据/AVPacket 包装）时无此问题。
+    //   另：本实现丢弃的是最旧项（front），符合 FIFO"保最新"语义，
+    //   与 FrameQueue::pushAndReplace（错误地动 back）形成对照。
     // ============================================================================
     bool push_latest(T item, size_t* replaced = nullptr) {
         std::unique_lock<std::mutex> lock(mutex_);

@@ -37,6 +37,15 @@
  * 基类提供通用的预处理工具方法（letterbox、resize、坐标缩放），
  * 派生类只需实现平台特定的模型加载、推理和后处理。
  *
+ * 现状说明（审查注记）：
+ *   - detect() 形参默认值 conf=0.25 / nms=0.45 是全项目统一口径的
+ *     "代码级默认阈值"（common.hpp 的 BOX_THRESH/NMS_THRESH 仅为宏定义
+ *     参考值，实际生效的是这里）；
+ *   - 本类的 letterBox/resizeImage/scaleCoords 是 CPU/调试路径的参考实现；
+ *     生产主链路（RKNN 零拷贝）不经过它们——预处理由解码线程的 RGA 硬件
+ *     letterbox 完成，坐标还原由 YOLO11Model::post_process 内联完成，
+ *     两者公式与此处一致（见 scaleCoords 的映射公式），可互为对照。
+ *
  * 使用方式：
  *   std::unique_ptr<YoloBaseDetector> detector = std::make_unique<RKNNYoloDetector>();
  *   detector->init(modelPath, labelsPath);
@@ -187,7 +196,13 @@ protected:
      * 1. 计算保持宽高比的缩放因子（取宽高中较小的比例）
      * 2. 计算缩放后的图像尺寸
      * 3. 计算居中偏移量（上下左右均匀填充）
+     *    xPad=(dstW-newW)/2 为左偏移、yPad 同理为上偏移；奇数像素差值由
+     *    "另一侧 = 总差 - 本侧"补齐，保证 newW+左右pad == dstW 精确成立，
+     *    这是 scaleCoords 能用 (x - pad)/scale 精确逆映射的前提。
      * 4. 执行resize和copyMakeBorder
+     *    审查点：此处灰边取 127，而生产 RGA 路径(convert_image_with_letterbox)
+     *    的 bg_color=114（Ultralytics 官方惯例值）。13 级灰度差对检测精度
+     *    影响可忽略，但做像素级对齐实验时须留意两处填充色不一致。
      *
      * @param src 源图像（原始输入）
      * @param dst 目标图像（输出：调整大小并填充后的图像）
@@ -253,6 +268,10 @@ protected:
      *
      * 映射公式：
      *   原图坐标 = (模型坐标 - 偏移量) / 缩放因子
+     * 即 letterBox 正变换 x' = x*scale + xShift 的解析逆变换，宽高同除
+     * scale（只缩放不平移，故 width/height 不减偏移）。
+     * 注意本方法只做浮点域映射，越界裁剪由调用方（如 YOLO11Model 的
+     * clamp + 整型化）负责。
      *
      * @param detection 要缩放的检测结果（就地修改）
      * @param xShift letterbox填充导致的X轴偏移量

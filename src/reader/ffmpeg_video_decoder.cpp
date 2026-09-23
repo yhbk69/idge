@@ -67,6 +67,16 @@
 //     - 不匹配的区域用灰色(114,114,114)填充
 //     - 这是 YOLO 系列模型的标准预处理方式
 //
+// 【代码审查视角的已知注意事项】（详见各处内联注释）：
+//   - 资源释放配对：fmt_ctx/dec_ctx/frame/pkt/dst_bufs 在正常退出路径统一释放；
+//     中途的多个 emit error + return 分支需注意 avformat_open_input 失败时
+//     FFmpeg 已自行释放 fmt_ctx（不能再 close），属"看似缺清理、实则正确"的点。
+//   - results.time 单位隐患：image->time 取 system_clock 的 count()（Linux 上为
+//     纳秒），而 common.hpp 注释标为"毫秒"，且 alarm_manager.h 限流常量按纳秒
+//     比较——三者必须统一口径，否则限流窗口失真（详见 common.hpp 警示注释）。
+//   - 双缓冲切换仅在 RGA 转换成功路径发生（back_buf = 1 - back_buf），失败帧
+//     复用同一缓冲不会造成读写竞争（该帧根本没有输出）。
+//
 // ============================================================================
 
 #include "ffmpeg_video_decoder.h"
@@ -469,6 +479,12 @@ void FFmpegVideoDecoder::stop()
     }
 
     // 3) 有界回收推理线程：最多等 1.5s，超时 detach，绝不阻塞 UI 线程
+    //    审查点：tasks_ 只 stop 从不 delete——析构函数同样只调 stop()。
+    //    这是有意为之：detach 后的推理线程仍可能访问 this/队列，delete 会
+    //    造成 use-after-free；代价是每路解码器泄漏至多 5 个 PpeTask 对象
+    //    （通道数固定、进程生命周期内不重复创建，总量可控）。
+    //    末尾把 running_ 复位为 true：此时线程已停，标志仅供下一轮 start()
+    //    的 interrupt 回调使用，不代表"正在运行"。
     for (PpeTask *task : tasks_) {
         task->stopBestEffort(1500);
     }
@@ -598,12 +614,16 @@ void FFmpegVideoDecoder::decodeLoop()
     {
         avformat_free_context(fmt_ctx);
         fmt_ctx = nullptr;
+        // 审查点：FFmpeg 约定 avformat_open_input 失败时内部已 free 并把传入指针
+        // 置 NULL，此处 free 实为对 NULL 的安全空操作，保留仅作防御性写法。
         emit error("Cannot open file");
         return;
     }
 
     // 读取流的详细信息（编码参数、帧率、分辨率等）
     // 对于网络流可能需要几秒钟来探测
+    // 审查点：返回值未检查。RTSP 断流/被 interrupt 打断时可能拿到不完整的
+    // codecpar，后续 av_find_best_stream 会因找不到视频流而走错误分支兜底。
     avformat_find_stream_info(fmt_ctx, nullptr);
 
     // 在所有流中找到最佳的视频流（可能是多个视频流，选质量最高的）
@@ -677,6 +697,8 @@ void FFmpegVideoDecoder::decodeLoop()
 
     // 打开解码器：此时解码器会初始化 MPP 硬件
     // 如果硬件解码器初始化失败，FFmpeg 会尝试软解
+    // 审查点：返回值未检查；若打开失败，后续 receive_frame 恒为错误，
+    // 表现为"无画面但不崩溃"，排查时可先确认此步日志。
     avcodec_open2(dec_ctx, codec, nullptr);
 
     // 从解码器上下文获取视频分辨率（可能与流信息中的略有不同）
@@ -704,12 +726,16 @@ void FFmpegVideoDecoder::decodeLoop()
     //   - 普通内存需要 CPU 来回拷贝，效率极低
 
     // 打开 DRM 设备，用于分配 DMA-BUF（显存类型的内存）
+    // 审查点：两次 open 都失败时 drm_fd<0，循环出口的 close(drm_fd) 对负数
+    // fd 只会返回 EBADF，无副作用；DMA 分配失败会在 DmaFrameBuffer::alloc 处暴露。
     int drm_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
     if (drm_fd < 0)
         drm_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
 
     // 双缓冲 RGBA（RGA 输出 → EGLImage 输入）
     // back_buf 在 0/1 之间交替切换，实现流水线并行
+    // 审查点：rgba_bufs 为早期手动管理缓冲的遗留声明，实际未被使用
+    // （现由下方 new 出的 DmaFrameBuffer 承担），保留仅为兼容原代码形态。
     DmaBuffer rgba_bufs[2];
 
 
@@ -765,6 +791,11 @@ void FFmpegVideoDecoder::decodeLoop()
         {
             // 流已结束（文件播放完毕或连接断开）
             // 发送 NULL packet 通知解码器"没有更多数据了，输出剩余帧"
+            // 审查点：drain 出的尾帧只做 unref 直接丢弃，并未走下方完整的
+            // RGA 转换/画框/emit 流程（与注释"同下方逻辑"不符）——文件播放
+            // 结束时最后若干解码帧不上屏，属可接受的收尾取舍。
+            // 另注意：若 ret 是 EAGAIN/被 interrupt 打断（非 EOF），同样会
+            // 提前 break 走清理路径，stop() 时表现为"立即收尾"。
             avcodec_send_packet(dec_ctx, nullptr);
             while (running_ && avcodec_receive_frame(dec_ctx, frame) == 0)
             {
@@ -785,6 +816,11 @@ void FFmpegVideoDecoder::decodeLoop()
         // avcodec_send_packet() 将压缩数据送入解码器
         // 解码器内部会将数据放入队列，异步处理
         // MPP 硬件会自动接管解码工作，CPU 几乎不参与
+        // 审查点：send_packet 返回值未检查，随后无条件 av_packet_unref。
+        // 严格 API 用法是 EAGAIN 时应先 receive 再重试 send；这里等价于
+        // "解码器满时直接丢这一包"，对实时监控是合理降级（宁可丢帧不堆积）。
+        // packet 引用由 unref 归零释放，与 4.1 分配配对；下面 stream_index
+        // 不匹配分支同样先 unref 再 continue，无泄漏路径。
         avcodec_send_packet(dec_ctx, pkt);
         av_packet_unref(pkt);  // 立即释放 packet，减少内存占用
 
@@ -811,6 +847,16 @@ void FFmpegVideoDecoder::decodeLoop()
             // 为什么需要 stride？：
             //   硬件要求内存按 16/32/64 字节对齐，所以实际内存宽度 >= 视频宽度
             //   例如 1920 宽的视频，stride 可能是 1920 或 2048（对齐到 128）
+            //
+            // 审查点（fd 所有权）：objects[0].fd 归 frame 所有，本函数绝不
+            // close/munmap——RGA 同步调用在 av_frame_unref(frame) 之前完成，
+            // 因此 unref 释放 surface 时 RGA 已读完，生命周期安全。
+            //
+            // 审查点（vstride 假设）：这里把 RGA 的 vstride 参数直接传
+            // frame->height（见 4.5 调用），隐含假设 MPP 输出无垂直对齐填充。
+            // 若某些分辨率下 UV 平面按 16 行对齐产生 padding，色度平面会错位
+            // （画面偏色/横条纹）。更稳健的做法见 camera_preview_decoder.cpp：
+            // 用 planes[1].offset - planes[0].offset 再除以 pitch 反推真实 vstride。
             int src_fd = -1;
             int src_stride = vid_w;
 
@@ -903,6 +949,15 @@ void FFmpegVideoDecoder::decodeLoop()
                             image->srcHeight = dst_buf->height(); // 原始高度
                             image->sp_dmaBuffer = rgabuffer;      // 保持引用，防止缓冲区被回收
                             auto t = chrono::system_clock::now();
+                            // 时间戳取 time_since_epoch().count()：Linux/libstdc++ 下
+                            // system_clock 的 tick 周期是 1ns，所以这里是"epoch 纳秒"。
+                            // 该值随 TaskData 一路传到 PpeTask::run() 回填
+                            // od_results.time（设计意图：结果携带的是"采集时刻"而非
+                            // "推理完成时刻"，便于统计端到端延迟并让 PriorityQueue
+                            // 始终保留最新帧）。
+                            // ⚠ 单位隐患：common.hpp 把 results.time 注释为"毫秒"，
+                            //   alarm_manager.h 的限流常量又按纳秒值(2e9)与其相减比较，
+                            //   三处口径不一致，详见 common.hpp / alarm_manager.h 警示。
                             image->time = t.time_since_epoch().count();  // 时间戳（用于排序）
 
                             // ===== 4.8 将帧分发给所有级联推理任务 =====
@@ -918,6 +973,10 @@ void FFmpegVideoDecoder::decodeLoop()
                             //   - 图像数据（shared_ptr，多个任务共享）
                             //   - 结果队列（推理结果写回这里）
                             auto now = chrono::system_clock::now();
+                            // TaskData 的排序时间戳（epoch 纳秒）：PpeTask::run()
+                            // 用 taskData->time 回填 od_results.time，即结果队列里
+                            // 的 time 来自这里（与上面 image->time 同源同单位，
+                            // 但取样时刻略晚于 RGA 缩放完成时）
                             long ts = now.time_since_epoch().count();
                             for (size_t k = 0; k < tasks_.size(); ++k) {
                                 auto td = std::make_shared<TaskData>(ts, image, slotQueues_[k]);
@@ -1153,8 +1212,11 @@ void FFmpegVideoDecoder::decodeLoop()
             // ===== 4.12 帧率控制（30fps） =====
             //
             // 如果解码+处理太快，主动等待以维持 30fps
-            // 预期每帧耗时 33333 微秒（1000000/30）
+            // 预期每帧耗时 33333 微秒（1000000/30，取整略小于 1/30s）
             // 实际耗时 < 预期时，sleep 补齐差值
+            // 审查点：expected 随 frame_count 线性累积，若中途某帧处理超时，
+            // 后续帧不会"追帧"（sleep 条件自动失效），等价于平滑限速而非
+            // 严格节拍；QElapsedTimer::elapsed() 单位是 ms，故 *1000 换算成 us。
             //
             // 为什么需要帧率控制？：
             //   - RTSP 流通常是 25-30fps
@@ -1184,6 +1246,15 @@ void FFmpegVideoDecoder::decodeLoop()
     //   4. 关闭输入流
     //
     // 注意：avcodec_free_context() 会自动 flush 解码器，无需额外处理
+    //
+    // 审查点（释放配对核查）：
+    //   - frame/pkt：与 av_frame_alloc/av_packet_alloc 一一对应，
+    //     循环内所有 continue/break 路径都保持 unref 语义，无泄漏。
+    //   - dec_ctx 引用了 pHWDeviceCtx 的 buffer(ref)，free_context 时释放；
+    //     但本地这份 av_buffer_ref 前的"创建引用"未再 av_buffer_unref，
+    //     每次开流泄漏 1 个 hwdevice buffer 引用（量小、单流一次性，
+    //     如要求严格可对等补 unref——注释登记，不改代码）。
+    //   - dst_bufs[2] 与 new 配对 delete；rgba_bufs 从未 alloc 无需释放。
     for (int i = 0; i < 2; i++)
     {
         delete dst_bufs[i];

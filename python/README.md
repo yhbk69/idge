@@ -1,198 +1,60 @@
-# Python 工具使用说明
+# python
 
-## 文件说明
+## 功能概述
 
-| 文件 | 功能 |
+PC 侧（x86 Ubuntu/WSL）模型工具链脚本，来自 rknn_model_zoo 的 YOLO11 示例并做了本项目适配：
+
+- `convert.py`：将 YOLO11/YOLOv8 导出的 **ONNX 模型转换为 RKNN 格式**（配置归一化、目标平台、INT8/FP16 量化、导出 .rknn）；
+- `yolo11.py`：RKNN/ONNX 模型图片推理验证 + 可选 **COCO mAP 评估**（LetterBox 预处理、DFL 解码、NMS 后处理），用于核对转换前后精度。
+
+模型在板上由主程序 `idge`（`src/yolo11/`、`3rdparty/rknpu2` 运行时）加载推理。
+
+## 文件/子目录清单
+
+| 文件 | 说明 |
 |------|------|
-| `convert.py` | ONNX 模型转换为 RKNN 格式（在 PC 上运行） |
-| `yolo11.py` | YOLO11 推理测试和 COCO mAP 评估 |
+| `convert.py` | ONNX→RKNN 转换脚本；默认量化数据集 `DATASET_PATH='../../../datasets/COCO/coco_subset_20.txt'`，默认输出 `../model/yolo11.rknn`，默认 INT8 量化 |
+| `yolo11.py` | 推理验证脚本；置信度阈值 0.25、NMS 0.45、输入 640×640（与 `config.json` 的 detect 段一致） |
+| `result/` | `--img_save` 时自动创建的检测结果输出目录（脚本内 `os.mkdir('./result')`） |
+| `README.md` | 本说明 |
 
----
+## 使用方法
 
-## 1. 环境安装
-
-### 在 x86 PC 上安装（用于转换）
-
-```bash
-# 创建虚拟环境（推荐）
-conda create -n rknn python=3.10
-conda activate rknn
-
-# 安装 rknn_toolkit（转换工具）
-pip install rknn_toolkit
-
-# 安装其他依赖
-pip install numpy opencv-python
-```
-
-### 在 RK3588 上安装（用于推理）
+环境：Python 3.8~3.10 + `rknn-toolkit2`（提供 `from rknn.api import RKNN`），以及 `numpy`、`opencv-python`；`yolo11.py` 还需 `rknn_model_zoo` 仓库布局（脚本按路径回溯 `rknn_model_zoo` 目录并 import `py_utils.coco_utils`）。
 
 ```bash
-# RK3588 开发板上已预装 Python 和依赖
-# 如果需要重新安装：
-pip install numpy opencv-python
-```
-
----
-
-## 2. 模型转换（convert.py）
-
-### 功能
-
-将 YOLO11/YOLOv8 的 ONNX 模型转换为 Rockchip RKNN 格式，用于 NPU 硬件加速。
-
-### 使用方法
-
-```bash
-python3 convert.py <onnx_model_path> <platform> [dtype] [output_rknn_path]
-```
-
-### 参数说明
-
-| 参数 | 必填 | 说明 |
-|------|------|------|
-| `onnx_model_path` | 是 | ONNX 模型路径（如 `yolo11n.onnx`） |
-| `platform` | 是 | 目标平台：`rk3562` / `rk3566` / `rk3568` / `rk3588` / `rk3576` |
-| `dtype` | 否 | 量化类型：`i8`（INT8 量化，默认）/ `fp`（FP16 保留） |
-| `output_rknn_path` | 否 | 输出路径（默认 `../model/yolo11.rknn`） |
-
-### 示例
-
-```bash
-# INT8 量化（推荐，模型小、速度快）
+# 1) ONNX → RKNN（INT8 量化，4 参数按位置传入）
+#    用法: python3 convert.py <onnx路径> <平台> [i8|u8|fp] [输出.rknn路径]
 python3 convert.py yolo11n.onnx rk3588 i8 ../model/yolo11n.rknn
 
-# FP16 保留（精度更高，但模型大）
+# FP16（不量化）
 python3 convert.py yolo11n.onnx rk3588 fp ../model/yolo11n_fp16.rknn
 
-# 使用默认参数
+# 省略后两个参数时：默认 i8 量化、输出 ../model/yolo11.rknn
 python3 convert.py yolo11n.onnx rk3588
-```
+# 平台可选：rk3562 / rk3566 / rk3568 / rk3588 / rk3576
 
-### 量化说明
-
-| 类型 | 模型大小 | 推理速度 | 精度 |
-|------|----------|----------|------|
-| `i8` (INT8) | 原始的 1/4 | 更快 | 略有损失 |
-| `fp` (FP16) | 原始的 1/2 | 较快 | 无损失 |
-
-**注意**：INT8 量化需要校准数据集，项目使用 `coco_subset_20.txt`（20 张 COCO 图片路径）。
-
----
-
-## 3. 推理测试（yolo11.py）
-
-### 功能
-
-加载模型对图片进行推理，支持 RKNN/ONNX/PyTorch 三种格式。
-
-### 使用方法
-
-```bash
-python3 yolo11.py --model_path <模型路径> [其他参数]
-```
-
-### 参数说明
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--model_path` | 模型路径（必填） | - |
-| `--target` | 目标平台 | `rk3566` |
-| `--device_id` | 设备 ID | `None` |
-| `--img_show` | 显示检测结果 | `False` |
-| `--img_save` | 保存检测结果 | `False` |
-| `--img_folder` | 图片文件夹路径 | `../model` |
-| `--coco_map_test` | 启用 COCO mAP 评估 | `False` |
-
-### 示例
-
-```bash
-# 在 RK3588 上测试 RKNN 模型
+# 2) 推理验证（板端或 PC；argparse 命名参数）
 python3 yolo11.py --model_path ../model/yolo11n.rknn --target rk3588 --img_folder ../model
-
-# 在 PC 上测试 ONNX 模型
-python3 yolo11.py --model_path yolo11n.onnx --img_folder ../model
-
-# 显示并保存结果
 python3 yolo11.py --model_path ../model/yolo11n.rknn --target rk3588 --img_show --img_save
-
-# COCO mAP 评估
+python3 yolo11.py --model_path yolo11n.onnx            # PC 上跑 ONNX 对照
 python3 yolo11.py --model_path ../model/yolo11n.rknn --target rk3588 --coco_map_test
 ```
 
----
+`yolo11.py` 全部参数：`--model_path`(必填) `--target`(默认 rk3566) `--device_id` `--img_show` `--img_save` `--anno_json`(默认 `../../../datasets/COCO/annotations/instances_val2017.json`) `--img_folder`(默认 `../model`) `--coco_map_test`。
 
-## 4. 完整工作流程
+## 依赖关系
 
-### 步骤 1：下载预训练模型
+- 上游产物：Ultralytics 导出 `yolo export model=yolo11n.pt format=onnx`；
+- `convert.py` → rknn-toolkit2（仅 PC 用，板端不需要）；
+- 转换输出放入根目录 `model/`，由 `config.json` 的 `model.path` / `cascade.models[].path` 引用（默认 `model/yolo11n.rknn` + `model/coco_80_labels_list.txt`）；
+- 量化校准数据集与 COCO 标注均指向 rknn_model_zoo 的 `../../../datasets/COCO/` 相对路径。
 
-```bash
-# 从 Ultralytics 下载 YOLO11 ONNX 模型
-pip install ultralytics
-yolo export model=yolo11n.pt format=onnx
-```
+## 注意事项
 
-### 步骤 2：转换为 RKNN 格式（在 PC 上）
-
-```bash
-python3 convert.py yolo11n.onnx rk3588 i8 ../model/yolo11n.rknn
-```
-
-### 步骤 3：在 RK3588 上测试
-
-```bash
-python3 yolo11.py --model_path ../model/yolo11n.rknn --target rk3588 --img_show
-```
-
-### 步骤 4：部署到 idge 系统
-
-将生成的 `.rknn` 文件拷贝到 `model/` 目录，idge 程序会自动加载。
-
----
-
-## 5. 常见问题
-
-### Q: 转换必须在 RK3588 上运行吗？
-
-**不需要**。转换在 x86 PC 上完成，生成的 `.rknn` 文件拷贝到 RK3588 上运行。
-
-### Q: 量化后精度下降怎么办？
-
-- 尝试 `fp`（FP16）模式，不量化
-- 增加校准数据集数量（修改 `DATASET_PATH`）
-- 使用更大的模型（如 `yolo11s` 替代 `yolo11n`）
-
-### Q: 如何获取 ONNX 模型？
-
-```bash
-# 方法 1：从 Ultralytics 导出
-yolo export model=yolo11n.pt format=onnx
-
-# 方法 2：从 GitHub Release 下载
-# https://github.com/airockchip/rknn_model_zoo
-```
-
-### Q: 支持哪些 YOLO 版本？
-
-- YOLOv8 / YOLOv11（推荐）
-- YOLOv5 / YOLOv7（需要修改后处理代码）
-
----
-
-## 6. 目录结构
-
-```
-python/
-├── convert.py          # 模型转换脚本
-├── yolo11.py           # 推理测试脚本
-├── README.md           # 本说明文件
-└── result/             # 检测结果输出目录（自动创建）
-```
-
----
-
-## 7. 相关资源
-
-- [RKNN Toolkit 文档](https://github.com/airockchip/rknn-toolkit2)
-- [RKNN Model Zoo](https://github.com/airockchip/rknn_model_zoo)
-- [Ultralytics YOLO11](https://docs.ultralytics.com/models/yolo11/)
+- **INT8 量化必须提供校准集**：`rknn.build(do_quantization=True, dataset=DATASET_PATH)`，DATASET_PATH 是相对脚本运行目录的路径，脱离 rknn_model_zoo 目录布局单独运行会因找不到 `coco_subset_20.txt` 而失败——需先改 `DATASET_PATH`。
+- 归一化在转换期配置为 `mean_values=[[0,0,0]] / std_values=[[255,255,255]]`，即 NPU 输入前做 /255；C++ 端预处理必须与此一致，否则精度异常。
+- 转换只在 x86 PC 完成，`.rknn` 与目标平台绑定（rk3588 生成的模型不能跑在 rk3568 上）。
+- `yolo11.py` 依赖同级 rknn_model_zoo 代码（`py_utils/`、模型 zoo 路径回溯），本仓库单独拷贝 python/ 目录到任意位置运行会 ImportError。
+- `--img_save` 结果写入**当前工作目录**下的 `result/`（非 python/result），注意先 cd 到期望位置。
+- 若量化后掉点明显：改用 `fp`、增大校准集、或换更大模型（n→s→m，`model/` 内已备好三档 .rknn）。

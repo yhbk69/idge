@@ -1,3 +1,5 @@
+// 文件：equipment_inventory_widget.cpp
+// 职责：设备盘点任务列表页实现（caichao 分支合入），页面风格与 RollCallWidget 保持一致
 #include "equipment_inventory_widget.h"
 
 #include <QAbstractItemView>
@@ -22,6 +24,9 @@ EquipmentInventoryWidget::EquipmentInventoryWidget(QWidget* parent) : QWidget(pa
     setupUi();
 }
 
+// 服务注入（由 frmMain 在两个服务初始化完成后调用）：
+// 注入后立即根据 isReady() 决定"创建任务"按钮可用性——识别程序/模型
+// 未部署时禁用创建，避免用户进入流程后才失败；tooltip 已提示部署要求。
 void EquipmentInventoryWidget::setServices(
     std::shared_ptr<EquipmentInventoryService> equipment_service,
     std::shared_ptr<RollCallService> roll_call_service) {
@@ -99,6 +104,9 @@ void EquipmentInventoryWidget::setupUi() {
 
 void EquipmentInventoryWidget::refreshTaskList() { loadTasks(); }
 
+// 同步重建任务列表：GUI 线程直接查询（数据量小）；操作列每行 new 一个
+// QWidget 容器塞进 setCellWidget，刷新时旧行连同按钮整体销毁，
+// lambda 按值捕获 task.id（C++14 初始化捕获），不依赖行号。
 void EquipmentInventoryWidget::loadTasks() {
     if (!equipment_service_ || !task_table_) return;
     task_table_->setRowCount(0);
@@ -146,6 +154,22 @@ void EquipmentInventoryWidget::loadTasks() {
     }
 }
 
+/**
+ * @brief 创建设备盘点（登记）任务：命名 → 选照片 → 后台识别 → 确认
+ *
+ * 与点名流程的差异：
+ *   - PhotoSelectionDialog 传入设备检测器配置（detector_configs 非空），
+ *     相机预览时实时框出设备而非人脸；每个模型独占一颗 NPU 核
+ *     （第1个模型 RKNN_NPU_CORE_0、第2个 RKNN_NPU_CORE_1，与 RK3588
+ *     三核中保留一核给实时检测流水线的预算有关）；
+ *   - 盘点任务的 task_id 由 EquipmentInventoryService 分配，但选照界面
+ *     仍用 roll_call_service_ 取任务目录（PhotoSelectionDialog 签名依赖它；
+ *     两个服务底层共用同一张 task 表，见 createEquipmentTask 直接调用
+ *     roll_call_service_->getDatabase()->createTask，故 task_id 可互用）。
+ *
+ * 返回码约定与 RecognitionResultDialog 相同：2 = 用户取消（需回滚删除任务）；
+ * 其余非 Accepted = 询问用户是否删除，最后统一刷新列表。
+ */
 void EquipmentInventoryWidget::onCreateTask() {
     if (!equipment_service_ || !roll_call_service_) return;
     const QString default_name = QStringLiteral("设备盘点_%1")
@@ -197,11 +221,16 @@ void EquipmentInventoryWidget::onCreateTask() {
     refreshTaskList();
 }
 
+// 详情对话框为栈上对象 + exec() 模态：关闭即析构，无残留窗口；
+// 数据在构造时一次性快照，不监听后台更新
 void EquipmentInventoryWidget::onViewTask(int task_id) {
     EquipmentDetailDialog detail(task_id, equipment_service_, this);
     detail.exec();
 }
 
+// 注销流程：与 onCreateTask 相同的选照/识别管线，只是
+// EquipmentRecognitionDialog 传 Phase::Cancellation（与登记结果做标签数量比对），
+// 取消时不回滚删除任务（登记数据仍有效）
 void EquipmentInventoryWidget::onCancelTask(int task_id) {
     if (!equipment_service_ || !roll_call_service_) return;
     std::vector<PreviewDetectorConfig> preview_configs;
@@ -220,6 +249,8 @@ void EquipmentInventoryWidget::onCancelTask(int task_id) {
     if (recognition.exec() == QDialog::Accepted) refreshTaskList();
 }
 
+// 删除前确认；deleteTask 委托 RollCallService 删除任务记录+目录，
+// 无论成败都刷新列表（失败时表格保持与库一致）
 void EquipmentInventoryWidget::onDeleteTask(int task_id) {
     const Task task = equipment_service_->getTaskInfo(task_id);
     if (QMessageBox::question(this, QStringLiteral("确认删除"),

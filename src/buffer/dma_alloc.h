@@ -83,6 +83,8 @@ int dma_sync_cpu_to_device(int fd);
  * @return 成功返回 0，失败返回负数
  * 作用：通过 DMA Heap 设备分配物理连续内存，并将其映射到用户空间虚拟地址。
  *       分配的内存可被 CPU 和硬件设备（如 RGA、解码器）直接访问。
+ * 所有权：成功返回后 fd/va 归调用方所有，必须且只能释放一次；
+ *       fd 可 dup() 后分发给多个消费者共享同一物理内存。
  */
 int dma_buf_alloc(const char *path, size_t size, int *fd, void **va);
 

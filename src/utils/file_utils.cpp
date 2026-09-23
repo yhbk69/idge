@@ -1,3 +1,5 @@
+// 文件职责：文件工具实现——RKNN 模型文件整体读入、图像文件读取及文本行读取，
+// 源自 rknn_model_zoo 示例工程，调用方需负责释放返回的堆内存。
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
