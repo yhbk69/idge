@@ -1,3 +1,7 @@
+// EglImageRenderer.h —— 基于 EGLImage 单纹理的 DMA-BUF 零拷贝渲染器（NV12 着色器版）
+// ⚠ 本文件没有 include guard / #pragma once：只能被单个编译单元包含一次，
+//   重复包含会触发类重定义编译错误。属遗留/备用实现，主流渲染路径见
+//   gl_video_widget.cpp + eglimage_helper.h。若需多处包含请补充保护宏。
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
@@ -21,6 +25,11 @@ public:
     作用：初始化渲染器
     说明：获取EGL扩展函数指针，创建纹理和着色器程序
     返回值：成功返回true，失败返回false
+    ⚠ 与 eglimage_helper/egl_dma_buf 的 init 不同，这里未查询
+      EGL_EXT_image_dma_buf_import 扩展、未检查当前上下文是否 current，
+      仅验证函数指针非空；且 compileShaders() 不检查编译/链接结果，
+      着色器失败时 program_=0，render() 里 glUseProgram(0) 静默黑屏。
+      失败几乎只能在 updateFrame 的 egl 报错里间接看出。
     ====================================================
     */
     bool init()
@@ -122,6 +131,9 @@ public:
     说明：使用OpenGL着色器将纹理渲染到视口
     参数：viewport_w - 视口宽度，viewport_h - 视口高度
     说明：保持视频原始宽高比，自动添加黑边
+    性能提示：每帧都重建顶点数组、glBufferData 重传 VBO/EBO 并两次
+      glGetAttrib/UniformLocation 查询—— quad 是静态几何，只有 sx/sy
+      随宽高比变化，稳态运行属可避免的上传开销（帧池/常量 VBO 可优化）。
     ====================================================
     */
     void render(int viewport_w, int viewport_h)
@@ -368,6 +380,16 @@ private:
         片段着色器：NV12 → RGB 转换
         说明：将YUV颜色空间转换为RGB颜色空间
         硬件概念：NV12是YUV420半平面格式，Y和UV分开存储
+        ⚠ 与 updateFrame 的用法耦合风险：
+          1) uniform tex_height/img_height 从未 glUniform 赋值（默认0），
+             y_ratio = img_height/tex_height 是 0/0 → NaN，采样坐标未定义；
+             只有按 NV12"Y 占 2/3 高度、UV 占 1/3"打包成单纹理
+             （软件重排布局）时公式才成立；
+          2) 若按 DMA-BUF 双平面直接导入 NV12 或导入 RGBA（本项目
+             主流水线是 RGA 转好的 RGBA），此着色器的 .r/.ra 通道解释
+             与 BT.601 矩阵全部错误，画面呈绿色噪声；
+          3) 转换系数用的是 BT.601 而非 RGA 路径常用的 BT.709，
+             两路渲染并存时色彩会有可感知偏差。
         ====================================================
         */
         const char* fs_src = R"(

@@ -20,6 +20,22 @@
 //   - 单例模式：全局唯一实例
 //   - 每线程独立上下文：每个线程有自己的 RKNN 模型实例
 //
+// 【调度模型】FIFO 无界任务队列 + 惰性建线程：submit 只在
+//   "无空闲线程且未达上限"时才新建线程，否则靠 notify_one 唤醒
+//   一个已挂起线程。任务本身不做优先级区分（推理优先级由上游
+//   各通道的投帧节奏决定）。空闲 2 秒缩容避免常驻线程持有
+//   线程局部 RKNN 上下文（每份上下文=完整模型权重，NPU 驱动内存
+//   数十~数百 MB 级），不回收会长期占用。
+//
+// ⚠【单例 + thread_local 上下文的生命周期纠缠】
+//   - context 为 thread_local：线程退出时才析构模型；ThreadPool
+//     析构 join 全部 worker，故正常退出顺序是安全的。
+//   - 若 worker 内任务又向本池 submit（递归并行），future.get()
+//     等待子任务而所有线程都在等父任务 → 自死锁风险，调用方需避免。
+//   - 退出时序：quit_=true 后队列中未执行的任务被丢弃（worker 直接
+//     return），对应 std::future 永不 ready，仍在 wait()/get() 的
+//     调用方会永久阻塞——停机前需自行排空。
+//   - submit 在 quit_ 后调用触发 assert（Release 版未定义行为）。
 // ============================================================================
 
 #include <cassert>
@@ -38,6 +54,11 @@
 using namespace std;
 
 // NPU 核心掩码数组（循环分配：0 → 1 → 2 → 0 → 1）
+// 为什么循环而不是 CORE_ALL：RK3588 NPU 有 3 个物理核，单模型推理
+//   绑到固定核可多模型并行流水（模型A跑核0时模型B同时跑核1），
+//   比 CORE_ALL 的分核调度延迟更稳定；5 项数组让"每线程最多 5 模型"
+//   的配置下核 0/1 各出现两次、负载大致均衡。
+// ⚠ 同一核上多个模型实例并存时是时分复用，不保证真并行。
 inline constexpr rknn_core_mask NPU_CORES[] = {
     RKNN_NPU_CORE_0,
     RKNN_NPU_CORE_1,
@@ -206,6 +227,11 @@ namespace dpool
             return instance;
         }
 
+        // 设置最大线程数上限
+        // ⚠ 数据竞争警示：maxThreads_ 在 submit() 中是持锁读取的，
+        //   而这里不加锁写入——与其他线程的 submit 并发调用属于
+        //   data race（形式上 UB，实践中大小写竞态可能导致瞬间多建
+        //   或少建一个线程）。只应在池启动前（首帧 submit 之前）调用。
         inline void setMaxThreads(size_t maxThreads)
         {
             this->maxThreads_ = maxThreads;
@@ -254,7 +280,14 @@ namespace dpool
         //   4. 如果没有空闲线程且未达上限，创建新线程
         //   5. 返回 future，调用者可以等待结果
         //
-        // ============================================================================
+        // ⚠ 无背压：tasks_ 是无界队列，达到 maxThreads_ 且全部繁忙时
+        //   任务只会在队列里排队（不阻塞提交方）。若提交速度持续大于
+        //   消费速度（如推理帧率 > NPU 吞吐），队列与其中捕获的
+        //   帧缓冲引用会无限增长——上游必须自行限流/丢帧。
+        // ⚠ packaged_task 用 make_shared 分配：任务对象在"队列项 +
+        //   所有持有者"释放后才销毁；Lambda 捕获的 shared_ptr<DmaBuffer>
+        //   因此活到任务执行为止，这是帧随任务自动归还池的依赖前提。
+        // ========================================================================
         template <typename Func, typename... Ts>
         auto submit(Func &&func, Ts &&...params)
             -> std::future<typename std::result_of<Func(Ts...)>::type>
@@ -319,6 +352,18 @@ namespace dpool
         //   - 避免空闲线程占用系统资源
         //   - 下次有任务时会创建新线程
         //
+        // 【计数的锁内一致性】idleThreads_ 的 ++/-- 与 tasks_ 的取任务
+        //   都在同一临界区内完成，因此 submit 观察到的
+        //   "idleThreads_>0 则 notify_one"不会出现"唤醒了一个正在
+        //   退出、不会再领任务的线程"导致任务滞留无人认领的竞态
+        //   （被唤醒者要么在谓词处重新拿到任务，要么退回到等待）。
+        // ⚠ 首次执行的任务承担"懒初始化"代价：context->init() 加载
+        //   全部 RKNN 模型（每个模型反序列化+权重重排，百 ms~秒级），
+        //   所以流水线预热（先发一帧空任务）能显著压低首帧延迟。
+        // ⚡ 超时分支中线程先把自己 ID 塞进 finishedThreadIDs_，由其他
+        //   worker 代为 join+erase（线程不能 join 自己）；若此后所有
+        //   worker 都已退出而无人调用 joinFinishedThreads，僵尸线程
+        //   记录会滞留到 ~ThreadPool 统一 join，属可接受的收尾延迟。
         // ============================================================================
         void worker()
         {

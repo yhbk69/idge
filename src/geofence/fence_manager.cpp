@@ -171,6 +171,8 @@ void FenceManager::setAlarmClasses(const QStringList &classes)
 // ============================================================================
 
 // 获取指定通道的围栏配置（不存在则返回空配置）
+// 按值返回：解码线程拿到的是数据快照，不与主线程后续写操作共享同一对象引用，
+// 降低 fenceChanged/saveToConfig 与检测读取之间的竞态面（无锁但取副本）。
 ChannelFence FenceManager::channelFence(int channel) const
 {
     auto it = fences_.find(channel);
@@ -223,8 +225,11 @@ bool FenceManager::hasFence(int channel) const
 // ============================================================================
 // overlay 尺寸管理
 // ============================================================================
-// 用户绘制围栏时，坐标是 overlay widget 的像素。
-// 检测时需要将这些坐标映射到原始视频空间，因此需要记录绘制时的 widget 尺寸。
+// 用户绘制围栏时，顶点坐标记录的是 overlay widget 的像素值（原样保存，不归一化）。
+// 检测时反向处理：把检测框脚点从视频帧空间按 letterbox 比例换算到 widget 空间，
+// 再与围栏比较；换算比例依赖"绘制时"的 widget 尺寸，故必须按通道记录该尺寸。
+// 若某通道未记录（overlaySize 返回 0,0），fence_checker 会退化为直接用帧坐标比较，
+// 属精度下降的兜底路径，不应作为常态。
 // ============================================================================
 
 void FenceManager::setOverlaySize(int channel, int w, int h)

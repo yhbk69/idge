@@ -1,3 +1,6 @@
+// dashboard_widget.cpp —— 数据看板页：统计卡片 + /proc 系统监控 + 类别统计条
+// 全部刷新由 2s QTimer 驱动，在 GUI 线程读 AlarmManager 单例（其内部
+// 有锁）并重建 QLabel 树；文件读取均为同步小 I/O，不构成卡顿源。
 #include "dashboard_widget.h"
 #include "alarm_manager.h"
 #include <QGridLayout>
@@ -268,6 +271,15 @@ void DashboardWidget::refreshStats()
     
     // CPU使用率监控
     // 通过读取/proc/stat文件获取CPU时间信息
+    // 【算法】CPU% = 1 - Δidle/Δtotal，两次采样差分求窗口均值；
+    //   首轮 lastTotal/lastIdle 从 0 起算，第一次刷新得到的是"自开机
+    //   以来"的均值而非 2s 窗口值（随后各轮自动纠正，仅首帧不准）。
+    // ⠠ static 局部变量为全实例共享：若同时存在多个 DashboardWidget，
+    //   它们会互相污染差分基线，导致数值跳变。
+    // ⚠ split(' ') 未按连续空白折叠，/proc/stat 的 "cpu  123"（两个空格）
+    //   会产生空 token，toLongLong() 对空串返回 0，恰好无害；但列序
+    //   parts[4]=idle 依赖内核 cpu 行字段顺序（user nice system idle...），
+    //   新内核追加字段在 idle 之后，不影响本取值。
     static qint64 lastTotal = 0, lastIdle = 0;
     QFile cpuFile("/proc/stat");
     if (cpuFile.open(QIODevice::ReadOnly)) {
@@ -321,6 +333,8 @@ void DashboardWidget::refreshStats()
     }
 
     // NPU状态（硬编码为3核在线）
+    // ⚠ 展示值非实测：未读取 /sys/rknpu 或 rvdbg 节点，仅静态文案占位，
+    //   排查"看板显示 3 核在线但 NPU 实际异常"时勿被误导。
     lblNpu_->setText("3 核在线");
 
     /* 
@@ -367,6 +381,9 @@ void DashboardWidget::refreshStats()
             h->addWidget(nameLbl);
 
             // 文本进度条（使用█字符）
+            // 魔法数字 30 = 条形图最大格数（full bar ≈ 30 个 █ 字符）；
+            // 以降序首位 sorted.first().second 为最大值归一化，防 0 除。
+            // 注意 pair.second*30 在计数超过 ~7000 万时 int 溢出（实际达不到）。
             int barLen = (pair.second * 30) / (sorted.first().second > 0 ? sorted.first().second : 1);
             QString barText = QString("█").repeated(barLen);
             QLabel *barLbl = new QLabel(barText);

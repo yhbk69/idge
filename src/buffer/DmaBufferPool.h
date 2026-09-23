@@ -26,6 +26,13 @@
 // ============================================================================
 // 作用：将值 val 向上对齐到 align 的整数倍。
 //       RGA 硬件要求图像的行步长按特定字节（通常 32 或 64）对齐。
+// 【位运算含义】(val + align - 1) 先加"align-1"保证跨过一个对齐边界，
+//   再与 ~(align-1) 相与：align 必须是 2 的幂，此时 (align-1) 的低
+//   log2(align) 位全为 1，取反后高位次 1，与运算即把低位清零 = 向下
+//   取整到边界，整体效果 = 向上取整。例：val=1920, align=32 → 1920
+//   （已对齐）；val=1288 → (1288+31)&~31 = 1319&0xFFFFFFE0 = 1312。
+//   默认 align=32 是 RK3588 RGA 对行步长(wstride)的安全字节对齐值，
+//   NV12 色度平面还隐含要求宽度为偶数（4:2:0 两像素共享一个 UV）。
 // ============================================================================
 #define RGA_ALIGN(val, align) (((val) + (align) - 1) & ~((align) - 1))
 
@@ -68,11 +75,24 @@ struct DmaBuffer {
 //       使用条件变量实现阻塞等待，当所有缓冲区都被占用时，
 //       acquire() 会阻塞直到有缓冲区被归还。
 //
+// 【为什么用池化而非按需 dma_buf_alloc】
+//   dma_buf_alloc 每次要走 open+ioctl+mmap 三次系统调用，4K 帧下
+//   每帧毫秒级开销且造成物理内存反复 fragmentation；池化把开销
+//   一次性摊销到构造期，运行期 acquire/release 均为 O(1)
+//   （队列 push/pop + 一次条件变量唤醒），且 RGA importbuffer_fd
+//   得到的句柄也可复用，避免每帧重复导入。
+//
 // 设计特点：
 //   - 预分配所有缓冲区，避免运行时分配延迟
 //   - 支持多种像素格式（NV12、NV21、I420、RGB888、RGBA8888）
 //   - 支持智能指针管理（tryAcquireSharedPtr），自动归还缓冲区
 //   - 继承 enable_shared_from_this，支持安全的 shared_ptr 回调
+//
+// ⚠【生命周期总警示】本池管理的 DmaBuffer 由池 new、由池 delete：
+//   任何方式取出的裸指针，其有效期都终止于析构。池析构只清理
+//   available_buffers 队列中的缓冲，仍在外部持有的（未 release 的）
+//   DmaBuffer 既不会被释放（泄漏），其指针也会在池销毁后成为悬垂。
+//   使用顺序必须是：先确保所有 acquire 都 release，再销毁池。
 // ============================================================================
 class DmaBufferPool : public std::enable_shared_from_this<DmaBufferPool>{
 public:
@@ -117,6 +137,9 @@ public:
     /**
      * @brief 析构函数 —— 释放所有预分配的 DMA 缓冲区
      * 作用：遍历可用缓冲区队列，逐个释放 DMA 缓冲区和 RGA 句柄
+     * ⚠ 只能释放"已归还"的缓冲区：仍在外部借出（未 release）的
+     *   DmaBuffer 既不会被释放（内存+fd 泄漏），对象本体也随池消失，
+     *   外部若再访问即 use-after-free。销毁池前必须确保全部归还。
      */
     ~DmaBufferPool() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -133,6 +156,25 @@ public:
     // 作用：从缓冲池中获取一个可用的 DMA 缓冲区。如果所有缓冲区都被占用，
     //       则阻塞等待直到有缓冲区被归还。
     // @return 可用的 DmaBuffer 指针
+    //
+    // 复杂度：O(1)（条件变量唤醒 + 队列 front/pop），锁内仅做指针搬运。
+    //
+    // 【为什么返回裸指针而非智能指针】
+    //   帧缓冲的生命周期跨越多个流水线阶段（解码→RGA→渲染），
+    //   池化对象的所有权属于池本身，调用方只是"借用"；返回裸指针
+    //   表达"无所有权、必须显式 release 归还"的语义，避免误用
+    //   delete 释放本不属于调用方的内存。
+    //
+    // ⚠【生命周期约束（上轮审查确认）】返回的裸指针有效期严格受限于：
+    //   1) 调用方 release(buf) 之前 —— release 后 buf 可被其他线程
+    //      立即 acquire 并改写（frame_id/内容），继续使用即数据竞争；
+    //   2) 池析构之前 —— 池销毁后未归还的 buf 成为悬垂指针。
+    //   禁止把该指针存入长期容器或跨 release 继续解引用；
+    //   需要自动归还语义时应改用 tryAcquireSharedPtr 或 DmaBufferGuard。
+    //
+    // ⚠ 若 init 阶段部分缓冲区分配失败，实际可用数 < capacity_，
+    //   所有线程借出后再次 acquire 将永久阻塞（无超时版本），
+    //   调用方需评估死锁风险。
     // ========================================================================
     DmaBuffer* acquire() {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -170,6 +212,10 @@ public:
     // 作用：获取缓冲区并包装为 shared_ptr，通过自定义删除器实现自动归还。
     //       当 shared_ptr 引用计数归零时，缓冲区会自动归还到缓冲池。
     //       使用 weak_ptr 避免循环引用导致的内存泄漏。
+    // 【删除器的所有权设计】shared_ptr 的"删除"被重定向为 release 归还，
+    //   因此这个 shared_ptr 绝不能 reset()/置换为别的 DmaBuffer，
+    //   否则归还的是错的缓冲、原缓冲永久丢失；跨线程传递时引用计数
+    //   本身是线程安全的，但指向的像素数据不是（多方同时写会撕裂）。
     // @return shared_ptr 包装的 DmaBuffer，无可用则返回 nullptr
     // ========================================================================
     std::shared_ptr<DmaBuffer> tryAcquireSharedPtr() {
@@ -269,6 +315,11 @@ private:
     /**
      * @brief 释放单个 DMA 缓冲区
      * 作用：先释放 RGA 句柄，再释放 DMA 内存和重置元信息
+     * ⚠ 已知缺陷（仅警示，不改逻辑）：buf->reset() 会把 fd/va/size
+     *   先清零，随后的 dma_buf_free(buf->size=0, &fd=-1, va=nullptr)
+     *   实际是 munmap(nullptr,0)+close(-1)，两个系统调用都失败——
+     *   即 RGA 导入成功的缓冲区其 DMA 内存与映射在此路径并未真正
+     *   释放，仅在进程退出时由内核回收。修复方向：先 free 再 reset。
      */
     void free_dma_buffer(DmaBuffer* buf) {
         if (buf->rga_handle != 0) {
@@ -369,6 +420,9 @@ public:
      * @brief 分离所有权
      * 作用：放弃缓冲区的所有权并返回指针，调用者需自行管理内存。
      *       用于需要将缓冲区传递给不支持 RAII 的接口时。
+     * ⚠ detach 后缓冲区脱离了 RAII 管理：调用者必须最终显式
+     *   pool.release(buf)，否则该缓冲区永久离开可用池（等效泄漏），
+     *   池内其余线程在 capacity_ 个都被借走后将阻塞或丢弃帧。
      */
     DmaBuffer* detach()
     {

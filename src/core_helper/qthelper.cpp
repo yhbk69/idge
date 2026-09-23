@@ -957,7 +957,10 @@ void QtHelper::setStyle(const QString &qssFile)
 {
     QString qss = QtHelper::getStyle(qssFile);
     if (!qss.isEmpty()) {
-        // 从qss第20个字符处提取调色板颜色(硬编码约定)
+        // 硬编码约定：QSS 首行必须以 "QPalette{background:#RRGGBB" 开头
+        // （如 blacksoft.css 的 "QPalette{background:#444444;}"），
+        // 下标 20 恰好是 '#' 的位置，mid(20, 7) 即取出 7 字符颜色值，
+        // 用于同步全局调色板底色（影响原生绘制的背景）。改 QSS 时不可动首行格式。
         QString paletteColor = qss.mid(20, 7);
         qApp->setPalette(QPalette(QColor(paletteColor)));
         qApp->setStyleSheet(qss);

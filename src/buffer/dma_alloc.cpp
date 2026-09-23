@@ -160,6 +160,14 @@ int dma_sync_cpu_to_device(int fd) {
 //
 // 返回值：0 成功，负数失败
 //
+// 【fd 所有权语义】分配成功后，*fd 与 *va 的所有权转移给调用方：
+//   必须且只能调用一次 dma_buf_free() 释放；重复释放会导致
+//   double-close（fd 可能已被复用为其他资源的描述符，误关他人文件）。
+//
+// 【大小与页对齐】size 无需调用方手动对齐：dma_heap 内核接口会自动
+//   向上取整到页（4KB）边界分配物理连续页，RGA 场景下再配合
+//   RGA_ALIGN 的行步长对齐即可，不必单独做页对齐。
+//
 // 分配流程：
 //   1. open(path) → 打开 DMA-BUF Heap 设备
 //   2. ioctl(DMA_HEAP_IOCTL_ALLOC) → 内核分配物理连续内存
@@ -203,6 +211,9 @@ int dma_buf_alloc(const char *path, size_t size, int *fd, void **va) {
 
     // mmap: 将 GPU 可访问的内存映射到 CPU 地址空间
     // 映射后，CPU 可以像访问普通内存一样读写这块 GPU 显存
+    // ⚠ 隐患警示：此处若 mmap 失败直接 return，ioctl 已分配的 buf_data.fd
+    //   未被关闭，造成 DMA-BUF fd 泄漏（内核物理内存被该 fd 引用计数持有，
+    //   直到进程退出才回收）。正确做法应先 close(buf_data.fd) 再返回。
     mmap_va = (void *)mmap(NULL, buf_data.len, prot, MAP_SHARED, buf_data.fd, 0);
     if (mmap_va == MAP_FAILED) {
         printf("mmap failed: %s\n", strerror(errno));
@@ -224,6 +235,10 @@ int dma_buf_alloc(const char *path, size_t size, int *fd, void **va) {
 // 释放流程：
 //   1. munmap: 解除 CPU 地址空间映射
 //   2. close(fd): 关闭 DMA-BUF fd（引用计数归零时内核释放物理内存）
+// ⚠ munmap 的返回值未检查：若传入的 va/size 与当初 mmap 不一致
+//   （如 size 传 0 或指针已被复位），解除映射会静默失败，
+//   虚拟地址区间持续占用进程地址空间。调用方必须保证
+//   size/fd/va 三者与分配时一致，且只释放一次。
 // ============================================================================
 void dma_buf_free(size_t size, int *fd, void *va) {
     int len;

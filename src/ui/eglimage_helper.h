@@ -42,6 +42,9 @@ class EglImageHelper
 public:
     // 初始化 EGL 扩展函数
     // 必须在 OpenGL 上下文创建后调用（因为需要 eglGetCurrentDisplay）
+    // ⚠ 线程约束：eglGetCurrentDisplay 只认"当前线程已 current 的上下文"，
+    //   须在 GUI 线程的 initializeGL（或 makeCurrent 之后）调用，
+    //   否则恒返回 EGL_NO_DISPLAY 导致 init 失败。
     bool init()
     {
         // 获取当前 EGL 显示设备
@@ -185,6 +188,13 @@ public:
     }
 
     // 销毁 EGLImage（释放引用，不释放物理内存）
+    // 【引用计数模型】dma-buf 物理内存由内核引用计数决定生死：
+    //   分配者(fd) / 每个 dup / EGLImage 各持一份引用，全部释放后
+    //   内核才回收页。所以 destroyImage 之后若源缓冲仍被解码器/池
+    //   持有则数据依旧存在；反之先 close 了所有 fd 也不会让
+    //   已导入的 EGLImage 失效——两边顺序无强约束，但"渲染中
+    //   的 image 被 destroy"会导致纹理内容未定义，须保证
+    //   destroy 晚于最后一帧采样（双缓冲交替即为此设计）。
     void destroyImage(EGLImageKHR image)
     {
         if (image != EGL_NO_IMAGE_KHR) {

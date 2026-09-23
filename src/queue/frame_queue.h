@@ -25,11 +25,26 @@
 //   - mutex_ 保护 queue_ 的并发访问
 //   - cond_not_full_  生产者等待队列非满
 //   - cond_not_empty_ 消费者等待队列非空
+//
+// 【阻塞唤醒语义】wait(pred) 采用"谓词+循环"模式，条件变量被虚假唤醒或
+//   被 notify 后都会重新求值谓词，因此不会丢帧错醒；shutdown() 用
+//   notify_all 而非 notify_one，保证所有挂起的生产者/消费者都能观察到
+//   关闭标志并退出，避免停机死锁。
+//
+// ⚠【帧数据是浅拷贝载体】image_buffer_t/DmaFrameBuffer(结构体版) 内含
+//   virt_addr/fd/dmaBuffer 裸指针，入队/出队只复制指针不复制像素数据。
+//   这意味着：队列中帧与生产者栈上帧共享同一底层 DMA 缓冲；一旦生产者
+//   把该缓冲 release 回 DmaBufferPool，队列里的副本即悬垂。
+//   生命周期的唯一权威是 DmaBufferPool 的借出/归还配对，队列不参与所有权。
 // ============================================================================
 class FrameQueue 
 {
 public:
     // 默认构造函数，最大容量为0
+    // ⚠ 陷阱：max_size(0) 且 shutdown_ 未初始化（indeterminate）。
+    //   默认构造后 push 的谓词 queue_.size() < 0 恒为 false，
+    //   若 shutdown_ 恰好是 false 则生产者永久阻塞；应始终使用
+    //   带 pool 参数的显式构造函数。
     FrameQueue() : max_size(0) {}
 
     /**
@@ -88,6 +103,19 @@ public:
     //       适用于实时视频场景，确保始终保留最新的帧数据。
     // @param temp 待入队的帧数据
     // @return 成功返回 true，已关闭返回 false
+    //
+    // ⚠⚠【实现与设计意图不符（上轮代码审查确认，仅警示不改代码）】
+    //   1) std::queue 是 FIFO：front() 才是最旧帧，back() 是最新帧。
+    //      此处取 queue_.back() 释放的是"最新帧"的 dmaBuffer，
+    //      与注释宣称的"释放最旧帧"相反，且该最新帧随后才被消费者
+    //      弹出时使用其已被归还的 dmaBuffer → 悬垂指针/双重归还风险。
+    //   2) 只 release 不 pop：队列尺寸会从 max_size 增长到 max_size+1，
+    //      下次进入时 size()==max_size 条件不再成立（等值比较），
+    //      队列可继续无界增长，"有界"语义失效。
+    //   3) 被 release 的帧仍留在队列中，其 dmaBuffer 已归还池内、
+    //      可能被其他线程 acquire 改写 —— 消费者弹出后读到撕裂/脏数据。
+    //   正确写法应为 pop front 后再 push 并归还 front 的缓冲区
+    //   （参考 BlockingQueue::push_latest 的实现）。
     // ========================================================================
     bool pushAndReplace(const image_buffer_t &temp)
     {

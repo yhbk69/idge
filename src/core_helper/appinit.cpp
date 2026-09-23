@@ -31,6 +31,10 @@ bool AppInit::eventFilter(QObject *watched, QEvent *event)
         return QObject::eventFilter(watched, event);
     }
 
+    // 注意：static 局部变量使拖动状态在"所有窗体间全局共享"，
+    // 即同一时刻只能有一个窗体处于拖动状态（这是本组件的设计取舍）。
+    // 该事件过滤器只会在 GUI 主线程被回调（Qt 事件派发），因此 static
+    // 变量无多线程竞争问题；但不可将其状态用于跨线程读写。
     static QPoint mousePoint;     // 鼠标相对于窗口的偏移量
     static bool mousePressed = false;  // 鼠标左键是否按下
 

@@ -38,13 +38,18 @@
 // AlarmRecord - 报警记录结构体
 // ============================================================================
 // 存放一条报警的完整信息：
-//   - timestamp: 报警时间戳
+//   - timestamp: 报警时间戳（直接取自 results.time，与推理结果时间同源，
+//                量纲见 common.hpp，注意与限流常量的单位一致性隐患）
 //   - channel: 视频通道编号
 //   - clsId: 检测到的类别 ID
 //   - className: 类别名称（如 "person"、"helmet"）
 //   - confidence: 置信度（0.0 ~ 1.0）
-//   - acknowledged: 是否已确认（用户点击确认后为 true）
-//   - imgPath: 报警截图路径（可为空）
+//   - acknowledged: 确认状态位——纯内存态，UI 点击"确认"后经 acknowledgeAll()
+//                   批量置 true，用于 unacknowledgedCount() 的未读角标；不入库
+//   - imgPath: 报警抓拍图路径（可为空）——本管理器只负责判定与产出记录，
+//              截图落盘由 SnapWriter 后台线程异步完成并回填，与 SQLite 落库解耦：
+//              一条报警 = 一行 DB 记录 + 一张 alarms/日期/ 下的抓拍图，二者非同一生命周期
+//   - isFenceAlarm: 是否为电子围栏侵入报警（区别于安全帽/PPE 类报警，通常限流被绕过）
 //
 // ============================================================================
 struct AlarmRecord {
@@ -75,8 +80,16 @@ public:
     // 获取单例实例
     static AlarmManager &instance();
 
-    // 同通道同类别去重限流间隔（纳秒），默认 2 秒
+    // 同通道同类别去重限流间隔（纳秒），名义上 2 秒
     // 例如：通道 0 检测到 person 后，2 秒内不会再次报警
+    //
+    // 【单位隐患·重要】本常量按"纳秒"定义，但 ingest() 中与 results.time 相减比较；
+    //   而 src/yolo11/common.hpp 中 object_detect_result_list::time 明确注释为"毫秒"，
+    //   alarm.timestamp 也直接取 results.time。若 results.time 确为毫秒，则：
+    //     毫秒差 < 2,000,000,000(ns值) 恒成立约 23 天，
+    //   等价于限流窗口被放大百万倍——同通道同类一旦首报，长期不再复报（限流失真）。
+    //   核查/统一单位前请勿依赖此处"2 秒"的实际行为；围栏报警因 bypassThrottle=true
+    //   不走此窗口，故不受影响。此处仅登记隐患，未改动代码。
     static const long kAlarmThrottleNs = 2000LL * 1000000LL;
 
     // 设置类别名称列表（用于将 cls_id 转换为类别名称）

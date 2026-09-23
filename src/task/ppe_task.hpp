@@ -4,7 +4,7 @@
 // =====================================================================
 // 头文件引用
 // =====================================================================
-#include "base_task.h"          // 基础任务类，提供任务接口
+#include "base_task.h"          // 复用其数据结构/队列定义（注：本类并不继承 BaseTask，仅 include 头文件）
 #include <iostream>             // 标准输入输出流
 #include <atomic>               // 原子操作，用于线程安全的状态标志
 #include <memory>               // 智能指针（shared_ptr等）
@@ -26,6 +26,17 @@
 // 作用：执行个人防护装备（PPE）检测的推理任务
 // 采用生产者-消费者模式，通过阻塞队列接收任务
 // 在独立线程中执行YOLO11模型推理，支持NPU加速
+//
+// 审查注记（与 HelmetTask/BaseTask 的关系 + 生命周期陷阱）：
+//   - 本类**不继承** BaseTask（尽管 include 其头文件），是独立实现的
+//     完整任务：持有自己的 YOLO11Model 实例与专属推理线程，
+//     与 helmet_task（无状态静态方法、跑在 ThreadPool 上）是两种模式；
+//   - taskQueue_ 为裸指针（new/delete 手工管理），仅在 init() 创建：
+//     start() 之前调用 put()/requestStop() 之外的路径会解引用空指针；
+//   - stopBestEffort() 超时 detach 后，析构函数仍会 delete taskQueue_，
+//     若在途 run() 线程尚未退出即访问已释放队列 → use-after-free 隐患。
+//     因此生产方（ffmpeg_video_decoder）对任务采取"只停不删"策略，
+//     对象生命周期上抛给退出流程，勿随手 delete 曾 stopBestEffort 的实例。
 // =====================================================================
 class PpeTask
 {
@@ -33,12 +44,12 @@ private:
     // =================================================================
     // 私有成员变量
     // =================================================================
-    std::shared_ptr<YOLO11Model> model_;                // YOLO11模型实例（NPU推理引擎）
-    BlockingQueue<std::shared_ptr<TaskData>>* taskQueue_; // 任务队列指针（生产者-消费者模式）
+    std::shared_ptr<YOLO11Model> model_;                // YOLO11模型实例（NPU推理引擎）；shared_ptr，析构自动释放（但模型自身无析构，见 yolo11_model.hpp 泄漏注记）
+    BlockingQueue<std::shared_ptr<TaskData>>* taskQueue_; // 任务队列指针（生产者-消费者模式）；裸指针：init() 中 new、析构中 delete，非线程安全的所有权
     std::thread thread_;                                // 推理工作线程
-    std::atomic<bool> running_{false};                  // 运行状态标志（原子操作保证线程安全）
-    std::atomic<bool> finished_{false};                 // 线程完成标志（原子操作保证线程安全）
-    TaskConfig config;                                  // 任务配置（模型路径、核心分配等）
+    std::atomic<bool> running_{false};                  // 运行状态标志（原子操作保证线程安全）；false 时 run() 在每次 pop 前后检查退出
+    std::atomic<bool> finished_{false};                 // 线程完成标志（原子操作保证线程安全）；仅由 run() 出口写 true，stopBestEffort 轮询它决定是否可安全 join
+    TaskConfig config;                                  // 任务配置（模型路径、核心分配等）；构造时拷贝一份，init() 后不再变更
 
 public:
     // =================================================================
@@ -79,6 +90,8 @@ public:
     // 参数：
     //   task - 任务数据智能指针，包含待推理的图像
     // 线程安全：BlockingQueue保证多线程安全访问
+    // 时序约束：taskQueue_ 在 init()（start() 内部调用）才创建，
+    //           start() 之前调用本函数会解引用空指针 → 崩溃
     // =================================================================
     void put(std::shared_ptr<TaskData> task);
 

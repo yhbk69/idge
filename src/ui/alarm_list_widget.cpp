@@ -1,3 +1,8 @@
+// alarm_list_widget.cpp —— 报警记录页：类别报警/围栏报警双 Tab 表格
+// 【刷新策略】三层节流：① 不可见时只更新统计数字不重建表；
+// ② alarmGenerated 触发 300ms 单发防抖定时器合并高频告警；
+// ③ showEvent 回到前台时补一次完整刷新。表格为全量重建（setRowCount
+// + 逐格 setItem），O(显示行数)，500 行上限内 300ms 粒度可承受。
 #include "alarm_list_widget.h"
 #include "alarm_manager.h"
 #include "fence_manager.h"
@@ -157,6 +162,9 @@ void AlarmListWidget::setupUi()
     toolLay->addWidget(chLbl);
 
     filterChannel_ = new QComboBox();
+    // ⚠ 通道数硬编码为 4（data: 0~3），新增通道配置不会自动出现在
+    //   筛选项中；"全部"用 data=-1 表示，refreshTable 以 filterCh>=0
+    //   判断是否启用通道过滤。
     filterChannel_->addItem("全部", -1);  // 全部通道
     filterChannel_->addItem("通道 1", 0);  // 通道1
     filterChannel_->addItem("通道 2", 1);  // 通道2
@@ -372,6 +380,9 @@ void AlarmListWidget::refreshTable()
         // 时间列
         QDateTime dt;
         dt.setMSecsSinceEpoch(a.timestamp / 1000000);  // 纳秒转换为毫秒
+        // ⚠ 前提：AlarmRecord::timestamp 单位为纳秒（steady/epoch ns）。
+        //   若上游改为 us/ms 时间戳，这里会静默显示 1970 年附近的错误时间；
+        //   /1000000 整除还会截断亚毫秒精度（展示到秒，无影响）。
         QTableWidgetItem *timeItem = new QTableWidgetItem(dt.toString("yyyy-MM-dd HH:mm:ss"));
         timeItem->setData(Qt::UserRole, a.imgPath);  // 存储截图路径
         table_->setItem(i, 0, timeItem);
@@ -394,6 +405,10 @@ void AlarmListWidget::refreshTable()
         table_->setItem(i, 4, statusItem);
 
         // ID列
+        // ⚠ 展示的是"倒序后的显示行号"而非告警唯一 ID/数据库主键：
+        //   过滤条件或新告警插入都会使同一条记录的"ID"变化，
+        //   报障沟通时勿把它当稳定标识；双击取截图走的是第 0 列
+        //   UserRole 里的 imgPath，与本列无关。
         table_->setItem(i, 5, new QTableWidgetItem(QString::number(i)));
     }
 }

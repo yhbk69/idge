@@ -11,6 +11,15 @@
 作用：EGL帧池类 - 管理DMA-BUF到OpenGL纹理的映射
 说明：使用对象池模式复用EGLImage和OpenGL纹理，避免频繁创建销毁
 硬件概念：DMA-BUF是Linux内核的缓冲区共享机制，允许不同硬件设备直接访问同一内存
+【设计动机】逐帧 eglCreateImageKHR/Destroy 会走驱动 ioctl 与内存表重建，
+  60fps 下开销可观；本池预生成 4 个纹理（MAX_FRAMES=4，与解码器
+  输出缓冲深度匹配），同一槽位换帧时仅重建 EGLImage、纹理对象复用，
+  渲染端拿到的 texture ID 稳定，省去 uniform 重绑。
+【归还语义】release() 只标记空闲并 close 自己 dup 的 fd，故意保留
+  EGLImage/纹理绑定——槽位再次 acquire 时才销毁旧 image 并重建，
+  因此"已 release"的槽位显存里可能仍是上一帧画面（无害，未被采样）。
+⚠ 无析构函数：纹理与 EGLImage 依赖 GL 上下文销毁时由驱动统一回收，
+  进程内反复创建/销毁帧池会累积 GL 对象。
 ====================================================
 */
 class EglFramePool {
@@ -75,6 +84,28 @@ public:
           format - 像素格式（DRM四字符码）
     返回值：成功返回纹理ID，失败返回0
     硬件概念：DMA-BUF导入允许GPU直接访问视频解码器输出的内存，无需CPU拷贝
+
+    【为什么 dup(fd)】dup 出的副本与调用方原 fd 指向同一 dma-buf 内核
+    对象（引用计数+1）：之后解码线程可以随时 close 原始 fd 归还缓冲池，
+    而 GPU 侧的 EGLImage 引用依旧有效——这就是零拷贝流水线里
+    "生产者回收"与"消费者渲染"解耦的所有权协议。副本由本池在
+    release() 中 close，一次 acquire 对应至多一次 release。
+
+    ⚠【单平面属性表】attrs 只描述 Plane0：仅适用于 RGBA/RGB/XRGB 等
+      单平面 FourCC。传 DRM_FORMAT_NV12 会缺少 Plane1 的 fd/offset/pitch，
+      GPU 读到未定义色度（花屏），勿复用本池导入 NV12。
+
+    ⚠【失败槽位泄漏】createImg_ 返回 EGL_NO_IMAGE_KHR 时：该槽位已被
+      置 in_use=true、已 dup 出新 fd，但函数继续找下一个槽并最终可返回 0；
+      失败槽位既不会被释放（fd 泄漏、槽位永久占用），调用方也拿不到
+      texture 去调用 release()。MAX_FRAMES=4 个槽漏完即整个池失效。
+      需要健壮性时应自行在 create 失败时 close(slots_[i].fd) 并复位槽位。
+
+    ⚠【线程约束】GL 对象（glGenTextures/glBindTexture/glTexParameteri）
+      绑定到调用时的当前 GL 上下文：init/acquire/release 都必须在
+      拥有该 widget 上下文的渲染线程（GUI 线程 paintGL 期间）执行；
+      跨线程调用要么失败要么悄悄操作错误上下文。池本身无锁，
+      非线程安全，仅供单一渲染线程独用。
     ====================================================
     */
     GLuint acquire(int fd, int width, int height, int stride, uint32_t format)

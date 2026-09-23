@@ -1,5 +1,5 @@
 ﻿/*
-任务列表主界面
+任务列表主界面（文件：roll_call_widget.cpp，实现 RollCallWidget）
 展示和管理所有点名任务：
 任务列表表格：显示任务名称、创建时间、签到人数、状态（处理中/已注销）
 创建任务：弹出对话框输入任务名 → 选择照片 → 识别 → 确认保存
@@ -8,7 +8,7 @@
 唯一人脸列表或注销匹配表
 注销任务：重新拍照/上传 → 匹配已登记人脸 → 标记注销
 删除任务：清除数据库和文件
-导出报告：生成 txt 文本文
+导出报告：生成 txt 纯文本报告（UTF-8）
 */
 #include "../utils/qt_image_utils.h"
 #include "roll_call_widget.h"
@@ -34,16 +34,21 @@
 
 RollCallWidget::RollCallWidget(QWidget* parent)
     : QWidget(parent) {
-    setupUI();
+    setupUI();   // 仅构建静态 UI；服务未注入前列表保持为空
 }
 
 RollCallWidget::~RollCallWidget() = default;
 
+// 服务注入：由 frmMain 在 RollCallService::initialize() 成功后调用。
+// 注入即触发首次刷新，保证页面出现时列表与数据库一致。
 void RollCallWidget::setService(std::shared_ptr<RollCallService> service) {
     service_ = service;
     refreshTaskList();
 }
 
+// 页面整体为深色卡片风格（#05070C 背景），与 caichao 业务页统一。
+// 表格列宽为经验值：时间列 260px、人数/状态列 180px、操作列 340px
+// 足以容纳"查看/注销/删除"三个 82px 按钮；行高 64/72px 适配触摸操作。
 void RollCallWidget::setupUI() {
     auto* main_layout = new QVBoxLayout(this);
     main_layout->setContentsMargins(24, 24, 24, 24);
@@ -158,6 +163,16 @@ void RollCallWidget::refreshTaskList() {
     loadTasks();
 }
 
+/**
+ * @brief 同步重建任务列表（GUI 线程直接查 SQLite，任务量小可接受）
+ *
+ * 要点：
+ *   - service_ 可能为空（点名服务初始化失败），此时直接返回，页面降级为空白列表；
+ *   - 只展示 type=="registration" 的登记任务（注销任务通过 is_cancelled 状态体现）；
+ *   - 每行"操作"列 new 一个临时 QWidget 塞进 setCellWidget——下次刷新
+ *     setRowCount(0) 会连同旧 cellWidget 一并销毁重建，因此 lambda 必须
+ *     按值捕获 task_id / is_cancelled，而不是持有行号或 task 引用。
+ */
 void RollCallWidget::loadTasks() {
     if (!service_) return;
     
@@ -271,6 +286,18 @@ void RollCallWidget::loadTasks() {
     }
 }
 
+/**
+ * @brief 创建登记任务的完整流水线（全部为模态对话框，父子链挂在本页面 this 上）
+ *
+ * 流程：输入任务名 → createRegistrationTask（先落库拿到 task_id）
+ *       → PhotoSelectionDialog 拍照/选图 → RecognitionResultDialog NPU 识别+人工确认。
+ *
+ * 回滚策略（防止库里残留垃圾任务）：
+ *   - 选照片被取消 / 一张照片都没有 → deleteTask 回滚；
+ *   - 识别结果对话框自定义返回码 2 = 用户点"取消"且已在对话框内删除任务，
+ *     外层只需提示，不再重复删除；
+ *   - 其他非 Accepted 退出（关窗/上一步后放弃）→ 询问用户是否删除。
+ */
 void RollCallWidget::onCreateTask() {
     if (!service_) {
         QMessageBox::warning(this, "错误", "服务未初始化");
@@ -278,6 +305,7 @@ void RollCallWidget::onCreateTask() {
     }
     
     // 生成默认任务名
+    // 大字号样式（28px/900x260）是RK3588 触摸屏可读性要求，非随意取值
     const QString default_name = QString("签到点名_%1")
         .arg(QDateTime::currentDateTime().toString("yyyy年MM月dd日 hh时mm分"));
     QInputDialog input_dialog(this);
@@ -347,6 +375,7 @@ void RollCallWidget::onViewTask(int task_id) {
     showTaskDetailDialog(task_id);
 }
 
+// 删除前二次确认：deleteTask 会级联清除数据库记录与任务目录文件，不可恢复
 void RollCallWidget::onDeleteTask(int task_id) {
     Task task = service_->getTaskInfo(task_id);
     if (task.id == 0) {
@@ -371,6 +400,8 @@ void RollCallWidget::onDeleteTask(int task_id) {
     }
 }
 
+// 注销流程：先校验任务存在且未注销 → 再次拉起 PhotoSelectionDialog 采集注销照片
+// → CancellationResultDialog 后台线程匹配已登记人脸 → 确认后刷新列表
 void RollCallWidget::onCancelTask(int task_id) {
     Task task = service_->getTaskInfo(task_id);
     if (task.id == 0 || task.is_cancelled) {
@@ -387,6 +418,19 @@ void RollCallWidget::onRefresh() {
     refreshTaskList();
 }
 
+/**
+ * @brief 任务详情窗口（非模态）
+ *
+ * 为什么用裸 QWidget + WA_DeleteOnClose 而不是 QDialog：
+ *   详情窗口需要独立顶层显示（Qt::Window），允许用户一边看详情一边操作列表；
+ *   生命周期靠 Qt 对象树 + close 时自毁，不阻塞 GUI 线程，也不需要 exec()。
+ *
+ * 数据来源均为已落库的后处理图/人脸记录，只做展示，不触发识别：
+ *   - 已注销任务：左右双栏（登记后处理图 vs 注销后处理图）+ 注销匹配表；
+ *   - 未注销任务：图片双列网格 + 唯一人脸 5 列网格（120x120 头像卡）。
+ * 图片统一经 loadPixmapSafe 加载（规避板端 Qt JPEG 插件与 libjpeg ABI 冲突），
+ * 卡片图缩放到 600x400、匹配表头像 240x190 为触摸端可读的经验尺寸。
+ */
 void RollCallWidget::showTaskDetailDialog(int task_id) {
     Task task = service_->getTaskInfo(task_id);
     if (task.id == 0) {
@@ -481,6 +525,8 @@ void RollCallWidget::showTaskDetailDialog(int task_id) {
         "}"
     );
     
+    // 从人脸记录表按"原始照片路径"聚合出每张照片的展示项（photo_index 去重），
+    // unique_count 只统计 is_duplicate==false 的人脸，与识别结果页口径一致
     TaskProcessResult registration_result;
     const auto records = service_->getDatabase()->getFaceRecordsByTask(task_id);
     std::map<std::string, size_t> photo_index;
@@ -646,6 +692,8 @@ void RollCallWidget::showTaskDetailDialog(int task_id) {
                 table_row, 0, create_face_cell(matches_table, match.registration_image));
             matches_table->setCellWidget(
                 table_row, 1, create_face_cell(matches_table, match.cancellation_image));
+            // 匹配状态码（与 RollCallService 约定一致）：
+            // 1=注销匹配（有人脸相似度）, 2=未登记（注销照里的人没登记过）, 其他=未注销
             auto* description = new QTableWidgetItem(
                 match.status == 1 ? QStringLiteral("注销匹配")
                 : match.status == 2 ? QStringLiteral("未登记") : QStringLiteral("未注销"));
@@ -750,6 +798,8 @@ void RollCallWidget::showTaskDetailDialog(int task_id) {
     detail_dialog->show();
 }
 
+// 导出纯文本报告：仅汇总任务元信息（人数/状态），不含人脸图片；
+// 显式 setCodec("UTF-8") 防止板端默认编解码导致中文乱码
 void RollCallWidget::exportTaskReport(int task_id) {
     Task task = service_->getTaskInfo(task_id);
     if (task.id == 0) {

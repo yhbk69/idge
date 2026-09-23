@@ -24,6 +24,19 @@
 //   - 当一个正在渲染时，另一个可以被更新
 //   - 避免画面撕裂和闪烁
 //
+// 【fd 两级流水线与 close 时机】解码线程 dup 出 fd 随信号投递；
+//   onFrameReady 里维护 pending/prev 两个副本，close(prev) 意味着
+//   一份 fd 副本最多"多活"两帧才关闭。EGLImage 在内核层另持引用，
+//   所以即便上游 dmaBuffer 已 release 回池、fd 已 close，正在显示的
+//   旧帧仍完整可读——这是零拷贝链路里防止画面撕裂的关键引用重叠。
+//
+// ⚠【每帧 EGLImage 创建/销毁开销】paintGL 对每帧 destroy+import 一次
+//   EGLImage（走驱动 ioctl）；EglFramePool.h 是为此准备的槽位复用优化，
+//   本组件尚未接入，高帧率下是主要 CPU/GPU 驱动热点之一。
+//
+// ⚠【析构与在途信号】若解码线程仍持有 frameReady 连接而 widget 先析构，
+//   队列中已投递的 RenderFrame::fd 副本无人签收 → fd 泄漏；
+//   PlayerWidget 析构约定"先 stopDecoder 再销毁窗口"正是为此。
 // ============================================================================
 
 #include "gl_video_widget.h"
@@ -196,6 +209,9 @@ void GLVideoWidget::onFrameReady(RenderFrame frame)
     frame_updated_ = true;
 
     // FPS 统计
+    // 注意：这里统计的是"收到的帧率"（onFrameReady 触发频率），
+    // 而非实际渲染帧率——Qt 合并 update() 时 paintGL 可能少于一帧一次，
+    // 网络丢帧/背压时两者会明显背离，排查性能问题时勿混用该数字。
     fpsFrameCount_++;
     qint64 elapsed = fpsTimer_.elapsed();
     if (elapsed >= 1000) {
@@ -328,6 +344,14 @@ void GLVideoWidget::drawQuad()
     glDeleteBuffers(1, &ebo);
 
     // 绘制 FPS 文字
+    // ⚠ 原生 GL 与 QPainter 混绘：paintGL 里先用裸 GL 调用画视频，再直接
+    //   构造 QPainter(this) 画文字。Qt 约定同一 paint 周期内混用需
+    //   beginNativePainting()/endNativePainting() 配对交接状态；此处
+    //   依赖 QPainter 在 GL 之后创建、且 end() 前不再发 GL 调用的顺序
+    //   侥幸正确——改动本函数时勿在 painter.end() 之后再插入 GL 调用，
+    //   且不同 Qt 版本下可能出现 FPS 文字丢失（升级需回归验证）。
+    // ⚠ 顶点缓冲每帧 glGenBuffers/glDeleteBuffers 一次（局部 VBO），
+    //   几何数据实际只有分辨率变化时才变，稳态下是可消除的驱动开销。
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setPen(Qt::green);

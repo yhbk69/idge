@@ -15,9 +15,14 @@
 //   FenceManager::instance().addShape(ch, shape); // 添加围栏
 //   FenceManager::instance().saveToConfig();      // 保存到文件
 //
-// 线程安全：
-//   loadFromConfig/saveToConfig 在主线程调用
-//   checkDetection 在解码线程调用（只读访问，无写冲突）
+// 线程安全约定：
+//   FenceManager 自身不加锁。依赖"单写多读 + 按值快照"模式：
+//     - 写路径（loadFromConfig / saveToConfig / addShape / setChannelFence 等）
+//       只在主线程（UI 绘制围栏、启动加载）调用；
+//     - 读路径（解码线程经 channelFence() 取按值副本后交给 FenceChecker 判定），
+//       拿到的是数据快照，不持有内部容器引用，避免与主线程改写产生数据竞争。
+//   注意：QMap 在读取期间被并发写仍是 UB，故解码线程不应直接访问 fences_ 内部，
+//   必须通过 channelFence() 复制。mode_/enabled_ 等标量的读写存在弱一致（可接受）。
 //
 // ============================================================================
 
@@ -88,8 +93,10 @@ public:
     // ========================================================================
     // overlay 尺寸管理（用于坐标映射）
     // ========================================================================
-    // 围栏坐标是在 overlay widget 像素空间中绘制的。
-    // 检测时需要将围栏坐标映射到原始视频空间，因此需要记录 overlay 尺寸。
+    // 围栏坐标是在 overlay widget 像素空间中绘制的，并被原样保存（不做归一化）。
+    // 检测时反向映射：把检测框脚点从视频帧空间换算到同一 widget 空间再比较，
+    // 这需要知道"当初绘制围栏时"的 widget 尺寸，故在此按通道记录 overlay 尺寸。
+    // 尺寸随窗口缩放而变，saveFences() 会带当前 width()/height() 一并落盘。
     void setOverlaySize(int channel, int w, int h);
     void overlaySize(int channel, int &w, int &h) const;
 

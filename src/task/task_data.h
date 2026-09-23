@@ -18,6 +18,19 @@
 //   - 多个线程可以安全地共享同一个 TaskData
 //   - 当所有引用都释放时，TaskData 自动销毁
 //
+// 设计意图（Why，代码审查视角）：
+//   - image 用 shared_ptr 而非独占：同一帧要派发给多个检测任务
+//     （如 camera_preview 的 SCRFD+PPE 双路），一图多任务共享只读缓冲，
+//     最后一个使用者释放后图像才销毁——避免复制大帧也避免提前释放；
+//   - resultQueue 随任务传递：推理线程"拿到任务就知道结果写到哪"，
+//     无需感知队列归属与消费者身份，任务与流水线拓扑解耦；
+//   - time 为 long：语义是解码线程采集该帧的时刻。
+//     ⚠ 实际写入值为 epoch 纳秒（std::chrono::system_clock::now()
+//     .time_since_epoch().count()，Linux tick=1ns），与 common.hpp 中
+//     object_detect_result_list::time 的"毫秒"文档不一致——本字段正是
+//     PpeTask::run() 回填 od_results.time 的来源，单位隐患链的中间环节，
+//     详见 src/yolo11/common.hpp 的 ⚠ 长注释，勿在此"顺手换算"。
+//
 // ============================================================================
 
 #include "base_task.h"

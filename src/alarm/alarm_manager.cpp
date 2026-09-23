@@ -107,13 +107,17 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
             if (alarmClasses_.contains(className)) {
                 // 去重限流：同通道同类别在限流窗口内只报一次（围栏报警不限流）
                 // key 格式: "通道号:类别ID"，如 "0:0" 表示通道 0 的 person
+                // 用"通道:类别"作复合键，使不同通道、不同类别各自独立计数互不影响。
                 QString key = QString("%1:%2").arg(channel).arg(det.cls_id);
-                long last = lastAlarmTime_.value(key, 0);
-                // 检查是否在限流窗口内（2 秒），围栏报警跳过此检查
+                long last = lastAlarmTime_.value(key, 0);  // 首次为 0，必然放行
+                // 检查是否在限流窗口内（名义 2 秒），围栏报警跳过此检查
+                // 【单位隐患】kAlarmThrottleNs 是纳秒值，而 results.time / last 源自
+                //   common.hpp 注释为"毫秒"的时间戳，二者相减再与 ns 阈值比较，量纲
+                //   不一致会使窗口远大于 2 秒（详见 alarm_manager.h 常量处说明）。
                 if (!bypassThrottle && results.time - last < kAlarmThrottleNs) {
                     continue;  // 在限流窗口内，跳过
                 }
-                lastAlarmTime_[key] = results.time;  // 更新最后报警时间
+                lastAlarmTime_[key] = results.time;  // 更新最后报警时间（记录本次时间戳）
 
                 // 创建报警记录
                 AlarmRecord alarm;
@@ -133,14 +137,16 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
 // ============================================================================
 // storeAndNotify: 存储报警记录并通知界面
 // ============================================================================
+// 这里维护的是"供 UI 展示"的内存环形列表（非持久层；落库由外部 DB 路径负责）。
 // 流程：
-//   1. 将新报警添加到报警列表
-//   2. 限制报警数量（最多 1000 条，超出时删除最早的）
+//   1. 将新报警 append 到报警列表尾部
+//   2. 超过 1000 条时从头部 removeFirst 淘汰最旧的（FIFO 环形语义）
+//      removeFirst 是 O(n) 元素搬移，但容量上限小（1000）且报警低频，可接受
 //   3. 通过 Qt 信号通知界面更新
 //
 // 注意：
-//   - 先解锁，再发信号，避免死锁
-//   - 信号/槽在不同线程执行时会自动排队
+//   - 先解锁，再发信号，避免信号槽同步回调里再次进入本管理器取锁而死锁
+//   - 信号/槽在不同线程执行时会自动排队（AlarmRecord 已 qRegisterMetaType）
 //
 // ============================================================================
 void AlarmManager::storeAndNotify(const QVector<AlarmRecord> &alarms)

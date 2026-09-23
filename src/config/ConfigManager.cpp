@@ -124,6 +124,9 @@ void ConfigManager::load(const QString &path)
     }
 
     // 读取并解析 JSON 文件
+    // 解析失败/文件损坏时不抛异常，而是把 root_ 置为空对象：
+    // 此后所有 getter 会因取不到键而回退到内置默认值（0.25/0.45/80/3/"inside_alarm"...），
+    // 保证程序仍可带默认配置启动；但注意这会静默丢弃用户原有配置。
     if (file.open(QIODevice::ReadOnly)) {
         QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
         if (doc.isNull()) {
@@ -141,7 +144,10 @@ void ConfigManager::load(const QString &path)
 // ============================================================================
 // 将当前配置保存到 JSON 文件
 // ============================================================================
-// 使用 Indented 格式写入，便于人工阅读和编辑
+// 唯一落盘入口：把内存中的 root_ 整体序列化写回 configPath_，使用 Indented 格式
+// 便于人工阅读。所有 setter 只改内存，改完不调 save() 则重启丢失。
+// 注意：文件打开失败（只读/路径不可写）时此处静默跳过、不报错，落盘结果需上层保证；
+//       且为整文件覆写（write 截断后重写），非追加，进程崩溃于写入中会损坏配置。
 // ============================================================================
 void ConfigManager::save()
 {

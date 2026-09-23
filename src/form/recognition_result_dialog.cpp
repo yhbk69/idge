@@ -1,5 +1,6 @@
 /*
-识别结果对话框，处理登记照片的人脸识别：
+识别结果对话框（文件：recognition_result_dialog.cpp，实现 RecognitionResultDialog），
+处理登记照片的人脸识别：
 后台线程：调用 service_->processPhotos() 进行 NPU 人脸检测和特征提取
 结果表格：
 第一列：后处理图片（绘制人脸框，重复人脸用黄色虚线框标记）
@@ -23,6 +24,14 @@
 #include <set>
 #include <QMetaType>
 
+/**
+ * @class RecognitionWorker
+ * @brief 登记识别执行体：在工作线程同步跑 processPhotos()
+ *        （NPU 人脸检测 + 特征提取 + 跨照片去重 + 后处理图落盘），
+ *        仅经 finished/error 信号回报，不触碰任何控件。
+ * @note 持 service_ 的 shared_ptr：即使对话框先销毁，服务对象也存活到
+ *       run() 结束，识别线程不会持有悬垂引用。异常全部在此拦截转消息。
+ */
 class RecognitionWorker : public QObject {
     Q_OBJECT
 public:
@@ -44,6 +53,8 @@ private:
     int task_id_; QStringList paths_; std::shared_ptr<RollCallService> service_;
 };
 
+// 构造：先注册元类型（跨线程信号携带 TaskProcessResult 的前提），
+// 再搭 UI；识别用 singleShot(0) 推迟到事件循环后启动
 RecognitionResultDialog::RecognitionResultDialog(int task_id,
                                                  const QStringList& photo_paths,
                                                  std::shared_ptr<RollCallService> service,
@@ -63,6 +74,8 @@ RecognitionResultDialog::RecognitionResultDialog(int task_id,
 }
 
 RecognitionResultDialog::~RecognitionResultDialog() {
+    // quit()+wait()：processPhotos 不可中断，识别中关窗会等待其自然结束
+    // （已知取舍：极端情况下 GUI 有数秒卡顿，勿改为 detach/terminate）
     if (recognition_thread_ && recognition_thread_->isRunning()) {
         recognition_thread_->quit();
         recognition_thread_->wait();
@@ -230,6 +243,14 @@ void RecognitionResultDialog::setupUI() {
     main_layout->addLayout(bottom_layout);
 }
 
+/**
+ * @brief 启动识别后台线程（Worker→QThread 标准模式）
+ *
+ * 顺序：new QThread(this) → worker.moveToThread → started 触发 run()，
+ * finished/error 连回本对话框槽（跨线程自动队列连接，槽内操作控件安全），
+ * 同时连到线程 quit；线程 finished 后 deleteLater worker，闭环无泄漏。
+ * 启动前把表格/按钮全部禁用并显示忙碌条，防止识别中用户重复操作。
+ */
 void RecognitionResultDialog::startRecognition() {
     if (!service_) {
         QMessageBox::critical(this, QString::fromUtf8("错误"), QString::fromUtf8("点名服务未初始化"));
@@ -280,6 +301,11 @@ void RecognitionResultDialog::onRecognitionError(const QString& message) {
     QMessageBox::critical(this, "识别失败", message);
 }
 
+// 逐张照片填充结果表：第一列后处理图（服务层已把人脸框画在图上，
+// UI 只做 760x350 等比缩放展示，行高 400 与之配套；解码失败退化为
+// "已识别 N 张人脸"文字占位），第二列为大号(48pt)不重复人数。
+// 注意板端 Qt JPEG 插件与图像流水线所用 libjpeg ABI 不兼容，
+// 必须走 loadPixmapSafe，不可改回 QPixmap 直接构造。
 void RecognitionResultDialog::displayResults() {
     qDebug() << "[rollcall-ui] displayResults begin photos=" << result_.photos.size();
     result_table_->setRowCount(0);
@@ -297,6 +323,8 @@ void RecognitionResultDialog::displayResults() {
         image_layout->setContentsMargins(12, 12, 12, 12);
         
         // 找出重复人脸的索
+        // ⚠ 遗留：duplicate_indices 现无任何消费者（原供 drawBoxesOnImage 使用），
+        // 属死代码计算，随 UI 侧画框方案废弃而失去作用，保留仅为对齐历史逻辑
         std::set<int> duplicate_indices;
         for (size_t j = 0; j < photo.faces.size(); ++j) {
             if (photo.faces[j].is_duplicate) {
@@ -355,6 +383,13 @@ void RecognitionResultDialog::displayResults() {
     }
 }
 
+/**
+ * @brief 在图片上二次绘制人脸框（绿色实线=不重复，橙黄虚线=重复，线宽 8）
+ * @warning ⚠ 遗留死代码警示：全工程无调用点。后处理图的人脸框已由
+ *          RollCallService 在落盘 processed_path 时绘制完成，UI 侧重绘方案
+ *          已废弃（同时规避板端 JPEG 解码限制）。清理前勿当作缺失功能重接；
+ *          配套声明 drawFaceBoxes() 更是只声明未实现（调用即链接失败）。
+ */
 QPixmap RecognitionResultDialog::drawBoxesOnImage(const QString& image_path,
                                                   const std::vector<ProcessedFace>& faces,
                                                   bool is_first_image,
@@ -421,6 +456,8 @@ QPixmap RecognitionResultDialog::drawBoxesOnImage(const QString& image_path,
 }
 
 void RecognitionResultDialog::onEditTotalCount() {
+    // 就地编辑：总人数 label 与 spinbox(0~10000) 互斥显隐，
+    // 保存时写回 total_unique_count_ 与 result_，确认落库以人工值为准
     if (is_editing_count_) {
         // 保存编辑
         total_unique_count_ = count_spinbox_->value();
@@ -446,6 +483,8 @@ void RecognitionResultDialog::onPrevious() {
 }
 
 void RecognitionResultDialog::onCancel() {
+    // 取消=删任务：确认后由服务层连库带文件删除，done(2) 为自定义返回码，
+    // 外层 RollCallWidget 识别到 2 只提示"任务已取消"，不再重复 deleteTask
     auto reply = QMessageBox::question(
         this, "确认取消",
         "确定要取消整个任务吗？所有数据将被删除",
@@ -461,6 +500,9 @@ void RecognitionResultDialog::onCancel() {
 }
 
 void RecognitionResultDialog::onConfirm() {
+    // 保存结果（含人工修正后的 total_unique_count、人脸特征、图片路径）；
+    // 失败保持对话框可重试，成功才 accept 并广播 taskConfirmed
+    // （taskConfirmed 目前全工程无接收者，仅保留扩展点，勿依赖它驱动刷新）
     // 保存结果
     if (!service_->saveTaskResult(result_)) {
         QMessageBox::critical(this, "错误", "保存失败");
@@ -474,6 +516,8 @@ void RecognitionResultDialog::onConfirm() {
     accept();
 }
 
+// RecognitionWorker 定义在本 .cpp 且带 Q_OBJECT，尾部必须包含 AUTOMOC
+// 生成的元对象实现，否则 vtable/静态元对象符号链接失败（勿删除）
 #include "recognition_result_dialog.moc"
 
 

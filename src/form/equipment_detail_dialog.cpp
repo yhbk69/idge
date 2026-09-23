@@ -1,3 +1,5 @@
+// 文件：equipment_detail_dialog.cpp
+// 职责：设备盘点任务详情对话框实现（caichao 分支合入），构造时同步取数建表，模态展示
 #include "equipment_detail_dialog.h"
 
 #include <QAbstractItemView>
@@ -23,6 +25,8 @@ EquipmentDetailDialog::EquipmentDetailDialog(
     loadData();
 }
 
+// 固定单元格：420x260 内等比缩放；libjpeg ABI 冲突风险统一由
+// loadPixmapSafe 兜底（解码失败显示"图片无法加载"而非崩溃）
 QWidget* EquipmentDetailDialog::imageWidget(const std::string& path, QWidget* parent) {
     auto* image = new QLabel(parent);
     image->setMinimumSize(300, 210);
@@ -51,6 +55,8 @@ QString EquipmentDetailDialog::countsText(const std::map<std::string, int>& coun
     return parts.join(QStringLiteral("\n"));
 }
 
+// ⚠ 遗留死代码警示：photoCell 在当前实现中没有任何调用点
+// （loadData 已改为逐格内联 imageWidget + counts 组合），保留仅供未来复用参考。
 QWidget* EquipmentDetailDialog::photoCell(const EquipmentPhotoRecord& photo, QWidget* parent) const {
     auto* cell = new QWidget(parent);
     auto* layout = new QVBoxLayout(cell);
@@ -71,6 +77,17 @@ void EquipmentDetailDialog::setupUi() {
     setStyleSheet(QStringLiteral("QDialog { background:#05070C; color:#E5E7EB; }"));
 }
 
+/**
+ * @brief 构造即取数并组装界面（在 GUI 线程同步完成，数据为一次性快照）
+ *
+ * getPhotos(task_id_, phase)：phase 0=登记照片、1=注销照片。
+ * 表头统计先遍历所有照片逐张 getDetections()（N+1 查询，照片量小可接受），
+ * 再按任务状态选布局：
+ *   - 未注销：2 列表格（后处理图 420x260 缩放 + 标签数量），行高 300；
+ *   - 已注销：4 列表格，登记/注销并排对照，行数取两侧较大值，
+ *     缺侧留空单元格（行仍高 300 保证视觉对齐）。
+ * 底部"关闭"按钮接 accept()：模态 exec() 返回后调用方栈上对象自动析构。
+ */
 void EquipmentDetailDialog::loadData() {
     const Task task = service_->getTaskInfo(task_id_);
     auto* root = new QVBoxLayout(this);

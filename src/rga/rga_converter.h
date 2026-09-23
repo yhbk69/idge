@@ -94,6 +94,21 @@ public:
     // ============================================================================
     // 与 nv12_to_rgba 类似，但使用 importbuffer_fd + wrapbuffer_handle 流程
     // 适用于需要更精细控制缓冲区的场景
+    //
+    // 【import 后再 wrap 的原因】importbuffer_fd 把 DMA-BUF fd 注册进 RGA
+    //   驱动得到 handle（驱动内部做了 fd→物理地址表缓存，之后每次任务
+    //   免重复 pin/unpin），wrapbuffer_handle 才生成带几何信息的 rga_buffer_t。
+    //   与 nv12_to_rgba 直接填 fd 的轻量路径相比，适合同一缓冲反复使用的场景。
+    //
+    // ⚠⚠【返回值恒为真陷阱（上轮审查确认，仅警示不改代码）】
+    //   本函数末尾无条件 `return true`：importbuffer 失败、imcheck 失败、
+    //   甚至 imcvtcolor 失败（ret!=SUCCESS 只打印不改变返回）全部返回 true。
+    //   调用方以此判断转换成败的逻辑完全失效——失败时输出缓冲保持旧内容/
+    //   未定义内容，画面表现为"显示上一帧"或花屏，且无错误可查。
+    //   （convertNV12ToRGBbyRGA 同病。）使用方切勿依赖返回值。
+    // ⚠ src_buf_size 用 hor_stride*ver_stride*bpp 计算，NV12 的 bpp=12
+    //   （位/像素）时 RgaUtils 返回的是"位宽"，importbuffer_fd(fd, size)
+    //   重载内部按字节处理，两处约定不同勿混用。
     // ============================================================================
     static bool convertNV12ToRGBAbyRGA(int src_dma_fd, int dst_dma_fd, int width, int height,
                                       int src_hor_stride, int src_ver_stride,
@@ -165,8 +180,11 @@ public:
     // ============================================================================
     // convertNV12ToRGBbyRGA - NV12 → RGB 转换（3 字节/像素）
     // ============================================================================
-    // 与 convertNV12ToRGBAbyRGA 类似，但输出 RGB888 格式（3 字节/像素）
+    // 与 convertNV12ToRGBAbyRGA 类似，但输出 RGB888 格式（3字节/像素）
     // 适用于需要更小内存占用的场景
+    // ⚠ 继承同一缺陷：所有失败路径同样 `return true`（恒真返回值），
+    //   且 RGB888 行需按像素三元组排布，RGA 对 wstride 有额外对齐要求，
+    //   输出缓冲若按 width*3 紧凑分配可能触发 imcheck 失败（但没人看得见）。
     // ============================================================================
     static bool convertNV12ToRGBbyRGA(int src_dma_fd, int dst_dma_fd, int width, int height,
                                       int src_hor_stride, int src_ver_stride)
@@ -260,6 +278,13 @@ public:
     // ============================================================================
     // 使用 IM_ASYNC 模式，RGA 硬件在后台执行转换
     // 适用于高帧率场景（如 60fps 视频），可以流水线化
+    //
+    // ⚠【异步语义陷阱】IM_ASYNC 下 imcvtcolor 返回 SUCCESS 仅表示
+    //   "任务已入队"，不代表转换完成；返回 true 后立即读取 dst_fd
+    //   会读到半成品像素。调用方必须先 imsync() 等待硬件栅栏。
+    //   而本类的 sync() 是空实现（imsync 被注释掉），配合
+    //   nv12_to_rgba（IM_SYNC）使用的同步语义由驱动隐式保证——
+    //   任何使用本异步函数的代码都必须自行显式调用 imsync()。
     // ============================================================================
     static bool nv12_to_rgba_async(int src_fd, int src_w, int src_h, int src_stride,
                                    int dst_fd, int dst_w, int dst_h, int dst_stride)
@@ -299,6 +324,15 @@ public:
     //   - letterbox: 是否使用 letterbox（默认 true）
     //     true:  保持宽高比，灰色背景填充（YOLO 标准）
     //     false: 直接拉伸到目标尺寸
+    //
+    // 【魔法数字】imfill 的 0x727272：0x72=114，即 Ultralytics YOLO
+    //   预处理标准灰 (114,114,114)；RGB888 三字节同值，故按字填充。
+    //   scale 取 min(dst_w/src_w, dst_h/src_h)，new_w/new_h 用 (int) 截断，
+    //   可能比理论值小 1 像素；NV12 源要求宽高为偶数（4:2:0 色度
+    //   2x2 共享），奇数尺寸输入时裁剪/填充坐标可能失配，产生 1px 偏移。
+    // ⚠ 非 letterbox 分支实际调用的是 imcvtcolor（纯色彩转换，不缩放！）：
+    //   src/dst 尺寸不同时结果取决于驱动行为，"直接拉伸"预期不成立；
+    //   需要拉伸应走 improcess（同函数 letterbox 分支的做法）。
     // ============================================================================
     static int nv12_to_rgb_resize(int src_fd, int src_w, int src_h, int src_stride,
                                    int dst_fd, int dst_w, int dst_h, int dst_stride,
@@ -361,6 +395,23 @@ public:
     // ============================================================================
     // 用于 RGBA 格式图像的预处理（与 nv12_to_rgb_resize 类似）
     // 使用 RGA3 双核心加速（IM_SCHEDULER_RGA3_CORE0 | CORE1）
+    //
+    // 【imconfig 是进程全局】双核调度配置一次生效于后续所有 im* 调用，
+    //   并非本函数私有——多线程下后写者覆盖前者，注意跨模块干扰。
+    //
+    // ⚠⚠【错误路径句柄泄漏（上轮审查确认，仅警示不改代码）】
+    //   letterbox / 非 letterbox 两分支中 improcess / imcvtcolor 失败时
+    //   直接 `return -1`，跳过了函数尾的 release_buffer 标签——
+    //   此前 importbuffer_fd 得到的 src_handle/dst_handle 未释放，
+    //   RGA 驱动内的 fd 注册表与内核资源随之泄漏（泄漏累积后
+    //   importbuffer 会开始失败）。正确路径应 goto release_buffer。
+    // ⚠ 反之，走 release_buffer 收尾的路径末尾无条件 `return 0`：
+    //   import 失败/imcheck 失败也报"成功"——返回值仅"转换执行失败"
+    //   一种错误可信，调用方不能以返回值判断转换质量。
+    // ⚠ 第二处 `if (src_handle == 0 || dst_handle == 0)`（wrapbuffer 后）
+    //   是死代码：handle 非零已在第一处 goto 前判过，此处恒为假。
+    // ⚠ src_buf_size/dst_buf_size 计算后未使用（importbuffer_fd 走的是
+    //   宽高+格式重载），保留自旧版本，勿据此推断缓冲尺寸校验存在。
     // ============================================================================
     static int rgba_to_rgb_resize(int src_fd, int src_w, int src_h, int src_stride,
                                    int dst_fd, int dst_w, int dst_h, int dst_stride,

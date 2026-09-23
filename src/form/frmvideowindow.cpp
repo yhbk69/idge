@@ -182,6 +182,17 @@ PlayerWidget *frmVideoWindow::playerWidget(int ch)
     }
 }
 
+// ============================================================================
+// setupFenceToolbar —— 电子围栏工具栏（代码动态创建，不在 .ui 中）
+// ============================================================================
+// 作用：在 gridLayout 视频区下方插入一行工具栏：
+//   通道切换按钮 ×4（28x24 可多选组，仅用于选中当前编辑通道，非互斥故
+//   setExclusive(false)） | 矩形/多边形/删除（互斥绘制工具组
+//   fenceDrawGroup_） | 清空（直接 FenceManager::clearChannel + 刷新叠加层）。
+//   工具栏高 36px，按钮 12px 字体为侧边栏紧凑布局的经验尺寸。
+// 布局手法：addWidget(toolbar, 2, 0, 1, 2) 占满两列；再把原第 2 行的
+//   label（点击提示条）挪到第 3 行，避免改动 .ui 文件。
+// ============================================================================
 void frmVideoWindow::setupFenceToolbar()
 {
     QFrame *toolbar = new QFrame(this);

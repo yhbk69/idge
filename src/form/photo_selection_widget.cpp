@@ -1,4 +1,4 @@
-/*照片选择对话框
+/*照片选择对话框（实现文件 photo_selection_widget.cpp，类定义见 photo_selection_widget.h）
 两种照片来源：
 拍照：
 调用 /dev/video41 摄像头，通过 CameraPreviewDecoder 解码 MJPEG 流
@@ -6,8 +6,10 @@
 播放快门音效 + 白色闪屏动画
 照片保存到任务文件夹，左下角显示缩略图
 上传照片：文件选择器批量添加图片
-编辑模式：切换后每张照片右上角显示 "×" 按钮删除
-网格展示：每行 3 张，360×360 正方形卡片
+删除：每张卡片右上角常驻 "×" 按钮（无独立编辑模式）
+照片列表：右侧滚动区纵向排列，280×210 卡片
+（历史版本为"网格每行3张360×360+编辑模式"，已由遗留文件
+ photo_selection_dialog.h 承载，现版本不再使用该交互）
 */
 // photo_selection_widget.cpp
 #include "photo_selection_widget.h"
@@ -32,6 +34,9 @@
 #include <QPaintEvent>
 
 namespace {
+// 圆形快门按钮：纯 QPainter 自绘（QSS 画不出正圆+粗圆环），
+// 7px 圆环 #CBD5E1，内部填充按 禁用/按下/悬停/常态 四档灰阶变化；
+// NoFocus 防止触摸屏点击后残留焦点框
 class RoundCaptureButton final : public QPushButton {
 public:
     explicit RoundCaptureButton(QWidget* parent = nullptr)
@@ -67,6 +72,8 @@ protected:
 };
 } // namespace
 
+// 构造即建 UI 并启动相机：调用方以 exec() 模态使用，
+// 相机生命周期完全包裹在对话框生命周期内（析构中 stop）
 PhotoSelectionDialog::PhotoSelectionDialog(int task_id, std::shared_ptr<RollCallService> service,
                                            const std::vector<PreviewDetectorConfig>& detector_configs,
                                            QWidget* parent)
@@ -79,12 +86,19 @@ PhotoSelectionDialog::PhotoSelectionDialog(int task_id, std::shared_ptr<RollCall
 }
 
 PhotoSelectionDialog::~PhotoSelectionDialog() {
+    // 顺序要求：先 stop() 让采集/解码线程退出并切断信号回调，
+    // 再 deleteLater()（decoder 以 this 为 parent，也在对象树析构内），
+    // 避免在途帧回调打到正在析构的 GL 控件
     if (camera_decoder_) {
         camera_decoder_->stop();
         camera_decoder_->deleteLater();
     }
 }
 
+// 左右分栏 3:1（主布局 addWidget stretch），右列固定 320~400px 放照片列表；
+// 预览最小 960x540 保持 16:9 且给底部控制条留空间（屏高≈1080 的板端不裁按钮）；
+// 快门遮罩是预览区的子 QLabel（随 resizeEvent 同步几何）；
+// 整体 1600x900/最小 1400x800 按 RK3588 触屏 1080p 屏设计
 void PhotoSelectionDialog::setupUI() {
     setWindowTitle(QStringLiteral("照片识别"));
     resize(1600, 900);
@@ -262,6 +276,23 @@ void PhotoSelectionDialog::setupUI() {
     shutter_sound_->setVolume(1.0);
 }
 
+/**
+ * @brief 组装并启动相机预览管线
+ *
+ * 检测器兜底策略：调用方未传 detector_configs 时取服务的人脸模型
+ * （绑定 RKNN_NPU_CORE_0，与主检测流水线的核分配约定一致）；模型文件
+ * 缺失则空配置启动，仅纯预览不画框，功能降级但流程可用。
+ *
+ * 连接类型（线程安全关键点）：
+ *   - frameReady → GLVideoWidget::onFrameReady：Qt::DirectConnection，
+ *     在解码线程内执行"加锁换帧 + update()"，不触碰 GL 上下文（paintGL
+ *     仍在 GUI 线程），改回 AutoConnection 会引入每帧队列投递开销；
+ *   - error → lambda：未显式指定，跨线程时按 Auto 排队到 GUI 线程弹窗
+ *     （QMessageBox 只能在 GUI 线程创建）；回调里恢复快门按钮可用性；
+ *   - photoCaptured → onPhotoCaptured：显式 Qt::QueuedConnection，
+ *     落盘在解码线程完成、UI 更新回到 GUI 线程，QImage 按值拷贝跨线程安全。
+ * 设备路径 /dev/video41 为板端固定 USB 摄像头节点（硬编码，换硬件需改）。
+ */
 void PhotoSelectionDialog::startCamera() {
     camera_decoder_ = new CameraPreviewDecoder(this);
 
@@ -293,6 +324,10 @@ void PhotoSelectionDialog::startCamera() {
     camera_decoder_->start(QStringLiteral("/dev/video41"));
 }
 
+// 快门动作：白色遮罩闪 110ms（singleShot 定时器，视觉上模拟单反闪屏）+
+// 音效；照片名 capture_yyyyMMdd_HHmmss_zzz.jpg 毫秒级时间戳仍可能同帧撞名，
+// 故用 while 递增 _1/_2... 后缀保证任务目录内不覆盖；
+// 期间禁用快门防连点重入，真正回调解码线程落盘后经队列连接在 onPhotoCaptured 恢复
 void PhotoSelectionDialog::onTakePhoto() {
     if (!camera_decoder_) return;
     
@@ -321,6 +356,8 @@ void PhotoSelectionDialog::onTakePhoto() {
     camera_decoder_->capture(photo_path);
 }
 
+// 解码线程落盘完成后经 Qt::QueuedConnection 回到 GUI 线程：
+// 入列表（contains 去重）、刷新 128x92 缩略图、启用"下一步"、恢复快门
 void PhotoSelectionDialog::onPhotoCaptured(const QString& path, const QImage& image) {
     snap_btn_->setEnabled(true);
     
@@ -339,6 +376,13 @@ void PhotoSelectionDialog::onPhotoCaptured(const QString& path, const QImage& im
     next_btn_->setEnabled(true);
 }
 
+// 右侧列表追加一张 280x210 卡片（图占满卡片，× 按钮以绝对坐标
+// move(280-36, 8) 钉在右上角，radius 14 → 直径 28 的圆钮）。
+// image 为空表示上传的本地照片：不在此处解码，显示时才 loadPixmapSafe
+// （延迟加载，避免批量上传大图阻塞 UI）。
+// 布局末尾的 stretch 占位：插入前移除、插入后补回，保证卡片顶部对齐。
+// 删除按钮 lambda 按值捕获 path/card：card->deleteLater() 后若列表已空
+// 重新补 stretch 并联动"下一步"可用性。
 void PhotoSelectionDialog::addPhotoToList(const QString& path, const QImage& image) {
     // 移除占位的stretch
     if (photo_list_layout_->count() > 0) {
@@ -417,6 +461,8 @@ void PhotoSelectionDialog::addPhotoToList(const QString& path, const QImage& ima
     photo_list_layout_->addStretch();
 }
 
+// 批量上传：jpg/jpeg 直接信任后缀，png/bmp 等其他后缀先用 QPixmap 试解码
+// 过滤坏图；contains 去重后以空 QImage 延迟加载加入列表
 void PhotoSelectionDialog::onUploadPhotos() {
     QStringList files = QFileDialog::getOpenFileNames(
         this, QStringLiteral("选择照片"), QString(),
@@ -444,6 +490,10 @@ void PhotoSelectionDialog::onUploadPhotos() {
     next_btn_->setEnabled(!selected_photos_.isEmpty());
 }
 
+// "下一步"出口：先打印 /proc/self/fd 打开句柄数（识别流程会大量开文件，
+// 该 qDebug 是上一轮"fd 泄漏卡死"排查留下的观测点，非业务逻辑），
+// 然后必须在 accept 前 stop() 相机——否则采集线程继续回调即将析构的界面；
+// photosConfirmed 信号当前无接收者，实际数据靠调用方 getSelectedPhotos() 取回
 void PhotoSelectionDialog::onNext() {
     if (selected_photos_.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("请先拍照或选择照片"));
@@ -463,6 +513,8 @@ void PhotoSelectionDialog::onNext() {
     accept();
 }
 
+// 成员版仅是全局 qt_image_utils 同名函数的薄包装（历史版本按后缀分流解码，
+// 现统一交给全局实现；suffix/QFileInfo 取值为遗留无效计算，勿在此加逻辑）
 QPixmap PhotoSelectionDialog::loadPixmapSafe(const QString& path) {
     // 避免libjpeg版本冲突导致崩溃
     QFileInfo info(path);
@@ -472,6 +524,7 @@ QPixmap PhotoSelectionDialog::loadPixmapSafe(const QString& path) {
     return ::loadPixmapSafe(path);
 }
 
+// 预览区随窗口缩放时，闪白遮罩必须同步几何，否则闪光覆盖区错位
 void PhotoSelectionDialog::resizeEvent(QResizeEvent* event) {
     QDialog::resizeEvent(event);
     if (shutter_overlay_ && camera_preview_) {

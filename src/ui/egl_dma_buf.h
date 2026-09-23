@@ -99,6 +99,10 @@ public:
           modifier - 内存布局修饰符（0表示线性布局）
     返回值：EGLImageKHR句柄，失败返回EGL_NO_IMAGE_KHR
     硬件概念：DMA-BUF导入是零拷贝的关键，避免CPU内存拷贝
+    【fd 引用计数语义】eglCreateImageKHR 成功时驱动内部会对 fd 指向的
+    dma-buf 增加一次内核引用；返回后调用方即可关闭自己的 fd 副本，
+    EGLImage 的生命期与原 fd 无关（但物理内存会活到 destroyImage 为止）。
+    因此传 dup 与否都可，本函数不接管 fd 所有权、也不做 dup。
     ====================================================
     */
     EGLImageKHR importDmaBuf(int fd, int width, int height,
@@ -106,6 +110,8 @@ public:
                               uint64_t modifier = 0)
     {
         // EGL属性列表
+        // attrs 是"键,值"交替数组：最多用 2*(3+2+2+4)+1=25 个槽（含
+        // NV12 双平面+modifier 分支），64 为安全上限，写满溢出即栈越界
         EGLint attrs[64];
         int i = 0;
 

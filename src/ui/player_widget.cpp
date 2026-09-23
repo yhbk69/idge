@@ -1,3 +1,10 @@
+// player_widget.cpp —— 单通道播放器窗体：GL 视频 + OSD + 围栏叠加 + 放大按钮的组合
+//
+// 【组合关系】三层叠加于同一 QGridLayout 单元 (0,0)：
+//   GLVideoWidget（底层，零拷贝渲染）→ overlayLabel（OSD，鼠标穿透）
+//   → FenceOverlay（围栏线框）→ expandBtn（悬浮按钮，手动定位右上角）。
+//   解码线程产物经 QueuedConnection 信号投递到 GLVideoWidget 的槽，
+//   保证 EGL/GL 调用始终发生在 GUI 线程（GL 上下文线程亲和）。
 #include "player_widget.h"
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -35,6 +42,10 @@ PlayerWidget::PlayerWidget(QWidget* parent)
     mainLayout->setSpacing(0);  // 减少主布局间距适配嵌入式屏幕
 
      // 创建视频解码器实例
+    // ⚠ 所有权：decoder_ 以 new 创建且未传 QObject parent——它不在本
+    //   widget 的子对象树上，~PlayerWidget 只 stop() 不 delete()。
+    //   每个 PlayerWidget 会泄漏一个解码器对象（含 FFmpeg 上下文），
+    //   通道反复重建时累积明显；依赖其内部自行释放时需逐一核实。
     decoder_ = new FFmpegVideoDecoder();
 
     // 创建OpenGL视频显示组件
@@ -210,6 +221,10 @@ void PlayerWidget::btnClicked()
 ====================================================
 作用：析构函数
 说明：释放所有资源，停止解码器
+⚠ 析构顺序契约：先 stop() 停解码线程，防止子 widget（video_widget_）
+  析构后仍有 frameReady 队列信号在途——那会让待处理的 RenderFrame
+  携带无人签收的 dup fd（泄漏），甚至投递到已析构对象。
+  stop() 必须是同步 join 型接口才真正闭环。
 ====================================================
 */
 PlayerWidget::~PlayerWidget() {

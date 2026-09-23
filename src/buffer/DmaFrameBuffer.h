@@ -40,6 +40,10 @@ extern "C" {
 #include <drm_fourcc.h>
 
 // 全局互斥锁，保护 DRM 操作的线程安全
+// ⚠ 线程安全陷阱：头文件内的 static 变量是"每个包含它的编译单元(TU)
+//   各有一份"的内部链接对象——不同 .cpp 里的 dma_mutex 根本不是同一把锁，
+//   跨 TU 的 DRM 分配/释放实际上并未互斥。真正全局唯一需要 extern 声明
+//   + 单一定义。当前仅单 TU 使用时侥幸无害。
 static std::mutex dma_mutex;
 
 // ============================================================================
@@ -67,6 +71,10 @@ private:
 
 public:
     // 默认构造函数
+    // ⚠ = default 不会初始化 m_ptr/m_size/m_frame/m_width/m_height/
+    //   m_format/m_handle 等无默认成员初始值的字段（仅 m_drm_fd/m_fd/
+    //   m_stride 有类内初始化）。构造后必须走 alloc()/带参构造再使用，
+    //   否则析构中 if (m_ptr) 判断读取的是栈/堆垃圾值。
     DmaFrameBuffer() = default;
 
     /**
@@ -98,6 +106,16 @@ public:
     void release ();
     
     // 拷贝构造和赋值（使用默认实现，浅拷贝）
+    // ⚠⚠【严重隐患（上轮审查确认，仅警示不改代码）】
+    //   本类持有 fd/m_ptr/drm_fd 等裸资源却允许默认浅拷贝：
+    //   拷贝出的两个对象指向同一 DMA-BUF fd 与同一映射，
+    //   二者析构时各自调用 release() → 同一 fd 被 close() 两次、
+    //   同一区间被 munmap 两次。第二次 close 的整数值可能已被其他
+    //   线程 open/socket 复用，会误关无关文件句柄（难以排查的
+    //   "数据莫名其妙被破坏"级 bug）。任何需要传副本的场合应改用
+    //   std::shared_ptr<DmaFrameBuffer>（项目已注册该元类型）或
+    //   显式 dup(fd)。Q_DECLARE_METATYPE + Qt 队列信号按值传递时
+    //   尤其危险：signal(DmaFrameBuffer) 每投递一次就复制一次。
     DmaFrameBuffer(const DmaFrameBuffer&) = default;
     DmaFrameBuffer& operator=(const DmaFrameBuffer&) = default;
 
@@ -105,6 +123,13 @@ public:
      * @brief 移动构造函数
      * 作用：接管另一个 DmaFrameBuffer 的资源所有权，源对象置为无效状态
      *       实现零拷贝的所有权转移
+     * ⚠ 隐患：仅转移了 m_fd/m_ptr 两个成员，m_size、m_handle、
+     *   m_drm_fd、m_stride、m_frame 未转移也未在源对象中复位，
+     *   且这些成员在无参初始化路径上未定义（无默认值）。后果：
+     *   1) 源对象析构时 free_drm_buffer() 用残留的 m_handle/大小
+     *      对已移交的缓冲区重复销毁（double-free / 错误 munmap）；
+     *   2) 目标对象的 m_size 可能读到不确定值，munmap 长度错误。
+     *   被移动的对象应立即视为废品，不得再次使用。
      */
     DmaFrameBuffer(DmaFrameBuffer&& other) noexcept
         :m_fd(other.m_fd), m_ptr(other.m_ptr)

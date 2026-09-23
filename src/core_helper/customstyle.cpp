@@ -46,6 +46,8 @@ void CustomStyle::initStyle(int fontSize, int radioButtonSize, int checkBoxSize,
 #else
     // 从系统调色板获取颜色（自适应系统主题）
     QPalette palette;
+    // 21 = QPalette::ColorRole 枚举的取值个数（Text..NBase 共 21 种角色），
+    // 此循环仅用于调试打印各角色颜色，正式发布时为空操作
     for (int i = 0; i < 21; ++i) {
         //qDebug() << i << palette.color((QPalette::ColorRole)i).name();
     }
@@ -70,10 +72,10 @@ void CustomStyle::initStyle(int fontSize, int radioButtonSize, int checkBoxSize,
     // 轨道（groove）：滑块的背景条
     list << QString("QSlider::groove:horizontal{background:%1;height:%2px;border-radius:%3px;}")
          .arg(normalColor).arg(sliderHeight).arg(sliderRadius);
-    // 已选区域（add-page）：滑块右侧区域
+    // 未走过区域（add-page）：手柄右侧（Qt 语义：需要"加上"的剩余部分）
     list << QString("QSlider::add-page:horizontal{background:%1;height:%2px;border-radius:%3px;}")
          .arg(normalColor).arg(sliderHeight).arg(sliderRadius);
-    // 未选区域（sub-page）：滑块左侧区域
+    // 已走过区域（sub-page）：手柄左侧（Qt 语义：已经"减去"的部分），用高亮色
     list << QString("QSlider::sub-page:horizontal{background:%1;height:%2px;border-radius:%3px;}")
          .arg(grooveColor).arg(sliderHeight).arg(sliderRadius);
     // 手柄（handle）：可拖动的滑块按钮

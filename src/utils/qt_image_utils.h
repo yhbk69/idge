@@ -1,3 +1,5 @@
+// 文件职责：Qt 图像安全读取工具。用 OpenCV 解码图片再转 QPixmap，规避板端 Qt JPEG
+// 插件与 libjpeg 的 ABI 冲突；OpenCV 解码失败时回退调用 ImageMagick convert 命令。
 #pragma once
 #include <QPixmap>
 #include <QImage>

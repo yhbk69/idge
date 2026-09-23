@@ -187,7 +187,8 @@ static int runCli(int argc, char *argv[])
         // 打印 FPS（每 30 帧）
         if (config.print_fps && frameCount % 30 == 0) {
             fpsTimer.tok();
-            float elapsed = fpsTimer.get_time();
+            float elapsed = fpsTimer.get_time();   // 最近 30 帧耗时（毫秒）
+            // 30000 = 30 帧 × 1000（毫秒/秒），即 FPS = 帧数×1000/耗时(ms)
             float fps = 30000.0f / elapsed;
             fpsTimer.tik();
             printf("[CLI] FPS: %.1f  Frame: %d  Detected: %d\n",

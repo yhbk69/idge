@@ -7,6 +7,8 @@
  *
  * 作用：定义视频监控窗口类，提供4路视频通道的管理和显示功能。
  *       每个通道对应一个 PlayerWidget，支持独立播放和控制。
+ *       另含单通道全屏放大切换与电子围栏绘制工具栏（通道选择/
+ *       矩形/多边形/删除/清空，操作经 FenceManager+PlayerWidget::fenceOverlay 下发）。
  */
 
 #include <QWidget>
@@ -61,7 +63,14 @@ public:
     void openVideo(int ch, const QString &path);
 
 private:
+    /**
+     * @brief 单通道放大/恢复四宫格
+     * 放大时隐藏其余通道与底部提示 label，expandedChannel_ 记录当前通道
+     */
     void setExpandedMode(int channel, bool expanded);
+    /**
+     * @brief 代码创建电子围栏工具栏并插入 gridLayout 第2行
+     */
     void setupFenceToolbar();
 
     Ui::frmVideoWindow *ui;  // Qt Designer 生成的界面对象指针
