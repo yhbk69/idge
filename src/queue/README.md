@@ -38,5 +38,5 @@ Result r; if (top5.tryPop(r)) { /* 注意：未删除，消费需再 pop() */ }
 - 帧元素是浅拷贝载体：队列里的 image_buffer_t/RenderFrame 与生产者共享底层 DMA 指针与 fd；所有权归池与 fd 签发协议，队列不管理资源。
 - **pushAndReplace 隐患（上轮审查确认）**：FrameQueue 满时取的是 `back()`（最新帧）而非最旧帧、只 release 不 pop（队列可越过 max_size 增长）、被归还的帧仍留在队列中被消费者取出——悬垂/撕裂风险；注释已警示，勿依赖该接口。
 - FrameQueue 默认构造 shutdown_ 未初始化且 max_size=0，push 可能永久阻塞；必须用带池构造。
-- priority_queue **出队不移除元素（上轮审查确认）**：tryPop/waitAndPop 反复返回同一堆顶，成对手动 pop() 才等价消费；且 push 从不 notify 条件变量，waitAndPop 的阻塞唤醒链不完整，停机也无 shutdown 通道——仅适合与轮询 tryPop 搭配。
+- priority_queue **waitAndPop 出队不移除元素**：waitAndPop 反复返回同一堆顶，需成对手动 pop() 才等价消费（tryPop 已修复为 pop_heap+pop_back 取出即删除）；且 push 从不 notify 条件变量，waitAndPop 的阻塞唤醒链不完整，停机也无 shutdown 通道——仅适合与轮询 tryPop 搭配。
 - BlockingQueue close 单向不可复用；notify_one 假设单消费者/单生产者，多消费者共享需重新评估。

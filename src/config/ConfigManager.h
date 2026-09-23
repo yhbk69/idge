@@ -22,10 +22,10 @@
  *      所有 setXxx() 只改内存中的 root_，并不会自动写文件——必须显式调用 save()
  *      才落盘。漏调 save() 会导致"改了但重启丢失"。getters 读的是内存 root_，
  *      因此 getter 能立刻看到 setter 的效果，即便尚未 save()。
- *   2. 无锁 + 主线程约定：本类内部无任何互斥保护。约定仅在"主线程/UI 线程"读写
- *      配置对象；解码线程应只在启动时通过 getters 取一次快照（如 AlarmManager 构造
- *      里读 alarmClasses()），运行期不要跨线程调 setter 或 save()，否则与 root_
- *      的读改存在数据竞争。
+ *   2. 线程安全：公开接口（load/save/全部 getter/setter）内部由 mutex_ 加锁，
+ *      可跨线程调用；但 saveUnsafe() 是"已持有锁时的内部复用版"，外部直接调用
+ *      会与 save() 的加锁路径冲突（std::mutex 不可重入，直接调用将死锁），
+ *      仅供本类已持锁的成员函数使用。
  *   3. 缺省值兜底：getter 多用 toDouble(0.25)/toInt(80)/toString("inside_alarm") 等
  *      带默认值的形式，缺键时返回兜底值而非崩溃；但 save() 打开文件失败会被静默忽略
  *      （仅 load 时 qWarning），落盘结果需自行保证可写路径。

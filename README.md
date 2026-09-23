@@ -178,6 +178,7 @@ RGBA8888 DMA-BUF fd（带检测框的最终画面）
 | `src/alarm/` | 报警管理（限流、去重、抓拍、SQLite 持久化） | [README](src/alarm/README.md) |
 | `src/geofence/` | 电子围栏（形状、判定、绘制 overlay） | [README](src/geofence/README.md) |
 | `src/db/` | 业务数据库 BusinessDBManager（roll_call.db） | [README](src/db/README.md) |
+| `src/database/` | 检测/报警持久层（idge.db：DatabaseManager + DAO） | [README](src/database/README.md) |
 | `src/config/` | ConfigManager 单例 + config.json 解析 | [README](src/config/README.md) |
 | `src/buffer/` | DMA-BUF 分配与帧缓冲池 | [README](src/buffer/README.md) |
 | `src/queue/` | 阻塞队列 / 帧队列 / 优先级队列 | [README](src/queue/README.md) |
@@ -188,7 +189,7 @@ RGBA8888 DMA-BUF fd（带检测框的最终画面）
 | `src/core_qss/` | blacksoft 皮肤资源 | [README](src/core_qss/README.md) |
 | `model/` | 检测模型与标签（yolo11n/s/m、coco 标签等） | [README](model/README.md) |
 | `python/` | ONNX→RKNN 转换与验证脚本 | [README](python/README.md) |
-| `tests/` | 测试代码（当前未接入构建，见 README 警示） | [README](tests/README.md) |
+| `tests/` | 数据库层测试（test_database，随主构建生成） | [README](tests/README.md) |
 | `docs/` | 技术知识库 | [README](docs/README.md) |
 | `include/` | nlohmann/json 单头文件 | [README](include/README.md) |
 | `res/` | Qt 资源（qrc：图片/字体/GL 着色器/音效） | [README](res/README.md) |
@@ -296,11 +297,10 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
 以下问题已在源码中以注释警示（详见各目录 README 的"注意事项"）：
 
 1. 点击关闭按钮后，解码线程和 player_widget 没有完全关闭，解码线程可能仍在运行
-2. **报警限流单位不一致**：`src/yolo11/common.hpp` 的 `results.time` 为毫秒，而 `src/alarm/alarm_manager.h` 限流常量按纳秒比较，会导致限流窗口失真
-3. `src/buffer/DmaFrameBuffer` 浅拷贝可能导致同一 fd 双释放；`DmaBufferPool::acquire` 返回裸指针有生命周期约束
-4. `src/queue/priority_queue` 出队不移除元素；`src/rga/rga_converter.h` 个别错误路径存在句柄泄漏、返回值恒真
-5. `tests/test_database.cpp` 依赖已删除的 `src/database/`，测试当前不可构建
-6. `src/form/photo_selection_dialog.h` 为无引用遗留文件；识别结果对话框存在未调用的画框死代码
+2. **报警时间戳单位口径不一**：`src/yolo11/common.hpp` 文档约定 `results.time` 为毫秒，但生产端实际写入 epoch 纳秒；限流常量 `kAlarmThrottleNs` 按纳秒比较，当前行为正确、文档口径错误（统一前勿依赖"time=毫秒"写新代码）
+3. `DmaBufferPool::acquire` 返回裸指针有生命周期约束（池回收后悬垂）；`DmaFrameBuffer` 浅拷贝双释放隐患已通过 `= delete` 修复
+4. `src/queue/priority_queue` 的 `waitAndPop` 出队不移除元素、push 不 notify（`tryPop` 已修复为取出即删除）；`src/queue/frame_queue` 的 `pushAndReplace` 存在错序释放隐患；`src/rga/rga_converter.h` 个别错误路径存在句柄泄漏、返回值恒真
+5. `src/form/photo_selection_dialog.h` 为无引用遗留文件；识别结果对话框存在未调用的画框死代码
 
 # 九、文档
 

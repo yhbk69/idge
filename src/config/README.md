@@ -48,8 +48,8 @@ CLI：`./app -m model/yolo11n.rknn -i video.mp4 -t 3 -c true`
   改完立刻可见——"看着生效了其实没存盘"是常见坑。
 - **写盘时机与风险**：`save()` 是整文件截断覆写（Indented），非原子；进程在写入中崩溃会
   损坏配置；`save()` 打开文件失败被静默忽略（仅 `load` 失败 qWarning），须保证路径可写。
-- **无锁、主线程约定**：ConfigManager 内部无互斥，约定主线程读写；解码/推理线程只应
-  启动时取一次快照（如读 `alarmClasses()`），运行期勿跨线程 setter/save，避免数据竞争。
+- **线程安全**：公开接口内部由 `mutex_` 加锁，可跨线程调用；`saveUnsafe()` 仅供已持锁的
+  内部路径复用，外部直接调用会与 `save()` 双重加锁死锁（std::mutex 不可重入）。
 - **缺省值兜底**：getter 用带默认值的 `toXxx(default)`，缺键不崩、返回兜底；文件损坏时
   `root_` 置空后全走默认，会静默丢弃用户原有配置。
 - **通道号约定差异**：ConfigManager 视频通道是 1-based（channel1..4，notes 补齐到 4），

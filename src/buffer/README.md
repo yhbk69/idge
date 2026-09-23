@@ -43,7 +43,7 @@ dma_buf_free(size, &fd, va);
 
 ## 注意事项
 - **fd 所有权**：`dma_buf_alloc` 成功后 (fd,va) 归调用方，只能 free 一次；跨线程共享一律 `dup(fd)`，各持有者各自 close（dma-buf 内核引用计数保证最后关闭者回收）。
-- **浅拷贝双释放（上轮审查确认）**：`class DmaFrameBuffer` 拷贝构造/赋值为 default 浅拷贝，副本析构会对同一 fd 二次 close、同一区间二次 munmap；经 Qt 队列信号按值传递即触发。请用 `shared_ptr<DmaFrameBuffer>` 或 dup。
+- **浅拷贝双释放（已修复）**：`DmaFrameBuffer` 拷贝构造/赋值已被 `= delete` 禁用（历史上为 default 浅拷贝，副本析构会对同一 fd 二次 close、同一区间二次 munmap）。需要共享时用 `std::shared_ptr<DmaFrameBuffer>` 或显式 dup(fd)。
 - **移动构造不完整（警示）**：只转移 m_fd/m_ptr，m_size/m_handle/m_drm_fd 未转移未置空，被移动对象析构可能重复销毁；free_drm_buffer 还在已 close 的 m_drm_fd 上发 DESTROY_DUMB ioctl。
 - **裸指针生命周期（上轮审查确认）**：`DmaBufferPool::acquire()` 返回的 `DmaBuffer*` 仅在使用方 release 前、池析构前有效；池销毁后为悬垂指针，借出未还的缓冲还会泄漏。
 - 池析构只回收"已归还"的缓冲；`free_dma_buffer` 中 reset() 先清零 fd/va/size 导致 munmap/close 实际失败（注释已警示）。
