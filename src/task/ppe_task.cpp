@@ -122,6 +122,8 @@ void PpeTask::run()
         
         // 添加时间戳（用于结果排序）
         od_results.time = taskData->time;
+        // 结果路由ID（摄像头预览多检测器区分来源；主流水线默认0）
+        od_results.id = config.result_id;
         
         // 将结果放入结果队列
         // 解码线程会从这个队列中取出结果并画框

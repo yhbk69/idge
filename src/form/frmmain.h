@@ -22,6 +22,8 @@
 #include <QTextCharFormat>
 #include <QCloseEvent>
 #include <QVector>
+#include <memory>
+#include <string>
 
 class QAbstractButton;
 class QLineEdit;
@@ -31,6 +33,11 @@ class AlarmListWidget;
 class VideoAlarmWidget;
 class QLabel;
 class QTimer;
+class QWidget;
+class RollCallWidget;
+class EquipmentInventoryWidget;
+class RollCallService;
+class EquipmentInventoryService;
 struct AlarmRecord;
 
 namespace Ui {
@@ -71,6 +78,14 @@ private:
 
     QList<int> iconsConfig;        ///< 配置导航图标列表
     QList<QAbstractButton *> btnsConfig;  ///< 配置导航按钮列表
+
+    // ========== 人员点名 / 设备盘点业务模块（caichao 分支合并） ==========
+    RollCallWidget *rollCallWidget_ = nullptr;
+    std::shared_ptr<RollCallService> rollCallService_;
+    EquipmentInventoryWidget *equipmentWidget_ = nullptr;
+    std::shared_ptr<EquipmentInventoryService> equipmentService_;
+    QWidget *equipPage_ = nullptr;   ///< 设备盘点页（代码创建，插入 stackedWidget）
+    std::string workspace_;          ///< 业务资源根目录（model/face、roll_call_data 等）
 
 private:
     // ========== QSS 样式颜色变量 ==========
@@ -141,6 +156,11 @@ private slots:
     void initDebugPage();          ///< 初始化调试帮助页（从 config.json 读取配置）
     void initCascadeUi();          ///< 初始化级联模型配置区（5个槽位+备注+清空）
     void appendLog(const QString &msg);  ///< 追加日志到文本框
+
+    // ========== 人员点名 / 设备盘点业务模块 ==========
+    void initBusinessPages();      ///< 初始化点名/盘点页面与服务
+    bool initRollCallService();    ///< 初始化人员点名服务
+    bool initEquipmentService();   ///< 初始化设备盘点服务
 
 private:
     // ========== 级联模型配置控件（数据成员，不能放 slots 里） ==========

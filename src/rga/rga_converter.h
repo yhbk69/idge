@@ -96,13 +96,14 @@ public:
     // 适用于需要更精细控制缓冲区的场景
     // ============================================================================
     static bool convertNV12ToRGBAbyRGA(int src_dma_fd, int dst_dma_fd, int width, int height,
-                                      int src_hor_stride, int src_ver_stride)
+                                      int src_hor_stride, int src_ver_stride,
+                                      int source_rga_format = RK_FORMAT_YCbCr_420_SP)
     {
         int ret = 0;
         int src_width = width;
         int src_height = height;
         int dst_widt = width, dst_height = height;
-        int src_format = RK_FORMAT_YCbCr_420_SP;  // NV12
+        int src_format = source_rga_format;  // NV12(默认) 或 NV21 等半平面 YUV
         int dst_format = RK_FORMAT_RGBA_8888;      // RGBA
         int src_buf_size, dst_buf_size;
 
