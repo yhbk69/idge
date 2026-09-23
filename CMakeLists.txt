@@ -52,6 +52,13 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
 # ============================================================================
+# EGL 平台配置
+# ============================================================================
+# 阻止 eglplatform.h 引入 X11 头文件：X11 的 KeyPress/FontChange/None/Unsorted
+# 等宏会污染之后包含的 Qt 头文件（QEvent::Type、QDir::SortFlag 等）
+add_compile_definitions(EGL_NO_X11)
+
+# ============================================================================
 # C++ 标准设置
 # ============================================================================
 set(CMAKE_CXX_STANDARD 17)              # 使用 C++17 标准
@@ -92,7 +99,7 @@ endif ()
 # - Charts: 图表组件（数据看板）
 # - LinguistTools: 国际化工具（多语言支持）
 # - Network: 网络支持（RTSP 流、报警推送）
-find_package(Qt5 COMPONENTS Core Gui Sql OpenGL Qml Quick Charts Widgets LinguistTools Network Sql REQUIRED)
+find_package(Qt5 COMPONENTS Core Gui Sql OpenGL Qml Quick Charts Widgets LinguistTools Network Sql Multimedia REQUIRED)
 
 # 线程库查找（POSIX 线程）
 find_package(Threads REQUIRED)
@@ -223,6 +230,11 @@ include_directories(
     # --- 电子围栏模块 ---
     ${CMAKE_SOURCE_DIR}/src/geofence                # 电子围栏（形状、检测、覆盖层）
 
+    # --- 人员点名 / 设备盘点业务模块（caichao 分支合并） ---
+    ${CMAKE_SOURCE_DIR}/src/db                      # 业务 SQLite 数据库（tasks/人脸/设备检测）
+    ${CMAKE_SOURCE_DIR}/src/service                 # 点名/盘点业务服务
+    ${CMAKE_SOURCE_DIR}/src/recognition             # 人脸识别桥接
+
     # --- UI 模块 ---
     ${CMAKE_SOURCE_DIR}/src/ui                      # OpenGL 渲染、EGL、数据看板
 )
@@ -320,6 +332,11 @@ qt5_add_big_resources(CORE_QRC
     ${CMAKE_SOURCE_DIR}/src/core_qss/qss.qrc            # QSS 样式表资源
 )
 
+# 拍照快门音效资源（人员点名/设备盘点模块）
+qt5_add_resources(SOUND_RESOURCES
+    ${CMAKE_SOURCE_DIR}/sounds/resources.qrc
+)
+
 # ============================================================================
 # 国际化翻译文件
 # ============================================================================
@@ -342,6 +359,7 @@ add_executable(${PROJECT_NAME}
     ${PROJECT_SOURCES}                  # 项目源文件
     ${CORE_HELPER_SOURCES_QRC}          # 核心辅助资源（字体、图片等）
     ${CORE_QRC}                         # QSS 样式表资源
+    ${SOUND_RESOURCES}                  # 快门音效资源
     ${TS_FILES}                         # 翻译文件
 )
 
@@ -370,6 +388,10 @@ target_link_libraries(${PROJECT_NAME}
     Qt5::Charts                 # 图表模块（数据看板）
     Qt5::OpenGL                 # OpenGL 模块
     Qt5::Sql                    # 数据库模块（报警记录）
+    Qt5::Multimedia             # 多媒体模块（拍照快门音效）
+
+    # ==================== 业务模块依赖（caichao 分支合并） ====================
+    sqlite3                     # 业务 SQLite（人员点名/设备盘点）
 
     # ==================== FFmpeg 硬件解码库 ====================
     avformat                    # 格式处理（MP4/RTSP/FLV 容器）

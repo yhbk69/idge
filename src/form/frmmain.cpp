@@ -30,6 +30,10 @@
 #include "alarm_list_widget.h"
 #include "alarm_manager.h"
 #include "fence_manager.h"
+#include "roll_call_widget.h"
+#include "equipment_inventory_widget.h"
+#include "service/roll_call_service.h"
+#include "service/equipment_inventory_service.h"
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
@@ -58,6 +62,7 @@ frmMain::frmMain(QWidget *parent) : QWidget(parent), ui(new Ui::frmMain)
     this->initForm();
     this->initStyle();
     this->initNewPages();
+    this->initBusinessPages();
     this->initLeftMain();
     this->initLeftConfig();
     this->on_btnMenu_Max_clicked();
@@ -456,6 +461,81 @@ void frmMain::updateAlarmBadge()
 }
 
 // ==========================================
+// 人员点名 / 设备盘点业务模块（caichao 分支合并）
+// ==========================================
+
+/**
+ * @brief 初始化人员点名/设备盘点页面
+ * 复用导航栏中 main 分支隐藏的两个占位按钮 btnData/btnConfig，
+ * 分别承载"人员点名"（pageRoll，.ui 已有）与"设备盘点"（代码创建页面）。
+ */
+void frmMain::initBusinessPages()
+{
+    QString ws = qEnvironmentVariable("IDGE_WORKSPACE");
+    if (ws.isEmpty()) ws = QDir::currentPath();
+    workspace_ = ws.toStdString();
+
+    if (!initRollCallService()) {
+        QMessageBox::warning(this, "警告", "人员点名服务初始化失败");
+    }
+
+    // 人员点名页：填充 .ui 中已有的 pageRoll
+    rollCallWidget_ = new RollCallWidget(ui->pageRoll);
+    rollCallWidget_->setService(rollCallService_);
+    ui->lab5->hide();
+    if (!ui->pageRoll->layout()) ui->pageRoll->setLayout(new QVBoxLayout());
+    ui->pageRoll->layout()->addWidget(rollCallWidget_);
+
+    // 设备盘点页：代码创建并插入 stackedWidget
+    initEquipmentService();
+    equipmentWidget_ = new EquipmentInventoryWidget();
+    equipmentWidget_->setServices(equipmentService_, rollCallService_);
+    equipPage_ = new QWidget();
+    equipPage_->setLayout(new QVBoxLayout());
+    equipPage_->layout()->addWidget(equipmentWidget_);
+    ui->stackedWidget->addWidget(equipPage_);
+
+    // 复用被 main 导航收敛隐藏的占位按钮
+    ui->btnData->setText("人员点名");
+    ui->btnData->show();
+    ui->btnConfig->setText("设备盘点");
+    ui->btnConfig->show();
+}
+
+bool frmMain::initRollCallService()
+{
+    rollCallService_ = std::make_shared<RollCallService>();
+    const std::string ws = workspace_;
+    const bool success = rollCallService_->initialize(
+        ws + "/model/face/face_recognition",
+        ws + "/model/face/detection.rknn",
+        ws + "/model/face/recognition.rknn",
+        ws + "/roll_call_data/roll_call.db",
+        ws + "/roll_call_data");
+    if (success) qDebug() << "RollCallService initialized successfully";
+    return success;
+}
+
+bool frmMain::initEquipmentService()
+{
+    equipmentService_ = std::make_shared<EquipmentInventoryService>(rollCallService_);
+    const std::string model_dir = workspace_ + "/model";
+    const std::vector<EquipmentModelConfig> models = {
+        {
+            model_dir + "/coco/rknn_yolo11_demo",
+            model_dir + "/coco/model/yolo11.rknn",
+            model_dir + "/coco/model/coco_80_labels_list.txt"
+        },
+        {
+            model_dir + "/fire/rknn_yolo11_demo",
+            model_dir + "/fire/model/yolo11.rknn",
+            model_dir + "/fire/model/coco_80_labels_list.txt"
+        }
+    };
+    return equipmentService_->initialize(models);
+}
+
+// ==========================================
 // 导航按钮点击处理
 // ==========================================
 
@@ -486,6 +566,10 @@ void frmMain::buttonClick()
         ui->stackedWidget->setCurrentWidget(dashboardWidget_);
     } else if (name == "报警数据") {
         ui->stackedWidget->setCurrentWidget(alarmListWidget_);
+    } else if (name == "人员点名") {
+        ui->stackedWidget->setCurrentWidget(ui->pageRoll);
+    } else if (name == "设备盘点") {
+        ui->stackedWidget->setCurrentWidget(equipPage_);
     } else if (name == "调试设置") {
         ui->stackedWidget->setCurrentWidget(ui->page4);
     } else if (name == "退出") {

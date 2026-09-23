@@ -20,6 +20,8 @@ struct TaskConfig
     std::string labelPath;      // 标签文件路径，用于检测结果映射
     rknn_core_mask core_mask;   // NPU核心掩码，指定在哪个NPU核心上运行
                                 // RK3588有3个NPU核心，可通过掩码选择特定核心
+    int result_id = 0;          // 结果路由ID，写入 od_results.id
+                                // 摄像头预览多检测器用它区分结果来源
 };
 
 #endif
