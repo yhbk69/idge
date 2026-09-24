@@ -64,7 +64,7 @@ db.replaceEquipmentData(tid, /*phase=0登记*/0, photos, dets);
 
 #### 依赖关系
 - `sqlite3`（3rdparty/sqlite）：原生 C API。
-- 上层点名/盘点服务（`src/service` 内 roll_call / equipment_inventory）为调用方。
+- 上层点名/盘点服务（`src/biz/service` 内 roll_call / equipment_inventory）为调用方。
 - 无 Qt 依赖。
 
 #### 注意事项
@@ -116,12 +116,12 @@ DatabaseManager::instance().cleanOldDetections(30);  // 保留期维护
 
 ### 依赖关系
 
-- Qt5 Sql（QSqlDatabase/QSqlQuery）、`src/alarm`（AlarmRecord 结构）
+- Qt5 Sql（QSqlDatabase/QSqlQuery）、`src/biz/alarm`（AlarmRecord 结构）
 - 配置：`ConfigManager` 的 `database.storeDetections` / `detectionRetentionDays`
 
 ### 注意事项
 
-- 与 `src/db/business_db_manager`（业务库 roll_call.db，sqlite3 原生 API）是两套
+- 与 `business_db_manager`（业务库 roll_call.db，sqlite3 原生 API）是两套
   互不相干的数据库层；勿混用连接。
 - 检测数据是否落库受 `storeDetections` 开关控制（对应提交 fc7ae46"仅存报警相关"）。
 - 建表语句在 `initialize()` 内幂等执行；修改表结构需同步 tests/test_database.cpp。

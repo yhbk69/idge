@@ -6,7 +6,7 @@
  * 模型：任务队列（std::queue + mutex + 条件变量）+ N 个常驻 worker；
  * submit() 把可调用对象包装成 packaged_task 入队并返回 future，
  * worker 串行取任务执行，任务异常经 packaged_task 捕获、在 future.get() 处重放。
- * 与全局 src/threadpool（视频流水线用）相互独立：本池只管“照片检测”这类批任务。
+ * 与全局 src/base/threadpool（视频流水线用）相互独立：本池只管“照片检测”这类批任务。
  */
 
 #include <vector>

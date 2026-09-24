@@ -4,7 +4,7 @@
 
 运行时模型与标签资源目录（不参与编译，随程序部署）。2026-09-24 起采用**模型库结构**：
 RKNN 模型收编进 `library/<id>/`，一个模型一个目录；专项标签 txt 保留在根目录备用；
-测试素材移至仓库根 `assets/test/`。库索引由 `src/model_repo/ModelRegistry` 启动时扫描
+测试素材移至仓库根 `assets/test/`。库索引由 `src/ai/model_repo/ModelRegistry` 启动时扫描
 `library/` 自动生成（无需手工维护清单），规划详见 `plan/model_management.md`。
 
 ## 目录结构
@@ -45,7 +45,7 @@ model/
 
 | 路径 | 引用位置 |
 |------|----------|
-| `model/face/face_recognition`、`model/face/detection.rknn`、`model/face/recognition.rknn` | `src/form/frmmain.cpp`（RollCallService 初始化） |
+| `model/face/face_recognition`、`model/face/detection.rknn`、`model/face/recognition.rknn` | `src/ui/form/frmmain.cpp`（RollCallService 初始化） |
 | `model/coco/rknn_yolo11_demo`、`model/coco/model/yolo11.rknn`、`model/coco/model/coco_80_labels_list.txt` | `frmmain.cpp`（设备盘点 coco 模型） |
 | `model/fire/rknn_yolo11_demo`、`model/fire/model/yolo11.rknn`、`model/fire/model/coco_80_labels_list.txt` | `frmmain.cpp`（设备盘点 fire 模型） |
 
@@ -65,9 +65,9 @@ python3 convert.py yolo11n.onnx rk3588 i8 ../model/library/yolo11n-coco/model.rk
 ## 依赖关系
 
 - `.rknn` 由 `python/convert.py`（rknn-toolkit2）在 x86 PC 上生成，平台绑定 rk3588；
-- 加载方：`src/yolo11/`（YOLO11Model，经 `3rdparty/rknpu2` librknnrt 运行时推理）、
-  `src/model_repo/`（ModelRegistry 库扫描/导入/槽位解析）、`src/service/`（点名/盘点走外部 demo 二进制）、
-  `src/threadpool/`（级联多模型方案）；
+- 加载方：`src/ai/yolo11/`（YOLO11Model，经 `3rdparty/rknpu2` librknnrt 运行时推理）、
+  `src/ai/model_repo/`（ModelRegistry 库扫描/导入/槽位解析）、`src/biz/service/`（点名/盘点走外部 demo 二进制）、
+  `src/base/threadpool/`（级联多模型方案）；
 - 标签文件行序必须与模型输出 `cls_id` 一致；预处理约定 640×640、/255 归一化，
   与 `config.json detect` 段（conf 0.25 / nms 0.45）配套。
 

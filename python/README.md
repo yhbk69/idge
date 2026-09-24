@@ -7,7 +7,7 @@ PC 侧（x86 Ubuntu/WSL）模型工具链脚本，来自 rknn_model_zoo 的 YOLO
 - `convert.py`：将 YOLO11/YOLOv8 导出的 **ONNX 模型转换为 RKNN 格式**（配置归一化、目标平台、INT8/FP16 量化、导出 .rknn）；
 - `yolo11.py`：RKNN/ONNX 模型图片推理验证 + 可选 **COCO mAP 评估**（LetterBox 预处理、DFL 解码、NMS 后处理），用于核对转换前后精度。
 
-模型在板上由主程序 `idge`（`src/yolo11/`、`3rdparty/rknpu2` 运行时）加载推理。
+模型在板上由主程序 `idge`（`src/ai/yolo11/`、`3rdparty/rknpu2` 运行时）加载推理。
 
 ## 文件/子目录清单
 

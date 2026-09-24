@@ -70,8 +70,8 @@ det.detectRgba(rgbaPixels, width, height, stride /*>=width*4*/,
 
 ## 依赖关系
 
-- **上游调用**：`src/form/*`（UI 窗口持有解码器）、`main.cpp`；
-- **下游依赖**：`src/buffer`（DmaBufferPool/DmaFrameBuffer）、`src/rga`（RgaUtils）、`src/yolo11`+`src/task`（PpeTask/TaskData）、`src/queue`（PriorityQueue）、FFmpeg(libav*) + MPP、RKNN runtime（SCRFD）、EGL（fd→纹理渲染）、Qt（信号槽）。
+- **上游调用**：`src/ui/form/*`（UI 窗口持有解码器）、`main.cpp`；
+- **下游依赖**：`src/base/buffer`（DmaBufferPool/DmaFrameBuffer）、`src/media/rga`（RgaUtils）、`src/ai/yolo11`+`src/ai/task`（PpeTask/TaskData）、`src/base/queue`（PriorityQueue）、FFmpeg(libav*) + MPP、RKNN runtime（SCRFD）、EGL（fd→纹理渲染）、Qt（信号槽）。
 
 ## 注意事项
 
@@ -79,7 +79,7 @@ det.detectRgba(rgbaPixels, width, height, stride /*>=width*4*/,
 - **fd 所有权**：`RenderFrame` 的 fd 为 `dup()` 产物，接收方必须 `close()`；AVFrame DRM fd 归 ffmpeg，禁止关闭；`pHWDeviceCtx` 存在 1 个 buffer 引用泄漏（已登记）。
 - **线程约束**：ScrfdFaceDetector 的 `rknn_context` 非线程安全，仅在解码线程内使用；`stop()` 后 `tasks_` 故意不 delete（detach 线程可能仍在回调，防 UAF）；`dmaBufferPool_` 借用遵循"最后一个引用释放自动归还"，新增提前 return 必须保证归还。
 - **已知隐患**（详见各文件头注释）：
-  - `image_buffer_t::time`/`TaskData::time` 实际为 **epoch 纳秒**，而 `common.hpp` 文档写毫秒、`src/alarm` 限流常量按纳秒比较——单位三方不一致，勿随手"换算"；
+  - `image_buffer_t::time`/`TaskData::time` 实际为 **epoch 纳秒**，而 `common.hpp` 文档写毫秒、`src/biz/alarm` 限流常量按纳秒比较——单位三方不一致，勿随手"换算"；
   - EOF drain 分支仅 unref 尾部 packet，可能丢最后几帧；
   - `camera_preview_decoder` 的 `ppeTasks_` 生命周期策略与主流水线"只停不删"不同，退出时序敏感；
   - EAGAIN 忙等依赖 v4l2 阻塞模式，非规范做法（性能可接受，已注释登记）。

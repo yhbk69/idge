@@ -10,7 +10,7 @@
  * 约定（2026-09-24 UI 统一批次确立）：
  *   - 新增代码禁止再手写内联色值/字号，一律引用本文件常量或 text() 构造器；
  *   - 存量 ~160 处内联 setStyleSheet 逐批迁移，本批：frmmain / dashboard_widget；
- *   - 令牌与 src/core_qss/qss/blacksoft.css 的注释色板保持一致，改主题两处同步。
+ *   - 令牌与 src/ui/core_qss/qss/blacksoft.css 的注释色板保持一致，改主题两处同步。
  *
  * 用法：
  *   label->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));

@@ -45,8 +45,8 @@ bool alarm = FenceChecker::checkDetection(det, srcW, srcH, modelW, modelH,
 ```
 
 ## 依赖关系
-- `src/yolo11/common.hpp`：`object_detect_result`/`image_rect_t`。
-- `src/config/ConfigManager.h`：`geofence` 配置段读写。
+- `src/ai/yolo11/common.hpp`：`object_detect_result`/`image_rect_t`。
+- `src/base/config/ConfigManager.h`：`geofence` 配置段读写。
 - Qt Widgets：`QWidget`/`QPainter`/`QPainterPath`（overlay 绘制）。
 
 ## 注意事项

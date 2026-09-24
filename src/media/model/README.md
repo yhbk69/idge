@@ -4,7 +4,7 @@
 
 ## 功能概述
 
-推理模型注册表。`ModelPool` 以字符串 ID 登记 `shared_ptr<YOLO11Model>` 实例，供无状态任务（如 HelmetTask 所在链路）按 ID 取用模型。**现状为只读查表容器**——早期"借出-归还"池化设计已退化（详见文件头注释），真正的多核并行调度由 `src/threadpool/ThreadPool.hpp`（`ExecuteContext` + `dpool::context`）承担。
+推理模型注册表。`ModelPool` 以字符串 ID 登记 `shared_ptr<YOLO11Model>` 实例，供无状态任务（如 HelmetTask 所在链路）按 ID 取用模型。**现状为只读查表容器**——早期"借出-归还"池化设计已退化（详见文件头注释），真正的多核并行调度由 `src/base/threadpool/ThreadPool.hpp`（`ExecuteContext` + `dpool::context`）承担。
 
 ## 文件清单
 
@@ -39,7 +39,7 @@ if (m) {
 
 ## 依赖关系
 
-- 依赖：`src/yolo11/yolo11_model.hpp`（被管理的模型类型）；
+- 依赖：`src/ai/yolo11/yolo11_model.hpp`（被管理的模型类型）；
 - 被依赖：历史上由任务层使用；当前生产取模路径是 `ThreadPool.hpp` 的 `ExecuteContext`/`dpool::context`，本类保留作备用注册表。
 
 ## 注意事项

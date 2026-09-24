@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-报警/拍照相关提示音资源目录。当前仅含**拍照快门音效** `shutter.wav`（人员点名、设备盘点模块拍照时播放），由 `resources.qrc` 注册为 `qrc:/shutter.wav` 编译进主程序。经代码核实：**报警提示目前不播放任何音频文件**（报警为界面 toast/角标，见 `src/form/frmmain.cpp` 的 `alarmToast_`），全工程唯一的声音引用点即本目录的快门音。
+报警/拍照相关提示音资源目录。当前仅含**拍照快门音效** `shutter.wav`（人员点名、设备盘点模块拍照时播放），由 `resources.qrc` 注册为 `qrc:/shutter.wav` 编译进主程序。经代码核实：**报警提示目前不播放任何音频文件**（报警为界面 toast/角标，见 `src/ui/form/frmmain.cpp` 的 `alarmToast_`），全工程唯一的声音引用点即本目录的快门音。
 
 ## 文件/子目录清单
 
@@ -20,7 +20,7 @@ qt5_add_resources(SOUND_RESOURCES
     ${CMAKE_SOURCE_DIR}/sounds/resources.qrc)   # 随 idge 目标一起链接
 ```
 
-运行时用法（`src/form/photo_selection_widget.cpp:260-263`，已验证的真实接口）：
+运行时用法（`src/ui/form/photo_selection_widget.cpp:260-263`，已验证的真实接口）：
 
 ```cpp
 shutter_sound_ = new QSoundEffect(this);
@@ -36,7 +36,7 @@ shutter_sound_->play();          // photo_selection_widget.cpp:303
 
 - Qt5 Multimedia 模块（`QSoundEffect`）：CMake 已 `find_package(Qt5 ... Multimedia)` 并链接 `Qt5::Multimedia`；
 - 板端音频输出依赖系统 ALSA/PulseAudio 可用（QSoundEffect 走 Qt 多媒体后端）；
-- 使用方为 `src/form/photo_selection_widget.cpp/.h`（点名/盘点拍照界面）。
+- 使用方为 `src/ui/form/photo_selection_widget.cpp/.h`（点名/盘点拍照界面）。
 
 ## 注意事项
 

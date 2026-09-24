@@ -29,9 +29,9 @@ ModelRegistry::instance().findIdByModelFile(p);// 模型文件反查库内 id
 
 ## 依赖关系 / 使用方
 
-- `src/reader/ffmpeg_video_decoder.cpp`：`buildCascadeTasks()` 按槽建任务，
+- `src/media/reader/ffmpeg_video_decoder.cpp`：`buildCascadeTasks()` 按槽建任务，
   `taskConfig.result_id = 槽下标`，结果经 `od.id` 路由到 `AlarmManager` 的按槽类名表；
-- `src/config/ConfigManager.cpp`：旧配置路径迁移（绝对路径/平铺路径 → `library/` 相对路径）；
+- `src/base/config/ConfigManager.cpp`：旧配置路径迁移（绝对路径/平铺路径 → `library/` 相对路径）；
 - Phase 2 模型管理 UI（规划中）：下拉框数据源、导入/删除。
 
 ## 注意事项

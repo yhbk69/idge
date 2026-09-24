@@ -23,12 +23,12 @@ float conf = j["conf"];                                     // 读取
 std::string s = j.dump();                                   // 序列化
 ```
 
-项目内真实用例：`src/recognition/face_recognizer.cpp:15` `#include "nlohmann/json.hpp"`。
+项目内真实用例：`src/ai/recognition/face_recognizer.cpp:15` `#include "nlohmann/json.hpp"`。
 
 ## 依赖关系
 
 - 仅依赖 C++11 标准库（`<string>/<vector>/<map>` 等），无外部库、无链接项；
-- 被 `src/recognition/` 使用；其余 JSON 场景当前走 `3rdparty/jsoncpp`（config/报警等）与 Qt `QJsonDocument`（UI 配置）；
+- 被 `src/ai/recognition/` 使用；其余 JSON 场景当前走 `3rdparty/jsoncpp`（config/报警等）与 Qt `QJsonDocument`（UI 配置）；
 - 升级替换：从上游 release 覆盖 `nlohmann/json.hpp` 单文件即可（保持目录名 `nlohmann/`，include 写法不变）。
 
 ## 注意事项

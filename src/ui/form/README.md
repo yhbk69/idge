@@ -4,7 +4,7 @@
 
 ## 功能概述
 
-`src/form` 是 IDGE（RK3588 施工行为监测与分析系统）的**顶层窗体目录**，包含主窗口 `frmMain` 及其挂载的全部页面控件：
+`src/ui/form` 是 IDGE（RK3588 施工行为监测与分析系统）的**顶层窗体目录**，包含主窗口 `frmMain` 及其挂载的全部页面控件：
 
 - **视频监控页**：4 路视频 2x2 网格实时显示（`frmVideoWindow` + `src/ui/PlayerWidget` + `src/ui/GLVideoWidget`），含单通道全屏放大与电子围栏绘制工具栏；
 - **系统设置页**：`config.json` 的编辑界面（视频通道/模型/阈值/报警类别/围栏类别）、级联模型 5 槽位配置、通道备注与清空（全部内嵌在 `frmmain.cpp` 的 `initDebugPage()`/`initCascadeUi()`）；
@@ -13,7 +13,7 @@
 - **人员点名页**（caichao 合入）：任务列表 + 拍照选图 + 登记识别 + 注销匹配全流程；
 - **设备盘点页**（caichao 合入）：复用点名选图界面做设备检测登记/注销与详情查看。
 
-录像回放解码线程 `video_decoder.cpp`（FFmpeg CPU 软解）也在本目录，当前无实例化点（历史方案，实时播放走 `src/reader/FFmpegVideoDecoder`）。
+录像回放解码线程 `video_decoder.cpp`（FFmpeg CPU 软解）也在本目录，当前无实例化点（历史方案，实时播放走 `src/media/reader/FFmpegVideoDecoder`）。
 
 ## 文件清单
 
@@ -54,11 +54,11 @@
 
 ## 依赖关系
 
-- `src/service`：RollCallService、EquipmentInventoryService（业务数据与 NPU 识别封装）；
-- `src/ui`：PlayerWidget/GLVideoWidget/DashboardWidget/AlarmListWidget；
-- `src/reader`：FFmpegVideoDecoder（实时）、CameraPreviewDecoder（MJPEG 预览/拍照）；
-- `src/geofence`（经 `src/fence_manager.h` 等）：FenceManager、FenceOverlay、DrawMode；
-- `src/utils`：qt_image_utils 的 `loadPixmapSafe`（板端 Qt JPEG 插件与 libjpeg ABI 冲突的安全解码，业务页所有图片加载必须走它）；
+- `src/biz/service`：RollCallService、EquipmentInventoryService（业务数据与 NPU 识别封装）；
+- `src/ui/widgets`：PlayerWidget/GLVideoWidget/DashboardWidget/AlarmListWidget；
+- `src/media/reader`：FFmpegVideoDecoder（实时）、CameraPreviewDecoder（MJPEG 预览/拍照）；
+- `src/biz/geofence`（经 `src/fence_manager.h` 等）：FenceManager、FenceOverlay、DrawMode；
+- `src/base/utils`：qt_image_utils 的 `loadPixmapSafe`（板端 Qt JPEG 插件与 libjpeg ABI 冲突的安全解码，业务页所有图片加载必须走它）；
 - 根目录：`ConfigManager`（config.json）、`AlarmManager`、`SharedTypes.hpp`、`core_helper`（IconHelper/QtHelper）；
 - CMake 通过 `src/*/*.cpp` GLOB 收集本目录，新增 .cpp 无需改构建脚本。
 

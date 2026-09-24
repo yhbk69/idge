@@ -12,7 +12,7 @@
 | --- | --- |
 | `roll_call_service.h/.cpp` | 点名服务：人脸注册、点名（重复检测）、注销三大流程；调用外部 `face_recognition` 程序做 SCRFD 检测 + 512 维特征提取；贪心一对一余弦相似度匹配 |
 | `equipment_inventory_service.h/.cpp` | 设备盘点服务：多模型（如 coco + 工地专项）YOLO11 检测、结果 JSON-lines 解析、检测框绘制回写、按 phase 登记/注销落库 |
-| `thread_pool.h/.cpp` | 固定线程数工作池（默认 4 线程），用于并行处理多张照片的"检测+特征提取"子进程调用；独立于全局 `src/threadpool` |
+| `thread_pool.h/.cpp` | 固定线程数工作池（默认 4 线程），用于并行处理多张照片的"检测+特征提取"子进程调用；独立于全局 `src/base/threadpool` |
 
 ## 核心类与流程
 
@@ -90,16 +90,16 @@ auto inv = equipmentService_->processPhotos(equipmentService_->createEquipmentTa
 equipmentService_->saveResult(inv);
 ```
 
-界面层参考 `src/form/frmmain.cpp` 中的服务初始化与 `EquipmentInventoryWidget`/点名窗体的调用。
+界面层参考 `src/ui/form/frmmain.cpp` 中的服务初始化与 `EquipmentInventoryWidget`/点名窗体的调用。
 
 ## 依赖关系
 
 - **外部 RKNN 可执行程序**：`face_recognition`（SCRFD 检测 + 512 维识别）、`rknn_yolo11_demo`（YOLO11 检测），均以子进程方式调用，模型权重 `.rknn` 由这些程序加载——本目录代码不直接链接 rknn API；
-- **BusinessDBManager**（`src/db`）：SQLite 注册库唯一入口，点名与盘点共用同一连接（`getDatabase()` 暴露）；
+- **BusinessDBManager**（`src/biz/db`）：SQLite 注册库唯一入口，点名与盘点共用同一连接（`getDatabase()` 暴露）；
 - **Qt5 Core**：QProcess（子进程）、QImage（绘制回写，绕开板端 cv::imwrite JPEG 编码器崩溃问题）；
 - **OpenCV**：图片读取、人脸裁剪与画框；
 - **std::vector 手写点积匹配**：当前余弦相似度匹配为逐对手工计算（贪心内按需算分），**未使用 Eigen 矩阵库**——注册库规模小（百人级），O(R·C·d) 足够，且避免引入矩阵构建与内存拷贝开销；
-- **src/utils**：`task_manager`（任务目录/唯一文件名）、`draw_utils`（绿实线/黄虚线框）、`qt_image_utils`（安全解码）。
+- **src/base/utils**：`task_manager`（任务目录/唯一文件名）、`draw_utils`（绿实线/黄虚线框）、`qt_image_utils`（安全解码）。
 
 ## 注意事项
 

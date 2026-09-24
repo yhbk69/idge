@@ -72,7 +72,7 @@ NN_LOG_INFO("loaded %s", photoPath.c_str());       // 受 g_log_level 控制
 
 - **第三方库**：OpenCV（`draw_utils`、`qt_image_utils`、部分读图）、turbojpeg + stb（`image_utils` 解码后端）、Qt5（`qt_image_utils` 的 QImage/QProcess）、iconv（`xml_utils` GB2312 转码）、RKNN/rknn_model_zoo 头（`file_utils`/`image_utils` 的 `image_buffer_t`/`_rect_t`/格式枚举、`rknn_inference` 数据类型）。
 - **Rockchip 专有**：`im2d.h`/`drmrga.h` 提供 RGA 2D 硬件加速（缩放/格式转换），运行时不可用则自动 CPU 回退。
-- **被上层使用**：`src/service`（点名/盘点服务用 task_manager、draw_utils、qt_image_utils）、`src/recognition`、`src/form` 界面层与识别流水线各阶段。
+- **被上层使用**：`src/biz/service`（点名/盘点服务用 task_manager、draw_utils、qt_image_utils）、`src/ai/recognition`、`src/ui/form` 界面层与识别流水线各阶段。
 - **内部自洽**：`image_drawing` 依赖 `font.h`（同目录）；`draw_utils` 独立于 `image_drawing`（一个走 OpenCV、一个走裸 buffer，二者不互含）。
 
 ## 注意事项

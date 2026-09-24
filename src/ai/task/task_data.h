@@ -29,7 +29,7 @@
 //     .time_since_epoch().count()，Linux tick=1ns），与 common.hpp 中
 //     object_detect_result_list::time 的"毫秒"文档不一致——本字段正是
 //     PpeTask::run() 回填 od_results.time 的来源，单位隐患链的中间环节，
-//     详见 src/yolo11/common.hpp 的 ⚠ 长注释，勿在此"顺手换算"。
+//     详见 src/ai/yolo11/common.hpp 的 ⚠ 长注释，勿在此"顺手换算"。
 //
 // ============================================================================
 

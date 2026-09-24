@@ -8,7 +8,7 @@
 
 - **无边框窗体与全局拖动**：`QtHelper::setFramelessForm` + `AppInit` 全局事件过滤器（依赖窗体属性 `canMove`）；
 - **图标字体（图形化按钮）**：`IconHelper` 统一管理阿里巴巴 iconfont / FontAwesome 等字体图标，支持正常/悬停/按下/选中四态切换与导航栏整体换肤 `IconHelper::setStyle`；
-- **QSS 换肤辅助**：`QtHelper::getStyle/setStyle` 读取并应用样式表（配合 `src/core_qss`）；
+- **QSS 换肤辅助**：`QtHelper::getStyle/setStyle` 读取并应用样式表（配合 `src/ui/core_qss`）；
 - **全局配置与初始化**：`AppData`（分辨率自适应参数）、`AppInit`（启动初始化）、`CustomStyle`（QSS 全局字号/滑块样式）；
 - **通用工具**：`QtHelper`（屏幕/DPI、居中、字体、编码、OpenGL 后端、消息日志、文件对话框、表格初始化等）、`Base64Helper`（图片/文本 Base64 互转）、`DelegateComboBox`（表格内下拉编辑）、`singleton.h`（双重检查锁单例宏）、`Logger.hpp`（异步彩色日志组件，当前工程内**尚无引用点**，见注意事项）。
 
@@ -34,9 +34,9 @@
 
 ## 使用方法
 
-本目录通过根 `CMakeLists.txt` 编入主程序：头文件路径加入 `include_directories(${CMAKE_SOURCE_DIR}/src/core_helper)`，qrc 经 `qt5_add_big_resources(CORE_HELPER_SOURCES_QRC ...)` 打包（CMakeLists.txt 第 324~329 行）。
+本目录通过根 `CMakeLists.txt` 编入主程序：头文件路径加入 `include_directories(${CMAKE_SOURCE_DIR}/src/ui/core_helper)`，qrc 经 `qt5_add_big_resources(CORE_HELPER_SOURCES_QRC ...)` 打包（CMakeLists.txt 第 324~329 行）。
 
-在 `frmmain` 中的真实用法（`src/form/frmmain.cpp`）：
+在 `frmmain` 中的真实用法（`src/ui/form/frmmain.cpp`）：
 
 ```cpp
 // 1. 无边框窗体（同时设置 form/canMove 属性，拖动由 AppInit 全局过滤器实现）
@@ -63,12 +63,12 @@ QString qss = QtHelper::getStyle(":/qss/blacksoft.css");   // frmmain.cpp:316
 
 - 依赖 `src/head.h`（聚合 QtCore/QtGui/QtWidgets）；
 - 依赖 Qt5（Core/Gui/Widgets；`setTranslator`/`qm.qrc` 为可选国际化支持）；
-- 被 `src/form/frmmain.cpp`、`src/main.cpp` 及多个 UI 窗体引用；`Logger.hpp` 目前未被任何源文件 include（现行日志走 `src/utils/logging.h` 的 NN_LOG_* 宏与 qDebug），保留待接入；
-- 与 `src/core_qss` 配套：`QtHelper::getStyle` 读取的 `:/qss/blacksoft.css` 由 core_qss 提供。
+- 被 `src/ui/form/frmmain.cpp`、`src/main.cpp` 及多个 UI 窗体引用；`Logger.hpp` 目前未被任何源文件 include（现行日志走 `src/base/utils/logging.h` 的 NN_LOG_* 宏与 qDebug），保留待接入；
+- 与 `src/ui/core_qss` 配套：`QtHelper::getStyle` 读取的 `:/qss/blacksoft.css` 由 core_qss 提供。
 
 ## 注意事项
 
-- 组件为移植通用代码，**不要随意修改**，否则影响全部窗体外观；业务改动应放在 `src/form` 层。
+- 组件为移植通用代码，**不要随意修改**，否则影响全部窗体外观；业务改动应放在 `src/ui/form` 层。
 - `QtHelper::setStyle(qssFile)` 与 `frmMain::initStyle()` 均依赖硬编码约定：QSS 首行必须为 `QPalette{background:#RRGGBB...` 格式（`qss.mid(20, 7)` 取背景色），改动 blacksoft.css 首行会破坏全局调色板。
 - `AppInit::eventFilter` 中的拖动状态是 `static` 全局共享的：同一时刻仅一个窗体可拖动；仅在 GUI 线程回调，无线程竞争，但不可跨线程复用。
 - `IconHelper::initFont()` 使用裸 `new` 且无锁保护，只应在主线程首次显示界面前调用（现有调用链满足此约束）。

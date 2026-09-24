@@ -51,7 +51,7 @@ for (const auto& f : res.faces) {
 ## 依赖关系
 
 - 依赖：外部识别 exe（命令行位置参数与 JSON schema 是强耦合契约）、`nlohmann/json`、OpenCV 头（cv::Rect/cv::Size）、libc `system/stat/unlink`；
-- 被依赖：点名/考勤与抓拍比对业务（`src/form`、`src/service` 层）。
+- 被依赖：点名/考勤与抓拍比对业务（`src/ui/form`、`src/biz/service` 层）。
 
 ## 注意事项
 

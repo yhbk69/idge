@@ -30,7 +30,7 @@ YOLO11Model : YoloBaseDetector
   复杂度: O(ΣG²×C)=8400 格×80 类粗筛 + 存活格精算 + NMS O(V²)/类
 ```
 
-结果以 `object_detect_result_list` **值拷贝**返回；`id`/`time` 由调用方回填（见 `src/task/ppe_task.cpp`）。
+结果以 `object_detect_result_list` **值拷贝**返回；`id`/`time` 由调用方回填（见 `src/ai/task/ppe_task.cpp`）。
 
 ## 使用方法
 
@@ -54,13 +54,13 @@ for (int i = 0; i < results.count; ++i) {
 
 ## 依赖关系
 
-- 被依赖：`src/task/ppe_task`（主要消费者）、`src/model/ModelPool`（登记共享指针）、`src/reader`（间接）；
-- 依赖：`rknn_api`（librknnrt）、`src/utils/image_utils.h`（`letterbox_t`）、OpenCV（基类参考实现）、`common.hpp` 类型。
+- 被依赖：`src/ai/task/ppe_task`（主要消费者）、`src/model/ModelPool`（登记共享指针）、`src/media/reader`（间接）；
+- 依赖：`rknn_api`（librknnrt）、`src/base/utils/image_utils.h`（`letterbox_t`）、OpenCV（基类参考实现）、`common.hpp` 类型。
 
 ## 注意事项
 
 - **模型输入约定**：输入 attr 被强制为 UINT8 NHWC 640x640x3——`.rknn` 必须按"归一化在 NPU 内做/量化感知训练导出"生成，普通 mean/std 归一化浮点模型不适用。
-- **time 单位隐患**：`object_detect_result_list::time` 文档写"毫秒"，生产实际回填 epoch **纳秒**（TaskData::time），而 `src/alarm/alarm_manager.h` 的 `kAlarmThrottleNs=2e9` 按纳秒比较——三方不一致，修改任一小时前先读 `common.hpp` 的 ⚠ 长注释。
+- **time 单位隐患**：`object_detect_result_list::time` 文档写"毫秒"，生产实际回填 epoch **纳秒**（TaskData::time），而 `src/biz/alarm/alarm_manager.h` 的 `kAlarmThrottleNs=2e9` 按纳秒比较——三方不一致，修改任一小时前先读 `common.hpp` 的 ⚠ 长注释。
 - **输出内存所有权**：`infer` 已改用官方 `rknn_outputs_release` 归还 runtime 分配的输出缓冲。板端实测（librknnrt 2.3.2，2026-09-24）：旧写法 `free(outputs[i].buf)` 与 release 行为完全一致（buf 即 runtime malloc 堆指针，800 轮 RSS 平稳、destroy 正常）——历史上并非 bug，但 release 才是 API 契约。
 - **线程纪律**：单实例 `detect` 非线程安全（共享 `app_ctx` 输出缓冲），一个 `YOLO11Model` 只允许一个线程串行调用；`ModelPool::getModel` 返回共享副本不等于并发推理许可。
 - **泄漏登记**：类无析构函数，`release_yolo11_model`（`rknn_destroy`）无调用点，长驻进程模型加载即泄漏 NPU 上下文。

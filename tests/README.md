@@ -3,7 +3,7 @@
 ## 功能概述
 
 C++ 测试源码目录。当前有一个数据库模块测试程序 `test_database.cpp`，针对
-`src/database/` 的检测记录 DAO / 报警记录 DAO / DatabaseManager 做初始化、插入、
+`src/biz/db/` 的检测记录 DAO / 报警记录 DAO / DatabaseManager 做初始化、插入、
 批量插入、条件查询、统计、状态更新与维护（vacuum/过期清理）的黑盒断言测试，
 输出 `[PASS]/[FAIL]` 与通过/失败计数。
 
@@ -27,12 +27,12 @@ C++ 测试源码目录。当前有一个数据库模块测试程序 `test_databa
 ## 依赖关系
 
 - Qt5 Core / Qt5 Sql、`3rdparty/sqlite`、`3rdparty/jsoncpp`
-- `src/database/`（database_manager、detection_dao、alarm_dao）
+- `src/biz/db/`（database_manager、detection_dao、alarm_dao）
 
 ## 注意事项
 
-- 断言基于 `src/database/` 接口行为（如"批量插入10条"后 `queryByTimeRange` 期望 ≥11 条），
+- 断言基于 `src/biz/db/` 接口行为（如"批量插入10条"后 `queryByTimeRange` 期望 ≥11 条），
   改动 DAO 语义时需同步核对用例假设。
 - 测试进程为单线程顺序执行，`testsPassed/testsFailed` 为全局计数，多线程化时需加锁。
-- 注意与 `src/db/business_db_manager`（业务库 roll_call.db）区分：本测试覆盖的是
-  `src/database/`（检测/报警库 idge.db）。
+- 注意与 `src/biz/db/business_db_manager`（业务库 roll_call.db）区分：本测试覆盖的是
+  `src/biz/db/`（检测/报警库 idge.db）。

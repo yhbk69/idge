@@ -1,7 +1,7 @@
 # tools/face_recognition — 人脸识别命令行工具
 
 SCRFD 人脸检测 + ArcFace 特征提取的独立可执行工具，由主程序
-`src/recognition/face_recognizer.cpp`（FaceRecognitionWrapper）经 fork+execv 调起，
+`src/ai/recognition/face_recognizer.cpp`（FaceRecognitionWrapper）经 fork+execv 调起，
 服务于人员点名（roll_call）功能。原目录名 `cc_face`，2026-09 迁入 tools/ 并接入根 CMake 主构建。
 
 ## 构建

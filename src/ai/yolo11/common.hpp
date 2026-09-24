@@ -387,7 +387,7 @@ struct object_detect_result_list{
     //   (ffmpeg_video_decoder.cpp / camera_preview_decoder.cpp 的
     //    chrono::system_clock::now().time_since_epoch().count()) 写入的是
     //   epoch **纳秒**（Linux/libstdc++ 下 system_clock tick=1ns）；
-    //   而 src/alarm/alarm_manager.h 的限流常量 kAlarmThrottleNs=2e9 又
+    //   而 src/biz/alarm/alarm_manager.h 的限流常量 kAlarmThrottleNs=2e9 又
     //   按纳秒语义与 time 差值比较。三方定义不一致：
     //     · 若 time 为毫秒 → 毫秒差 < 2e9 恒成立约 23 天，限流被放大成
     //       "首报后长期不复报"（限流失真）；

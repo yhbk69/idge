@@ -25,7 +25,7 @@ extern "C" {
 // ⚠ 使用契约与现状警示：
 //   1. 本类经 CMake GLOB 参与编译，但当前工程内暂无实例化点
 //      （历史"录像回放"方案，实时播放走 src/ui/player_widget +
-//      src/reader/FFmpegVideoDecoder）。重新接线时须自行遵守以下约定；
+//      src/media/reader/FFmpegVideoDecoder）。重新接线时须自行遵守以下约定；
 //   2. 标准用法：new VideoDecoder（无 parent）→ new QThread →
 //      moveToThread → started 触发 receiveStartDecoding → 各控制槽用
 //      信号跨线程调用；start()/receiveVideoPath 会阻塞跑完整个解码循环；

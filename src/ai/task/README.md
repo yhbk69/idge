@@ -4,7 +4,7 @@
 
 ## 功能概述
 
-推理任务层：把"一帧图像 + 结果去向"封装成可跨线程传递的任务单元，并以独立线程运行 RKNN 推理任务（PpeTask），供 `src/reader` 解码流水线投递。另含占位的任务基类 `BaseTask`、无状态检测任务 `HelmetTask` 与全局任务池雏形 `TaskPool`。
+推理任务层：把"一帧图像 + 结果去向"封装成可跨线程传递的任务单元，并以独立线程运行 RKNN 推理任务（PpeTask），供 `src/media/reader` 解码流水线投递。另含占位的任务基类 `BaseTask`、无状态检测任务 `HelmetTask` 与全局任务池雏形 `TaskPool`。
 
 ## 文件清单
 
@@ -63,12 +63,12 @@ HelmetTask::run(image /*dmaBuffer 借出*/, ctx); // 被调方负责所有路径
 
 ## 依赖关系
 
-- 依赖：`src/yolo11`（YOLO11Model/common.hpp）、`src/queue`（PriorityQueue、BlockingQueue）、`src/buffer`（DmaBufferPool）、`src/threadpool`（HelmetTask 的 dpool::context）、OpenCV；
-- 被依赖：`src/reader/ffmpeg_video_decoder`、`src/reader/camera_preview_decoder`（创建并驱动 PpeTask）。
+- 依赖：`src/ai/yolo11`（YOLO11Model/common.hpp）、`src/base/queue`（PriorityQueue、BlockingQueue）、`src/base/buffer`（DmaBufferPool）、`src/base/threadpool`（HelmetTask 的 dpool::context）、OpenCV；
+- 被依赖：`src/media/reader/ffmpeg_video_decoder`、`src/media/reader/camera_preview_decoder`（创建并驱动 PpeTask）。
 
 ## 注意事项
 
-- **时间单位隐患**：`TaskData::time` → `od_results.time` 回填链携带的是 **epoch 纳秒**，与 `common.hpp` 毫秒文档、`src/alarm` 纳秒限流常量三方不一致；本层只是"搬运"，勿在任务层顺手换算（详见 `src/yolo11/common.hpp` ⚠ 注释）。
+- **时间单位隐患**：`TaskData::time` → `od_results.time` 回填链携带的是 **epoch 纳秒**，与 `common.hpp` 毫秒文档、`src/biz/alarm` 纳秒限流常量三方不一致；本层只是"搬运"，勿在任务层顺手换算（详见 `src/ai/yolo11/common.hpp` ⚠ 注释）。
 - `BaseTask` 是占位基类：调用其 init/run 即链接错误，禁止经基类指针多态删除；PpeTask/HelmetTask 均未继承它。
 - `PpeTask` 生命周期：构造后未 start 即 put → 解引用空 taskQueue_；stopBestEffort detach 后析构 delete 队列存在在途线程 UAF 风险——上层策略是只停不删。
 - `HelmetTask::run` 现状：推理结果未入队/未回传（链路未闭合），`runWithDma` 为空实现；DMA 缓冲手工借还，新增 return 分支必须保持 release 配对。

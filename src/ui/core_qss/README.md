@@ -25,8 +25,8 @@ blacksoft 深色（黑灰色）QSS 皮肤包：一个全局样式表 `blacksoft.
 皮肤生效链路（均为已核实的真实代码位置）：
 
 1. **编译打包**：根 `CMakeLists.txt` 第 331~333 行
-   `qt5_add_big_resources(CORE_QRC ${CMAKE_SOURCE_DIR}/src/core_qss/qss.qrc)`，随主程序 `idge` 一起链接。
-2. **运行时加载**：`frmMain::initStyle()`（`src/form/frmmain.cpp:314`）：
+   `qt5_add_big_resources(CORE_QRC ${CMAKE_SOURCE_DIR}/src/ui/core_qss/qss.qrc)`，随主程序 `idge` 一起链接。
+2. **运行时加载**：`frmMain::initStyle()`（`src/ui/form/frmmain.cpp:314`）：
 
    ```cpp
    QString qss = QtHelper::getStyle(":/qss/blacksoft.css");   // 读取 qrc 资源
@@ -43,9 +43,9 @@ blacksoft 深色（黑灰色）QSS 皮肤包：一个全局样式表 `blacksoft.
 
 ## 依赖关系
 
-- 被 `src/form/frmmain.cpp` 通过资源路径 `:/qss/blacksoft.css` 加载（全工程唯一引用点）；
+- 被 `src/ui/form/frmmain.cpp` 通过资源路径 `:/qss/blacksoft.css` 加载（全工程唯一引用点）；
 - `blacksoft.css` 内部用 `url(:/qss/blacksoft/xxx.png)` 引用同目录 PNG 小图；
-- 选择器依赖 `src/core_helper` 设置的窗体动态属性：`QtHelper::setFramelessForm` 会设置 `form=true`，`AppInit` 依赖 `canMove` 属性；导航容器需带 `nav="left"/"top"`、`flag` 属性（frmmain 中设置）；
+- 选择器依赖 `src/ui/core_helper` 设置的窗体动态属性：`QtHelper::setFramelessForm` 会设置 `form=true`，`AppInit` 依赖 `canMove` 属性；导航容器需带 `nav="left"/"top"`、`flag` 属性（frmmain 中设置）；
 - 与 `CustomStyle::initStyle`（core_helper）互补：后者只做字号/滑块等局部覆盖。
 
 ## 注意事项

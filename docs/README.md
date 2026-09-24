@@ -70,7 +70,7 @@ xdg-open docs/knowledge/architecture/alertgateway_architecture.html
 ## 依赖关系
 
 - 文档之间互相引用（阶段系列、artifacts 被优化路线/实验记录引用）；
-- 内容与代码目录对应：MPP/FFmpeg → `src/reader`，RGA → `src/rga`，NPU → `src/yolo11`、`3rdparty/rknpu2`，模型实验 → `python/`；
+- 内容与代码目录对应：MPP/FFmpeg → `src/media/reader`，RGA → `src/media/rga`，NPU → `src/ai/yolo11`、`3rdparty/rknpu2`，模型实验 → `python/`；
 - 本 README 为汇总层，不复制专题 README 的正文，避免双处维护。
 
 ## 注意事项

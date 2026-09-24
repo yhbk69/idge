@@ -43,8 +43,8 @@ connect(&AlarmManager::instance(), &AlarmManager::alarmGenerated, ...);
 ```
 
 ## 依赖关系
-- `src/yolo11/common.hpp`：`object_detect_result(_list)` 检测结果类型、时间戳字段。
-- `src/config/ConfigManager.h`：构造时读取 `alarm.classes` 缺省报警类别。
+- `src/ai/yolo11/common.hpp`：`object_detect_result(_list)` 检测结果类型、时间戳字段。
+- `src/base/config/ConfigManager.h`：构造时读取 `alarm.classes` 缺省报警类别。
 - Qt：`QMutex`/`QVector`/`QMap`/信号槽；`AlarmRecord` 经 `qRegisterMetaType` 支持跨线程。
 
 ## 注意事项

@@ -17,7 +17,7 @@
 
 ## 2. 工作区目录约定（IDGE_WORKSPACE）
 
-人员点名与设备盘点两个业务模块的所有资源路径以环境变量 `IDGE_WORKSPACE` 为根目录，**缺省回退到当前工作目录**（见 `src/form/frmmain.cpp`）：
+人员点名与设备盘点两个业务模块的所有资源路径以环境变量 `IDGE_WORKSPACE` 为根目录，**缺省回退到当前工作目录**（见 `src/ui/form/frmmain.cpp`）：
 
 ```bash
 export IDGE_WORKSPACE=/home/pi/cc/idge_work   # 示例
@@ -40,15 +40,16 @@ $IDGE_WORKSPACE/
 │   │       └── coco_80_labels_list.txt
 │   └── fire/                      # 设备盘点模型 2（可扩展其他类别）
 │       └── model/ ...
-└── roll_call_data/                # 点名/盘点业务数据
-    └── roll_call.db               # 业务 SQLite 库（任务/人脸/设备表）
+└── data/
+    └── roll_call_data/            # 点名/盘点业务数据
+        └── roll_call.db               # 业务 SQLite 库（任务/人脸/设备表）
 ```
 
 模型文件缺失时对应业务页初始化会弹窗告警，但视频监控主功能不受影响。
 
 ## 3. 主检测配置（config.json）
 
-程序启动时读取项目根目录 `config.json`（可从 `config_example.json` 复制），在 **系统设置页** 修改后自动回写。关键配置：
+程序启动时读取 `data/config.json`（首次可从 `config_example.json` 复制：`mkdir -p data && cp config_example.json data/config.json`；旧版根目录 config.json 启动时自动迁移），在 **系统设置页** 修改后自动回写。关键配置：
 
 | 配置节 | 说明 |
 |--------|------|
@@ -58,7 +59,7 @@ $IDGE_WORKSPACE/
 | `geofence` | 每路通道的电子围栏：多边形顶点（widget 像素坐标）、报警类别 `alarmClasses`、开关 |
 | `alarm` | 参与报警的类别列表 |
 
-报警记录写入根目录 `idge.db`（Qt SQL 检测库），抓拍图片保存在 `alarms/YYYYMMDD/` 目录。
+报警记录写入 `data/idge.db`（Qt SQL 检测库），抓拍图片保存在 `data/alarms/YYYYMMDD/` 目录。
 
 ## 4. 其他常用脚本
 
@@ -137,25 +138,25 @@ RGBA8888 DMA-BUF fd（带检测框的最终画面）
 
 | 阶段 | 输入格式 | 输出格式 | 执行硬件 | 关键代码 |
 |------|----------|----------|----------|----------|
-| 解码 | H.264 码流 | NV12 DMA-BUF | VPU (MPP) | `src/reader/ffmpeg_video_decoder.cpp` |
-| 色彩转换 | NV12 DMA-BUF | RGBA DMA-BUF | RGA 硬件 | `src/rga/rga_converter.h` |
+| 解码 | H.264 码流 | NV12 DMA-BUF | VPU (MPP) | `src/media/reader/ffmpeg_video_decoder.cpp` |
+| 色彩转换 | NV12 DMA-BUF | RGBA DMA-BUF | RGA 硬件 | `src/media/rga/rga_converter.h` |
 | 推理预处理 | RGBA DMA-BUF | 640×640 RGB DMA-BUF | RGA 硬件 | `RgaConverter::rgba_to_rgb_resize()` |
-| NPU 推理 | 640×640 RGB | 检测结果 (80类) | NPU ×3 | `src/yolo11/yolo11_model.hpp` |
-| 画框叠加 | RGBA DMA-BUF + 检测结果 | 带框的 RGBA DMA-BUF | CPU (mmap) | `src/utils/draw_utils.*` |
-| 渲染 | RGBA DMA-BUF fd | 屏幕像素 | GPU (Mali) | `src/ui/EglImageRenderer.h` |
-| 围栏/报警 | 检测结果 | 报警记录 + 抓拍图 | CPU | `src/geofence/`、`src/alarm/` |
+| NPU 推理 | 640×640 RGB | 检测结果 (80类) | NPU ×3 | `src/ai/yolo11/yolo11_model.hpp` |
+| 画框叠加 | RGBA DMA-BUF + 检测结果 | 带框的 RGBA DMA-BUF | CPU (mmap) | `src/base/utils/draw_utils.*` |
+| 渲染 | RGBA DMA-BUF fd | 屏幕像素 | GPU (Mali) | `src/ui/widgets/EglImageRenderer.h` |
+| 围栏/报警 | 检测结果 | 报警记录 + 抓拍图 | CPU | `src/biz/geofence/`、`src/biz/alarm/` |
 
 ## 业务模块调用链
 
 ```
-人员点名：摄像头预览(src/reader/camera_preview_decoder) → 抓拍 JPEG
-    → SCRFD 检测(src/reader/scrfd_face_detector) → 人脸对齐裁剪
-    → 特征提取(src/recognition/face_recognizer)
-    → 注册/比对/注销(src/service/roll_call_service)
+人员点名：摄像头预览(src/media/reader/camera_preview_decoder) → 抓拍 JPEG
+    → SCRFD 检测(src/media/reader/scrfd_face_detector) → 人脸对齐裁剪
+    → 特征提取(src/ai/recognition/face_recognizer)
+    → 注册/比对/注销(src/biz/service/roll_call_service)
     → 余弦相似度矩阵(Eigen) + 贪心一对一匹配 → roll_call.db
 
 设备盘点：拍照 → YOLO11 识别(多模型 coco/fire) → 结果去重汇总
-    → src/service/equipment_inventory_service → roll_call.db 任务/设备表
+    → src/biz/service/equipment_inventory_service → roll_call.db 任务/设备表
 ```
 
 ---
@@ -164,31 +165,45 @@ RGBA8888 DMA-BUF fd（带检测框的最终画面）
 
 **每个源码目录都有 README.md 详述功能、数据流、使用方法与注意事项**，下表为速查索引。
 
+### 功能域总览（依赖方向 base ← media ← ai ← biz ← ui）
+
+| 域 | 模块 |
+|------|------|
+| `src/base/` 基础设施 | buffer、queue、threadpool、config、utils、runtime_paths.h |
+| `src/media/` 视频管线 | reader、rga、model(ModelPool) |
+| `src/ai/` 推理与模型应用 | yolo11、model_repo、recognition、task |
+| `src/biz/` 业务域 | alarm、geofence、service、db(报警库+业务库) |
+| `src/ui/` 界面层 | form、widgets(原 src/ui)、core_helper、core_qss |
+
+### 模块速查
+
 | 目录 | 职责 | 文档 |
 |------|------|------|
-| `src/main.cpp` | 应用入口（CLI/GUI 双模式、EGL 初始化） | — |
-| `src/form/` | 主窗口与全部页面/对话框（视频、设置、点名、盘点） | [README](src/form/README.md) |
-| `src/ui/` | EGL/OpenGL ES 零拷贝渲染、视频控件、看板、报警列表 | [README](src/ui/README.md) |
-| `src/reader/` | FFmpeg 解码线程、摄像头预览解码、SCRFD 人脸检测 | [README](src/reader/README.md) |
-| `src/yolo11/` | YOLO11 RKNN 推理核心、前后处理 | [README](src/yolo11/README.md) |
-| `src/model/` | 推理模型池（NPU 核心借还调度） | [README](src/model/README.md) |
-| `src/model_repo/` | 模型库注册表（library 扫描/元数据/级联槽位解析） | [README](src/model_repo/README.md) |
-| `src/task/` | 检测任务体系（安全帽/PPE 任务与任务池） | [README](src/task/README.md) |
-| `src/recognition/` | 人脸特征提取与比对 | [README](src/recognition/README.md) |
-| `src/service/` | 人员点名 / 设备盘点业务服务 | [README](src/service/README.md) |
-| `src/alarm/` | 报警管理（限流、去重、抓拍、SQLite 持久化） | [README](src/alarm/README.md) |
-| `src/geofence/` | 电子围栏（形状、判定、绘制 overlay） | [README](src/geofence/README.md) |
-| `src/db/` | 业务数据库 BusinessDBManager（roll_call.db） | [README](src/db/README.md) |
-| `src/database/` | 检测/报警持久层（idge.db：DatabaseManager + DAO） | [README](src/database/README.md) |
-| `src/config/` | ConfigManager 单例 + config.json 解析 | [README](src/config/README.md) |
-| `src/buffer/` | DMA-BUF 分配与帧缓冲池 | [README](src/buffer/README.md) |
-| `src/queue/` | 阻塞队列 / 帧队列 / 优先级队列 | [README](src/queue/README.md) |
-| `src/threadpool/` | 通用线程池 | [README](src/threadpool/README.md) |
-| `src/rga/` | RGA 硬件加速封装 | [README](src/rga/README.md) |
-| `src/utils/` | 图像/绘制/路径/日志等通用工具 | [README](src/utils/README.md) |
-| `src/core_helper/` | 无边框窗体、图标字体、QSS 换肤组件 | [README](src/core_helper/README.md) |
-| `src/core_qss/` | blacksoft 皮肤资源 | [README](src/core_qss/README.md) |
+| `src/main.cpp` | 应用入口（CLI/GUI 双模式、EGL 初始化、data/ 旧布局迁移） | — |
+| `src/base/runtime_paths.h` | 运行时数据路径唯一事实源（data/ 约定） | [README](src/base/README.md) |
+| `src/ui/form/` | 主窗口与全部页面/对话框（视频、设置、点名、盘点） | [README](src/ui/form/README.md) |
+| `src/ui/widgets/` | EGL/OpenGL ES 零拷贝渲染、视频控件、看板、报警列表 | [README](src/ui/widgets/README.md) |
+| `src/ui/core_helper/` | 无边框窗体、图标字体、QSS 换肤组件 | [README](src/ui/core_helper/README.md) |
+| `src/ui/core_qss/` | blacksoft 皮肤资源 | [README](src/ui/core_qss/README.md) |
+| `src/media/reader/` | FFmpeg 解码线程、摄像头预览解码、SCRFD 人脸检测 | [README](src/media/reader/README.md) |
+| `src/media/rga/` | RGA 硬件加速封装 | [README](src/media/rga/README.md) |
+| `src/media/model/` | 推理模型池（NPU 核心借还调度） | [README](src/media/model/README.md) |
+| `src/ai/yolo11/` | YOLO11 RKNN 推理核心、前后处理 | [README](src/ai/yolo11/README.md) |
+| `src/ai/model_repo/` | 模型库注册表（library 扫描/元数据/级联槽位解析） | [README](src/ai/model_repo/README.md) |
+| `src/ai/task/` | 检测任务体系（安全帽/PPE 任务与任务池） | [README](src/ai/task/README.md) |
+| `src/ai/recognition/` | 人脸识别桥接（fork+execv 调 tools 产物） | [README](src/ai/recognition/README.md) |
+| `src/biz/service/` | 人员点名 / 设备盘点业务服务 | [README](src/biz/service/README.md) |
+| `src/biz/alarm/` | 报警管理（限流、去重、抓拍、SQLite 持久化） | [README](src/biz/alarm/README.md) |
+| `src/biz/geofence/` | 电子围栏（形状、判定、绘制 overlay） | [README](src/biz/geofence/README.md) |
+| `src/biz/db/` | 数据持久层：报警库 idge.db（QtSQL DAO）+ 业务库 roll_call.db（sqlite3 原生） | [README](src/biz/db/README.md) |
+| `src/base/config/` | ConfigManager 单例 + data/config.json 解析 | [README](src/base/config/README.md) |
+| `src/base/buffer/` | DMA-BUF 分配与帧缓冲池 | [README](src/base/buffer/README.md) |
+| `src/base/queue/` | 阻塞队列 / 帧队列 / 优先级队列 | [README](src/base/queue/README.md) |
+| `src/base/threadpool/` | 通用线程池 | [README](src/base/threadpool/README.md) |
+| `src/base/utils/` | 图像/绘制/路径/日志等通用工具 | [README](src/base/utils/README.md) |
+| `tools/face_recognition/` | 人脸识别命令行工具（第二构建 target，产物输出 model/face/） | [README](tools/face_recognition/README.md) |
 | `model/` | 模型库 `library/<id>/`（yolo11n/s/m 收编）+ 专项标签 | [README](model/README.md) |
+| `data/` | 运行时数据（config/idge.db/alarms/backups/roll_call_data，内容不入库） | — |
 | `python/` | ONNX→RKNN 转换与验证脚本 | [README](python/README.md) |
 | `tests/` | 数据库层测试（test_database，随主构建生成） | [README](tests/README.md) |
 | `docs/` | 技术知识库 | [README](docs/README.md) |
@@ -197,7 +212,7 @@ RGBA8888 DMA-BUF fd（带检测框的最终画面）
 | `sounds/` | 提示音文件 | [README](sounds/README.md) |
 | `3rdparty/` | 第三方库 | [README](3rdparty/README.md) |
 
-运行时数据目录（已 gitignore，不入库）：`alarms/`（按日报警抓拍）、`roll_call_data/`（业务库与照片）、`backups/`、`build*/`、`install/`、根目录 `idge.db*`。
+运行时数据统一在 `data/`（内容已 gitignore，不入库）：`data/config.json`、`data/idge.db*`、`data/alarms/`（按日抓拍）、`data/backups/`、`data/roll_call_data/`。旧布局（散落在根目录）启动时由 `RuntimePaths::migrateLegacy()` 自动迁入。构建目录 `build*/`、`install/` 同样不入库。
 
 ### 根目录文件
 
@@ -207,7 +222,7 @@ RGBA8888 DMA-BUF fd（带检测框的最终画面）
 ├── run.sh                      # 一键启动（自动设置库路径）
 ├── video-preview.sh            # MIPI CSI 摄像头预览脚本
 ├── dump_hang.sh                # 卡死堆栈抓取
-├── config.json                 # 运行配置（UI 即改即存）
+├── data/                       # 运行时数据根（config.json/idge.db/alarms/backups/roll_call_data）
 ├── config_example.json         # 配置模板
 └── yolo11_videocapture_demo.cc # 独立 YOLO11 摄像头检测示例
 ```
@@ -300,8 +315,8 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
 1. 点击关闭按钮后，解码线程和 player_widget 没有完全关闭，解码线程可能仍在运行
 2. 报警时间戳口径：生产端 `results.time` 为 epoch 纳秒（common.hpp"毫秒"注释是文档误差）；限流窗口已改用 steady_clock 单调纳秒、与墙钟解耦；detections 表写入口已统一换算为毫秒
 3. `DmaBufferPool::acquire` 返回裸指针有生命周期约束（池回收后悬垂）；`DmaFrameBuffer` 浅拷贝双释放隐患已通过 `= delete` 修复
-4. `src/queue/priority_queue` 的 `waitAndPop` 出队不移除元素、push 不 notify（`tryPop` 已修复为取出即删除）；`src/queue/frame_queue` 的 `pushAndReplace` 存在错序释放隐患
-5. `src/form/photo_selection_dialog.h` 为无引用遗留文件；识别结果对话框存在未调用的画框死代码
+4. `src/base/queue/priority_queue` 的 `waitAndPop` 出队不移除元素、push 不 notify（`tryPop` 已修复为取出即删除）；`src/base/queue/frame_queue` 的 `pushAndReplace` 存在错序释放隐患
+5. `src/ui/form/photo_selection_dialog.h` 为无引用遗留文件；识别结果对话框存在未调用的画框死代码
 6. 围栏报警 `bypassThrottle` 当前所有调用方均传 false——围栏报警同样受 2 秒限流窗口约束，"围栏不限流"的设计意图尚未落地
 
 **已修复批次（2026-09-24，明细见 `plan/update_log.md`）**：DmaBufferPool fd 缺省 0→-1（close(0) 误关 stdin）、free 顺序致 DMA 泄漏、dma_alloc 失败路径 fd 泄漏、rga_converter 恒真返回值/错误路径句柄泄漏/letterbox 未填灰边、shell 命令注入（face_recognizer 改 fork+execv、roll_call 回退改 QProcess）、detections 表 ns 存值 vs ms 清理失配（含存量数据一次性迁移）、报警限流墙钟回拨致抑制数天（改 steady_clock）。注：批内曾按"get_bpp_from_format 返回位宽"结论做 /8 缓冲换算，板端实测证伪（该函数返回**字节**/像素）并已回退，详见 update_log 回归实录。

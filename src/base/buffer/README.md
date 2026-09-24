@@ -40,7 +40,7 @@ dma_buf_free(size, &fd, va);
 ```
 
 ## 依赖关系
-- 被引用：src/rga（格式/句柄约定）、src/queue/frame_queue.h（持池引用）、解码与渲染链路（DmaFrameBuffer/FrameBuffer 作为信号载荷）。
+- 被引用：src/media/rga（格式/句柄约定）、src/base/queue/frame_queue.h（持池引用）、解码与渲染链路（DmaFrameBuffer/FrameBuffer 作为信号载荷）。
 - 外部依赖：librga（im2d/RgaUtils）、Linux dma_heap 与 DRM 头、FFmpeg（仅头文件，关联 AVFrame）。
 
 ## 注意事项

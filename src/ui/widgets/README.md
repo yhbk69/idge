@@ -1,6 +1,6 @@
 # src/ui/widgets
 
-> 所属域：**ui 界面域**。原 `src/ui` 模块目录，S4e 域分组时更名 `widgets`
+> 所属域：**ui 界面域**。原 `src/ui/widgets` 模块目录，S4e 域分组时更名 `widgets`
 > （避免与域目录同名），承载可复用控件与 EGL/GL 渲染。
 
 ## 功能概述（在流水线中的位置）
