@@ -1185,10 +1185,10 @@ public:
         timer.tik();
         post_process(app_ctx, outputs, &letter_box, box_conf_threshold, nms_threshold, od_results);
 
-        for (int i = 0; i < app_ctx->io_num.n_output; i++)
-        {
-            free(outputs[i].buf);
-        }
+        // 官方约定：is_prealloc=FALSE 时 buf 归 runtime 所有，必须用        // rknn_outputs_release 归还。板端实测 librknnrt 2.3.2 下 free() 等价
+        // 无泄漏（800 轮 RSS 平稳、destroy 正常），但 release 才是 API 契约，
+        // 且与 scrfd_face_detector 用法统一，跨 runtime 版本更安全。
+        rknn_outputs_release(app_ctx->rknn_ctx, app_ctx->io_num.n_output, outputs);
 
         timer.tok();
         //timer.print_time("post_process");
