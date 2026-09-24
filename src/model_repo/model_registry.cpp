@@ -27,6 +27,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QDate>
+#include <QDateTime>
 #include <QRegularExpression>
 #include <QTextStream>
 #include <QDebug>
@@ -341,6 +342,59 @@ bool ModelRegistry::importModel(const QString &srcRknnPath, const QString &srcLa
     }
 
     loadEntryDir(dstDir);
+    return true;
+}
+
+// ============================================================================
+// 槽位引用计数：模型1~5 的 config 路径中反查命中 id 的个数
+// ============================================================================
+int ModelRegistry::referenceCount(const QString &id) const
+{
+    auto &cfg = ConfigManager::instance();
+    QStringList slotPaths;
+    slotPaths << cfg.modelPath();                    // 模型1 = 全局 model.path
+    for (int idx = 2; idx <= 5; ++idx)
+        slotPaths << cfg.cascadeModelPath(idx);
+    int n = 0;
+    for (const QString &p : slotPaths) {
+        if (!p.trimmed().isEmpty() && findIdByModelFile(p) == id)
+            ++n;
+    }
+    return n;
+}
+
+// ============================================================================
+// 从库中移除模型（移入 model/.trash/，不做物理删除）
+// ============================================================================
+bool ModelRegistry::deleteModel(const QString &id, QString &errorMsg)
+{
+    const ModelMeta m = meta(id);
+    if (m.id.isEmpty()) {
+        errorMsg = QStringLiteral("模型不存在: %1").arg(id);
+        return false;
+    }
+    if (const int refs = referenceCount(id)) {
+        errorMsg = QStringLiteral("模型被 %1 个槽位引用，请先在模型路径1~5 中切换").arg(refs);
+        return false;
+    }
+
+    // 移入回收目录（library 之外，rescan 不会扫到），带时间戳防重名
+    const QString trashDir = QStringLiteral("model/.trash");
+    if (!QDir().mkpath(trashDir)) {
+        errorMsg = QStringLiteral("无法创建回收目录: %1").arg(trashDir);
+        return false;
+    }
+    const QString dst = trashDir + "/" + id + "-"
+                        + QDateTime::currentDateTime().toString("yyyyMMdd-hhmmss");
+    if (!QFile::rename(m.dir, QFileInfo(dst).absoluteFilePath())) {
+        errorMsg = QStringLiteral("移动模型目录失败: %1").arg(m.dir);
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        entries_.remove(id);
+    }
     return true;
 }
 

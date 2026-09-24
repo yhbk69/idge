@@ -106,6 +106,19 @@ public:
     bool importModel(const QString &srcRknnPath, const QString &srcLabelPath,
                      const QString &id, QString &errorMsg);
 
+    /// id 被级联槽位（模型1~5，含全局 model.path）引用的次数
+    int referenceCount(const QString &id) const;
+
+    /**
+     * @brief 从库中移除模型
+     *
+     * 有槽位引用时拒绝删除；否则把模型目录移入 model/.trash/
+     * （带时间戳后缀，可人工恢复，不做物理删除），并同步注册表。
+     *
+     * @return true=已移除，false=被引用/目录移动失败（errorMsg 给原因）
+     */
+    bool deleteModel(const QString &id, QString &errorMsg);
+
     /**
      * @brief 解析级联 5 槽位的模型与标签（decoder/UI 的单一事实源）
      *

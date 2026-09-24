@@ -54,6 +54,10 @@
 #include <QVBoxLayout>
 #include <QFileDialog>
 #include <QApplication>
+#include <QHeaderView>
+#include <QInputDialog>
+#include <QScrollArea>
+#include <QTableWidget>
 
 // ==========================================
 // 构造 / 析构
@@ -870,6 +874,9 @@ void frmMain::initDebugPage()
     // ========== 级联模型配置区（5个槽位 + 备注 + 清空） ==========
     initCascadeUi();
 
+    // ========== 模型库管理区（列表 + 导入/删除） ==========
+    initModelLibraryUi();
+
     // ========== 报警配置（从 config.json 读取，保存后实时生效） ==========
     {
         QStringList classes = cfg.alarmClasses();
@@ -1167,6 +1174,177 @@ void frmMain::refreshCascadeModelCombos()
         }
         cb->setCurrentIndex(qMax(0, idx));
         cb->blockSignals(false);
+    }
+}
+
+// ============================================================
+// initModelLibraryUi: 模型库管理区（P2）
+//   位置：设置页滚动内容中、"模型配置"分组框之后
+//   构成：工具行（刷新/导入/删除 + 提示） + 只读表格
+// ============================================================
+void frmMain::initModelLibraryUi()
+{
+    // 找到设置页滚动内容布局（initDebugPage 开头把原控件整体包进 QScrollArea，
+    // 它是 pageSettings 布局的第 0 项）
+    QVBoxLayout *pageLayout = qobject_cast<QVBoxLayout *>(ui->pageSettings->layout());
+    QLayoutItem *first = pageLayout ? pageLayout->itemAt(0) : nullptr;
+    QScrollArea *sa = first ? qobject_cast<QScrollArea *>(first->widget()) : nullptr;
+    QVBoxLayout *contentLayout = sa ? qobject_cast<QVBoxLayout *>(sa->widget()->layout()) : nullptr;
+    QWidget *modelGroup = ui->gridLayout_model->parentWidget();
+    if (!contentLayout || !modelGroup) {
+        qWarning() << "initModelLibraryUi: settings scroll layout not found";
+        return;
+    }
+    int insertAt = -1;
+    for (int i = 0; i < contentLayout->count(); ++i) {
+        if (contentLayout->itemAt(i)->widget() == modelGroup) {
+            insertAt = i + 1;
+            break;
+        }
+    }
+    if (insertAt < 0) return;
+
+    QGroupBox *group = new QGroupBox("模型库管理");
+    group->setStyleSheet(theme::field(theme::PANEL));
+    QVBoxLayout *v = new QVBoxLayout(group);
+
+    QHBoxLayout *bar = new QHBoxLayout();
+    QPushButton *btnRefresh = new QPushButton("刷新");
+    QPushButton *btnImport = new QPushButton("导入模型...");
+    QPushButton *btnDelete = new QPushButton("删除选中");
+    btnRefresh->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
+    btnImport->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
+    btnDelete->setStyleSheet(theme::miniButton(theme::DANGER));
+    QLabel *hint = new QLabel("库目录 model/library；改选路径后重启程序生效");
+    hint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
+    bar->addWidget(btnRefresh);
+    bar->addWidget(btnImport);
+    bar->addWidget(btnDelete);
+    bar->addStretch();
+    bar->addWidget(hint);
+    v->addLayout(bar);
+
+    modelLibTable_ = new QTableWidget(0, 6);
+    modelLibTable_->setHorizontalHeaderLabels(
+        {"id", "名称", "任务", "类别数", "输入", "被引用"});
+    modelLibTable_->verticalHeader()->setVisible(false);
+    modelLibTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+    modelLibTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    modelLibTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    modelLibTable_->setShowGrid(false);
+    modelLibTable_->horizontalHeader()->setStretchLastSection(false);
+    modelLibTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    modelLibTable_->setMaximumHeight(240);
+    modelLibTable_->setStyleSheet(QString(
+        "QTableWidget { background: %1; border: 1px solid %2; color: %3; font-size: %4px; }"
+        "QTableWidget::item { padding: 4px 8px; border-bottom: 1px solid %2; }"
+        "QTableWidget::item:selected { background: %5; }"
+        "QHeaderView::section { background: %2; color: %3; padding: 4px 8px; border: none; }")
+        .arg(theme::FIELD, theme::BORDER, theme::TEXT)
+        .arg(theme::FS_BODY)
+        .arg(theme::HOVER));
+    v->addWidget(modelLibTable_);
+
+    connect(btnRefresh, &QPushButton::clicked, this, [this]() {
+        refreshModelLibraryTable();
+        refreshCascadeModelCombos();
+    });
+    connect(btnImport, &QPushButton::clicked, this, &frmMain::importModelViaDialog);
+    connect(btnDelete, &QPushButton::clicked, this, &frmMain::deleteSelectedModel);
+
+    contentLayout->insertWidget(insertAt, group);
+    refreshModelLibraryTable();
+}
+
+// ============================================================
+// refreshModelLibraryTable: rescan 库并重建表格
+// ============================================================
+void frmMain::refreshModelLibraryTable()
+{
+    if (!modelLibTable_) return;
+    ModelRegistry &reg = ModelRegistry::instance();
+    reg.rescan();
+    modelLibTable_->setRowCount(0);
+    int row = 0;
+    const QStringList ids = reg.ids();
+    for (const QString &id : ids) {
+        const ModelMeta m = reg.meta(id);
+        modelLibTable_->insertRow(row);
+        const QStringList cols = {
+            m.id,
+            m.displayName,
+            m.task,
+            QString::number(m.numClasses),
+            QString("%1x%2").arg(m.inputWidth).arg(m.inputHeight),
+            QString::number(reg.referenceCount(id)),
+        };
+        for (int c = 0; c < cols.size(); ++c)
+            modelLibTable_->setItem(row, c, new QTableWidgetItem(cols[c]));
+        ++row;
+    }
+}
+
+// ============================================================
+// importModelViaDialog: 三步导入（rknn → labels(可跳过) → id）
+//   importModel 内置 sha256 去重；成功后同步刷新表格与下拉
+// ============================================================
+void frmMain::importModelViaDialog()
+{
+    QString rknn = QFileDialog::getOpenFileName(
+        this, "导入模型 (1/3): 选择 .rknn 文件", "model", "RKNN 模型 (*.rknn)");
+    if (rknn.isEmpty()) return;
+
+    QString labels = QFileDialog::getOpenFileName(
+        this, "导入模型 (2/3): 选择标签文件（可取消=跳过）", "model",
+        "文本文件 (*.txt);;所有文件 (*)");
+
+    bool ok = false;
+    QString id = QInputDialog::getText(
+        this, "导入模型 (3/3): 指定 id",
+        "库内目录名（小写字母/数字/-/_）:",
+        QLineEdit::Normal, QFileInfo(rknn).completeBaseName().toLower(), &ok)
+                     .trimmed();
+    if (!ok || id.isEmpty()) return;
+
+    QString err;
+    if (ModelRegistry::instance().importModel(rknn, labels, id, err)) {
+        refreshModelLibraryTable();
+        refreshCascadeModelCombos();
+        QMessageBox::information(this, "导入成功",
+            err.isEmpty() ? QString("已导入模型: %1").arg(id) : err);
+        log("model", QString("模型库导入: %1").arg(err.isEmpty() ? id : err));
+    } else {
+        QMessageBox::warning(this, "导入失败", err);
+        log("model", QString("模型库导入失败: %1").arg(err));
+    }
+}
+
+// ============================================================
+// deleteSelectedModel: 删除表格选中模型（registry 内做引用检查）
+//   registry.deleteModel 移入 model/.trash/，非物理删除
+// ============================================================
+void frmMain::deleteSelectedModel()
+{
+    if (!modelLibTable_) return;
+    const int row = modelLibTable_->currentRow();
+    if (row < 0 || !modelLibTable_->item(row, 0)) {
+        QMessageBox::information(this, "删除模型", "请先在列表中选中一行模型");
+        return;
+    }
+    const QString id = modelLibTable_->item(row, 0)->text();
+    if (QMessageBox::question(this, "删除模型",
+            QString("确认把模型 [%1] 移出模型库？\n目录将移入 model/.trash/，可人工恢复。").arg(id))
+        != QMessageBox::Yes) {
+        return;
+    }
+
+    QString err;
+    if (ModelRegistry::instance().deleteModel(id, err)) {
+        refreshModelLibraryTable();
+        refreshCascadeModelCombos();
+        log("model", QString("模型库移除: %1").arg(id));
+    } else {
+        QMessageBox::warning(this, "删除被拒", err);
     }
 }
 

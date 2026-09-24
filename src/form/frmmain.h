@@ -19,6 +19,7 @@
 
 #include <QWidget>
 #include <QComboBox>
+#include <QTableWidget>
 #include <QTextCursor>
 #include <QTextCharFormat>
 #include <QCloseEvent>
@@ -169,6 +170,13 @@ private:
 
     void applyCascadeCombo(int slotIdx);     ///< 下拉当前选项写回 config（槽位0..4）
     void refreshCascadeModelCombos();        ///< 重建 5 个下拉并同步 config 选中项
+
+    // ========== 模型库管理区（P2：model/library 列表 + 导入/删除） ==========
+    QTableWidget *modelLibTable_ = nullptr;
+    void initModelLibraryUi();       ///< 在"模型配置"分组框后插入管理区
+    void refreshModelLibraryTable(); ///< rescan 库并重建表格（含被引用数）
+    void importModelViaDialog();     ///< 三步导入：选 rknn → 选 labels → 起 id
+    void deleteSelectedModel();      ///< 删除表格选中模型（有引用则拒绝）
 
 private slots:
     // ========== 4路视频浏览按钮 ==========
