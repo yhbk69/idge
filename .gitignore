@@ -39,6 +39,14 @@ config.json
 # Test
 test_database
 test_*.cpp
+# 点名/盘点离线全链自检（正式测试源，须入库，豁免上面的临时文件规则）
+!tests/test_equipment.cpp
+!tests/test_rollcall.cpp
+
+# 测试素材（*.jpg/*.mp4 全局忽略，此处显式放行；*_faces.json 等为运行产物不放行）
+!assets/test/1.mp4
+!assets/test/bus.jpg
+!assets/test/test.jpg
 
 *.db-shm
 *.db-wal
