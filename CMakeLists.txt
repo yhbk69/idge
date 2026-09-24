@@ -150,7 +150,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/include
 
     # === OpenCV (备用路径) ===
-    ${CMAKE_SOURCE_DIR}/3rdparty/opencv/include/opencv4
+    # (已删除：3rdparty/opencv 旧版备用路径不存在，OpenCV 由 3rdparty/opencv4.10 CMake 配置提供)
 
     # === Rockchip RGA 2D 加速库 ===
     ${CMAKE_SOURCE_DIR}/3rdparty/librga/include
@@ -183,65 +183,42 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/3rdparty/sqlite/sqlite
 
     # ====================================================================
-    # 项目源码目录（按模块分组）
+    # 项目源码目录（目录重组后按功能域分组，依赖方向 base ← media ← ai ← biz ← ui）
+    # include 约定：一律平铺（#include "xxx.h"），靠本列表解析；禁止 ../ 或模块前缀写法
     # ====================================================================
 
-    # --- 核心模块 ---
-    ${CMAKE_SOURCE_DIR}/src                         # 根目录
-    ${CMAKE_SOURCE_DIR}/src/base                    # 运行时路径等基础设施（runtime_paths.h）
-    ${CMAKE_SOURCE_DIR}/src/base/config                  # 配置管理（CLI/JSON 解析）
-    ${CMAKE_SOURCE_DIR}/src/ui/core_helper             # 核心辅助（单例、样式、日志）
-    ${CMAKE_SOURCE_DIR}/src/ui/core_qss                # QSS 样式表
-    ${CMAKE_SOURCE_DIR}/src/draw                    # 绘图模块
-    ${CMAKE_SOURCE_DIR}/src/engine                  # 引擎模块
-    ${CMAKE_SOURCE_DIR}/src/media/model                   # 模型管理（RKNN 模型池）
-    ${CMAKE_SOURCE_DIR}/src/process                 # 处理模块
-    ${CMAKE_SOURCE_DIR}/src/rkmedia                 # RK 媒体库封装
-    ${CMAKE_SOURCE_DIR}/src/rkmedia/utils           # RK 媒体工具
-    ${CMAKE_SOURCE_DIR}/src/ai/task                    # 任务管理（检测任务、线程池）
-    ${CMAKE_SOURCE_DIR}/src/RtspWorker              # RTSP 流处理
-    ${CMAKE_SOURCE_DIR}/src/stream                  # 流处理
-    ${CMAKE_SOURCE_DIR}/src/base/threadpool              # 线程池
-    ${CMAKE_SOURCE_DIR}/src/types                   # 类型定义
-    ${CMAKE_SOURCE_DIR}/src/base/utils                   # 工具函数（文件、图像、路径）
-    ${CMAKE_SOURCE_DIR}/src/context                 # 上下文管理
-    ${CMAKE_SOURCE_DIR}/src/counter                 # 计数器
+    ${CMAKE_SOURCE_DIR}/src                         # 入口（main.cpp / head.h）
 
-    # --- 视频播放模块 ---
-    ${CMAKE_SOURCE_DIR}/src/videoplay_gl            # OpenGL 视频播放
-    ${CMAKE_SOURCE_DIR}/src/VideoPlay               # 视频播放器
-    ${CMAKE_SOURCE_DIR}/src/player                  # 播放器控件
-    ${CMAKE_SOURCE_DIR}/src/ui/form                    # 窗口界面（主窗口、视频窗口）
+    # --- base 基础设施域（无业务依赖，被所有域引用）---
+    ${CMAKE_SOURCE_DIR}/src/base                    # runtime_paths.h 运行时路径唯一事实源
+    ${CMAKE_SOURCE_DIR}/src/base/buffer             # DMA 缓冲池、帧缓冲区
+    ${CMAKE_SOURCE_DIR}/src/base/config             # 配置管理（CLI/JSON 解析）
+    ${CMAKE_SOURCE_DIR}/src/base/queue              # 帧队列（生产者-消费者）
+    ${CMAKE_SOURCE_DIR}/src/base/threadpool         # 线程池
+    ${CMAKE_SOURCE_DIR}/src/base/utils              # 工具函数（文件、图像、路径）
 
-    # --- YOLO 检测模块 ---
-    ${CMAKE_SOURCE_DIR}/src/media/reader                  # 视频读取（FFmpeg/MPP 解码）
-    ${CMAKE_SOURCE_DIR}/src/ai/yolo11  # (ai域)                 # YOLOv11 检测
-    ${CMAKE_SOURCE_DIR}/src/ai/model_repo             # 模型库注册表
-    ${CMAKE_SOURCE_DIR}/src/yolo8                   # YOLOv8 检测
-    ${CMAKE_SOURCE_DIR}/src/yolo8_pose              # YOLOv8 姿态估计
-    ${CMAKE_SOURCE_DIR}/src/yolo8_seg               # YOLOv8 实例分割
-    ${CMAKE_SOURCE_DIR}/src/yolo                    # YOLO 通用
+    # --- media 视频管线域 ---
+    ${CMAKE_SOURCE_DIR}/src/media/model             # 模型管理（RKNN 帧模型池 ModelPool）
+    ${CMAKE_SOURCE_DIR}/src/media/reader            # 视频读取（FFmpeg 硬解/MPP 解码/录像）
+    ${CMAKE_SOURCE_DIR}/src/media/rga               # RGA 色彩转换
 
-    # --- 缓冲区管理 ---
-    ${CMAKE_SOURCE_DIR}/src/base/buffer                  # DMA 缓冲池、帧缓冲区
-    ${CMAKE_SOURCE_DIR}/src/base/queue                   # 帧队列（生产者-消费者）
-    ${CMAKE_SOURCE_DIR}/src/infer                   # 推理模块
-    ${CMAKE_SOURCE_DIR}/src/rknn                    # RKNN 封装
-    ${CMAKE_SOURCE_DIR}/src/media/rga                     # RGA 色彩转换
+    # --- ai 推理与模型应用域 ---
+    ${CMAKE_SOURCE_DIR}/src/ai/model_repo           # 模型库注册表（扫描/导入/级联槽位）
+    ${CMAKE_SOURCE_DIR}/src/ai/recognition          # 人脸识别桥接（fork+execv 调 tools/face_recognition）
+    ${CMAKE_SOURCE_DIR}/src/ai/task                 # 检测任务（helmet/ppe 等）
+    ${CMAKE_SOURCE_DIR}/src/ai/yolo11               # YOLOv11 RKNN 推理
 
-    # --- 报警模块 ---
-    ${CMAKE_SOURCE_DIR}/src/biz/alarm                   # 报警管理（去重、限流）
+    # --- biz 业务域 ---
+    ${CMAKE_SOURCE_DIR}/src/biz/alarm               # 报警管理（去重、限流）
+    ${CMAKE_SOURCE_DIR}/src/biz/db                  # 数据持久层（业务 sqlite3 + 报警 QtSQL 两套）
+    ${CMAKE_SOURCE_DIR}/src/biz/geofence            # 电子围栏（形状、检测、覆盖层）
+    ${CMAKE_SOURCE_DIR}/src/biz/service             # 点名/盘点业务服务
 
-    # --- 电子围栏模块 ---
-    ${CMAKE_SOURCE_DIR}/src/biz/geofence                # 电子围栏（形状、检测、覆盖层）
-
-    # --- 人员点名 / 设备盘点业务模块（caichao 分支合并） ---
-    ${CMAKE_SOURCE_DIR}/src/biz/db                      # 业务 SQLite 数据库（tasks/人脸/设备检测）
-    ${CMAKE_SOURCE_DIR}/src/biz/service                 # 点名/盘点业务服务
-    ${CMAKE_SOURCE_DIR}/src/ai/recognition             # 人脸识别桥接
-
-    # --- UI 模块 ---
-    ${CMAKE_SOURCE_DIR}/src/ui/widgets                     # OpenGL 渲染、EGL、数据看板
+    # --- ui 界面域 ---
+    ${CMAKE_SOURCE_DIR}/src/ui/core_helper          # 核心辅助（单例、样式、日志）
+    ${CMAKE_SOURCE_DIR}/src/ui/core_qss             # QSS 样式表
+    ${CMAKE_SOURCE_DIR}/src/ui/form                 # 窗口界面（主窗口、视频窗口）
+    ${CMAKE_SOURCE_DIR}/src/ui/widgets              # 可复用控件与 EGL/GL 渲染
 )
 
 # ============================================================================
@@ -352,7 +329,7 @@ set(TS_FILES ${CMAKE_SOURCE_DIR}/src/idge_zh_CN.ts)  # 中文翻译文件
 # ============================================================================
 # 最终头文件包含路径
 # ============================================================================
-include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/utils ${STB_INCLUDES} ${LIBJPEG_INCLUDES})
+include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${STB_INCLUDES} ${LIBJPEG_INCLUDES})
 include_directories(${LIBRKNNRT_INCLUDES})
 
 message(STATUS ${LIBRKNNRT})
