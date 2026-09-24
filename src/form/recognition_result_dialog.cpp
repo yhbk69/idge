@@ -9,7 +9,7 @@
 上一步：返回照片选择界面重新拍照
 确认：保存结果到数据库，写入人脸特征和图片路径
 */
-#include "../utils/qt_image_utils.h"
+#include "qt_image_utils.h"
 #include "recognition_result_dialog.h"
 #include "theme.h"
 #include <QHeaderView>

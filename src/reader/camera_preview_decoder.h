@@ -33,8 +33,8 @@
 
 // 引入video_decoder相同的头文件
 #include "../ui/gl_video_widget.h"
-#include "../buffer/DmaBufferPool.h"
-#include "../queue/priority_queue.h"
+#include "DmaBufferPool.h"
+#include "priority_queue.h"
 #include "../task/ppe_task.hpp"
 #include "../yolo11/common.hpp"
 #include "scrfd_face_detector.h"

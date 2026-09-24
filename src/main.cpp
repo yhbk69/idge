@@ -61,11 +61,11 @@
 #include <gelf.h>
 #include <GL/gl.h>
 #include "easy_timer.h"
-#include "queue/priority_queue.h"
+#include "priority_queue.h"
 #include "gl_video_widget.h"
 #include "ThreadPool.hpp"
 
-#include "config/parse_config.hpp"
+#include "parse_config.hpp"
 #include "yolo11/yolo11_model.hpp"
 #include "alarm_manager.h"
 #include "database/database_manager.h"

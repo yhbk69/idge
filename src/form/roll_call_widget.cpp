@@ -10,7 +10,7 @@
 删除任务：清除数据库和文件
 导出报告：生成 txt 纯文本报告（UTF-8）
 */
-#include "../utils/qt_image_utils.h"
+#include "qt_image_utils.h"
 #include "roll_call_widget.h"
 #include "photo_selection_widget.h"
 #include "recognition_result_dialog.h"

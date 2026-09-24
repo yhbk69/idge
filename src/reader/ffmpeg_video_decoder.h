@@ -37,7 +37,7 @@ extern "C" {
 }
 
 #include "gl_video_widget.h"
-#include "queue/priority_queue.h"
+#include "priority_queue.h"
 #include "DmaBufferPool.h"
 #include "easy_timer.h"
 #include "yolo11_model.hpp"

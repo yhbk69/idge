@@ -1,4 +1,6 @@
-# src/threadpool
+# src/base/threadpool
+
+> 所属域：**base 基础设施域**（目录重组 S4a 迁入，依赖方向 base ← media/ai/biz/ui）
 
 ## 功能概述（在流水线中的位置）
 多路视频并发推理的执行引擎。每个工作线程持有独立的 RKNN 模型上下文（线程局部 ExecuteContext），把"一帧送 NPU 跑 YOLO11"的任务从各通道解码线程中卸载出来，实现通道级并行 + 动态扩缩容。

@@ -23,8 +23,8 @@
 #include <unistd.h>
 #include <utility>
 
-#include "../utils/task_manager.h"
-#include "../utils/qt_image_utils.h"
+#include "task_manager.h"
+#include "qt_image_utils.h"
 
 // 构造注入：仅保存 shared_ptr，不做任何 IO；ready_=false 前所有流程接口都会拒绝工作
 EquipmentInventoryService::EquipmentInventoryService(

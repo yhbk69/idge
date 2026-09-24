@@ -17,7 +17,7 @@
 #include <map>
 #include <utility>
 
-#include "../utils/qt_image_utils.h"
+#include "qt_image_utils.h"
 
 EquipmentDetailDialog::EquipmentDetailDialog(
     int task_id, std::shared_ptr<EquipmentInventoryService> service, QWidget* parent)

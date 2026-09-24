@@ -13,7 +13,7 @@
 #include "cancellation_result_dialog.h"
 #include "theme.h"
 #include "photo_selection_widget.h"
-#include "../utils/qt_image_utils.h"
+#include "qt_image_utils.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QPushButton>

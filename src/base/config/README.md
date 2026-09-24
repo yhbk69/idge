@@ -1,8 +1,10 @@
-# src/config
+# src/base/config
+
+> 所属域：**base 基础设施域**（目录重组 S4a 迁入，依赖方向 base ← media/ai/biz/ui）
 
 ## 功能概述
 配置模块。分两部分：
-- **ConfigManager**（Qt/JSON）：`config.json` 的统一读写入口，供 GUI/检测/报警/围栏共享。
+- **ConfigManager**（Qt/JSON）：`data/config.json` 的统一读写入口（路径常量见 `src/base/runtime_paths.h`），供 GUI/检测/报警/围栏共享。
 - **ConfigParser**（CLI）：基于 `getopt_long` 的命令行参数解析，产出 `AppConfig`。
 
 ## 文件清单

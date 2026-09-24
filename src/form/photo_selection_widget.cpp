@@ -14,7 +14,7 @@
 // photo_selection_widget.cpp
 #include "photo_selection_widget.h"
 #include "theme.h"
-#include "../utils/qt_image_utils.h"
+#include "qt_image_utils.h"
 #include "../reader/camera_preview_decoder.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>

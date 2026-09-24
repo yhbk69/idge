@@ -189,7 +189,7 @@ include_directories(
     # --- 核心模块 ---
     ${CMAKE_SOURCE_DIR}/src                         # 根目录
     ${CMAKE_SOURCE_DIR}/src/base                    # 运行时路径等基础设施（runtime_paths.h）
-    ${CMAKE_SOURCE_DIR}/src/config                  # 配置管理（CLI/JSON 解析）
+    ${CMAKE_SOURCE_DIR}/src/base/config                  # 配置管理（CLI/JSON 解析）
     ${CMAKE_SOURCE_DIR}/src/core_helper             # 核心辅助（单例、样式、日志）
     ${CMAKE_SOURCE_DIR}/src/core_qss                # QSS 样式表
     ${CMAKE_SOURCE_DIR}/src/draw                    # 绘图模块
@@ -201,9 +201,9 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/task                    # 任务管理（检测任务、线程池）
     ${CMAKE_SOURCE_DIR}/src/RtspWorker              # RTSP 流处理
     ${CMAKE_SOURCE_DIR}/src/stream                  # 流处理
-    ${CMAKE_SOURCE_DIR}/src/threadpool              # 线程池
+    ${CMAKE_SOURCE_DIR}/src/base/threadpool              # 线程池
     ${CMAKE_SOURCE_DIR}/src/types                   # 类型定义
-    ${CMAKE_SOURCE_DIR}/src/utils                   # 工具函数（文件、图像、路径）
+    ${CMAKE_SOURCE_DIR}/src/base/utils                   # 工具函数（文件、图像、路径）
     ${CMAKE_SOURCE_DIR}/src/context                 # 上下文管理
     ${CMAKE_SOURCE_DIR}/src/counter                 # 计数器
 
@@ -222,8 +222,8 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/yolo                    # YOLO 通用
 
     # --- 缓冲区管理 ---
-    ${CMAKE_SOURCE_DIR}/src/buffer                  # DMA 缓冲池、帧缓冲区
-    ${CMAKE_SOURCE_DIR}/src/queue                   # 帧队列（生产者-消费者）
+    ${CMAKE_SOURCE_DIR}/src/base/buffer                  # DMA 缓冲池、帧缓冲区
+    ${CMAKE_SOURCE_DIR}/src/base/queue                   # 帧队列（生产者-消费者）
     ${CMAKE_SOURCE_DIR}/src/infer                   # 推理模块
     ${CMAKE_SOURCE_DIR}/src/rknn                    # RKNN 封装
     ${CMAKE_SOURCE_DIR}/src/rga                     # RGA 色彩转换

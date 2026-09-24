@@ -15,7 +15,7 @@
 
 #include <utility>
 
-#include "../utils/qt_image_utils.h"
+#include "qt_image_utils.h"
 
 namespace {
 /**

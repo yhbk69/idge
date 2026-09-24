@@ -17,7 +17,7 @@
 // ============================================================================
 
 #include "model_registry.h"
-#include "../config/ConfigManager.h"
+#include "ConfigManager.h"
 
 #include <QDir>
 #include <QFile>

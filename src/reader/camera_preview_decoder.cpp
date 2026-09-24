@@ -15,11 +15,11 @@
 // ============================================================================
 #include "camera_preview_decoder.h"
 
-#include "../buffer/DmaFrameBuffer.h"
-#include "../buffer/dma_alloc.h"
+#include "DmaFrameBuffer.h"
+#include "dma_alloc.h"
 #include "../rga/rga_converter.h"
-#include "../utils/image_utils.h"
-#include "../utils/image_drawing.h"
+#include "image_utils.h"
+#include "image_drawing.h"
 
 #include <QFile>
 #include <QDebug>

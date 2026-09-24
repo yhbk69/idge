@@ -1,4 +1,6 @@
-# src/utils
+# src/base/utils
+
+> 所属域：**base 基础设施域**（目录重组 S4a 迁入，依赖方向 base ← media/ai/biz/ui）
 
 ## 功能概述
 

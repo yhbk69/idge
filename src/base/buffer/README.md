@@ -1,4 +1,6 @@
-# src/buffer
+# src/base/buffer
+
+> 所属域：**base 基础设施域**（目录重组 S4a 迁入，依赖方向 base ← media/ai/biz/ui）
 
 ## 功能概述（在流水线中的位置）
 零拷贝视频流水线的"内存底座"。FFmpeg(h264_rkmpp) 硬解码输出 NV12 DMA-BUF、RGA 硬件转换/缩放产生的 RGBA 与 640×640 输入帧，全部落在本目录分配或池化管理的 DMA-BUF 物理连续内存上。下游（RGA、NPU、GPU/EGLImage）都以 fd 共享同一物理页，CPU 只在画框时 mmap 触点。
