@@ -1,4 +1,6 @@
-# src/service
+# src/biz/service
+
+> 所属域：**biz 业务域**（目录重组 S4d 迁入）
 
 ## 功能概述
 

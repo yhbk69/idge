@@ -13,7 +13,7 @@
 #include <map>
 #include <memory>
 
-#include "../service/equipment_inventory_service.h"
+#include "equipment_inventory_service.h"
 
 /**
  * @class EquipmentDetailDialog

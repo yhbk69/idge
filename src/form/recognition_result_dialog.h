@@ -22,7 +22,7 @@
 #include <memory>
 #include <set>
 #include <vector>
-#include "../service/roll_call_service.h"
+#include "roll_call_service.h"
 
 // TaskProcessResult 需跨线程（识别线程→GUI）经队列连接传递，必须注册元类型
 Q_DECLARE_METATYPE(TaskProcessResult)

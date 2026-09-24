@@ -1,4 +1,6 @@
-# src/geofence
+# src/biz/geofence
+
+> 所属域：**biz 业务域**（目录重组 S4d 迁入）
 
 ## 功能概述
 电子围栏模块。支持在视频 overlay 上绘制矩形/多边形围栏，配置 per-channel 的

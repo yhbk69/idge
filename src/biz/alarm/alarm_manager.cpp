@@ -38,9 +38,9 @@
 
 #include "alarm_manager.h"
 #include "ConfigManager.h"
-#include "database/database_manager.h"
-#include "database/alarm_dao.h"
-#include "database/detection_dao.h"
+#include "database_manager.h"
+#include "alarm_dao.h"
+#include "detection_dao.h"
 #include <QDateTime>
 #include <QDebug>
 #include <QUuid>

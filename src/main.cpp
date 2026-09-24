@@ -68,7 +68,7 @@
 #include "parse_config.hpp"
 #include "yolo11_model.hpp"
 #include "alarm_manager.h"
-#include "database/database_manager.h"
+#include "database_manager.h"
 
 //std::shared_ptr<dpool::ThreadPool> detectPool;
 

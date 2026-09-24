@@ -23,7 +23,7 @@
 #include <QSoundEffect>
 #include <memory>
 
-#include "../service/roll_call_service.h"
+#include "roll_call_service.h"
 #include "camera_preview_decoder.h"
 #include "../ui/gl_video_widget.h"
 

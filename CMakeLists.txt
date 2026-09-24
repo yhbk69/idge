@@ -230,14 +230,14 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/media/rga                     # RGA 色彩转换
 
     # --- 报警模块 ---
-    ${CMAKE_SOURCE_DIR}/src/alarm                   # 报警管理（去重、限流）
+    ${CMAKE_SOURCE_DIR}/src/biz/alarm                   # 报警管理（去重、限流）
 
     # --- 电子围栏模块 ---
-    ${CMAKE_SOURCE_DIR}/src/geofence                # 电子围栏（形状、检测、覆盖层）
+    ${CMAKE_SOURCE_DIR}/src/biz/geofence                # 电子围栏（形状、检测、覆盖层）
 
     # --- 人员点名 / 设备盘点业务模块（caichao 分支合并） ---
-    ${CMAKE_SOURCE_DIR}/src/db                      # 业务 SQLite 数据库（tasks/人脸/设备检测）
-    ${CMAKE_SOURCE_DIR}/src/service                 # 点名/盘点业务服务
+    ${CMAKE_SOURCE_DIR}/src/biz/db                      # 业务 SQLite 数据库（tasks/人脸/设备检测）
+    ${CMAKE_SOURCE_DIR}/src/biz/service                 # 点名/盘点业务服务
     ${CMAKE_SOURCE_DIR}/src/ai/recognition             # 人脸识别桥接
 
     # --- UI 模块 ---
@@ -474,14 +474,14 @@ install(DIRECTORY ${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg-rkmpp/lib/
 # 数据库模块测试
 add_executable(test_database
     tests/test_database.cpp
-    src/database/database_manager.cpp
-    src/database/detection_dao.cpp
-    src/database/alarm_dao.cpp
+    src/biz/db/database_manager.cpp
+    src/biz/db/detection_dao.cpp
+    src/biz/db/alarm_dao.cpp
 )
 
 target_include_directories(test_database PRIVATE
     ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/src/database
+    ${CMAKE_SOURCE_DIR}/src/biz/db
     ${CMAKE_SOURCE_DIR}/src/ai/yolo11
     ${CMAKE_SOURCE_DIR}/src/alarm
     ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/include

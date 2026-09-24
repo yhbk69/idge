@@ -17,8 +17,8 @@
 #include <vector>
 #include <opencv2/opencv.hpp>
 
-#include "../db/business_db_manager.h"
-#include "../service/roll_call_service.h"
+#include "business_db_manager.h"
+#include "roll_call_service.h"
 
 // 单个设备检出：class_index 为模型标签表行号，label 为标签名，rect 为原图像素坐标框
 struct EquipmentDetection {

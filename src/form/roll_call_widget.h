@@ -15,7 +15,7 @@
 #include <QTableWidget>
 #include <QPushButton>
 #include <memory>
-#include "../service/roll_call_service.h"
+#include "roll_call_service.h"
 
 /**
  * @class RollCallWidget

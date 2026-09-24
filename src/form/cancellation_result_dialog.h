@@ -20,7 +20,7 @@
 #include <QPushButton>
 #include <QStringList>
 #include <memory>
-#include "../service/roll_call_service.h"
+#include "roll_call_service.h"
 /**
  * @class CancellationResultDialog
  * @brief 注销匹配结果页。识别在独立 QThread 中执行（Worker moveToThread 模式，

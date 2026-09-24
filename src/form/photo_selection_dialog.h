@@ -24,7 +24,7 @@
 #include <QCheckBox>
 #include <memory>
 #include <opencv2/opencv.hpp>
-#include "../service/roll_call_service.h"
+#include "roll_call_service.h"
 
 /**
  * @class PhotoSelectionDialog (遗留版本声明)

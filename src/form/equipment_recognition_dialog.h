@@ -22,7 +22,7 @@
 #include <memory>
 #include <map>
 
-#include "../service/equipment_inventory_service.h"
+#include "equipment_inventory_service.h"
 
 // 跨线程(工作线程→GUI)信号参数必须注册元类型，队列连接才能搬运该结构体
 Q_DECLARE_METATYPE(EquipmentTaskResult)
