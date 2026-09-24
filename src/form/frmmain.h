@@ -176,6 +176,7 @@ private:
     void initModelLibraryUi();       ///< 在"模型配置"分组框后插入管理区
     void refreshModelLibraryTable(); ///< rescan 库并重建表格（含被引用数）
     void importModelViaDialog();     ///< 三步导入：选 rknn → 选 labels → 起 id
+    void importModelZip();           ///< zip 模型包一键导入（解压→逐目录 importModel）
     void deleteSelectedModel();      ///< 删除表格选中模型（有引用则拒绝）
 
 private slots:

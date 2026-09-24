@@ -58,6 +58,7 @@
 #include <QInputDialog>
 #include <QScrollArea>
 #include <QTableWidget>
+#include <QProcess>
 
 // ==========================================
 // 构造 / 析构
@@ -1211,14 +1212,17 @@ void frmMain::initModelLibraryUi()
     QHBoxLayout *bar = new QHBoxLayout();
     QPushButton *btnRefresh = new QPushButton("刷新");
     QPushButton *btnImport = new QPushButton("导入模型...");
+    QPushButton *btnZip = new QPushButton("导入zip包...");
     QPushButton *btnDelete = new QPushButton("删除选中");
     btnRefresh->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
     btnImport->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
+    btnZip->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
     btnDelete->setStyleSheet(theme::miniButton(theme::DANGER));
     QLabel *hint = new QLabel("库目录 model/library；改选路径后重启程序生效");
     hint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
     bar->addWidget(btnRefresh);
     bar->addWidget(btnImport);
+    bar->addWidget(btnZip);
     bar->addWidget(btnDelete);
     bar->addStretch();
     bar->addWidget(hint);
@@ -1250,6 +1254,7 @@ void frmMain::initModelLibraryUi()
         refreshCascadeModelCombos();
     });
     connect(btnImport, &QPushButton::clicked, this, &frmMain::importModelViaDialog);
+    connect(btnZip, &QPushButton::clicked, this, &frmMain::importModelZip);
     connect(btnDelete, &QPushButton::clicked, this, &frmMain::deleteSelectedModel);
 
     contentLayout->insertWidget(insertAt, group);
@@ -1317,6 +1322,89 @@ void frmMain::importModelViaDialog()
         QMessageBox::warning(this, "导入失败", err);
         log("model", QString("模型库导入失败: %1").arg(err));
     }
+}
+
+// ============================================================
+// importModelZip: zip 模型包一键导入（换库/分发场景）
+//   布局约定：包内每个模型一个目录，含 model.rknn（labels.txt 可选）；
+//   容忍 zip 自带的顶层文件夹（向下多探一层）。
+//   流程：解压临时目录 → 收集模型目录 → 逐个 importModel（sha256 去重）
+//        → 清理临时目录 → 刷新表格/下拉
+// ============================================================
+void frmMain::importModelZip()
+{
+    const QString zip = QFileDialog::getOpenFileName(
+        this, "导入 zip 模型包", "model", "Zip 模型包 (*.zip)");
+    if (zip.isEmpty()) return;
+
+    const QString tmp = QDir::temp().filePath(
+        QStringLiteral("idge_model_zip_%1").arg(QDateTime::currentMSecsSinceEpoch()));
+    if (!QDir().mkpath(tmp)) {
+        QMessageBox::warning(this, "解压失败", "无法创建临时目录: " + tmp);
+        return;
+    }
+    const int rc = QProcess::execute("unzip", {"-q", "-o", zip, "-d", tmp});
+    if (rc != 0) {
+        QDir(tmp).removeRecursively();
+        QMessageBox::warning(this, "解压失败",
+            QString("unzip 退出码 %1（zip 损坏或解压工具缺失）").arg(rc));
+        return;
+    }
+
+    // 收集含 model.rknn 的目录：根 → 一级子目录 → 二级子目录
+    QStringList modelDirs;
+    QDir t(tmp);
+    if (t.exists("model.rknn")) {
+        modelDirs << t.absolutePath();
+    } else {
+        const QFileInfoList l1 = t.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QFileInfo &d1 : l1) {
+            QDir q1(d1.absoluteFilePath());
+            if (q1.exists("model.rknn")) {
+                modelDirs << q1.absolutePath();
+                continue;
+            }
+            const QFileInfoList l2 = q1.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+            for (const QFileInfo &d2 : l2) {
+                QDir q2(d2.absoluteFilePath());
+                if (q2.exists("model.rknn"))
+                    modelDirs << q2.absolutePath();
+            }
+        }
+    }
+    if (modelDirs.isEmpty()) {
+        QDir(tmp).removeRecursively();
+        QMessageBox::warning(this, "未找到模型",
+            "zip 内未找到含 model.rknn 的模型目录");
+        return;
+    }
+
+    QStringList okList, dupList, failList;
+    for (const QString &dirPath : modelDirs) {
+        QString id = QFileInfo(dirPath).fileName().toLower();
+        id.replace(' ', '-');
+        const QString srcLabel = QFile::exists(dirPath + "/labels.txt")
+            ? dirPath + "/labels.txt" : QString();
+        QString err;
+        if (ModelRegistry::instance().importModel(dirPath + "/model.rknn", srcLabel, id, err)) {
+            (err.isEmpty() ? okList : dupList) << (err.isEmpty() ? id : err);
+        } else {
+            failList << QString("%1: %2").arg(id, err);
+        }
+    }
+    QDir(tmp).removeRecursively();
+    refreshModelLibraryTable();
+    refreshCascadeModelCombos();
+
+    QString summary = QString("共 %1 个模型目录\n新导入: %2\n跳过(重复): %3")
+        .arg(modelDirs.size())
+        .arg(okList.isEmpty() ? "无" : okList.join(", "))
+        .arg(dupList.isEmpty() ? "无" : QStringList(dupList).join("; "));
+    if (!failList.isEmpty())
+        summary += "\n失败:\n" + failList.join("\n");
+    QMessageBox::information(this, "zip 导入结果", summary);
+    log("model", QString("zip 模型包导入: 成功 %1, 重复 %2, 失败 %3")
+            .arg(okList.size()).arg(dupList.size()).arg(failList.size()));
 }
 
 // ============================================================
