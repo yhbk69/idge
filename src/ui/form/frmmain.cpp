@@ -533,8 +533,11 @@ void frmMain::initBusinessPages()
     if (!ui->pageRoll->layout()) ui->pageRoll->setLayout(new QVBoxLayout());
     ui->pageRoll->layout()->addWidget(rollCallWidget_);
 
-    // 设备盘点页：代码创建并插入 stackedWidget
-    initEquipmentService();
+    // 设备盘点页：代码创建并插入 stackedWidget（初始化失败与点名同级弹窗提示）
+    if (!initEquipmentService()) {
+        QMessageBox::warning(this, "警告",
+                             "设备盘点服务初始化失败：模型库中未找到可用检测模型");
+    }
     equipmentWidget_ = new EquipmentInventoryWidget();
     equipmentWidget_->setServices(equipmentService_, rollCallService_);
     equipPage_ = new QWidget();
@@ -566,25 +569,38 @@ bool frmMain::initRollCallService()
     return success;
 }
 
-// 设备盘点模型清单：coco(通用目标) 与 fire(明火) 两套 yolo11.rknn，
-// 均借 coco_80_labels_list.txt 出标签；预览期两个模型分别绑定 NPU 核0/核1
-// （与设备页构造 detector_configs 时的核分配一致，主检测流水线预算留核2）
+// 设备盘点模型清单（经模型库 ModelRegistry 解析，权重来自 model/library/）：
+//   - coco 槽：yolo11n-coco（80 类通用目标，当前作为盘点主力权重）；
+//   - fire 槽：库内 id 含 "fire" 的模型（用户日后用库管理导入明火 .rknn 即自动生效），
+//     未入库则跳过，仅用 COCO 单模型盘点。
+// 首个模型绑 NPU 核0、其余核1（与设备页预览的核分配一致，主检测流水线预算留核2）
 bool frmMain::initEquipmentService()
 {
     equipmentService_ = std::make_shared<EquipmentInventoryService>(rollCallService_);
-    const std::string model_dir = workspace_ + "/model";
-    const std::vector<EquipmentModelConfig> models = {
-        {
-            model_dir + "/coco/rknn_yolo11_demo",
-            model_dir + "/coco/model/yolo11.rknn",
-            model_dir + "/coco/model/coco_80_labels_list.txt"
-        },
-        {
-            model_dir + "/fire/rknn_yolo11_demo",
-            model_dir + "/fire/model/yolo11.rknn",
-            model_dir + "/fire/model/coco_80_labels_list.txt"
+    ModelRegistry &reg = ModelRegistry::instance();
+    std::vector<EquipmentModelConfig> models;
+    const QString coco_id = QStringLiteral("yolo11n-coco");
+    if (reg.contains(coco_id)) {
+        models.push_back({"", reg.modelPath(coco_id).toStdString(),
+                          reg.labelPath(coco_id).toStdString()});
+    }
+    QString fire_id;
+    for (const QString &id : reg.ids()) {
+        if (id != coco_id && id.contains("fire", Qt::CaseInsensitive)) {
+            fire_id = id;
+            break;
         }
-    };
+    }
+    if (!fire_id.isEmpty()) {
+        models.push_back({"", reg.modelPath(fire_id).toStdString(),
+                          reg.labelPath(fire_id).toStdString()});
+    } else {
+        qWarning() << "明火模型未入库，暂用 COCO 单模型盘点";
+    }
+    if (models.empty()) {
+        qWarning() << "设备盘点初始化失败：模型库中无 yolo11n-coco 也无明火模型";
+        return false;
+    }
     return equipmentService_->initialize(models);
 }
 

@@ -33,13 +33,10 @@ $IDGE_WORKSPACE/
 │   │   ├── detection.rknn         # SCRFD 人脸检测模型
 │   │   ├── recognition.rknn       # 人脸特征比对模型
 │   │   └── face_recognition       # 模型基路径（前缀约定）
-│   ├── coco/                      # 设备盘点模型 1（COCO 通用类）
-│   │   ├── rknn_yolo11_demo       # 模型基路径（前缀约定）
-│   │   └── model/
-│   │       ├── yolo11.rknn
-│   │       └── coco_80_labels_list.txt
-│   └── fire/                      # 设备盘点模型 2（可扩展其他类别）
-│       └── model/ ...
+│   └── library/                   # 模型库：设备盘点权重经 ModelRegistry 从这里解析
+│       └── yolo11n-coco/          # 当前盘点主力权重（明火模型入库后自动加入盘点清单）
+│           ├── model.rknn
+│           └── labels.txt
 └── data/
     └── roll_call_data/            # 点名/盘点业务数据
         └── roll_call.db               # 业务 SQLite 库（任务/人脸/设备表）
@@ -155,8 +152,8 @@ RGBA8888 DMA-BUF fd（带检测框的最终画面）
     → 注册/比对/注销(src/biz/service/roll_call_service)
     → 余弦相似度矩阵(Eigen) + 贪心一对一匹配 → roll_call.db
 
-设备盘点：拍照 → YOLO11 识别(多模型 coco/fire) → 结果去重汇总
-    → src/biz/service/equipment_inventory_service → roll_call.db 任务/设备表
+设备盘点：拍照 → 进程内 YOLO11 识别(src/ai/yolo11，权重=model/library/yolo11n-coco)
+    → 结果去重汇总 → src/biz/service/equipment_inventory_service → roll_call.db 任务/设备表
 ```
 
 ---

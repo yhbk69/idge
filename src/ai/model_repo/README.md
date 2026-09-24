@@ -31,6 +31,8 @@ ModelRegistry::instance().findIdByModelFile(p);// 模型文件反查库内 id
 
 - `src/media/reader/ffmpeg_video_decoder.cpp`：`buildCascadeTasks()` 按槽建任务，
   `taskConfig.result_id = 槽下标`，结果经 `od.id` 路由到 `AlarmManager` 的按槽类名表；
+- `src/ui/form/frmmain.cpp`：`initEquipmentService()` 设备盘点模型清单的单一来源
+  （coco 槽固定取 `yolo11n-coco`；明火按 id 含 "fire" 探测，入库即自动生效）；
 - `src/base/config/ConfigManager.cpp`：旧配置路径迁移（绝对路径/平铺路径 → `library/` 相对路径）；
 - Phase 2 模型管理 UI（规划中）：下拉框数据源、导入/删除。
 

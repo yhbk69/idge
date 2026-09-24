@@ -49,7 +49,7 @@
 - **后台识别线程模式**：`QThread(this)` + Worker `moveToThread` + `started→run` + finished/error 自动 quit；跨线程携带的结构体必须先 `qRegisterMetaType`；Worker 定义在 .cpp 内时文件尾必须 `#include "xxx.moc"`。
 - **IDGE_WORKSPACE 目录约定**（`initBusinessPages()` 读取环境变量，缺省回退当前目录）：
   - `model/face/`：点名三件套（face_recognition 路径、detection.rknn、recognition.rknn）；
-  - `model/coco/`、`model/fire/`：设备盘点 yolo11 模型与标签；
+  - `model/library/`：设备盘点检测权重（`initEquipmentService()` 经 ModelRegistry 解析，当前用 yolo11n-coco，明火模型入库后自动加入）；
   - `roll_call_data/`：任务目录根与 `roll_call.db`；拍照产物写入各任务 `folder_path`。
 
 ## 依赖关系

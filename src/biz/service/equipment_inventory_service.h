@@ -3,8 +3,9 @@
 
 /*
  * 设备盘点服务：对批量照片运行 YOLO11(RKNN) 目标检测，统计各品类数量。
- * 检测不在本进程内做，而是复用外部 rknn_yolo11_demo 可执行程序（子进程，
- * 参数：模型 图片 结果txt 类别数），逐行解析其输出的 JSON-like 检测结果；
+ * 检测在主进程内完成（YOLO11Model + model/library 下的库模型权重，
+ * 与实时预览 PpeTask 同一推理链路）；模型实例在 initialize 时一次性
+ * 加载并常驻，绑定约定 models[i]->NPU 核 i（核0/1，主流水线留核2）。
  * 任务与结果落库共用 RollCallService 持有的同一个 BusinessDBManager 连接，
  * 因此本服务以 shared_ptr<RollCallService> 为依赖注入而非独立建库。
  * phase 语义：0=进场盘点（registration），1=退场/复查（cancellation），
@@ -19,6 +20,10 @@
 
 #include "business_db_manager.h"
 #include "roll_call_service.h"
+
+// 前置声明即可：完整头（含 rknn 依赖）只在 .cpp 引入；
+// 成员析构因此移到 .cpp（unique_ptr 要求完整类型）
+class YOLO11Model;
 
 // 单个设备检出：class_index 为模型标签表行号，label 为标签名，rect 为原图像素坐标框
 struct EquipmentDetection {
@@ -48,9 +53,10 @@ struct EquipmentTaskResult {
     std::string error_message;                // 记录第一张失败照片的错误
 };
 
-// 外部检测程序的三件套配置：宿主 exe + rknn 模型 + 标签表（每行一个类别名）
+// 盘点模型配置：rknn 权重 + 标签表（每行一个类别名）。
+// executable_path 为外部 demo 时代的遗留字段，已废弃，恒可留空
 struct EquipmentModelConfig {
-    std::string executable_path;
+    std::string executable_path;   // 废弃：保留仅为兼容既有构造点聚合初始化
     std::string model_path;
     std::string labels_path;
 };
@@ -60,14 +66,15 @@ public:
     // roll_call_service 以 shared_ptr 注入：设备任务复用其 SQLite 连接与存储根目录；
     // 允许为空（未初始化点名服务时所有库操作静默失败返回默认值，不崩溃）
     explicit EquipmentInventoryService(std::shared_ptr<RollCallService> roll_call_service);
+    // 定义在 .cpp：detectors_ 的 unique_ptr<YOLO11Model> 析构需要完整类型
+    ~EquipmentInventoryService();
 
-    // 多模型初始化：逐个校验标签文件可读非空、exe 与模型文件存在，任一失败则整体不就绪。
-    // 单标签行计数即模型类别数 label_count，作为参数传给外部检测程序（决定输出解码宽度）
+    // 多模型初始化：逐个校验标签文件可读非空、模型文件存在，并为每个模型
+    // 构造常驻 YOLO11Model（加载权重到 NPU，绑定核 i）。任一失败则整体不就绪。
+    // 标签行数即模型类别数 numClasses，决定输出解码宽度。
     bool initialize(const std::vector<EquipmentModelConfig>& models);
     // 单模型便捷重载：转调 vector 版本
-    bool initialize(const std::string& executable_path,
-                    const std::string& model_path,
-                    const std::string& labels_path);
+    bool initialize(const std::string& model_path, const std::string& labels_path);
     bool isReady() const {
         return ready_;
     }
@@ -90,29 +97,27 @@ public:
     std::vector<EquipmentDetectionRecord> getDetections(int photo_id) const;
 
 private:
-    // 以子进程方式跑一次检测：参数约定 <model> <image> <result.txt> <label_count>，
-    // 结果写文本文件回传（避免解析 stdout 噪声）；超时/非零退出/异常退出都算失败
+    // 进程内跑一次检测：read_image 解码 -> detectors_[model_index] 推理 ->
+    // 转 EquipmentDetection（坐标已是原图像素空间）；解码/推理失败返回 false
     bool runDetector(const std::string& image_path,
-                     const std::string& result_path,
-                     const EquipmentModelConfig& model,
-                     int label_count,
-                     std::vector<EquipmentDetection>& detections) const;
-    // 解析结果文件：每行一条 {index,confidence,label,x1,y1,x2,y2}，不匹配的行静默跳过
-    bool parseResultFile(const std::string& result_path,
-                         std::vector<EquipmentDetection>& detections) const;
+                     size_t model_index,
+                     std::vector<EquipmentDetection>& detections);
     EquipmentPhotoResult processSinglePhoto(const std::string& photo_path,
-                                             const std::string& task_folder) const;
+                                             const std::string& task_folder);
     // 解码原图(带Qt兜底)->画框->写 processed_equipment_*.png；返回空串视为该照失败
     std::string drawAndSave(const EquipmentPhotoResult& result,
                             const std::string& task_folder) const;
     std::shared_ptr<RollCallService> roll_call_service_;
     // 以下 4 个成员是 models_[0] 的便捷副本（历史单模型接口保留，逻辑以 models_ 为准）
-    std::string executable_path_;
+    std::string executable_path_;   // 废弃：外部 demo 时代遗留
     std::string model_path_;
     std::string labels_path_;
     int label_count_ = 0;
     std::vector<EquipmentModelConfig> models_;          // 全部启用的检测模型（多品类各一）
     std::vector<int> model_label_counts_;               // 与 models_ 一一对应的类别数
+    // 与 models_ 同序的常驻推理实例（initialize 构造、析构释放 NPU）；
+    // 仅盘点工作线程串行使用（detect 对同实例非线程安全，单线程独占即可）
+    std::vector<std::unique_ptr<YOLO11Model>> detectors_;
     bool ready_ = false;                                // initialize 全部校验通过才可跑
 };
 

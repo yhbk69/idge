@@ -1,18 +1,16 @@
 /* 设备盘点服务实现
-流程：照片归档复制到任务目录 -> 逐模型起子进程跑 YOLO11 RKNN 检测 -> 解析结果文本 ->
+流程：照片归档复制到任务目录 -> 逐模型进程内 YOLO11Model 推理 ->
      按标签计数 + 画框回显图 -> 用户确认后 saveResult 落库（与点名共库，phase 分场景区）
-说明：检测走外部可执行程序而非进程内推理，以“结果文件”为 IPC 载体，
-     进程隔离保证模型/驱动崩溃不拖垮 UI 主程序。本服务串行处理照片（子进程本身吃满 NPU）。
+说明：检测在主进程内完成（与实时预览 PpeTask 同一推理链路），模型实例在
+     initialize 时一次性加载常驻，避免每张照片重复 init 的秒级开销。
+     本服务串行处理照片（单张推理已吃满所绑 NPU 核，并行只增开销）。
 */
 #include "equipment_inventory_service.h"
 
-#include <QFile>
 #include <QFileInfo>
-#include <QProcess>
-#include <QRegularExpression>
-#include <QStringList>
-#include <QTextStream>
+#include <QDebug>
 
+#include <cstdlib>
 #include <fstream>
 #include <algorithm>
 #include <iomanip>
@@ -20,36 +18,42 @@
 #include <numeric>
 #include <sstream>
 #include <sys/stat.h>
-#include <unistd.h>
 #include <utility>
 
 #include "task_manager.h"
 #include "qt_image_utils.h"
+#include "easy_timer.h"   // yolo11_model.hpp 依赖 TIMER（与 ppe_task/frmmain 同序）
+#include "yolo11_model.hpp"
 
 // 构造注入：仅保存 shared_ptr，不做任何 IO；ready_=false 前所有流程接口都会拒绝工作
 EquipmentInventoryService::EquipmentInventoryService(
     std::shared_ptr<RollCallService> roll_call_service)
     : roll_call_service_(std::move(roll_call_service)) {}
 
+// unique_ptr<YOLO11Model> 需要完整类型才能析构，故在此（include 之后）物化
+EquipmentInventoryService::~EquipmentInventoryService() = default;
+
 // 单模型便捷重载：包成 vector 转调多模型版本（两接口共享同一套校验逻辑，行为一致）
-bool EquipmentInventoryService::initialize(const std::string& executable_path,
-                                           const std::string& model_path,
+bool EquipmentInventoryService::initialize(const std::string& model_path,
                                            const std::string& labels_path) {
-    return initialize({EquipmentModelConfig{executable_path, model_path, labels_path}});
+    return initialize({EquipmentModelConfig{"", model_path, labels_path}});
 }
 
-// 多模型初始化校验（全部通过才置 ready_，任一项失败保持未就绪、不留半初始化状态）：
+// 多模型初始化（全部成功才置 ready_，任一项失败保持未就绪并回收已加载模型）：
 //   - 标签文件：行数=类别数（容忍 CRLF，逐行去 \r，空行不计数），必须>0 行；
-//   - exe / rknn：必须以普通文件形式存在；
-//   - 每模型的类别数存入 model_label_counts_，与 models_ 严格同序，供子进程调参使用。
+//   - rknn 权重：必须以普通文件形式存在；
+//   - 每模型构造常驻 YOLO11Model，绑定核约定 models[i]->NPU 核 i
+//     （首模型核0、其余核1，与设备页预览的核分配一致，主检测流水线留核2）。
 bool EquipmentInventoryService::initialize(const std::vector<EquipmentModelConfig>& models) {
     models_ = models;
     model_label_counts_.clear();
+    detectors_.clear();
     ready_ = false;   // 先复位：重复调用 initialize 重新校验时可安全换配置
     if (models_.empty()) return false;
-    for (const auto& model : models_) {
-        // 数标签行数：一行一类别，行号即模型输出 class_index（解析结果时不再回查标签表，
-        // 标签名直接取结果文件里的 label 字段，这里 count 仅作为解码参数与合法性校验）
+    for (size_t i = 0; i < models_.size(); ++i) {
+        const auto& model = models_[i];
+        // 数标签行数：一行一类别，行号即模型输出 class_index（检测结果转换时
+        // 按行号取名，这里 count 仅作为解码参数 numClasses 与合法性校验）
         int count = 0;
         std::ifstream labels(model.labels_path);
         if (!labels.is_open()) return false;
@@ -58,53 +62,34 @@ bool EquipmentInventoryService::initialize(const std::vector<EquipmentModelConfi
             if (!line.empty() && line.back() == '\r') line.pop_back();
             if (!line.empty()) ++count;
         }
-        if (count <= 0 || model.executable_path.empty() || model.model_path.empty() ||
-            !QFileInfo(QString::fromUtf8(model.executable_path.c_str())).isFile() ||
-            !QFileInfo(QString::fromUtf8(model.model_path.c_str())).isFile()) return false;
+        if (count <= 0 || model.model_path.empty() ||
+            !QFileInfo(QString::fromUtf8(model.model_path.c_str())).isFile()) {
+            qWarning() << "Equipment inventory: invalid model config at index" << int(i);
+            return false;
+        }
+        const rknn_core_mask core_mask = (i == 0) ? RKNN_NPU_CORE_0 : RKNN_NPU_CORE_1;
+        try {
+            detectors_.push_back(std::make_unique<YOLO11Model>(
+                model.model_path, model.labels_path, core_mask, count));
+        } catch (const std::exception& e) {
+            // YOLO11Model 构造失败抛 runtime_error：回收已加载实例，整体保持未就绪
+            qWarning() << "Equipment inventory: model load failed at index" << int(i)
+                       << ":" << e.what();
+            detectors_.clear();
+            model_label_counts_.clear();
+            return false;
+        }
         model_label_counts_.push_back(count);
+        qInfo() << "Equipment inventory: model loaded" << model.model_path.c_str()
+                << "classes =" << count << "npu core" << (i == 0 ? 0 : 1);
     }
-    // 保留首模型的便捷副本：兼容早期单模型接口（executable_path_ 等成员仍在类内暴露）
+    // 保留首模型的便捷副本：兼容早期单模型接口（model_path_ 等成员仍在类内暴露）
     executable_path_ = models_[0].executable_path;
     model_path_ = models_[0].model_path;
     labels_path_ = models_[0].labels_path;
     label_count_ = model_label_counts_[0];
     ready_ = true;
     return true;
-/* 以下为“单模型时代”的旧实现（含更详细的错误日志），迁移到多模型版本后
-   整段注释保留备查；逻辑已由上方多模型循环等价覆盖，勿再启用 */
-/*
-    executable_path_ = executable_path;
-    model_path_ = model_path;
-    labels_path_ = labels_path;
-    label_count_ = 0;
-    ready_ = false;
-
-    std::ifstream labels(labels_path_);
-    if (!labels.is_open()) {
-        std::cerr << "Unable to open equipment labels: " << labels_path_ << std::endl;
-        return false;
-    }
-    std::string line;
-    while (std::getline(labels, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (!line.empty()) ++label_count_;
-    }
-    if (label_count_ <= 0) {
-        std::cerr << "Equipment label file is empty: " << labels_path_ << std::endl;
-        return false;
-    }
-    if (executable_path_.empty() || model_path_.empty()) return false;
-    if (!QFileInfo(QString::fromUtf8(executable_path_.c_str())).isFile()) {
-        std::cerr << "Equipment detector executable not found: " << executable_path_ << std::endl;
-        return false;
-    }
-    if (!QFileInfo(QString::fromUtf8(model_path_.c_str())).isFile()) {
-        std::cerr << "Equipment model not found: " << model_path_ << std::endl;
-        return false;
-    }
-    ready_ = true;
-    return true;
-*/
 }
 
 // 创建设备盘点任务：与点名任务同表不同 type（"equipment_registration"），
@@ -135,77 +120,38 @@ bool EquipmentInventoryService::deleteTask(int task_id) {
     return roll_call_service_ && roll_call_service_->deleteTask(task_id);
 }
 
-// 以子进程方式运行一次设备检测（IPC 契约：4 个位置参数 + 结果文本文件）。
-// 参数顺序由 rknn_yolo11_demo 约定：<模型文件> <图片> <结果txt> <类别数>；
-// 结果写文件而非 stdout：demo 运行日志会混在 stdout，单独文件保证解析纯净。
-// 工作目录切到 exe 所在目录：demo 可能以相对路径加载其同级的运行库/标定文件
+// 进程内跑一次检测（models_[model_index] 对应的常驻 YOLO11Model）：
+// read_image 用 malloc/stbi 分配缓冲，调用方负责 free(virt_addr)；
+// detect 输出的 box 已经过 letterbox 逆变换，是原图像素坐标，直接采用。
+// cls_id 越界（标签表与模型输出不一致的脏配置）的检出整条丢弃，防止空标签入库
 bool EquipmentInventoryService::runDetector(
-    const std::string& image_path, const std::string& result_path,
-    const EquipmentModelConfig& model, int label_count,
-    std::vector<EquipmentDetection>& detections) const {
-    if (model.executable_path.empty() || model.model_path.empty() || label_count <= 0)
-        return false;
+    const std::string& image_path, size_t model_index,
+    std::vector<EquipmentDetection>& detections) {
+    if (model_index >= detectors_.size() || !detectors_[model_index]) return false;
+    YOLO11Model& detector = *detectors_[model_index];
 
-    QProcess process;
-    process.setProgram(QString::fromUtf8(model.executable_path.c_str()));
-    process.setWorkingDirectory(QFileInfo(QString::fromUtf8(model.executable_path.c_str())).absolutePath());
-    process.setArguments({
-        QString::fromUtf8(model.model_path.c_str()),
-        QString::fromUtf8(image_path.c_str()),
-        QString::fromUtf8(result_path.c_str()),
-        QString::number(label_count)
-    });
-    process.start();
-    // 3000ms 启动时限：exe 缺失/不可执行应立刻失败，不值得久等（QProcess 失败也常报 started）
-    if (!process.waitForStarted(3000)) {
-        std::cerr << "Unable to start equipment detector: "
-                  << model.executable_path << std::endl;
+    image_buffer_t img{};   // 含内部 shared_ptr 语义成员，禁止 memset
+    if (read_image(image_path.c_str(), &img) != 0 || img.virt_addr == NULL) {
+        std::cerr << "Unable to decode image for equipment detect: " << image_path << std::endl;
         return false;
     }
-    // -1=不限时：RKNN 首次加载模型可能数十秒，宁可等待不可误杀；
-    // 但若进程假死将永远卡住本函数（串行流程可 UI 层超时兜底，注释留此风险提示）
-    if (!process.waitForFinished(-1)) {
-        process.kill();               // 异常终止路径：先杀再有限等待回收，不留僵尸进程
-        process.waitForFinished(1000);
-        return false;
-    }
-    // 双重退出校验：异常退出（崩溃/信号杀）与非零退出码都视为检测失败
-    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
-        std::cerr << "Equipment detector failed, exit code=" << process.exitCode()
-                  << " stderr=" << process.readAllStandardError().toStdString() << std::endl;
-        return false;
-    }
-    return parseResultFile(result_path, detections);
-}
+    object_detect_result_list results;
+    detector.detect(&img, &results);   // infer 内部先 memset 再填充
+    free(img.virt_addr);
 
-// 解析 demo 输出的结果文件：约定每行一条定长 JSON 对象（非标准 JSON 数组，逐行更稳）。
-// 正则严格锚定整行并允许字段间任意空白：格式漂移的行（日志混入/半行截断）
-// 直接跳过而不是报错——个别坏行不应否定整次检测的其余有效结果
-bool EquipmentInventoryService::parseResultFile(
-    const std::string& result_path,
-    std::vector<EquipmentDetection>& detections) const {
-    QFile file(QString::fromUtf8(result_path.c_str()));
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
-
-    const QRegularExpression expression(
-        R"REGEX(^\s*\{\s*"index"\s*:\s*(-?\d+)\s*,\s*"confidence"\s*:\s*([-+0-9.eE]+)\s*,\s*"label"\s*:\s*"([^"]*)"\s*,\s*"x1"\s*:\s*(-?\d+)\s*,\s*"y1"\s*:\s*(-?\d+)\s*,\s*"x2"\s*:\s*(-?\d+)\s*,\s*"y2"\s*:\s*(-?\d+)\s*\}\s*$)REGEX");
-
-    QTextStream stream(&file);
-    while (!stream.atEnd()) {
-        const QString line = stream.readLine();
-        const QRegularExpressionMatch match = expression.match(line);
-        if (!match.hasMatch()) continue;
+    const std::vector<std::string>& names = detector.getClassNames();
+    for (int i = 0; i < results.count; ++i) {
+        const object_detect_result& r = results.results[i];
+        if (r.cls_id < 0 || r.cls_id >= static_cast<int>(names.size())) continue;
         EquipmentDetection detection;
-        detection.class_index = match.captured(1).toInt();
-        detection.confidence = match.captured(2).toFloat();
-        detection.label = match.captured(3).toUtf8().toStdString();
-        const int x1 = match.captured(4).toInt();
-        const int y1 = match.captured(5).toInt();
-        const int x2 = match.captured(6).toInt();
-        const int y2 = match.captured(7).toInt();
-        // 框用 (x1,y1,w,h) 存储；max(0,·) 兜底坐标倒置（x2<x1）的异常检测框，
+        detection.class_index = r.cls_id;
+        detection.confidence = r.prop;
+        detection.label = names[r.cls_id];
+        // 框用 (x1,y1,w,h) 存储；max(0,·) 兜底坐标倒置的异常检测框，
         // 绘制阶段再与图像边界求交并二次剔除零宽高框
-        detection.rect = cv::Rect(x1, y1, std::max(0, x2 - x1), std::max(0, y2 - y1));
+        detection.rect = cv::Rect(r.box.left, r.box.top,
+                                  std::max(0, r.box.right - r.box.left),
+                                  std::max(0, r.box.bottom - r.box.top));
         detections.push_back(std::move(detection));
     }
     return true;
@@ -214,7 +160,7 @@ bool EquipmentInventoryService::parseResultFile(
 // 单张照片完整盘点链：归档复制 -> 多模型检测 -> 计数 -> 画框回显。
 // 返回 success=false 时 error_message 已带中文原因，供 UI 弹窗
 EquipmentPhotoResult EquipmentInventoryService::processSinglePhoto(
-    const std::string& photo_path, const std::string& task_folder) const {
+    const std::string& photo_path, const std::string& task_folder) {
     EquipmentPhotoResult result;
     const QFileInfo source_info(QString::fromUtf8(photo_path.c_str()));
     std::cerr << "[equipment] processSinglePhoto input=" << photo_path
@@ -225,7 +171,7 @@ EquipmentPhotoResult EquipmentInventoryService::processSinglePhoto(
         return result;
     }
 
-    // 路径约定：外部检测程序与后续 UI 都只看“任务目录内”的副本，
+    // 路径约定：UI 与落库都只看“任务目录内”的副本，
     // 把用户选择的照片复制归档（unique 命名防同名覆盖），result.original_path
     // 从此指向任务目录副本——删任务即全清，不依赖用户原始文件继续存在
     const QFileInfo task_info(QString::fromUtf8(task_folder.c_str()));
@@ -247,18 +193,12 @@ EquipmentPhotoResult EquipmentInventoryService::processSinglePhoto(
     // 逐模型串行检测：结果按模型顺序拼接进同一 detections；
     // 任一模型失败即整照失败（保守策略：宁可全弃不可部分统计误导盘点数）
     for (size_t i = 0; i < models_.size(); ++i) {
-        const std::string output_path = TaskManager::generateUniqueFilename(
-            "equipment_" + std::to_string(i), "txt");
-        const std::string result_path = task_folder + "/" + output_path;
         std::vector<EquipmentDetection> model_detections;
-        if (!runDetector(result.original_path, result_path, models_[i],
-                         model_label_counts_[i], model_detections)) {
-            result.error_message = "设备识别程序执行失败: " + result.original_path;
-            unlink(result_path.c_str());   // 失败也要清理半成品结果文件
+        if (!runDetector(result.original_path, i, model_detections)) {
+            result.error_message = "设备检测执行失败: " + result.original_path;
             return result;
         }
         result.detections.insert(result.detections.end(), model_detections.begin(), model_detections.end());
-        unlink(result_path.c_str());       // 检测结果已解析进内存，临时 txt 即刻删除防堆积
     }
     // 按标签计数：operator[] 自动建 0 再 ++，即“标签->数量”直方图
     for (const auto& detection : result.detections)
@@ -326,7 +266,7 @@ std::string EquipmentInventoryService::drawAndSave(
     }
 }
 
-// 任务级盘点入口：串行逐张处理（外部 demo 子进程已占满 NPU，再并行只增开销）。
+// 任务级盘点入口：串行逐张处理（单张推理已占满所绑 NPU 核，再并行只增开销）。
 // 部分成功语义：一张失败不中断其余照片，但整体 success 置 false 并保留首个错误；
 // UI 依据 success 决定是否放行 saveResult，避免把缺照的统计当完整盘点入库
 EquipmentTaskResult EquipmentInventoryService::processPhotos(
