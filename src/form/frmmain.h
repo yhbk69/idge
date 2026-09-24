@@ -18,6 +18,7 @@
  */
 
 #include <QWidget>
+#include <QComboBox>
 #include <QTextCursor>
 #include <QTextCharFormat>
 #include <QCloseEvent>
@@ -159,10 +160,15 @@ private slots:
 
 private:
     // ========== 级联模型配置控件（数据成员，不能放 slots 里） ==========
-    QLineEdit *cascadePathEdit_[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+    // P2：路径输入框升级为"模型库下拉框"（数据源 ModelRegistry），
+    // custom 路径仍经各行"浏览"按钮进入，以下拉为唯一显示/写入口
+    QComboBox *cascadeModelCombo_[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
     QLineEdit *cascadeNoteEdit_[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
     QLineEdit *chNoteEdit_[4] = {nullptr, nullptr, nullptr, nullptr};  // 每路通道备注
     QLineEdit *fenceClassesEdit_ = nullptr;  // 围栏报警类别编辑框
+
+    void applyCascadeCombo(int slotIdx);     ///< 下拉当前选项写回 config（槽位0..4）
+    void refreshCascadeModelCombos();        ///< 重建 5 个下拉并同步 config 选中项
 
 private slots:
     // ========== 4路视频浏览按钮 ==========

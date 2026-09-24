@@ -36,6 +36,7 @@
 #include "equipment_inventory_widget.h"
 #include "service/roll_call_service.h"
 #include "service/equipment_inventory_service.h"
+#include "model_repo/model_registry.h"
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
@@ -1000,15 +1001,15 @@ void frmMain::initCascadeUi()
     moveTo(ui->labModelType,    20, 2);
     moveTo(ui->labModelTypeVal, 20, 3);
 
-    // ===== 模型路径1：复用原来的"模型路径"行 =====
-    cascadePathEdit_[0] = ui->lineEditModelPath;
+    // ===== 模型路径1：复用原来的"模型路径"行，路径框换为模型库下拉 =====
     ui->labModelPath->setText("模型路径1:");
-    // 编辑完自动保存到 model.path
-    connect(ui->lineEditModelPath, &QLineEdit::editingFinished, this, [this]() {
-        ConfigManager &c = ConfigManager::instance();
-        c.setModelPath(ui->lineEditModelPath->text().trimmed());
-        c.save();
-    });
+    gl->removeWidget(ui->lineEditModelPath);
+    ui->lineEditModelPath->setVisible(false);
+    cascadeModelCombo_[0] = new QComboBox;
+    cascadeModelCombo_[0]->setStyleSheet(theme::field(theme::PANEL));
+    connect(cascadeModelCombo_[0], QOverload<int>::of(&QComboBox::activated),
+            this, [this](int) { applyCascadeCombo(0); });
+    gl->addWidget(cascadeModelCombo_[0], 4, 1);
     // 模型路径1 的备注（存 cascade idx1 的 note）
     cascadeNoteEdit_[0] = new QLineEdit(cfg.cascadeModelNote(1));
     cascadeNoteEdit_[0]->setPlaceholderText("备注");
@@ -1024,12 +1025,12 @@ void frmMain::initCascadeUi()
     clear1->setMaximumWidth(64);
     clear1->setStyleSheet(theme::miniButton(theme::DANGER));
     connect(clear1, &QPushButton::clicked, this, [this]() {
-        ui->lineEditModelPath->clear();
         cascadeNoteEdit_[0]->clear();
         ConfigManager &c = ConfigManager::instance();
         c.setModelPath("");
         c.setCascadeModelNote(1, "");
         c.save();
+        refreshCascadeModelCombos();
         log("system", "模型路径1 已清空");
     });
     gl->addWidget(clear1, 4, 4);
@@ -1043,20 +1044,11 @@ void frmMain::initCascadeUi()
         lbl->setStyleSheet(theme::text(theme::TEXT, theme::FS_BODY));
         gl->addWidget(lbl, row, 0);
 
-        cascadePathEdit_[i] = new QLineEdit(cfg.cascadeModelPath(i + 1));
-        // 便于先验证级联：模型路径2 默认也填同一个模型（空则回退用全局模型）
-        if (i == 1 && cascadePathEdit_[i]->text().isEmpty()) {
-            cascadePathEdit_[i]->setText(cfg.modelPath());
-        }
-        cascadePathEdit_[i]->setPlaceholderText("模型路径(*.rknn)，留空不用");
-        cascadePathEdit_[i]->setStyleSheet(theme::field(theme::PANEL));
-        connect(cascadePathEdit_[i], &QLineEdit::editingFinished,
-                this, [this, i]() {
-                    ConfigManager &c = ConfigManager::instance();
-                    c.setCascadeModelPath(i + 1, cascadePathEdit_[i]->text().trimmed());
-                    c.save();
-                });
-        gl->addWidget(cascadePathEdit_[i], row, 1);
+        cascadeModelCombo_[i] = new QComboBox;
+        cascadeModelCombo_[i]->setStyleSheet(theme::field(theme::PANEL));
+        connect(cascadeModelCombo_[i], QOverload<int>::of(&QComboBox::activated),
+                this, [this, i](int) { applyCascadeCombo(i); });
+        gl->addWidget(cascadeModelCombo_[i], row, 1);
 
         QPushButton *browse = new QPushButton("浏览...");
         browse->setMaximumWidth(80);
@@ -1065,10 +1057,10 @@ void frmMain::initCascadeUi()
             QString f = QFileDialog::getOpenFileName(
                 this, QString("选择模型路径%1").arg(i + 1), "model", "RKNN 模型 (*.rknn)");
             if (!f.isEmpty()) {
-                cascadePathEdit_[i]->setText(f);
                 ConfigManager &c = ConfigManager::instance();
                 c.setCascadeModelPath(i + 1, f);
                 c.save();
+                refreshCascadeModelCombos();
                 log("system", QString("模型路径%1 已设置: %2").arg(i + 1).arg(f));
             }
         });
@@ -1090,12 +1082,12 @@ void frmMain::initCascadeUi()
         clearBtn->setMaximumWidth(64);
         clearBtn->setStyleSheet(theme::miniButton(theme::DANGER));
         connect(clearBtn, &QPushButton::clicked, this, [this, i]() {
-            cascadePathEdit_[i]->clear();
             cascadeNoteEdit_[i]->clear();
             ConfigManager &c = ConfigManager::instance();
             c.setCascadeModelPath(i + 1, "");
             c.setCascadeModelNote(i + 1, "");
             c.save();
+            refreshCascadeModelCombos();
             log("system", QString("模型路径%1 已清空").arg(i + 1));
         });
         gl->addWidget(clearBtn, row, 4);
@@ -1110,7 +1102,72 @@ void frmMain::initCascadeUi()
     moveTo(ui->labModelType,      10, 2);
     moveTo(ui->labModelTypeVal,   10, 3);
 
-    log("system", "模型路径配置加载完成（模型1/模型2 默认相同，先验证级联）");
+    refreshCascadeModelCombos();
+
+    log("system", "模型路径配置加载完成（下拉选项来自 model/library 模型库）");
+}
+
+// ============================================================
+// applyCascadeCombo: 把某槽位下拉的当前选项写回 config
+//   slotIdx = 数组下标 0..4，对应界面模型1..5
+//   写入的仍是路径（config schema 不变），下拉显示名经反查映射
+// ============================================================
+void frmMain::applyCascadeCombo(int slotIdx)
+{
+    QComboBox *cb = cascadeModelCombo_[slotIdx];
+    if (!cb) return;
+    QString path = cb->currentData().toString();
+    ConfigManager &c = ConfigManager::instance();
+    if (slotIdx == 0) {
+        c.setModelPath(path);
+    } else {
+        c.setCascadeModelPath(slotIdx + 1, path);
+    }
+    c.save();
+    log("system", QString("模型路径%1 已设置: %2")
+            .arg(slotIdx + 1)
+            .arg(path.isEmpty() ? "(不用)" : path));
+}
+
+// ============================================================
+// refreshCascadeModelCombos: 重建 5 个下拉并同步 config 选中项
+//   选项 = "(不用)" + 库内全部模型 + (config 路径未收编时)"(自定义)"
+//   保留旧便利默认：模型路径2 为空时回退显示全局模型（仅显示，不写回）
+// ============================================================
+void frmMain::refreshCascadeModelCombos()
+{
+    ConfigManager &cfg = ConfigManager::instance();
+    ModelRegistry &reg = ModelRegistry::instance();
+    reg.rescan();  // 库目录可能刚被导入/删除，刷新条目
+    for (int i = 0; i < 5; ++i) {
+        QComboBox *cb = cascadeModelCombo_[i];
+        if (!cb) continue;
+        QString path = (i == 0) ? cfg.modelPath() : cfg.cascadeModelPath(i + 1);
+        if (i == 1 && path.isEmpty()) {
+            path = cfg.modelPath();
+        }
+        cb->blockSignals(true);
+        cb->clear();
+        cb->addItem("(不用)", QString(""));
+        const QStringList ids = reg.ids();
+        for (const QString &id : ids) {
+            cb->addItem(reg.displayName(id), reg.modelPath(id));
+        }
+        // config 里的路径可能是相对写法，先经注册表反查归一化再比对
+        int idx = -1;
+        QString hitId = path.isEmpty() ? QString() : reg.findIdByModelFile(path);
+        if (!hitId.isEmpty()) {
+            idx = cb->findData(reg.modelPath(hitId));
+        } else if (!path.isEmpty()) {
+            idx = cb->findData(path);
+        }
+        if (idx < 0 && !path.isEmpty()) {
+            cb->addItem(QString("(自定义) ") + QFileInfo(path).fileName(), path);
+            idx = cb->count() - 1;
+        }
+        cb->setCurrentIndex(qMax(0, idx));
+        cb->blockSignals(false);
+    }
 }
 
 // ==========================================
@@ -1235,16 +1292,17 @@ void frmMain::on_btnBrowseCh4_clicked()
  */
 void frmMain::on_btnBrowseModel_clicked()
 {
-    QString currentPath = ui->lineEditModelPath->text().isEmpty()
+    const QString cur = ConfigManager::instance().modelPath();
+    QString currentPath = cur.isEmpty()
         ? QDir::currentPath()
-        : QFileInfo(ui->lineEditModelPath->text()).path();
+        : QFileInfo(cur).path();
 
     QString file = QFileDialog::getOpenFileName(this, "选择模型文件", currentPath,
         "RKNN模型 (*.rknn);;ONNX模型 (*.onnx);;所有文件 (*)");
     if (!file.isEmpty()) {
-        ui->lineEditModelPath->setText(file);
         ConfigManager::instance().setModelPath(file);
         ConfigManager::instance().save();
+        refreshCascadeModelCombos();
         QFileInfo fi(file);
         log("model", QString("已选择模型: %1 (%2 MB)")
             .arg(fi.fileName())
