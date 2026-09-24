@@ -110,8 +110,12 @@ private:
     QThread* thread_ = nullptr;
     // 运行标志：true→false 时通过 FFmpeg interrupt_callback 打断阻塞的
     // av_read_frame/avcodec_receive_frame，实现解码线程快速退出；
-    // stop() 末尾会重置为 true，为下次 start() 做准备
+    // 由 start() 置 true（stop() 不再复位，避免复活超时遗弃的旧循环）
     std::atomic<bool> running_{false};
+    // 存活 decodeLoop 实例计数：++/-- 由 RAII 守卫覆盖所有退出路径。
+    // start() 拒绝在 >0 时重启（旧线程还持有本对象状态）；
+    // stop() 等待超时后遗弃线程时靠它兜底，QThread 由 finished→deleteLater 回收
+    std::atomic<int> liveLoops_{0};
     // 640x640 RGB(BGR888) DMA 缓冲池（借出-归还语义：tryAcquireSharedPtr
     // 返回 shared_ptr，最后一个引用(含 image_buffer_t::sp_dmaBuffer)释放时自动归还）
     std::shared_ptr<DmaBufferPool> dmaBufferPool_;

@@ -80,7 +80,8 @@ private:
     QString device_;
     // 退出时序：stop() 置 running_=false → FFmpeg interruptCallback 返回 1
     // 打断阻塞的 av_read_frame → decodeLoop 走清理路径自然返回 → join() 回收。
-    // 审查点：join() 是无界阻塞（对比主流水线用 terminate 兜底），若 FFmpeg
+    // 审查点：join() 是无界阻塞（主流水线已改为"协作退出 + 超时遗弃，绝不
+    // terminate"），若 FFmpeg
     // 某版本不响应中断，stop() 可能长时间挂起，属已登记风险。
     std::atomic<bool> running_{false};
     std::thread worker_;

@@ -441,6 +441,15 @@ void FFmpegVideoDecoder::start(const QString &url)
     if (running_)
         stop();
 
+    // 上一次 stop() 若超时遗弃了解码线程，其 decodeLoop 仍在本对象上运行；
+    // 此时重启会造成两个 decodeLoop 并发（且 running_ 复活僵尸循环）。拒绝并提示重试。
+    if (liveLoops_.load() > 0) {
+        qWarning() << "Decoder channel" << channel_
+                   << "still shutting down, start() refused";
+        emit error("Decoder is still shutting down, retry later");
+        return;
+    }
+
     url_ = url;
     running_ = true;
 
@@ -487,13 +496,21 @@ void FFmpegVideoDecoder::stop()
     }
 
     // 2) 停解码线程（interrupt_callback 中断 av_read_frame，处理完当前帧即退出）
+    //    绝不调用 terminate()：强杀可能落在 FFmpeg/MPP/驱动自旋锁内部，
+    //    留下互斥量永久上锁 / 堆损坏（未定义行为）。协作式停止已覆盖所有
+    //    阻塞点（IO 走 interrupt 回调、队列已 close、循环条件查 running_），
+    //    超时只说明卡在驱动级阻塞，多等是正解，强杀是引入随机崩溃。
     if (thread_)
     {
-        thread_->quit();
+        thread_->quit();   // 退出该线程事件循环（decodeLoop 返回后生效）
         if (!thread_->wait(3000)) {
-            qWarning() << "Decoder thread did not stop in time, terminating";
-            thread_->terminate();
-            thread_->wait(1500);
+            qWarning() << "Decoder thread still alive after 3s, waiting cooperative exit";
+            if (!thread_->wait(10000)) {
+                qCritical() << "Decoder thread did not exit in 13s; abandoning it"
+                               " (no terminate: kill inside FFmpeg/driver locks is UB)";
+                // 遗弃而非强杀：QThread 退出后经 finished→deleteLater 自行回收；
+                // start() 通过 liveLoops_ 拒绝在旧循环存活期间重启。
+            }
         }
         thread_ = nullptr;
     }
@@ -503,13 +520,11 @@ void FFmpegVideoDecoder::stop()
     //    这是有意为之：detach 后的推理线程仍可能访问 this/队列，delete 会
     //    造成 use-after-free；代价是每路解码器泄漏至多 5 个 PpeTask 对象
     //    （通道数固定、进程生命周期内不重复创建，总量可控）。
-    //    末尾把 running_ 复位为 true：此时线程已停，标志仅供下一轮 start()
-    //    的 interrupt 回调使用，不代表"正在运行"。
+    //    running_ 不再在此复位：若上面的解码线程被遗弃，它仍在看 running_，
+    //    复位会复活僵尸循环；start() 负责置 true。
     for (PpeTask *task : tasks_) {
         task->stopBestEffort(1500);
     }
-
-    running_ = true;  // 重置，为下次 start() 准备
 }
 
 // ============================================================================
@@ -616,6 +631,13 @@ bool FFmpegVideoDecoder::dumpVideoToFile(const QString &filePath)
 // ============================================================================
 void FFmpegVideoDecoder::decodeLoop()
 {
+    // 存活计数 RAII：覆盖本函数所有 return 路径，供 start() 判断旧循环是否已退场
+    struct LiveGuard {
+        std::atomic<int> &c;
+        explicit LiveGuard(std::atomic<int> &cnt) : c(cnt) { ++c; }
+        ~LiveGuard() { --c; }
+    } liveGuard{liveLoops_};
+
     int ret;
 
     // ===== 步骤1: 打开视频流 =====
@@ -627,6 +649,11 @@ void FFmpegVideoDecoder::decodeLoop()
     // 使解码线程能快速退出，避免阻塞在 IO 上（尤其是网络流）
     AVIOInterruptCB interrupt_cb = {decodeInterruptCallback, &running_};
     fmt_ctx = avformat_alloc_context();
+    if (!fmt_ctx) {
+        qCritical() << "avformat_alloc_context failed (OOM)";
+        emit error("Decoder init failed (OOM)");
+        return;
+    }
     fmt_ctx->interrupt_callback = interrupt_cb;
 
     // 打开输入流：可以是本地文件(如 video.mp4)或网络流(如 rtsp://...)
@@ -644,9 +671,14 @@ void FFmpegVideoDecoder::decodeLoop()
 
     // 读取流的详细信息（编码参数、帧率、分辨率等）
     // 对于网络流可能需要几秒钟来探测
-    // 审查点：返回值未检查。RTSP 断流/被 interrupt 打断时可能拿到不完整的
-    // codecpar，后续 av_find_best_stream 会因找不到视频流而走错误分支兜底。
-    avformat_find_stream_info(fmt_ctx, nullptr);
+    if ((ret = avformat_find_stream_info(fmt_ctx, nullptr)) < 0) {
+        // 断流/被 interrupt 打断时可能拿不到完整 codecpar；此处不再依赖兜底，
+        // 直接走错误分支释放资源（find_best_stream 基于坏 codecpar 的结果不可信）
+        qWarning() << "avformat_find_stream_info failed, ret =" << ret;
+        emit error("Cannot read stream info");
+        avformat_close_input(&fmt_ctx);
+        return;
+    }
 
     // 在所有流中找到最佳的视频流（可能是多个视频流，选质量最高的）
     // vidx 是视频流在 fmt_ctx->streams[] 数组中的索引
@@ -680,6 +712,12 @@ void FFmpegVideoDecoder::decodeLoop()
 
     // 创建解码器上下文，用于存放解码器的状态和配置
     AVCodecContext *dec_ctx = avcodec_alloc_context3(codec);
+    if (!dec_ctx) {
+        qCritical() << "avcodec_alloc_context3 failed (OOM)";
+        emit error("Decoder init failed (OOM)");
+        avformat_close_input(&fmt_ctx);
+        return;
+    }
 
     // 将视频流的编码参数（分辨率、profile、level等）拷贝到解码器上下文
     avcodec_parameters_to_context(dec_ctx, fmt_ctx->streams[vidx]->codecpar);
@@ -718,10 +756,15 @@ void FFmpegVideoDecoder::decodeLoop()
     dec_ctx->thread_count = 1;
 
     // 打开解码器：此时解码器会初始化 MPP 硬件
-    // 如果硬件解码器初始化失败，FFmpeg 会尝试软解
-    // 审查点：返回值未检查；若打开失败，后续 receive_frame 恒为错误，
-    // 表现为"无画面但不崩溃"，排查时可先确认此步日志。
-    avcodec_open2(dec_ctx, codec, nullptr);
+    // 打开失败必须终止：继续跑 receive_frame 恒为错误，表现为"无画面但不崩溃"，
+    // 不如立即报错释放（此前该返回值未检查）。
+    if ((ret = avcodec_open2(dec_ctx, codec, nullptr)) < 0) {
+        qCritical() << "avcodec_open2 failed, ret =" << ret;
+        emit error("Cannot open decoder");
+        avcodec_free_context(&dec_ctx);
+        avformat_close_input(&fmt_ctx);
+        return;
+    }
 
     // 从解码器上下文获取视频分辨率（可能与流信息中的略有不同）
     int vid_w = dec_ctx->width;
@@ -770,13 +813,25 @@ void FFmpegVideoDecoder::decodeLoop()
     dst_bufs[0]->setWidth(vid_w);
     dst_bufs[0]->setHeight(vid_h);
     dst_bufs[0]->setFormat(DRM_FORMAT_RGBA8888);
-    dst_bufs[0]->alloc();
     
     dst_bufs[1] = new DmaFrameBuffer();
     dst_bufs[1]->setWidth(vid_w);
     dst_bufs[1]->setHeight(vid_h);
     dst_bufs[1]->setFormat(DRM_FORMAT_RGBA8888);
-    dst_bufs[1]->alloc();
+
+    // alloc() 返回 DMA-BUF fd 或 -1：失败多为 DRM 设备不可用/显存不足，
+    // 继续跑只会让每帧 RGA 转换拿到无效缓冲，必须在此终止
+    if (dst_bufs[0]->alloc() < 0 || dst_bufs[1]->alloc() < 0) {
+        qCritical() << "DMA-BUF alloc failed for RGBA double buffer";
+        emit error("DMA buffer alloc failed");
+        emit statusChanged(channel_, 0);   // 已上报在线，失败路径必须复位
+        delete dst_bufs[0];
+        delete dst_bufs[1];
+        close(drm_fd);
+        avcodec_free_context(&dec_ctx);
+        avformat_close_input(&fmt_ctx);
+        return;
+    }
 
 
     // ===== 步骤4: 主解码循环 =====
@@ -795,6 +850,19 @@ void FFmpegVideoDecoder::decodeLoop()
     //   - pkt->stream_index: 属于哪个流（音频/视频/字幕）
     AVFrame *frame = av_frame_alloc();
     AVPacket *pkt = av_packet_alloc();
+    if (!frame || !pkt) {
+        qCritical() << "av_frame_alloc/av_packet_alloc failed (OOM)";
+        emit error("Decoder init failed (OOM)");
+        emit statusChanged(channel_, 0);
+        for (int i = 0; i < 2; i++)
+            delete dst_bufs[i];
+        close(drm_fd);
+        av_frame_free(&frame);
+        av_packet_free(&pkt);
+        avcodec_free_context(&dec_ctx);
+        avformat_close_input(&fmt_ctx);
+        return;
+    }
     int frame_count = 0;
 
     QElapsedTimer timer;
