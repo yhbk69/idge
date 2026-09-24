@@ -37,6 +37,8 @@
 #include "service/roll_call_service.h"
 #include "service/equipment_inventory_service.h"
 #include "model_repo/model_registry.h"
+#include "easy_timer.h"  // yolo11_model.hpp 依赖 TIMER（与 ppe_task 同序）
+#include "yolo11/yolo11_model.hpp"
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
@@ -1213,16 +1215,19 @@ void frmMain::initModelLibraryUi()
     QPushButton *btnRefresh = new QPushButton("刷新");
     QPushButton *btnImport = new QPushButton("导入模型...");
     QPushButton *btnZip = new QPushButton("导入zip包...");
+    QPushButton *btnTest = new QPushButton("测试选中");
     QPushButton *btnDelete = new QPushButton("删除选中");
     btnRefresh->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
     btnImport->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
     btnZip->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
+    btnTest->setStyleSheet(theme::miniButton(theme::SUCCESS));
     btnDelete->setStyleSheet(theme::miniButton(theme::DANGER));
     QLabel *hint = new QLabel("库目录 model/library；改选路径后重启程序生效");
     hint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
     bar->addWidget(btnRefresh);
     bar->addWidget(btnImport);
     bar->addWidget(btnZip);
+    bar->addWidget(btnTest);
     bar->addWidget(btnDelete);
     bar->addStretch();
     bar->addWidget(hint);
@@ -1255,6 +1260,7 @@ void frmMain::initModelLibraryUi()
     });
     connect(btnImport, &QPushButton::clicked, this, &frmMain::importModelViaDialog);
     connect(btnZip, &QPushButton::clicked, this, &frmMain::importModelZip);
+    connect(btnTest, &QPushButton::clicked, this, &frmMain::testSelectedModel);
     connect(btnDelete, &QPushButton::clicked, this, &frmMain::deleteSelectedModel);
 
     contentLayout->insertWidget(insertAt, group);
@@ -1434,6 +1440,84 @@ void frmMain::deleteSelectedModel()
     } else {
         QMessageBox::warning(this, "删除被拒", err);
     }
+}
+
+// ============================================================
+// testSelectedModel: 对选中模型做单帧推理验证（P2 验证工具）
+//   现场构造 YOLO11Model（NPU 加载约数秒，期间 GUI 短暂阻塞，
+//   验证工具可接受）→ detect(assets/test/test.jpg) → 报检出数与明细；
+//   函数退出即析构，release_yolo11_model 归还 NPU 资源
+// ============================================================
+void frmMain::testSelectedModel()
+{
+    if (!modelLibTable_) return;
+    const int row = modelLibTable_->currentRow();
+    if (row < 0 || !modelLibTable_->item(row, 0)) {
+        QMessageBox::information(this, "模型测试", "请先在列表中选中一行模型");
+        return;
+    }
+    const QString id = modelLibTable_->item(row, 0)->text();
+    ModelRegistry &reg = ModelRegistry::instance();
+    const ModelMeta m = reg.meta(id);
+    if (m.id.isEmpty()) {
+        QMessageBox::warning(this, "模型测试", "模型不在库中: " + id);
+        return;
+    }
+    const QString testImage = QStringLiteral("assets/test/test.jpg");
+    if (!QFileInfo::exists(testImage)) {
+        QMessageBox::warning(this, "模型测试", "测试图片不存在: " + testImage);
+        return;
+    }
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    QString summary;
+    int detCount = 0;
+    try {
+        YOLO11Model model(reg.modelPath(id).toStdString(),
+                          reg.labelPath(id).toStdString(),
+                          RKNN_NPU_CORE_AUTO,
+                          m.numClasses > 0 ? m.numClasses : 80);
+
+        image_buffer_t img{};
+        const int rc = read_image(testImage.toUtf8().constData(), &img);
+        if (rc != 0 || img.virt_addr == NULL) {
+            QApplication::restoreOverrideCursor();
+            QMessageBox::warning(this, "模型测试", "测试图片解码失败: " + testImage);
+            return;
+        }
+
+        object_detect_result_list results;
+        model.detect(&img, &results);   // infer 内部先 memset 再填充
+        free(img.virt_addr);            // read_image 用 malloc/stbi 分配，成对释放
+
+        const std::vector<std::string> &names = model.getClassNames();
+        detCount = results.count;
+        QStringList lines;
+        lines << QString("模型: %1").arg(id)
+              << QString("测试图: %1 (%2x%3)").arg(testImage).arg(img.width).arg(img.height)
+              << QString("检出目标: %1 个").arg(results.count);
+        for (int i = 0; i < results.count && i < 15; ++i) {
+            const object_detect_result &r = results.results[i];
+            const QString cls = (r.cls_id >= 0 && r.cls_id < (int)names.size())
+                ? QString::fromStdString(names[r.cls_id]) : QString("?");
+            lines << QString("  %1  %2%  [%3,%4 - %5,%6]")
+                         .arg(cls)
+                         .arg(r.prop * 100.0, 0, 'f', 1)
+                         .arg(r.box.left).arg(r.box.top)
+                         .arg(r.box.right).arg(r.box.bottom);
+        }
+        if (results.count > 15)
+            lines << QString("  ...（仅列前 15 个）");
+        summary = lines.join("\n");
+    } catch (const std::exception &e) {
+        QApplication::restoreOverrideCursor();
+        QMessageBox::warning(this, "模型加载失败", QString::fromUtf8(e.what()));
+        log("model", QString("模型测试失败 %1: %2").arg(id).arg(e.what()));
+        return;
+    }
+    QApplication::restoreOverrideCursor();
+    QMessageBox::information(this, "模型测试结果", summary);
+    log("model", QString("模型测试 %1: 检出 %2 个目标").arg(id).arg(detCount));
 }
 
 // ==========================================

@@ -178,6 +178,7 @@ private:
     void importModelViaDialog();     ///< 三步导入：选 rknn → 选 labels → 起 id
     void importModelZip();           ///< zip 模型包一键导入（解压→逐目录 importModel）
     void deleteSelectedModel();      ///< 删除表格选中模型（有引用则拒绝）
+    void testSelectedModel();        ///< 用 assets/test/test.jpg 对选中模型单帧推理
 
 private slots:
     // ========== 4路视频浏览按钮 ==========
