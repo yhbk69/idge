@@ -154,25 +154,28 @@ margin:1px 1px 2px 1px;
 background-color:rgba(238,0,0,128);
 }
 
+/* ===== 复选/单选指示器：CSS 自绘（原灰底 PNG 与暗色主题违和，2026-09-24 统一） ===== */
 QRadioButton::indicator{
 width:15px;
 height:15px;
+border-radius:8px;
+border:1px solid #3d3d4d;
+background:#262636;
 }
 
-QRadioButton::indicator::unchecked{
-image:url(:/qss/blacksoft/radiobutton_unchecked.png);
+QRadioButton::indicator:checked{
+border:1px solid #4fc3f7;
+background:qradialgradient(spread:pad,cx:0.5,cy:0.5,radius:0.5,fx:0.5,fy:0.5,stop:0 #4fc3f7,stop:0.45 #4fc3f7,stop:0.5 #262636,stop:1 #262636);
 }
 
-QRadioButton::indicator::unchecked:disabled{
-image:url(:/qss/blacksoft/radiobutton_unchecked_disable.png);
+QRadioButton::indicator:unchecked:disabled{
+border:1px solid #34343f;
+background:#232330;
 }
 
-QRadioButton::indicator::checked{
-image:url(:/qss/blacksoft/radiobutton_checked.png);
-}
-
-QRadioButton::indicator::checked:disabled{
-image:url(:/qss/blacksoft/radiobutton_checked_disable.png);
+QRadioButton::indicator:checked:disabled{
+border:1px solid #3d3d4d;
+background:qradialgradient(spread:pad,cx:0.5,cy:0.5,radius:0.5,fx:0.5,fy:0.5,stop:0 #55606e,stop:0.45 #55606e,stop:0.5 #232330,stop:1 #232330);
 }
 
 QGroupBox::indicator,QTreeView::indicator,QListView::indicator,QTableView::indicator{
@@ -180,32 +183,36 @@ padding:0px 0px 0px 0px;
 }
 
 QCheckBox::indicator,QGroupBox::indicator,QTreeView::indicator,QListView::indicator,QTableView::indicator{
-width:13px;
-height:13px;
-}
-
-QCheckBox::indicator:unchecked,QGroupBox::indicator:unchecked,QTreeView::indicator:unchecked,QListView::indicator:unchecked,QTableView::indicator:unchecked{
-image:url(:/qss/blacksoft/checkbox_unchecked.png);
-}
-
-QCheckBox::indicator:unchecked:disabled,QGroupBox::indicator:unchecked:disabled,QTreeView::indicator:unchecked:disabled,QListView::indicator:unchecked:disabled,QTableView::indicator:unchecked:disabled{
-image:url(:/qss/blacksoft/checkbox_unchecked_disable.png);
+width:15px;
+height:15px;
+border-radius:3px;
+border:1px solid #3d3d4d;
+background:#262636;
 }
 
 QCheckBox::indicator:checked,QGroupBox::indicator:checked,QTreeView::indicator:checked,QListView::indicator:checked,QTableView::indicator:checked{
-image:url(:/qss/blacksoft/checkbox_checked.png);
-}
-
-QCheckBox::indicator:checked:disabled,QGroupBox::indicator:checked:disabled,QTreeView::indicator:checked:disabled,QListView::indicator:checked:disabled,QTableView::indicator:checked:disabled{
-image:url(:/qss/blacksoft/checkbox_checked_disable.png);
+border:1px solid #4fc3f7;
+background:#4fc3f7;
 }
 
 QCheckBox::indicator:indeterminate,QGroupBox::indicator:indeterminate,QTreeView::indicator:indeterminate,QListView::indicator:indeterminate,QTableView::indicator:indeterminate{
-image:url(:/qss/blacksoft/checkbox_parcial.png);
+border:1px solid #4fc3f7;
+background:qlineargradient(spread:pad,x1:0,y1:0,x2:0,y2:1,stop:0 #262636,stop:0.5 #262636,stop:0.5 #4fc3f7,stop:1 #4fc3f7);
+}
+
+QCheckBox::indicator:unchecked:disabled,QGroupBox::indicator:unchecked:disabled,QTreeView::indicator:unchecked:disabled,QListView::indicator:unchecked:disabled,QTableView::indicator:unchecked:disabled{
+border:1px solid #34343f;
+background:#232330;
+}
+
+QCheckBox::indicator:checked:disabled,QGroupBox::indicator:checked:disabled,QTreeView::indicator:checked:disabled,QListView::indicator:checked:disabled,QTableView::indicator:checked:disabled{
+border:1px solid #3d3d4d;
+background:#55606e;
 }
 
 QCheckBox::indicator:indeterminate:disabled,QGroupBox::indicator:indeterminate:disabled,QTreeView::indicator:indeterminate:disabled,QListView::indicator:indeterminate:disabled,QTableView::indicator:indeterminate:disabled{
-image:url(:/qss/blacksoft/checkbox_parcial_disable.png);
+border:1px solid #3d3d4d;
+background:qlineargradient(spread:pad,x1:0,y1:0,x2:0,y2:1,stop:0 #232330,stop:0.5 #232330,stop:0.5 #55606e,stop:1 #55606e);
 }
 
 QTimeEdit::up-button,QDateEdit::up-button,QDateTimeEdit::up-button,QDoubleSpinBox::up-button,QSpinBox::up-button{

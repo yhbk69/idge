@@ -22,6 +22,7 @@
 #include "ui_frmmain.h"
 #include "core_helper/iconhelper.h"
 #include "core_helper/qthelper.h"
+#include "core_helper/theme.h"
 #include "SharedTypes.hpp"
 #include "ConfigManager.h"
 #include "frmvideowindow.h"
@@ -65,7 +66,6 @@ frmMain::frmMain(QWidget *parent) : QWidget(parent), ui(new Ui::frmMain)
     this->initNewPages();
     this->initBusinessPages();
     this->initLeftMain();
-    this->initLeftConfig();
     this->on_btnMenu_Max_clicked();
 }
 
@@ -253,7 +253,7 @@ void frmMain::initForm()
     this->setWindowTitle(ui->labTitle->text());
 
     // 5. stackedWidget 全局样式（统一基础字号，页面内可再覆盖）
-    ui->stackedWidget->setStyleSheet("QLabel{font-size:16px;}");
+    ui->stackedWidget->setStyleSheet(QString("QLabel{font-size:%1px;}").arg(theme::FS_BODY));
 
     // 6. 配置顶部导航按钮
     QSize icoSize(22, 22);
@@ -280,9 +280,7 @@ void frmMain::initForm()
 
     // 7. 左侧导航按钮样式
     ui->widgetLeftMain->setProperty("flag", "left");
-    ui->widgetLeftConfig->setProperty("flag", "left");
     ui->pageMonitor->setStyleSheet(QString("QWidget[flag=\"left\"] QAbstractButton{min-height:%1px;max-height:%1px;}").arg(60));
-    ui->page2->setStyleSheet(QString("QWidget[flag=\"left\"] QAbstractButton{min-height:%1px;max-height:%1px;}").arg(25));
 
     // 8. 获取视频监控窗口指针（用于后续打开视频）
     videoWindow = ui->lab1;
@@ -359,8 +357,8 @@ void frmMain::initNewPages()
     ui->stackedWidget->insertWidget(2, alarmListWidget_);
 
     // 设置背景
-    dashboardWidget_->setStyleSheet("background: #1e1e2e;");
-    alarmListWidget_->setStyleSheet("background: #1e1e2e;");
+    dashboardWidget_->setStyleSheet(QString("background: %1;").arg(theme::BG));
+    alarmListWidget_->setStyleSheet(QString("background: %1;").arg(theme::BG));
 
     // ===== 视频监控页面右侧报警列表 =====
     if (ui->widgetRightMain) {
@@ -387,8 +385,9 @@ void frmMain::initNewPages()
     // ===== 悬浮报警提示 toast =====
     alarmToast_ = new QLabel(this);
     alarmToast_->setStyleSheet(
-        "QLabel { background: rgba(220,50,50,0.92); color: white;"
-        " border-radius: 6px; padding: 10px 16px; font-size: 16px; font-weight: bold; }");
+        QString("QLabel { background: rgba(220,50,50,0.92); color: white;"
+                " border-radius: 6px; padding: 10px 16px; font-size: %1px; font-weight: bold; }")
+            .arg(theme::FS_BODY));
     alarmToast_->setVisible(false);
     alarmToast_->setWordWrap(true);
     alarmToast_->adjustSize();
@@ -399,9 +398,11 @@ void frmMain::initNewPages()
     // ===== 未确认报警角标 =====
     alarmBadge_ = new QLabel(ui->btnEquipCheck);
     alarmBadge_->setStyleSheet(
-        "QLabel { background: #f44336; color: white; border-radius: 8px;"
-        " font-size: 12px; font-weight: bold; min-width: 15px; max-width: 40px;"
-        " padding: 1px 3px; }");
+        QString("QLabel { background: %1; color: white; border-radius: 8px;"
+                " font-size: %2px; font-weight: bold; min-width: 15px; max-width: 40px;"
+                " padding: 1px 3px; }")
+            .arg(theme::DANGER)
+            .arg(theme::FS_BADGE));
     alarmBadge_->setAlignment(Qt::AlignCenter);
     alarmBadge_->setVisible(false);
     alarmBadge_->raise();
@@ -652,37 +653,6 @@ void frmMain::initLeftMain()
     IconHelper::setStyle(ui->widgetLeftMain, btnsMain, iconsMain, styleColor);
 }
 
-/**
- * @brief 初始化系统设置页左侧导航
- * 6个配置子菜单：基本设置、转发设置、用户设置、防区设置、设备设置、其他设置
- */
-void frmMain::initLeftConfig()
-{
-    iconsConfig << 0xf031 << 0xf036 << 0xf249 << 0xf055 << 0xf05a << 0xf249;
-    btnsConfig << ui->tbtnConfig1 << ui->tbtnConfig2 << ui->tbtnConfig3 << ui->tbtnConfig4 << ui->tbtnConfig5 << ui->tbtnConfig6;
-
-    for (int i = 0; i < btnsConfig.count(); ++i) {
-        QToolButton *btn = (QToolButton *)btnsConfig.at(i);
-        btn->setCheckable(true);
-        btn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-        connect(btn, SIGNAL(clicked(bool)), this, SLOT(leftConfigClick()));
-    }
-
-    // 配置导航栏样式颜色
-    IconHelper::StyleColor styleColor;
-    styleColor.position = "left";
-    styleColor.iconSize = 16;
-    styleColor.iconWidth = 20;
-    styleColor.iconHeight = 20;
-    styleColor.borderWidth = 3;
-    styleColor.borderColor = borderColor;
-    styleColor.setColor(normalBgColor, normalTextColor, darkBgColor, darkTextColor);
-    IconHelper::setStyle(ui->widgetLeftConfig, btnsConfig, iconsConfig, styleColor);
-
-    // 默认选中"基本设置"
-    ui->tbtnConfig1->click();
-}
-
 // ==========================================
 // 左侧导航点击处理
 // ==========================================
@@ -694,17 +664,6 @@ void frmMain::leftMainClick()
         QAbstractButton *btn = btnsMain.at(i);
         btn->setChecked(btn == b);
     }
-}
-
-void frmMain::leftConfigClick()
-{
-    QToolButton *b = (QToolButton *)sender();
-    QString name = b->text();
-    for (int i = 0; i < btnsConfig.count(); ++i) {
-        QAbstractButton *btn = btnsConfig.at(i);
-        btn->setChecked(btn == b);
-    }
-    ui->lab2->setText(name);
 }
 
 // ==========================================
@@ -883,8 +842,7 @@ void frmMain::initDebugPage()
             chNoteEdit_[i] = new QLineEdit(cfg.channelNote(i + 1));
             chNoteEdit_[i]->setPlaceholderText("备注");
             chNoteEdit_[i]->setMaximumWidth(180);
-            chNoteEdit_[i]->setStyleSheet("color:#fff;background:#3d3d4d;"
-                                          "border:1px solid #555;border-radius:4px;padding:2px 6px;");
+            chNoteEdit_[i]->setStyleSheet(theme::field(theme::BORDER));
             connect(chNoteEdit_[i], &QLineEdit::editingFinished, this, [this, i]() {
                 ConfigManager::instance().setChannelNote(i + 1, chNoteEdit_[i]->text().trimmed());
                 ConfigManager::instance().save();
@@ -894,8 +852,7 @@ void frmMain::initDebugPage()
             // 清空按钮：清掉该路的视频路径 + 备注
             QPushButton *clearBtn = new QPushButton("清空");
             clearBtn->setMaximumWidth(64);
-            clearBtn->setStyleSheet("color:#fff;background:#f44336;"
-                                    "border-radius:4px;padding:3px 8px;");
+            clearBtn->setStyleSheet(theme::miniButton(theme::DANGER));
             connect(clearBtn, &QPushButton::clicked, this, [this, i, chEdit]() {
                 chEdit[i]->clear();
                 chNoteEdit_[i]->clear();
@@ -937,10 +894,12 @@ void frmMain::initDebugPage()
     // ========== 电子围栏报警类别（动态创建，保存后实时生效） ==========
     {
         QGroupBox *grpFence = new QGroupBox("电子围栏配置");
-        grpFence->setStyleSheet("QGroupBox{font-size:18px; font-weight:bold;}"
-                                "QLabel{font-size:16px;}"
-                                "QLineEdit{font-size:16px;}"
-                                "QPushButton{font-size:16px;}");
+        grpFence->setStyleSheet(QString("QGroupBox{font-size:%1px; font-weight:bold;}"
+                                        "QLabel{font-size:%2px;}"
+                                        "QLineEdit{font-size:%2px;}"
+                                        "QPushButton{font-size:%2px;}")
+                                    .arg(theme::FS_CARD)
+                                    .arg(theme::FS_BODY));
         QGridLayout *glFence = new QGridLayout(grpFence);
         glFence->setHorizontalSpacing(20);
         glFence->setVerticalSpacing(6);
@@ -959,7 +918,7 @@ void frmMain::initDebugPage()
         glFence->addWidget(btnSaveFenceClasses, 0, 2);
 
         QLabel *labFenceHint = new QLabel("逗号分隔，留空默认只报 person。可用: person, bicycle, car 等");
-        labFenceHint->setStyleSheet("color: #9ca3af; font-size: 13px;");
+        labFenceHint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
         labFenceHint->setWordWrap(true);
         glFence->addWidget(labFenceHint, 1, 1, 1, 2);
 
@@ -1054,8 +1013,7 @@ void frmMain::initCascadeUi()
     cascadeNoteEdit_[0] = new QLineEdit(cfg.cascadeModelNote(1));
     cascadeNoteEdit_[0]->setPlaceholderText("备注");
     cascadeNoteEdit_[0]->setMaximumWidth(180);
-    cascadeNoteEdit_[0]->setStyleSheet("color:#fff;background:#2d2d3d;"
-                                       "border:1px solid #555;border-radius:4px;padding:2px 6px;");
+    cascadeNoteEdit_[0]->setStyleSheet(theme::field(theme::PANEL));
     connect(cascadeNoteEdit_[0], &QLineEdit::editingFinished, this, [this]() {
         ConfigManager &c = ConfigManager::instance();
         c.setCascadeModelNote(1, cascadeNoteEdit_[0]->text().trimmed());
@@ -1064,7 +1022,7 @@ void frmMain::initCascadeUi()
     gl->addWidget(cascadeNoteEdit_[0], 4, 3);
     QPushButton *clear1 = new QPushButton("清空");
     clear1->setMaximumWidth(64);
-    clear1->setStyleSheet("color:#fff;background:#f44336;border-radius:4px;padding:3px 8px;");
+    clear1->setStyleSheet(theme::miniButton(theme::DANGER));
     connect(clear1, &QPushButton::clicked, this, [this]() {
         ui->lineEditModelPath->clear();
         cascadeNoteEdit_[0]->clear();
@@ -1082,7 +1040,7 @@ void frmMain::initCascadeUi()
         int row = 4 + i;                   // 模型2在row5 ... 模型5在row8
 
         QLabel *lbl = new QLabel(QString("模型路径%1:").arg(i + 1));
-        lbl->setStyleSheet("color:#E5E7EB;font-size:16px;");
+        lbl->setStyleSheet(theme::text(theme::TEXT, theme::FS_BODY));
         gl->addWidget(lbl, row, 0);
 
         cascadePathEdit_[i] = new QLineEdit(cfg.cascadeModelPath(i + 1));
@@ -1091,8 +1049,7 @@ void frmMain::initCascadeUi()
             cascadePathEdit_[i]->setText(cfg.modelPath());
         }
         cascadePathEdit_[i]->setPlaceholderText("模型路径(*.rknn)，留空不用");
-        cascadePathEdit_[i]->setStyleSheet("color:#fff;background:#2d2d3d;"
-                                           "border:1px solid #555;border-radius:4px;padding:2px 6px;");
+        cascadePathEdit_[i]->setStyleSheet(theme::field(theme::PANEL));
         connect(cascadePathEdit_[i], &QLineEdit::editingFinished,
                 this, [this, i]() {
                     ConfigManager &c = ConfigManager::instance();
@@ -1103,7 +1060,7 @@ void frmMain::initCascadeUi()
 
         QPushButton *browse = new QPushButton("浏览...");
         browse->setMaximumWidth(80);
-        browse->setStyleSheet("color:#fff;background:#4a6fa5;border-radius:4px;padding:3px 8px;");
+        browse->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
         connect(browse, &QPushButton::clicked, this, [this, i]() {
             QString f = QFileDialog::getOpenFileName(
                 this, QString("选择模型路径%1").arg(i + 1), "model", "RKNN 模型 (*.rknn)");
@@ -1120,8 +1077,7 @@ void frmMain::initCascadeUi()
         cascadeNoteEdit_[i] = new QLineEdit(cfg.cascadeModelNote(i + 1));
         cascadeNoteEdit_[i]->setPlaceholderText("备注");
         cascadeNoteEdit_[i]->setMaximumWidth(180);
-        cascadeNoteEdit_[i]->setStyleSheet("color:#fff;background:#2d2d3d;"
-                                           "border:1px solid #555;border-radius:4px;padding:2px 6px;");
+        cascadeNoteEdit_[i]->setStyleSheet(theme::field(theme::PANEL));
         connect(cascadeNoteEdit_[i], &QLineEdit::editingFinished,
                 this, [this, i]() {
                     ConfigManager &c = ConfigManager::instance();
@@ -1132,7 +1088,7 @@ void frmMain::initCascadeUi()
 
         QPushButton *clearBtn = new QPushButton("清空");
         clearBtn->setMaximumWidth(64);
-        clearBtn->setStyleSheet("color:#fff;background:#f44336;border-radius:4px;padding:3px 8px;");
+        clearBtn->setStyleSheet(theme::miniButton(theme::DANGER));
         connect(clearBtn, &QPushButton::clicked, this, [this, i]() {
             cascadePathEdit_[i]->clear();
             cascadeNoteEdit_[i]->clear();

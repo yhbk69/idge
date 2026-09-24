@@ -76,9 +76,6 @@ private:
     QList<int> iconsMain;          ///< 主导航图标列表
     QList<QAbstractButton *> btnsMain;  ///< 主导航按钮列表
 
-    QList<int> iconsConfig;        ///< 配置导航图标列表
-    QList<QAbstractButton *> btnsConfig;  ///< 配置导航按钮列表
-
     // ========== 人员点名 / 设备盘点业务模块（caichao 分支合并） ==========
     RollCallWidget *rollCallWidget_ = nullptr;
     std::shared_ptr<RollCallService> rollCallService_;
@@ -149,9 +146,7 @@ private slots:
     void showAlarmToast(const AlarmRecord &alarm);  ///< 悬浮报警提示
     void updateAlarmBadge();       ///< 更新未确认报警角标
     void initLeftMain();           ///< 初始化视频监控页左侧导航
-    void initLeftConfig();         ///< 初始化系统设置页左侧导航
     void leftMainClick();          ///< 视频监控页左侧按钮点击
-    void leftConfigClick();        ///< 系统设置页左侧按钮点击
     void systemExit();             ///< 系统退出确认
     void initDebugPage();          ///< 初始化调试帮助页（从 config.json 读取配置）
     void initCascadeUi();          ///< 初始化级联模型配置区（5个槽位+备注+清空）
