@@ -553,14 +553,14 @@ void frmMain::initBusinessPages()
 }
 
 // 点名服务资源约定（根目录 = 环境变量 IDGE_WORKSPACE，缺省回退当前工作目录）：
-//   model/face/ 下三件套：face_recognition(可执行/库路径)、detection.rknn(SCRFD 检测)、
-//   recognition.rknn(特征比对)；数据统一放 data/roll_call_data/（SQLite: roll_call.db）
+//   model/face/ 下两件套权重：detection.rknn(SCRFD 检测)、recognition.rknn(特征比对)，
+//   由进程内 InProcessFaceRecognizer 常驻加载（不再依赖 face_recognition 可执行文件）；
+//   数据统一放 data/roll_call_data/（SQLite: roll_call.db）
 bool frmMain::initRollCallService()
 {
     rollCallService_ = std::make_shared<RollCallService>();
     const std::string ws = workspace_;
     const bool success = rollCallService_->initialize(
-        ws + "/model/face/face_recognition",
         ws + "/model/face/detection.rknn",
         ws + "/model/face/recognition.rknn",
         RuntimePaths::rollCallDb(QString::fromStdString(ws)).toStdString(),

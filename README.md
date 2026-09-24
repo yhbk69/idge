@@ -29,10 +29,10 @@ export IDGE_WORKSPACE=/home/pi/cc/idge_work   # 示例
 ```
 $IDGE_WORKSPACE/
 ├── model/
-│   ├── face/                      # 人员点名三件套
+│   ├── face/                      # 人员点名权重（两件套 .rknn，进程内推理直接加载）
 │   │   ├── detection.rknn         # SCRFD 人脸检测模型
 │   │   ├── recognition.rknn       # 人脸特征比对模型
-│   │   └── face_recognition       # 模型基路径（前缀约定）
+│   │   └── face_recognition       # CLI 对照工具构建产物（点名已进程内化，主程序不再调起）
 │   └── library/                   # 模型库：设备盘点权重经 ModelRegistry 从这里解析
 │       └── yolo11n-coco/          # 当前盘点主力权重（明火模型入库后自动加入盘点清单）
 │           ├── model.rknn
@@ -86,7 +86,7 @@ $IDGE_WORKSPACE/
 - **RGA 硬件加速预处理**：色彩转换和图像缩放由 RGA 引擎完成，释放 CPU
 - **电子围栏**：多边形围栏绘制，inside/outside 两种侵入判定模式，按类别过滤报警
 - **报警管理**：限流去重、抓拍落盘、SQLite 持久化、GUI 悬浮提示与历史查询
-- **人员点名**：SCRFD 人脸检测 + 特征比对，注册 / 点名 / 注销三阶段，矩阵批量相似度 + 贪心匹配
+- **人员点名**：SCRFD 人脸检测 + 特征比对（进程内 RKNN 常驻推理），注册 / 点名 / 注销三阶段，余弦相似度 + 贪心一对一匹配
 - **设备盘点**：复用 YOLO11 RKNN 模型做设备识别与盘点任务管理
 - **Qt5 GUI**：blacksoft 换肤框架，无边框窗体，多页面导航
 - **多路视频支持**：支持 4 路视频同时监控
@@ -147,10 +147,10 @@ RGBA8888 DMA-BUF fd（带检测框的最终画面）
 
 ```
 人员点名：摄像头预览(src/media/reader/camera_preview_decoder) → 抓拍 JPEG
-    → SCRFD 检测(src/media/reader/scrfd_face_detector) → 人脸对齐裁剪
-    → 特征提取(src/ai/recognition/face_recognizer)
+    → SCRFD 检测 + 五点仿射对齐 + 512 维特征提取(进程内常驻
+      src/ai/recognition/in_process_face_recognizer)
     → 注册/比对/注销(src/biz/service/roll_call_service)
-    → 余弦相似度矩阵(Eigen) + 贪心一对一匹配 → roll_call.db
+    → 余弦相似度(归一化点积) + 贪心一对一匹配 → roll_call.db
 
 设备盘点：拍照 → 进程内 YOLO11 识别(src/ai/yolo11，权重=model/library/yolo11n-coco)
     → 结果去重汇总 → src/biz/service/equipment_inventory_service → roll_call.db 任务/设备表
@@ -188,7 +188,7 @@ RGBA8888 DMA-BUF fd（带检测框的最终画面）
 | `src/ai/yolo11/` | YOLO11 RKNN 推理核心、前后处理 | [README](src/ai/yolo11/README.md) |
 | `src/ai/model_repo/` | 模型库注册表（library 扫描/元数据/级联槽位解析） | [README](src/ai/model_repo/README.md) |
 | `src/ai/task/` | 检测任务体系（安全帽/PPE 任务与任务池） | [README](src/ai/task/README.md) |
-| `src/ai/recognition/` | 人脸识别桥接（fork+execv 调 tools 产物） | [README](src/ai/recognition/README.md) |
+| `src/ai/recognition/` | 人脸识别：进程内 `InProcessFaceRecognizer`（点名生产链）+ 外部 exe 桥接 `FaceRecognitionWrapper`（对照/CLI） | [README](src/ai/recognition/README.md) |
 | `src/biz/service/` | 人员点名 / 设备盘点业务服务 | [README](src/biz/service/README.md) |
 | `src/biz/alarm/` | 报警管理（限流、去重、抓拍、SQLite 持久化） | [README](src/biz/alarm/README.md) |
 | `src/biz/geofence/` | 电子围栏（形状、判定、绘制 overlay） | [README](src/biz/geofence/README.md) |
@@ -198,11 +198,11 @@ RGBA8888 DMA-BUF fd（带检测框的最终画面）
 | `src/base/queue/` | 阻塞队列 / 帧队列 / 优先级队列 | [README](src/base/queue/README.md) |
 | `src/base/threadpool/` | 通用线程池 | [README](src/base/threadpool/README.md) |
 | `src/base/utils/` | 图像/绘制/路径/日志等通用工具 | [README](src/base/utils/README.md) |
-| `tools/face_recognition/` | 人脸识别命令行工具（第二构建 target，产物输出 model/face/） | [README](tools/face_recognition/README.md) |
+| `tools/face_recognition/` | 人脸识别命令行工具（CLI 验证/点名对照回归基准，产物输出 model/face/） | [README](tools/face_recognition/README.md) |
 | `model/` | 模型库 `library/<id>/`（yolo11n/s/m 收编）+ 专项标签 | [README](model/README.md) |
 | `data/` | 运行时数据（config/idge.db/alarms/backups/roll_call_data，内容不入库） | — |
 | `python/` | ONNX→RKNN 转换与验证脚本 | [README](python/README.md) |
-| `tests/` | 测试程序（test_database 数据库层；test_equipment 设备盘点全链离线自测，均随主构建生成） | [README](tests/README.md) |
+| `tests/` | 测试程序（test_database 数据库层；test_equipment 设备盘点、test_rollcall 人员点名全链离线自测，均随主构建生成） | [README](tests/README.md) |
 | `docs/` | 技术知识库 | [README](docs/README.md) |
 | `include/` | nlohmann/json 单头文件 | [README](include/README.md) |
 | `res/` | Qt 资源（qrc：图片/字体/GL 着色器/音效） | [README](res/README.md) |

@@ -48,7 +48,7 @@
 - **服务注入**：业务页构造函数只做 UI，服务经 `setService(svc)` / `setServices(eq, rc)` 注入（所有权在 `frmMain`，页面持 `shared_ptr`）。顺序约束：**先 `initRollCallService()` 再 `initEquipmentService()`**——设备服务构造依赖点名服务，且两者共用 `roll_call.db` 的 task 表（盘点任务 type=`equipment_registration`），task_id 两侧可互用。服务初始化失败仅弹警告，页面判空降级。
 - **后台识别线程模式**：`QThread(this)` + Worker `moveToThread` + `started→run` + finished/error 自动 quit；跨线程携带的结构体必须先 `qRegisterMetaType`；Worker 定义在 .cpp 内时文件尾必须 `#include "xxx.moc"`。
 - **IDGE_WORKSPACE 目录约定**（`initBusinessPages()` 读取环境变量，缺省回退当前目录）：
-  - `model/face/`：点名三件套（face_recognition 路径、detection.rknn、recognition.rknn）；
+  - `model/face/`：点名两件套权重（detection.rknn、recognition.rknn，进程内 `InProcessFaceRecognizer` 直接加载；face_recognition exe 仅 CLI 对照工具，不再需要）；
   - `model/library/`：设备盘点检测权重（`initEquipmentService()` 经 ModelRegistry 解析，当前用 yolo11n-coco，明火模型入库后自动加入）；
   - `roll_call_data/`：任务目录根与 `roll_call.db`；拍照产物写入各任务 `folder_path`。
 

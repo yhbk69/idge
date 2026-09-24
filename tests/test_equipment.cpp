@@ -59,10 +59,9 @@ int main(int argc, char** argv) {
     QDir().mkpath(tmp_root);
     std::cout << "[test_equipment] tmp workspace=" << tmp_root.toStdString() << std::endl;
 
-    // 1. 点名服务（盘点共库依赖）：exe/权重同主程序约定
+    // 1. 点名服务（盘点共库依赖）：两件套权重同主程序约定（进程内识别器）
     auto roll_call = std::make_shared<RollCallService>();
     check(roll_call->initialize(
-              (face_dir + "/face_recognition").toStdString(),
               (face_dir + "/detection.rknn").toStdString(),
               (face_dir + "/recognition.rknn").toStdString(),
               (tmp_root + "/roll_call.db").toStdString(),

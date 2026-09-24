@@ -4,20 +4,22 @@
 /*
  * 人员点名服务（RollCallService）对外接口
  * 职责：串联“注册（点名登记）→ 注销比对”两条业务链——
- *   1) 注册：对批量照片做 SCRFD 人脸检测 + 识别模型特征提取（经外部可执行程序
- *      FaceRecognitionWrapper 调 RKNN/NPU），跨照片全局余弦相似度去重后写入 SQLite；
+ *   1) 注册：对批量照片做 SCRFD 人脸检测 + 识别模型特征提取（进程内
+ *      InProcessFaceRecognizer，常驻两个 rknn 上下文），跨照片全局余弦
+ *      相似度去重后写入 SQLite；
  *   2) 注销：将注销照片检测到的人脸与注册库做“一对一贪心匹配”，输出
  *      已注销/未注销/未登记 三类结果，确认后落库。
- * 内部自带线程池并行检测（照片级并行、去重与匹配串行），供 frm 层直接调用。
+ * 检测为串行逐照片执行：RKNN 上下文非线程安全，且常驻实例单次推理
+ * 远快于旧“fork 子进程 + 每次重加载模型”方案，照片级并行已随内化移除。
  */
 
 #include <string>
 #include <vector>
 #include <memory>
-#include "face_recognizer.h"
+#include "face_recognizer.h"                 // 复用 DetectedFace / FaceDetectionResult
+#include "in_process_face_recognizer.h"      // 进程内 SCRFD+ArcFace 识别器
 #include "business_db_manager.h"
 #include <opencv2/opencv.hpp>
-#include "thread_pool.h"  // 服务私有线程池：照片人脸检测在其后台线程并行执行
 
 // 单张检测出的人脸的处理结果（贯穿“检测→去重→落库”三个阶段的中间载体）
 struct ProcessedFace {
@@ -70,21 +72,20 @@ struct CancellationProcessResult {
 };
 
 // 人员点名服务：注册（点名）、注销比对、任务生命周期管理三条流程的统一入口。
-// 线程模型：本类自身不加锁，约定由调用方（UI 后台线程）串行驱动；
-// 类内 thread_pool_ 仅用于把“逐照片检测”这一 CPU/NPU 密集步骤并行化。
+// 线程模型：本类自身不加锁，约定由调用方（frm 层后台线程）串行驱动；
+// 识别器为进程内常驻 rknn 上下文，非线程安全。
 class RollCallService {
 public:
     RollCallService();
     ~RollCallService();
     
-    // 初始化：加载外部识别程序与两个 RKNN 模型路径、打开 SQLite 注册库、创建存储目录
-    //  @param exe_path      face_recognition 可执行程序（RKNN 推理宿主，子进程方式调用）
+    // 初始化：常驻加载两个 RKNN 模型（进程内识别器）、打开 SQLite 注册库、创建存储目录
     //  @param det_model_path SCRFD 人脸检测 rknn 模型（工作区约定 model/face/detection.rknn）
     //  @param rec_model_path 人脸特征提取 rknn 模型（model/face/recognition.rknn，输出 512 维特征）
     //  @param db_path        SQLite 注册库文件（data/roll_call_data/roll_call.db）
     //  @param base_storage_path 任务文件夹根目录（data/roll_call_data/），每个任务一个子目录
-    bool initialize(const std::string& exe_path,
-                   const std::string& det_model_path,
+    //  核绑定 RKNN_NPU_CORE_AUTO：点名为低频批量操作，不与其他链路争抢固定核预算
+    bool initialize(const std::string& det_model_path,
                    const std::string& rec_model_path,
                    const std::string& db_path,
                    const std::string& base_storage_path);
@@ -116,17 +117,15 @@ public:
     void setSimilarityThreshold(float threshold) { similarity_threshold_ = threshold; }
     
 private:
-    std::unique_ptr<FaceRecognitionWrapper> recognizer_;  // 外部人脸检测/识别程序封装（子进程 + JSON 解析）
+    std::unique_ptr<InProcessFaceRecognizer> recognizer_;  // 进程内 SCRFD+ArcFace 识别器（常驻两个 rknn 上下文）
     std::unique_ptr<BusinessDBManager> db_;               // SQLite：任务表 + 人脸注册表 + 注销记录表
-    std::unique_ptr<ThreadPool> thread_pool_;             // 默认 4 工作线程，照片级并行检测
     std::string base_storage_path_;                       // 任务文件夹根目录
     std::string detection_model_path_;                    // 检测模型路径（对外展示/复用）
     float similarity_threshold_;                          // 余弦相似度判定阈值（去重与注销匹配共用）
     
     // 单张图片处理：仅“检测+特征提取”，不做去重——去重需要全局视角，留到合并阶段。
-    // 设计为独立成员函数正是为了能作为线程池任务体并行调度（多张照片同时在检）
-    PhotoProcessResult processSinglePhotoParallel(const std::string& photo_path,
-                                                  const std::string& task_folder);
+    // 由 processPhotos/matchCancellation 逐照片同步调用（识别器常驻，单张数十 ms）
+    PhotoProcessResult processSinglePhoto(const std::string& photo_path);
     
     // 合并各照片的检测结果做“全局去重”：按照片顺序逐人脸与已收集的唯一特征比对，
     // 唯一者入列表并裁剪保存人脸图，重复者仅记录 similar_to_index 指向的重复来源

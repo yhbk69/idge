@@ -1,6 +1,7 @@
 /* 人员点名服务实现（核心业务逻辑层）
-人脸检测和特征提取：调用外部 RKNN 可执行程序（NPU 加速），按“每图一份 <图片路径>_faces.json”
-    的约定回传检测结果，因此多张照片可同时并行检测而互不干扰。
+人脸检测和特征提取：进程内 InProcessFaceRecognizer 常驻 SCRFD+ArcFace 两个 rknn
+    上下文，逐照片串行调用（旧"外部 exe 子进程 + _faces.json 文件 IPC + 线程池
+    并行"方案已废弃——每次 fork 都要重加载模型，常驻后串行反而更快）。
 去重算法：特征经 L2 归一化后，两向量内积即余弦相似度，超过 similarity_threshold_ 判为同一人。
 图像处理：绘制人脸框（唯一=绿实线，重复=黄虚线）、裁剪人脸区域、保存图片产物。
 任务管理：创建/删除任务，保存识别结果到数据库（先建文件夹后写库，失败回滚）。
@@ -52,18 +53,14 @@ cv::Mat loadImageWithFallback(const std::string& path, const std::string& tag) {
 }
 
 RollCallService::RollCallService()
-    : recognizer_(std::make_unique<FaceRecognitionWrapper>()),
+    : recognizer_(std::make_unique<InProcessFaceRecognizer>()),
       db_(std::make_unique<BusinessDBManager>()),
-      thread_pool_(std::make_unique<ThreadPool>()),
       similarity_threshold_(0.8f) {
 }// 阈值 0.8 为默认值：余弦相似度 >=0.8 即判为同一人（去重合并/注销命中），可用 setSimilarityThreshold 调整
 
-// 析构依赖成员逆序销毁：thread_pool_ 最后声明、最先析构，其析构函数会 join 全部
-// 工作线程，保证不会再有任务访问 recognizer_/db_ 之后它们才被释放——无悬垂访问
-RollCallService::~RollCallService() = default;
+RollCallService::~RollCallService() = default;   // recognizer_ 析构释放两个常驻 rknn 上下文
 
-bool RollCallService::initialize(const std::string& exe_path,
-                                 const std::string& det_model_path,
+bool RollCallService::initialize(const std::string& det_model_path,
                                  const std::string& rec_model_path,
                                  const std::string& db_path,
                                  const std::string& base_storage_path) {
@@ -73,10 +70,13 @@ bool RollCallService::initialize(const std::string& exe_path,
     // 创建存储目录（0755：属主可写、他人只读，任务文件夹将建在其下）
     mkdir(base_storage_path_.c_str(), 0755);
     
-    // 配置识别器：外部可执行程序 + 检测/识别两个 rknn 模型，仅在 detectAndExtract 时读取
-    recognizer_->setExecutablePath(exe_path);
-    recognizer_->setDetectionModel(det_model_path);
-    recognizer_->setRecognitionModel(rec_model_path);
+    // 常驻加载检测+识别两个 rknn 模型（替代旧"每次调用 fork 子进程重加载"）；
+    // 核绑定 AUTO：点名为低频批量操作，交给驱动调度，不抢盘点/预览的固定核
+    if (!recognizer_->init(det_model_path, rec_model_path, RKNN_NPU_CORE_AUTO)) {
+        std::cerr << "Failed to init in-process face recognizer (det=" << det_model_path
+                  << " rec=" << rec_model_path << ")" << std::endl;
+        return false;
+    }
     // 0.6=人脸检测置信度阈值（低于此分的检测框丢弃），0.4=NMS 去重的 IoU 阈值
     recognizer_->setThresholds(0.6f, 0.4f);  // 可配置
     
@@ -189,24 +189,20 @@ int RollCallService::createRegistrationTask(const std::string& task_name) {
     return task_id;
 }
 
-// 并行版本的单张图片处理（只做检测，不做去重）——线程池任务体。
-// 并行安全性依据：
-//   1) detectAndExtract 以“子进程执行外部程序 + 结果写 <图片路径>_faces.json”方式工作，
-//      JSON 路径按图片名区分，不同照片并发处理不会互相覆盖；
-//   2) recognizer_ 的路径/阈值成员在多任务间只读，无共享可变状态；
-//   3) 返回的 PhotoProcessResult 按值返回，经 std::future 传回主线程，无数据竞争。
-// 注意：同一 photo_paths 列表内部不得出现重复路径（同名文件并发写同一 JSON 会竞争）。
-PhotoProcessResult RollCallService::processSinglePhotoParallel(
-    const std::string& photo_path,
-    const std::string& task_folder) {
+// 单张照片的检测+特征提取（调用线程内同步执行）。
+// 串行依据：常驻 rknn 上下文非线程安全；单次推理数十 ms，无旧方案的
+// fork+双模型重加载开销，逐张串行的总耗时反而低于旧的 4 路并行子进程。
+// 失败语义：detectAndExtract 失败返回空结果，该照片按"零人脸"参与后续
+// 合并（不阻断整批），与旧子进程链一致。
+PhotoProcessResult RollCallService::processSinglePhoto(const std::string& photo_path) {
     
     PhotoProcessResult result;
     result.original_path = photo_path;
     result.unique_count = 0;
     
-    std::cerr << "[rollcall] Processing photo (parallel): " << photo_path << std::endl;
+    std::cerr << "[rollcall] Processing photo: " << photo_path << std::endl;
     
-    // 调用exe检测人脸（SCRFD 检测 + 逐脸特征提取，一次子进程调用完成两阶段），计时用于性能观测
+    // 进程内检测（SCRFD 检测 + 逐脸对齐+特征提取，同一对常驻上下文完成两阶段），计时用于性能观测
     auto start = std::chrono::steady_clock::now();
     FaceDetectionResult det_result = recognizer_->detectAndExtract(photo_path);
     auto end = std::chrono::steady_clock::now();
@@ -216,7 +212,7 @@ PhotoProcessResult RollCallService::processSinglePhotoParallel(
               << duration << "ms" << std::endl;
     
     // 暂时保存所有检测到的人脸（不做去重，稍后统一处理）：
-    // 去重必须看到全部照片才能保证“全局唯一”，并行阶段仅收集原始证据
+    // 去重必须看到全部照片才能保证“全局唯一”，检测阶段仅收集原始证据
     for (const auto& detected_face : det_result.faces) {
         ProcessedFace face;
         face.rect = detected_face.bbox;
@@ -254,8 +250,8 @@ TaskProcessResult RollCallService::mergeAndDeduplicateResults(
     
     // 遍历所有图片的所有人脸，做全局去重
     for (auto& photo_result : photo_results) {
-        // 后处理（裁剪/画框）需要原图像素，此时才重新读图（检测在子进程里已完成，
-        // 主进程不持有 Mat，避免并行阶段跨线程传大图）
+        // 后处理（裁剪/画框）需要原图像素，此时才重新读图（检测阶段只返回
+        // 结构化结果不持有 Mat，控制批量点名期间的内存峰值）
         cv::Mat image = loadImageWithFallback(photo_result.original_path, "merge");
         
         for (auto& face : photo_result.faces) {
@@ -306,9 +302,9 @@ TaskProcessResult RollCallService::mergeAndDeduplicateResults(
     return final_result;
 }
 
-// 注册流程入口：processPhotos 采用“并行检测 + 串行去重”两段式流水线。
-// 分工依据：检测要跑 NPU/子进程、单张耗时数百 ms~秒级，是绝对瓶颈，值得并行；
-// 去重仅涉及内存内积运算，N 脸整体 O(N²·d) 但常数极小，串行反而避免加锁。
+// 注册流程入口：processPhotos 按"逐照片串行检测 + 全局去重"两段执行。
+// 串行依据：识别器常驻上下文非线程安全，且单张数十 ms 无并行价值；
+// 去重仅涉及内存内积运算，N 脸整体 O(N²·d) 但常数极小。
 TaskProcessResult RollCallService::processPhotos(
     int task_id, const std::vector<std::string>& photo_paths) {
     
@@ -319,35 +315,18 @@ TaskProcessResult RollCallService::processPhotos(
     }
     
     const size_t num_photos = photo_paths.size();
-    std::cout << "Starting parallel processing of " << num_photos << " photos..." << std::endl;
+    std::cout << "Starting serial processing of " << num_photos << " photos..." << std::endl;
     
     auto start = std::chrono::steady_clock::now();
     
-    // 1. 并行检测所有图片的人脸：一次性全部 submit（线程池队列无界，不会阻塞提交），
-    //    实际并发度受池大小限制（默认 4，即最多 4 张同时检测）
-    std::vector<std::future<PhotoProcessResult>> futures;
-    futures.reserve(num_photos);
-    
-    for (const auto& photo_path : photo_paths) {
-        futures.push_back(
-            thread_pool_->submit(
-                &RollCallService::processSinglePhotoParallel,
-                this,
-                photo_path,
-                task.folder_path
-            )
-        );
-    }
-    
-    // 2. 等待所有检测完成：future.get() 按提交顺序阻塞收结果；
-    //    子任务抛异常时 get() 重放异常，这里捕获后跳过该照片（部分成功策略：
-    //    坏图不阻断整批点名，代价是该照片的人脸不计入人数）
+    // 逐照片检测（单照处理中的异常只丢弃该照片，不阻断整批——部分成功策略：
+    // 坏图不计入人数，与旧线程池版本对 future.get() 重放异常的处置等价）
     std::vector<PhotoProcessResult> photo_results;
     photo_results.reserve(num_photos);
     
-    for (auto& future : futures) {
+    for (const auto& photo_path : photo_paths) {
         try {
-            photo_results.push_back(future.get());
+            photo_results.push_back(processSinglePhoto(photo_path));
         } catch (const std::exception& e) {
             std::cerr << "Error processing photo: " << e.what() << std::endl;
         }
@@ -541,11 +520,11 @@ bool RollCallService::cancelTask(int task_id) {
                            task.cancelled_count, 1);
 }
 
-// 注销比对入口：与注册流程同构的“并行检测 + 串行匹配”，差别在于匹配对象是
+// 注销比对入口：与注册流程同构的“串行检测 + 贪心匹配”，差别在于匹配对象是
 // 注册库（SQLite 中本任务的全部唯一人脸），且要求“一对一”约束：
 // 一张注册脸最多被一张注销照命中，一张注销脸也最多认领一条注册记录。
 // 整体流程（对应下方编号 1~7）：
-//   1 取注册库 → 2 并行检测注销照片 → 3 汇总注销人脸(裁剪/画框产物) →
+//   1 取注册库 → 2 逐照检测注销照片 → 3 汇总注销人脸(裁剪/画框产物) →
 //   4 双侧特征归一化 → 5 相似度定义 → 6 贪心一对一匹配 → 7 收集未认领的注销脸
 CancellationProcessResult RollCallService::matchCancellation(
     int task_id, const std::vector<std::string>& photo_paths) {
@@ -568,32 +547,18 @@ CancellationProcessResult RollCallService::matchCancellation(
                                    // 维度不一致时越界——模型与注册库必须同模型配套）
     
     std::cout << "Loaded " << num_registered << " registered faces" << std::endl;
-    std::cout << "Starting parallel detection of " << photo_paths.size() 
+    std::cout << "Starting detection of " << photo_paths.size() 
               << " cancellation photos..." << std::endl;
 
     auto start = std::chrono::steady_clock::now();
 
-    // 2. 并行检测注销照片：复用注册流程的线程池任务体 processSinglePhotoParallel
-    //    （检测逻辑完全相同；注销照片不走去重，所以此处只取“检出了哪些脸”）
-    std::vector<std::future<PhotoProcessResult>> futures;
-    futures.reserve(photo_paths.size());
-    
-    for (const auto& path : photo_paths) {
-        futures.push_back(
-            thread_pool_->submit(
-                &RollCallService::processSinglePhotoParallel,
-                this,
-                path,
-                task.folder_path
-            )
-        );
-    }
-    
-    // 等待检测完成：同 processPhotos 的容错策略——单照异常仅告警跳过，不中断整批
+    // 2. 逐照片检测注销照：复用注册流程的 processSinglePhoto
+    //    （检测逻辑完全相同；注销照片不走去重，所以此处只取“检出了哪些脸”）；
+    //    容错策略同 processPhotos——单照异常仅告警跳过，不中断整批
     std::vector<PhotoProcessResult> photo_results;
-    for (auto& future : futures) {
+    for (const auto& path : photo_paths) {
         try {
-            photo_results.push_back(future.get());
+            photo_results.push_back(processSinglePhoto(path));
         } catch (const std::exception& e) {
             std::cerr << "Error detecting cancellation photo: " << e.what() << std::endl;
         }

@@ -45,7 +45,8 @@ model/
 
 | 路径 | 引用位置 |
 |------|----------|
-| `model/face/face_recognition`、`model/face/detection.rknn`、`model/face/recognition.rknn` | `src/ui/form/frmmain.cpp`（RollCallService 初始化） |
+| `model/face/detection.rknn`、`model/face/recognition.rknn` | `src/ui/form/frmmain.cpp`（RollCallService 初始化，进程内 `InProcessFaceRecognizer` 加载） |
+| `model/face/face_recognition` | 仅 CLI 手工验证与 `tests/test_rollcall` 对照回归需要（点名生产链 2026-09 已进程内化，主程序不再调起） |
 
 设备盘点不再依赖外部 demo 与 `model/coco|fire/` 目录（2026-09-24 内化改造）：
 `frmMain::initEquipmentService()` 经 ModelRegistry 从 `library/` 解析权重
@@ -68,8 +69,8 @@ python3 convert.py yolo11n.onnx rk3588 i8 ../model/library/yolo11n-coco/model.rk
 
 - `.rknn` 由 `python/convert.py`（rknn-toolkit2）在 x86 PC 上生成，平台绑定 rk3588；
 - 加载方：`src/ai/yolo11/`（YOLO11Model，经 `3rdparty/rknpu2` librknnrt 运行时推理）、
-  `src/ai/model_repo/`（ModelRegistry 库扫描/导入/槽位解析）、`src/biz/service/`（点名走外部
-  face_recognition 二进制；盘点进程内 YOLO11Model，权重取自本库）、
+  `src/ai/model_repo/`（ModelRegistry 库扫描/导入/槽位解析）、`src/ai/recognition/`
+  （点名的 `InProcessFaceRecognizer` 直接加载 `face/` 两件套权重，进程内推理）、
   `src/base/threadpool/`（级联多模型方案）；
 - 标签文件行序必须与模型输出 `cls_id` 一致；预处理约定 640×640、/255 归一化，
   与 `config.json detect` 段（conf 0.25 / nms 0.45）配套。
@@ -79,7 +80,8 @@ python3 convert.py yolo11n.onnx rk3588 i8 ../model/library/yolo11n-coco/model.rk
 - **模型与驱动版本强绑定**：librknnrt.so 过旧会报 RKNN_ERR_MODEL_INVALID，换板/换固件后先跑 CLI 冒烟。
 - rknn 文件不进 git（`.gitignore` 排除），部署包需自行携带 `library/`。
 - `meta.json` 的 `sha256` 用于导入去重与完整性核对；删除后下次启动重扫会重新生成。
-- `model/face/` 缺失时，人员点名初始化会失败（`initRollCallService` 返回 false）；
+- `model/face/` 的**两件套权重**（detection/recognition .rknn）缺失时，人员点名初始化会失败
+  （`initRollCallService` 返回 false；`face_recognition` exe 已降级为 CLI 对照工具，缺失不影响点名运行）；
   盘点权重改从 `library/` 解析，库中既无 `yolo11n-coco` 也无明火模型时 `initEquipmentService`
   返回 false——均为弹警告降级，视频监控主流程不受影响。
 - 标签 txt 每行一个类名、不要带引号或逗号；新增类别后需重新导出模型保持 cls_id 对齐。
