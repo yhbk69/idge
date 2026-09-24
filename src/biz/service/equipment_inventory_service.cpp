@@ -42,16 +42,18 @@ bool EquipmentInventoryService::initialize(const std::string& model_path,
 // 多模型初始化（全部成功才置 ready_，任一项失败保持未就绪并回收已加载模型）：
 //   - 标签文件：行数=类别数（容忍 CRLF，逐行去 \r，空行不计数），必须>0 行；
 //   - rknn 权重：必须以普通文件形式存在；
-//   - 每模型构造常驻 YOLO11Model，绑定核约定 models[i]->NPU 核 i
-//     （首模型核0、其余核1，与设备页预览的核分配一致，主检测流水线留核2）。
+//   - 每模型构造常驻 YOLO11Model，绑定核约定：首模型 NPU 核0、其余核1
+//     （与设备页预览的核分配一致，主检测流水线留核2）。
+// 原子性：新配置全部构建成功才整体替换旧状态（临时容器 → swap）；任一项失败
+//   直接返回 false，成员与 ready_ 保持不动——支持"模型热更新失败仍用老模型"。
 bool EquipmentInventoryService::initialize(const std::vector<EquipmentModelConfig>& models) {
-    models_ = models;
-    model_label_counts_.clear();
-    detectors_.clear();
-    ready_ = false;   // 先复位：重复调用 initialize 重新校验时可安全换配置
-    if (models_.empty()) return false;
-    for (size_t i = 0; i < models_.size(); ++i) {
-        const auto& model = models_[i];
+    if (models.empty()) return false;
+
+    // 全部构建进局部容器，成功前不触碰任何成员（失败即整批丢弃，旧状态无损）
+    std::vector<std::unique_ptr<YOLO11Model>> new_detectors;
+    std::vector<int> new_counts;
+    for (size_t i = 0; i < models.size(); ++i) {
+        const auto& model = models[i];
         // 数标签行数：一行一类别，行号即模型输出 class_index（检测结果转换时
         // 按行号取名，这里 count 仅作为解码参数 numClasses 与合法性校验）
         int count = 0;
@@ -69,20 +71,23 @@ bool EquipmentInventoryService::initialize(const std::vector<EquipmentModelConfi
         }
         const rknn_core_mask core_mask = (i == 0) ? RKNN_NPU_CORE_0 : RKNN_NPU_CORE_1;
         try {
-            detectors_.push_back(std::make_unique<YOLO11Model>(
+            new_detectors.push_back(std::make_unique<YOLO11Model>(
                 model.model_path, model.labels_path, core_mask, count));
         } catch (const std::exception& e) {
-            // YOLO11Model 构造失败抛 runtime_error：回收已加载实例，整体保持未就绪
+            // YOLO11Model 构造失败抛 runtime_error：局部实例随作用域析构，成员未受影响
             qWarning() << "Equipment inventory: model load failed at index" << int(i)
                        << ":" << e.what();
-            detectors_.clear();
-            model_label_counts_.clear();
             return false;
         }
-        model_label_counts_.push_back(count);
+        new_counts.push_back(count);
         qInfo() << "Equipment inventory: model loaded" << model.model_path.c_str()
                 << "classes =" << count << "npu core" << (i == 0 ? 0 : 1);
     }
+
+    // 全部成功：整体替换。旧 detectors_ 在 swap 后随临时容器析构归还 NPU
+    models_ = models;
+    model_label_counts_.swap(new_counts);
+    detectors_.swap(new_detectors);
     // 保留首模型的便捷副本：兼容早期单模型接口（model_path_ 等成员仍在类内暴露）
     executable_path_ = models_[0].executable_path;
     model_path_ = models_[0].model_path;

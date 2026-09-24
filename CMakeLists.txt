@@ -477,6 +477,44 @@ target_link_libraries(test_database
 target_compile_definitions(test_database PRIVATE ZERO_COPY)
 
 # ============================================================================
+# 设备盘点全链离线自测（模型加载→检测计数→画框落盘→落库→回读，/tmp 工作区）
+# 仓库根运行：./build/build_rk3588_linux/test_equipment，rc 0=PASS 1=FAIL
+# 直接编译盘点链依赖源（同 idge 主目标的平铺 include 约定）
+# ============================================================================
+add_executable(test_equipment
+    tests/test_equipment.cpp
+    src/biz/service/equipment_inventory_service.cpp
+    src/biz/service/roll_call_service.cpp
+    src/biz/service/thread_pool.cpp
+    src/biz/db/business_db_manager.cpp
+    src/base/utils/task_manager.cpp
+    src/base/utils/draw_utils.cpp
+    src/base/utils/image_utils.cpp
+    src/base/utils/image_drawing.cpp
+    src/base/utils/file_utils.cpp
+    src/ai/recognition/face_recognizer.cpp
+    src/ai/model_repo/model_registry.cpp
+    src/base/config/ConfigManager.cpp
+)
+
+target_link_libraries(test_equipment
+    Qt5::Core
+    Qt5::Gui
+    sqlite3
+    rknnrt
+    ${OpenCV_LIBS}
+    ${LIBJPEG}
+    ${LIBRGA}
+    ${CMAKE_DL_LIBS}
+    pthread
+)
+
+# 静态 libturbojpeg 会向动态符号表导出 jpeg_* 符号，劫持系统 OpenCV imgcodecs
+# 依赖的 libjpeg ABI，导致 cv::imread 解码返回空（主程序动态链接 jpeg 故无此患）。
+# --exclude-libs 把静态库符号移出动态表：内部仍用自带 turbojpeg，OpenCV 恢复解析系统 libjpeg。
+target_link_options(test_equipment PRIVATE -Wl,--exclude-libs,ALL)
+
+# ============================================================================
 # 人脸识别工具（原 cc_face，命令行接口：<det.rknn> <rec.rknn> <image> [out.json]）
 # 由 src/recognition/face_recognizer.cpp 经 fork+execv 调起（人员点名功能）
 # 产物固定输出到 model/face/face_recognition，与主程序约定路径一致

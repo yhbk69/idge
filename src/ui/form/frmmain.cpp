@@ -569,14 +569,13 @@ bool frmMain::initRollCallService()
     return success;
 }
 
-// 设备盘点模型清单（经模型库 ModelRegistry 解析，权重来自 model/library/）：
+// 盘点模型清单解析（启动 init 与模型库变更 reload 共用的单一口径）：
 //   - coco 槽：yolo11n-coco（80 类通用目标，当前作为盘点主力权重）；
 //   - fire 槽：库内 id 含 "fire" 的模型（用户日后用库管理导入明火 .rknn 即自动生效），
 //     未入库则跳过，仅用 COCO 单模型盘点。
-// 首个模型绑 NPU 核0、其余核1（与设备页预览的核分配一致，主检测流水线预算留核2）
-bool frmMain::initEquipmentService()
+// 核分配在服务层：首个模型绑 NPU 核0、其余核1（主检测流水线预算留核2）
+std::vector<EquipmentModelConfig> frmMain::equipmentModelConfigsFromLibrary()
 {
-    equipmentService_ = std::make_shared<EquipmentInventoryService>(rollCallService_);
     ModelRegistry &reg = ModelRegistry::instance();
     std::vector<EquipmentModelConfig> models;
     const QString coco_id = QStringLiteral("yolo11n-coco");
@@ -597,11 +596,37 @@ bool frmMain::initEquipmentService()
     } else {
         qWarning() << "明火模型未入库，暂用 COCO 单模型盘点";
     }
+    return models;
+}
+
+bool frmMain::initEquipmentService()
+{
+    equipmentService_ = std::make_shared<EquipmentInventoryService>(rollCallService_);
+    const std::vector<EquipmentModelConfig> models = equipmentModelConfigsFromLibrary();
     if (models.empty()) {
         qWarning() << "设备盘点初始化失败：模型库中无 yolo11n-coco 也无明火模型";
         return false;
     }
     return equipmentService_->initialize(models);
+}
+
+// 盘点模型热更新：模型库导入/zip导入/删除/手动刷新后调用，免重启生效。
+// 不换服务实例（initialize 已原子化：失败保持旧模型），设备页与对话框持有的
+// shared_ptr 无需重新注入。并发安全：盘点选图/识别对话框均为模态 exec()，
+// 批处理运行期间无法操作模型管理页；预览 PpeTask 持独立模型实例不受影响。
+void frmMain::reloadEquipmentService()
+{
+    if (!equipmentService_) return;
+    const std::vector<EquipmentModelConfig> models = equipmentModelConfigsFromLibrary();
+    // 清单未变且模型已就绪：导入的是与盘点无关的模型（helmet 等），免无谓的 NPU 重载
+    if (equipmentService_->isReady() && equipmentService_->modelConfigs() == models) return;
+    if (models.empty() || !equipmentService_->initialize(models)) {
+        log("model", "盘点模型重载失败，保持原模型继续工作");
+        QMessageBox::warning(this, "盘点模型重载失败",
+                             "新模型加载失败或库中无可用模型，盘点保持使用原模型");
+        return;
+    }
+    log("model", QString("盘点模型热更新成功：%1 个模型").arg(models.size()));
 }
 
 // ==========================================
@@ -1274,6 +1299,7 @@ void frmMain::initModelLibraryUi()
     connect(btnRefresh, &QPushButton::clicked, this, [this]() {
         refreshModelLibraryTable();
         refreshCascadeModelCombos();
+        reloadEquipmentService();   // 手工刷库也可能对应外部已拷入的模型目录
     });
     connect(btnImport, &QPushButton::clicked, this, &frmMain::importModelViaDialog);
     connect(btnZip, &QPushButton::clicked, this, &frmMain::importModelZip);
@@ -1338,6 +1364,7 @@ void frmMain::importModelViaDialog()
     if (ModelRegistry::instance().importModel(rknn, labels, id, err)) {
         refreshModelLibraryTable();
         refreshCascadeModelCombos();
+        reloadEquipmentService();
         QMessageBox::information(this, "导入成功",
             err.isEmpty() ? QString("已导入模型: %1").arg(id) : err);
         log("model", QString("模型库导入: %1").arg(err.isEmpty() ? id : err));
@@ -1418,6 +1445,7 @@ void frmMain::importModelZip()
     QDir(tmp).removeRecursively();
     refreshModelLibraryTable();
     refreshCascadeModelCombos();
+    reloadEquipmentService();
 
     QString summary = QString("共 %1 个模型目录\n新导入: %2\n跳过(重复): %3")
         .arg(modelDirs.size())
@@ -1453,6 +1481,7 @@ void frmMain::deleteSelectedModel()
     if (ModelRegistry::instance().deleteModel(id, err)) {
         refreshModelLibraryTable();
         refreshCascadeModelCombos();
+        reloadEquipmentService();
         log("model", QString("模型库移除: %1").arg(id));
     } else {
         QMessageBox::warning(this, "删除被拒", err);

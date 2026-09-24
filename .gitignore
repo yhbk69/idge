@@ -47,6 +47,8 @@ test_*.cpp
 !assets/test/1.mp4
 !assets/test/bus.jpg
 !assets/test/test.jpg
+# 同名运行产物（*_result.jpg 已被全局 *.jpg 挡住，faces.json 需显式忽略）
+assets/test/*_faces.json
 
 *.db-shm
 *.db-wal

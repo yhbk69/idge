@@ -202,7 +202,7 @@ RGBA8888 DMA-BUF fd（带检测框的最终画面）
 | `model/` | 模型库 `library/<id>/`（yolo11n/s/m 收编）+ 专项标签 | [README](model/README.md) |
 | `data/` | 运行时数据（config/idge.db/alarms/backups/roll_call_data，内容不入库） | — |
 | `python/` | ONNX→RKNN 转换与验证脚本 | [README](python/README.md) |
-| `tests/` | 数据库层测试（test_database，随主构建生成） | [README](tests/README.md) |
+| `tests/` | 测试程序（test_database 数据库层；test_equipment 设备盘点全链离线自测，均随主构建生成） | [README](tests/README.md) |
 | `docs/` | 技术知识库 | [README](docs/README.md) |
 | `include/` | nlohmann/json 单头文件 | [README](include/README.md) |
 | `res/` | Qt 资源（qrc：图片/字体/GL 着色器/音效） | [README](res/README.md) |

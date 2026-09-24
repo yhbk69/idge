@@ -60,6 +60,10 @@ struct EquipmentModelConfig {
     std::string model_path;
     std::string labels_path;
 };
+// 清单变更比较用（热更新时判断"模型库变了但盘点清单没变"）；废弃字段不参与
+inline bool operator==(const EquipmentModelConfig& a, const EquipmentModelConfig& b) {
+    return a.model_path == b.model_path && a.labels_path == b.labels_path;
+}
 
 class EquipmentInventoryService {
 public:
@@ -69,8 +73,9 @@ public:
     // 定义在 .cpp：detectors_ 的 unique_ptr<YOLO11Model> 析构需要完整类型
     ~EquipmentInventoryService();
 
-    // 多模型初始化：逐个校验标签文件可读非空、模型文件存在，并为每个模型
-    // 构造常驻 YOLO11Model（加载权重到 NPU，绑定核 i）。任一失败则整体不就绪。
+    // 多模型初始化（原子）：逐个校验标签可读非空、模型文件存在，并为每个模型构造
+    // 常驻 YOLO11Model（加载权重到 NPU，首模型核0、其余核1）。任一项失败则直接
+    // 返回 false 且**旧配置与旧模型实例保持不动**（热更新失败仍可继续用老模型）。
     // 标签行数即模型类别数 numClasses，决定输出解码宽度。
     bool initialize(const std::vector<EquipmentModelConfig>& models);
     // 单模型便捷重载：转调 vector 版本

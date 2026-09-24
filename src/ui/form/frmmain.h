@@ -26,6 +26,7 @@
 #include <QVector>
 #include <memory>
 #include <string>
+#include <vector>
 
 class QAbstractButton;
 class QLineEdit;
@@ -40,6 +41,7 @@ class RollCallWidget;
 class EquipmentInventoryWidget;
 class RollCallService;
 class EquipmentInventoryService;
+struct EquipmentModelConfig;   // 完整定义见 equipment_inventory_service.h（仅 .cpp 用到）
 struct AlarmRecord;
 
 namespace Ui {
@@ -158,6 +160,8 @@ private slots:
     void initBusinessPages();      ///< 初始化点名/盘点页面与服务
     bool initRollCallService();    ///< 初始化人员点名服务
     bool initEquipmentService();   ///< 初始化设备盘点服务
+    std::vector<EquipmentModelConfig> equipmentModelConfigsFromLibrary(); ///< 从模型库解析盘点清单（init 与 reload 共用同一口径）
+    void reloadEquipmentService(); ///< 模型库变更后热更新盘点模型（失败保持旧模型）
 
 private:
     // ========== 级联模型配置控件（数据成员，不能放 slots 里） ==========
