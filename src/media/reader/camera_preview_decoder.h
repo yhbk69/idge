@@ -35,8 +35,8 @@
 #include "../ui/gl_video_widget.h"
 #include "DmaBufferPool.h"
 #include "priority_queue.h"
-#include "../task/ppe_task.hpp"
-#include "../yolo11/common.hpp"
+#include "ppe_task.hpp"
+#include "common.hpp"
 #include "scrfd_face_detector.h"
 
 struct PreviewDetectorConfig {

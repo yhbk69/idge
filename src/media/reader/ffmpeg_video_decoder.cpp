@@ -82,7 +82,7 @@
 #include "ffmpeg_video_decoder.h"
 #include "runtime_paths.h"
 #include "rga_converter.h"
-#include "../model_repo/model_registry.h"
+#include "model_registry.h"
 
 #include <QDebug>
 #include <QElapsedTimer>

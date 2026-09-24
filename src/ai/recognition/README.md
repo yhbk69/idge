@@ -1,4 +1,6 @@
-# src/recognition
+# src/ai/recognition
+
+> 所属域：**ai 推理与模型应用域**（目录重组 S4c 迁入）
 
 ## 功能概述
 

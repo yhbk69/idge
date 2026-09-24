@@ -36,10 +36,10 @@
 #include "equipment_inventory_widget.h"
 #include "service/roll_call_service.h"
 #include "service/equipment_inventory_service.h"
-#include "model_repo/model_registry.h"
+#include "model_registry.h"
 #include "runtime_paths.h"
 #include "easy_timer.h"  // yolo11_model.hpp 依赖 TIMER（与 ppe_task 同序）
-#include "yolo11/yolo11_model.hpp"
+#include "yolo11_model.hpp"
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>

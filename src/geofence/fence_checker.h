@@ -23,7 +23,7 @@
 // ============================================================================
 
 #include "fence_shape.h"
-#include "../yolo11/common.hpp"
+#include "common.hpp"
 
 namespace geofence {
 

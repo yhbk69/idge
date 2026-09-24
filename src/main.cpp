@@ -66,7 +66,7 @@
 #include "ThreadPool.hpp"
 
 #include "parse_config.hpp"
-#include "yolo11/yolo11_model.hpp"
+#include "yolo11_model.hpp"
 #include "alarm_manager.h"
 #include "database/database_manager.h"
 

@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 #include <memory>
-#include "../recognition/face_recognizer.h"
+#include "face_recognizer.h"
 #include "../db/business_db_manager.h"
 #include <opencv2/opencv.hpp>
 #include "thread_pool.h"  // 服务私有线程池：照片人脸检测在其后台线程并行执行

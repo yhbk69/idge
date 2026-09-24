@@ -198,7 +198,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/process                 # 处理模块
     ${CMAKE_SOURCE_DIR}/src/rkmedia                 # RK 媒体库封装
     ${CMAKE_SOURCE_DIR}/src/rkmedia/utils           # RK 媒体工具
-    ${CMAKE_SOURCE_DIR}/src/task                    # 任务管理（检测任务、线程池）
+    ${CMAKE_SOURCE_DIR}/src/ai/task                    # 任务管理（检测任务、线程池）
     ${CMAKE_SOURCE_DIR}/src/RtspWorker              # RTSP 流处理
     ${CMAKE_SOURCE_DIR}/src/stream                  # 流处理
     ${CMAKE_SOURCE_DIR}/src/base/threadpool              # 线程池
@@ -215,7 +215,8 @@ include_directories(
 
     # --- YOLO 检测模块 ---
     ${CMAKE_SOURCE_DIR}/src/media/reader                  # 视频读取（FFmpeg/MPP 解码）
-    ${CMAKE_SOURCE_DIR}/src/yolo11                  # YOLOv11 检测
+    ${CMAKE_SOURCE_DIR}/src/ai/yolo11  # (ai域)                 # YOLOv11 检测
+    ${CMAKE_SOURCE_DIR}/src/ai/model_repo             # 模型库注册表
     ${CMAKE_SOURCE_DIR}/src/yolo8                   # YOLOv8 检测
     ${CMAKE_SOURCE_DIR}/src/yolo8_pose              # YOLOv8 姿态估计
     ${CMAKE_SOURCE_DIR}/src/yolo8_seg               # YOLOv8 实例分割
@@ -237,7 +238,7 @@ include_directories(
     # --- 人员点名 / 设备盘点业务模块（caichao 分支合并） ---
     ${CMAKE_SOURCE_DIR}/src/db                      # 业务 SQLite 数据库（tasks/人脸/设备检测）
     ${CMAKE_SOURCE_DIR}/src/service                 # 点名/盘点业务服务
-    ${CMAKE_SOURCE_DIR}/src/recognition             # 人脸识别桥接
+    ${CMAKE_SOURCE_DIR}/src/ai/recognition             # 人脸识别桥接
 
     # --- UI 模块 ---
     ${CMAKE_SOURCE_DIR}/src/ui                      # OpenGL 渲染、EGL、数据看板
@@ -481,7 +482,7 @@ add_executable(test_database
 target_include_directories(test_database PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/database
-    ${CMAKE_SOURCE_DIR}/src/yolo11
+    ${CMAKE_SOURCE_DIR}/src/ai/yolo11
     ${CMAKE_SOURCE_DIR}/src/alarm
     ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/include
     ${CMAKE_SOURCE_DIR}/3rdparty/sqlite
