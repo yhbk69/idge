@@ -215,12 +215,12 @@ void frmVideoWindow::setupFenceToolbar()
 
     // 设置工具栏的暗色主题样式
     toolbar->setStyleSheet(
-        "QFrame { background: #2a2a2a; border: 1px solid #444; }"        // 框架背景和边框
-        "QPushButton { background: #3a3a3a; color: #ddd; border: 1px solid #555;"  // 按钮默认样式
-        "  border-radius: 3px; padding: 2px 8px; font-size: 12px; }"    // 圆角、内边距、字体
-        "QPushButton:hover { background: #4a4a4a; }"                    // 鼠标悬停样式
-        "QPushButton:checked { background: #0078d4; color: white; }"    // 选中状态样式（蓝色）
-        "QLabel { color: #aaa; font-size: 12px; }"                      // 标签文字样式
+        "QFrame { background: #2d2d3d; border: 1px solid #3d3d4d; }"        // 框架背景和边框
+        "QPushButton { background: #3d3d4d; color: #E5E7EB; border: 1px solid #45455c;"  // 按钮默认样式
+        "  border-radius: 4px; padding: 2px 8px; font-size:13px; }"    // 圆角、内边距、字体
+        "QPushButton:hover { background: #45455c; }"                    // 鼠标悬停样式
+        "QPushButton:checked { background: #4fc3f7; color: #1e1e2e; }"  // 选中状态样式（主题强调色）
+        "QLabel { color: #9ca3af; font-size:13px; }"                   // 标签文字样式
     );
 
     // ========================================================================

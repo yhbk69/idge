@@ -31,7 +31,7 @@ QWidget* imageCell(const std::string& path, QWidget* parent) {
     auto* label = new QLabel(parent);
     label->setFixedSize(240, 190);
     label->setAlignment(Qt::AlignCenter);
-    label->setStyleSheet(QStringLiteral("background: #0A0D12; border: 1px solid #1E2636; border-radius: 8px;"));
+    label->setStyleSheet(QStringLiteral("background: #262636; border: 1px solid #45455c; border-radius: 8px;"));
     const QPixmap pixmap = loadPixmapSafe(QString::fromUtf8(path.c_str()));
     if (!pixmap.isNull())
         label->setPixmap(pixmap.scaled(label->size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
@@ -97,7 +97,7 @@ CancellationResultDialog::CancellationResultDialog(int id, const QStringList& pa
 
     auto* header = new QHBoxLayout;
     status_ = new QLabel(QStringLiteral("\u6b63\u5728\u8bc6\u522b\u4e2d..."), this);
-    status_->setStyleSheet(QStringLiteral("color: #38BDF8; font-size: 16px; font-weight: 600;"));
+    status_->setStyleSheet(QStringLiteral("color: #4fc3f7; font-size:18px; font-weight: 600;"));
     header->addWidget(status_);
     header->addSpacing(20);
     header->addWidget(new QLabel(QStringLiteral("\u6ce8\u9500\u4eba\u6570:"), this));
@@ -182,7 +182,7 @@ void CancellationResultDialog::onRecognitionFinished(const CancellationProcessRe
     recognize();
     loading_->setVisible(false);
     status_->setText(QStringLiteral("\u8bc6\u522b\u5b8c\u6210"));
-    status_->setStyleSheet(QStringLiteral("color: #6EE7B7; font-size: 16px; font-weight: 600;"));
+    status_->setStyleSheet(QStringLiteral("color: #4caf50; font-size:18px; font-weight: 600;"));
     table_->setEnabled(true);
     count_->setEnabled(true);
     previous_btn_->setEnabled(true);

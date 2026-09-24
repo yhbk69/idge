@@ -97,8 +97,8 @@ void AlarmListWidget::onStatsUpdated()
     
     // 根据未确认数设置不同颜色
     lblUnack_->setStyleSheet(unack > 0
-        ? "color: #ff9800; font-size: 13px;"  // 橙色（有未确认）
-        : "color: #4caf50; font-size: 13px;"); // 绿色（全部已确认）
+        ? "color: #ff9800; font-size:16px;"  // 橙色（有未确认）
+        : "color: #4caf50; font-size:16px;"); // 绿色（全部已确认）
 }
 
 /* 
@@ -130,7 +130,7 @@ void AlarmListWidget::setupUi()
 
     // 创建标题标签
     QLabel *header = new QLabel("报警记录");
-    header->setStyleSheet("color: #fff; font-size: 20px; font-weight: bold;");
+    header->setStyleSheet("color: #fff; font-size:22px; font-weight: bold;");
     mainLay->addWidget(header);
 
     /* 
@@ -141,11 +141,11 @@ void AlarmListWidget::setupUi()
     */
     QHBoxLayout *statsLay = new QHBoxLayout();
     lblTotal_ = new QLabel("共 0 条");  // 总数标签
-    lblTotal_->setStyleSheet("color: #aaa; font-size: 13px;");
+    lblTotal_->setStyleSheet("color: #aaa; font-size:16px;");
     statsLay->addWidget(lblTotal_);
 
     lblUnack_ = new QLabel("未确认: 0 条");  // 未确认数标签
-    lblUnack_->setStyleSheet("color: #ff9800; font-size: 13px;");
+    lblUnack_->setStyleSheet("color: #ff9800; font-size:16px;");
     statsLay->addWidget(lblUnack_);
 
     statsLay->addStretch();  // 弹性空间
@@ -315,8 +315,8 @@ void AlarmListWidget::refreshTable()
     lblTotal_->setText(statsText);
     lblUnack_->setText(QString("未确认: %1 条").arg(unack));
     lblUnack_->setStyleSheet(unack > 0
-        ? "color: #ff9800; font-size: 13px;"
-        : "color: #4caf50; font-size: 13px;");
+        ? "color: #ff9800; font-size:16px;"
+        : "color: #4caf50; font-size:16px;");
 
     /* 
     ====================================================

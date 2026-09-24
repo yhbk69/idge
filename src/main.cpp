@@ -286,7 +286,7 @@ int main(int argc, char *argv[])
     AppInit::Instance()->start();
 
     // 设置字体和编码
-    QtHelper::setFont();
+    QtHelper::setFont(16);  // 统一基础字号 16px（字阶：13提示/16正文/18卡片标题/22页面标题/30大数字）
     QtHelper::setCode();
 
     // 初始化数据库

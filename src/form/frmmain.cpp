@@ -246,13 +246,14 @@ void frmMain::initForm()
 
     // 4. 设置标题文字
     QFont font;
-    font.setPixelSize(15);
+    font.setPixelSize(18);
+    font.setBold(true);
     ui->labTitle->setFont(font);
     ui->labTitle->setText("施工行为监测与分析");
     this->setWindowTitle(ui->labTitle->text());
 
-    // 5. stackedWidget 全局样式（页面内控件会覆盖）
-    ui->stackedWidget->setStyleSheet("QLabel{font-size:50px;}");
+    // 5. stackedWidget 全局样式（统一基础字号，页面内可再覆盖）
+    ui->stackedWidget->setStyleSheet("QLabel{font-size:16px;}");
 
     // 6. 配置顶部导航按钮
     QSize icoSize(22, 22);
@@ -268,7 +269,7 @@ void frmMain::initForm()
             tbtn->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
             tbtn->setMinimumHeight(58);
             QFont bf = tbtn->font();
-            bf.setPixelSize(12);
+            bf.setPixelSize(14);
             tbtn->setFont(bf);
         }
         connect(btn, SIGNAL(clicked()), this, SLOT(buttonClick()));
@@ -387,7 +388,7 @@ void frmMain::initNewPages()
     alarmToast_ = new QLabel(this);
     alarmToast_->setStyleSheet(
         "QLabel { background: rgba(220,50,50,0.92); color: white;"
-        " border-radius: 6px; padding: 10px 16px; font-size: 14px; font-weight: bold; }");
+        " border-radius: 6px; padding: 10px 16px; font-size: 16px; font-weight: bold; }");
     alarmToast_->setVisible(false);
     alarmToast_->setWordWrap(true);
     alarmToast_->adjustSize();
@@ -399,7 +400,7 @@ void frmMain::initNewPages()
     alarmBadge_ = new QLabel(ui->btnEquipCheck);
     alarmBadge_->setStyleSheet(
         "QLabel { background: #f44336; color: white; border-radius: 8px;"
-        " font-size: 10px; font-weight: bold; min-width: 15px; max-width: 40px;"
+        " font-size: 12px; font-weight: bold; min-width: 15px; max-width: 40px;"
         " padding: 1px 3px; }");
     alarmBadge_->setAlignment(Qt::AlignCenter);
     alarmBadge_->setVisible(false);
@@ -936,10 +937,10 @@ void frmMain::initDebugPage()
     // ========== 电子围栏报警类别（动态创建，保存后实时生效） ==========
     {
         QGroupBox *grpFence = new QGroupBox("电子围栏配置");
-        grpFence->setStyleSheet("QGroupBox{font-size:14px; font-weight:bold;}"
-                                "QLabel{font-size:12px;}"
-                                "QLineEdit{font-size:12px;}"
-                                "QPushButton{font-size:12px;}");
+        grpFence->setStyleSheet("QGroupBox{font-size:18px; font-weight:bold;}"
+                                "QLabel{font-size:16px;}"
+                                "QLineEdit{font-size:16px;}"
+                                "QPushButton{font-size:16px;}");
         QGridLayout *glFence = new QGridLayout(grpFence);
         glFence->setHorizontalSpacing(20);
         glFence->setVerticalSpacing(6);
@@ -958,7 +959,7 @@ void frmMain::initDebugPage()
         glFence->addWidget(btnSaveFenceClasses, 0, 2);
 
         QLabel *labFenceHint = new QLabel("逗号分隔，留空默认只报 person。可用: person, bicycle, car 等");
-        labFenceHint->setStyleSheet("color: #888; font-size: 11px;");
+        labFenceHint->setStyleSheet("color: #9ca3af; font-size: 13px;");
         labFenceHint->setWordWrap(true);
         glFence->addWidget(labFenceHint, 1, 1, 1, 2);
 
@@ -1081,7 +1082,7 @@ void frmMain::initCascadeUi()
         int row = 4 + i;                   // 模型2在row5 ... 模型5在row8
 
         QLabel *lbl = new QLabel(QString("模型路径%1:").arg(i + 1));
-        lbl->setStyleSheet("color:#ccc;font-size:13px;");
+        lbl->setStyleSheet("color:#E5E7EB;font-size:16px;");
         gl->addWidget(lbl, row, 0);
 
         cascadePathEdit_[i] = new QLineEdit(cfg.cascadeModelPath(i + 1));

@@ -91,7 +91,7 @@ void EquipmentRecognitionDialog::setupUi() {
                                           : QStringLiteral("设备注销识别结果"));
     resize(1400, 900);
     setMinimumSize(1000, 700);
-    setStyleSheet(QStringLiteral("QDialog { background: #05070C; color: #E5E7EB; }"));
+    setStyleSheet(QStringLiteral("QDialog { background: #1e1e2e; color: #E5E7EB; }"));
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(24, 24, 24, 24);
@@ -99,11 +99,11 @@ void EquipmentRecognitionDialog::setupUi() {
 
     auto* header = new QHBoxLayout;
     status_label_ = new QLabel(QStringLiteral("正在识别中..."), this);
-    status_label_->setStyleSheet(QStringLiteral("color:#38BDF8; font-size:18px; font-weight:600;"));
+    status_label_->setStyleSheet(QStringLiteral("color:#4fc3f7; font-size:18px; font-weight:600;"));
     header->addWidget(status_label_);
     header->addSpacing(24);
     total_label_ = new QLabel(QStringLiteral("标签总数：0"), this);
-    total_label_->setStyleSheet(QStringLiteral("color:#6EE7B7; font-size:20px; font-weight:700;"));
+    total_label_->setStyleSheet(QStringLiteral("color:#4caf50; font-size:22px; font-weight:700;"));
     header->addWidget(total_label_);
     progress_ = new QProgressBar(this);
     progress_->setRange(0, 0);
@@ -192,7 +192,7 @@ void EquipmentRecognitionDialog::onRecognitionFinished(const EquipmentTaskResult
     result_ = result;
     renderResults();
     status_label_->setText(QStringLiteral("识别完成"));
-    status_label_->setStyleSheet(QStringLiteral("color:#6EE7B7; font-size:18px; font-weight:600;"));
+    status_label_->setStyleSheet(QStringLiteral("color:#4caf50; font-size:18px; font-weight:600;"));
     total_label_->setText(QStringLiteral("标签总数\n%1").arg(countsText(result_.total_counts)));
     progress_->setVisible(false);
     table_->setEnabled(true);
@@ -222,7 +222,7 @@ void EquipmentRecognitionDialog::renderResults() {
         image->setMinimumSize(0, 320);
         image->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
         image->setAlignment(Qt::AlignCenter);
-        image->setStyleSheet(QStringLiteral("background:#0A0D12; border:1px solid #1E2636;"));
+        image->setStyleSheet(QStringLiteral("background:#262636; border:1px solid #45455c;"));
         const QPixmap pixmap = loadPixmapSafe(path);
         if (!pixmap.isNull())
             image->setPixmap(pixmap.scaled(760, 320, Qt::KeepAspectRatio, Qt::SmoothTransformation));

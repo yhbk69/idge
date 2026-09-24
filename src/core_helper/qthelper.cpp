@@ -626,10 +626,8 @@ void QtHelper::setFont(int fontSize)
     return;
 #endif
 
-    // ARM设备使用较大字体
-#ifdef __arm__
-    fontSize = 25;
-#endif
+    // ARM 强制大字号（25px）已移除：1080p 屏下与页面 px 覆盖冲突导致字号混乱，
+    // 现由调用方显式传入统一基础字号（main.cpp setFont(16)）
 
     QStringList preferredFonts;
 #ifdef Q_OS_WIN

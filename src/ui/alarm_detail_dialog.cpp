@@ -42,9 +42,9 @@ void AlarmDetailDialog::setupUi()
 
     auto addRow = [&](int row, const QString &label, const QString &value) {
         QLabel *lbl = new QLabel(label);
-        lbl->setStyleSheet("color: #aaa; font-size: 13px;");
+        lbl->setStyleSheet("color: #aaa; font-size:16px;");
         QLabel *val = new QLabel(value);
-        val->setStyleSheet("color: #fff; font-size: 13px; font-weight: bold;");
+        val->setStyleSheet("color: #fff; font-size:16px; font-weight: bold;");
         infoLay->addWidget(lbl, row, 0);
         infoLay->addWidget(val, row, 1);
         return val;
@@ -59,9 +59,9 @@ void AlarmDetailDialog::setupUi()
     addRow(4, "ID:", alarm_.id);
     statusLabel_ = addRow(5, "状态:", alarm_.status == "rectified" ? "已确认" : "未确认");
     if (alarm_.status != "rectified") {
-        statusLabel_->setStyleSheet("color: #ff9800; font-size: 13px; font-weight: bold;");
+        statusLabel_->setStyleSheet("color: #ff9800; font-size:16px; font-weight: bold;");
     } else {
-        statusLabel_->setStyleSheet("color: #4caf50; font-size: 13px; font-weight: bold;");
+        statusLabel_->setStyleSheet("color: #4caf50; font-size:16px; font-weight: bold;");
     }
 
     mainLay->addLayout(infoLay);
@@ -74,7 +74,7 @@ void AlarmDetailDialog::setupUi()
 
     QPushButton *btnFalse = new QPushButton("确认误报");
     btnFalse->setStyleSheet(
-        "QPushButton { color: #fff; background: #f44336; border-radius: 4px; padding: 8px 20px; font-size: 14px; }"
+        "QPushButton { color: #fff; background: #f44336; border-radius: 4px; padding: 8px 20px; font-size:16px; }"
         "QPushButton:hover { background: #d32f2f; }"
     );
     connect(btnFalse, &QPushButton::clicked, this, &AlarmDetailDialog::onMarkFalsePositive);
@@ -82,7 +82,7 @@ void AlarmDetailDialog::setupUi()
 
     QPushButton *btnNormal = new QPushButton("不是误报");
     btnNormal->setStyleSheet(
-        "QPushButton { color: #fff; background: #4caf50; border-radius: 4px; padding: 8px 20px; font-size: 14px; }"
+        "QPushButton { color: #fff; background: #4caf50; border-radius: 4px; padding: 8px 20px; font-size:16px; }"
         "QPushButton:hover { background: #388e3c; }"
     );
     connect(btnNormal, &QPushButton::clicked, this, &AlarmDetailDialog::onMarkNormal);
@@ -92,7 +92,7 @@ void AlarmDetailDialog::setupUi()
 
     QPushButton *btnCancel = new QPushButton("取消");
     btnCancel->setStyleSheet(
-        "QPushButton { color: #fff; background: #555; border-radius: 4px; padding: 8px 20px; font-size: 14px; }"
+        "QPushButton { color: #fff; background: #555; border-radius: 4px; padding: 8px 20px; font-size:16px; }"
         "QPushButton:hover { background: #666; }"
     );
     connect(btnCancel, &QPushButton::clicked, this, &QDialog::reject);

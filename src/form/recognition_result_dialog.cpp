@@ -85,7 +85,7 @@ RecognitionResultDialog::~RecognitionResultDialog() {
 void RecognitionResultDialog::setupUI() {
     setWindowTitle("识别结果");
     resize(1400, 900);
-    setStyleSheet("QDialog { background: #05070C; }");
+    setStyleSheet("QDialog { background: #1e1e2e; }");
     
     auto* main_layout = new QVBoxLayout(this);
     main_layout->setContentsMargins(24, 24, 24, 24);
@@ -96,7 +96,7 @@ void RecognitionResultDialog::setupUI() {
     
     auto* title = new QLabel("人脸识别结果", this);
     QFont title_font;
-    title_font.setPointSize(20);
+    title_font.setPixelSize(22);
     title_font.setBold(true);
     title->setFont(title_font);
     title->setStyleSheet("color: #E5E7EB;");
@@ -106,17 +106,17 @@ void RecognitionResultDialog::setupUI() {
     
     total_count_label_ = new QLabel("总人数", this);
     QFont count_font;
-    count_font.setPointSize(24);
+    count_font.setPixelSize(22);
     count_font.setBold(true);
     total_count_label_->setFont(count_font);
-    total_count_label_->setStyleSheet("color: #6EE7B7; padding: 12px 24px; background: #0F131C; border-radius: 12px;");
+    total_count_label_->setStyleSheet("color: #4caf50; padding: 12px 24px; background: #2d2d3d; border-radius: 12px;");
     header_layout->addWidget(total_count_label_);
 
     loading_bar_ = new QProgressBar(this);
     loading_bar_->setRange(0, 0);
     loading_bar_->setFixedWidth(180);
     loading_bar_->setTextVisible(false);
-    loading_bar_->setStyleSheet("QProgressBar { background: #0F131C; border: 1px solid #1E2636; border-radius: 5px; height: 10px; } QProgressBar::chunk { background: #38BDF8; }");
+    loading_bar_->setStyleSheet("QProgressBar { background: #2d2d3d; border: 1px solid #45455c; border-radius: 5px; height: 10px; } QProgressBar::chunk { background: #4fc3f7; }");
     loading_bar_->setVisible(false);
     header_layout->addWidget(loading_bar_);
     
@@ -127,12 +127,12 @@ void RecognitionResultDialog::setupUI() {
     count_spinbox_->setVisible(false);
     count_spinbox_->setStyleSheet(
         "QSpinBox {"
-        "  background: #0F131C;"
+        "  background: #2d2d3d;"
         "  color: #E5E7EB;"
-        "  border: 2px solid #38BDF8;"
+        "  border: 2px solid #4fc3f7;"
         "  border-radius: 8px;"
         "  padding: 8px 16px;"
-        "  font-size: 18px;"
+        "  font-size:18px;"
         "  font-weight: 700;"
         "}"
     );
@@ -142,15 +142,15 @@ void RecognitionResultDialog::setupUI() {
     edit_count_btn_->setMinimumSize(120, 48);
     edit_count_btn_->setStyleSheet(
         "QPushButton {"
-        "  background: #1E2636;"
-        "  color: #E9A568;"
+        "  background: #45455c;"
+        "  color: #ff9800;"
         "  border: none;"
         "  border-radius: 999px;"
         "  padding: 0 24px;"
-        "  font-size: 15px;"
+        "  font-size:18px;"
         "  font-weight: 600;"
         "}"
-        "QPushButton:hover { background: #161D2B; }"
+        "QPushButton:hover { background: #3d3d4d; }"
     );
     connect(edit_count_btn_, &QPushButton::clicked, this, &RecognitionResultDialog::onEditTotalCount);
     header_layout->addWidget(edit_count_btn_);
@@ -172,23 +172,23 @@ void RecognitionResultDialog::setupUI() {
     result_table_->verticalHeader()->setDefaultSectionSize(400);
     result_table_->setStyleSheet(
         "QTableWidget {"
-        "  background: #0A0D12;"
-        "  border: 2px solid #161D2B;"
+        "  background: #262636;"
+        "  border: 2px solid #3d3d4d;"
         "  border-radius: 12px;"
-        "  gridline-color: #161D2B;"
+        "  gridline-color: #3d3d4d;"
         "  color: #E5E7EB;"
         "}"
         "QTableWidget::item {"
         "  padding: 16px;"
-        "  border-bottom: 1px solid #161D2B;"
+        "  border-bottom: 1px solid #3d3d4d;"
         "}"
         "QHeaderView::section {"
-        "  background: #0F131C;"
+        "  background: #2d2d3d;"
         "  color: #9CA3AF;"
         "  padding: 16px;"
         "  border: none;"
-        "  border-bottom: 2px solid #38BDF8;"
-        "  font-size: 15px;"
+        "  border-bottom: 2px solid #4fc3f7;"
+        "  font-size:18px;"
         "  font-weight: 600;"
         "}"
     );
@@ -203,15 +203,15 @@ void RecognitionResultDialog::setupUI() {
     prev_btn_->setMinimumSize(120, 48);
     prev_btn_->setStyleSheet(
         "QPushButton {"
-        "  background: #1E2636;"
+        "  background: #45455c;"
         "  color: #E5E7EB;"
         "  border: none;"
         "  border-radius: 999px;"
         "  padding: 0 24px;"
-        "  font-size: 15px;"
+        "  font-size:18px;"
         "  font-weight: 600;"
         "}"
-        "QPushButton:hover { background: #161D2B; }"
+        "QPushButton:hover { background: #3d3d4d; }"
     );
     connect(prev_btn_, &QPushButton::clicked, this, &RecognitionResultDialog::onPrevious);
     bottom_layout->addWidget(prev_btn_);
@@ -226,12 +226,12 @@ void RecognitionResultDialog::setupUI() {
     confirm_btn_->setMinimumSize(140, 48);
     confirm_btn_->setStyleSheet(
         "QPushButton {"
-        "  background: #6EE7B7;"
-        "  color: #05070C;"
+        "  background: #4caf50;"
+        "  color: #1e1e2e;"
         "  border: none;"
         "  border-radius: 999px;"
         "  padding: 0 32px;"
-        "  font-size: 16px;"
+        "  font-size:18px;"
         "  font-weight: 700;"
         "}"
         "QPushButton:hover { background: #34D399; }"
@@ -345,8 +345,8 @@ void RecognitionResultDialog::displayResults() {
         image_label->setAlignment(Qt::AlignCenter);
         image_label->setStyleSheet(
             "QLabel {"
-            "  background: #0F131C;"
-            "  border: 2px solid #161D2B;"
+            "  background: #2d2d3d;"
+            "  border: 2px solid #3d3d4d;"
             "  border-radius: 8px;"
             "  padding: 8px;"
             "}"
@@ -358,7 +358,7 @@ void RecognitionResultDialog::displayResults() {
         filename_label->setAlignment(Qt::AlignCenter);
         filename_label->setStyleSheet(
             "color: #9CA3AF;"
-            "font-size: 13px;"
+            "font-size:16px;"
             "margin-top: 8px;"
         );
         image_layout->addWidget(filename_label);
@@ -372,11 +372,11 @@ void RecognitionResultDialog::displayResults() {
         
         auto* count_label = new QLabel(QString::number(photo.unique_count), count_widget);
         QFont count_font;
-        count_font.setPointSize(48);
+        count_font.setPixelSize(40);
         count_font.setBold(true);
         count_label->setFont(count_font);
         count_label->setAlignment(Qt::AlignCenter);
-        count_label->setStyleSheet("color: #38BDF8;");
+        count_label->setStyleSheet("color: #4fc3f7;");
         count_layout->addWidget(count_label);
         
         result_table_->setCellWidget(row, 1, count_widget);
@@ -412,18 +412,18 @@ QPixmap RecognitionResultDialog::drawBoxesOnImage(const QString& image_path,
         
         if (is_first_image) {
             // 第一张图：所有框都是绿色实线
-            box_color = QColor(110, 231, 183);  // #6EE7B7
+            box_color = QColor(110, 231, 183);  // #4caf50
             pen_style = Qt::SolidLine;
             pen_width = 8;
         } else {
             if (duplicate_indices.find(i) != duplicate_indices.end()) {
                 // 重复人脸：黄色虚
-                box_color = QColor(233, 165, 104);  // #E9A568
+                box_color = QColor(233, 165, 104);  // #ff9800
                 pen_style = Qt::DashLine;
                 pen_width = 8;
             } else {
                 // 不重复人脸：绿色实线
-                box_color = QColor(110, 231, 183);  // #6EE7B7
+                box_color = QColor(110, 231, 183);  // #4caf50
                 pen_style = Qt::SolidLine;
                 pen_width = 8;
             }
@@ -440,9 +440,9 @@ QPixmap RecognitionResultDialog::drawBoxesOnImage(const QString& image_path,
         // 绘制人脸ID标签（可选）
         if (!is_first_image && duplicate_indices.find(i) == duplicate_indices.end()) {
             painter.fillRect(QRectF(r.x, r.y - 30, 60, 30), box_color);
-            painter.setPen(QColor(5, 7, 12));  // #05070C
+            painter.setPen(QColor(5, 7, 12));  // #1e1e2e
             QFont font;
-            font.setPointSize(12);
+            font.setPixelSize(16);
             font.setBold(true);
             painter.setFont(font);
             painter.drawText(QRectF(r.x, r.y - 30, 60, 30), 

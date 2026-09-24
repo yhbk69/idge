@@ -46,7 +46,7 @@ void RollCallWidget::setService(std::shared_ptr<RollCallService> service) {
     refreshTaskList();
 }
 
-// 页面整体为深色卡片风格（#05070C 背景），与 caichao 业务页统一。
+// 页面整体为深色卡片风格（#1e1e2e 背景），与 caichao 业务页统一。
 // 表格列宽为经验值：时间列 260px、人数/状态列 180px、操作列 340px
 // 足以容纳"查看/注销/删除"三个 82px 按钮；行高 64/72px 适配触摸操作。
 void RollCallWidget::setupUI() {
@@ -54,7 +54,7 @@ void RollCallWidget::setupUI() {
     main_layout->setContentsMargins(24, 24, 24, 24);
     main_layout->setSpacing(20);
     
-    setStyleSheet("QWidget { background: #05070C; }");
+    setStyleSheet("QWidget { background: #1e1e2e; }");
     
     // 顶部标题和按钮
     auto* header_layout = new QHBoxLayout();
@@ -62,7 +62,7 @@ void RollCallWidget::setupUI() {
     
     auto* title = new QLabel("签到点名", this);
     QFont title_font;
-    title_font.setPointSize(24);
+    title_font.setPixelSize(22);
     title_font.setBold(true);
     title->setFont(title_font);
     title->setStyleSheet("color: #E5E7EB;");
@@ -74,16 +74,16 @@ void RollCallWidget::setupUI() {
     refresh_btn_->setMinimumSize(100, 48);
     refresh_btn_->setStyleSheet(
         "QPushButton {"
-        "  background: #1E2636;"
+        "  background: #45455c;"
         "  color: #E5E7EB;"
         "  border: none;"
         "  border-radius: 12px;"
         "  padding: 8px 24px;"
-        "  font-size: 15px;"
+        "  font-size:18px;"
         "  font-weight: 600;"
         "}"
-        "QPushButton:hover { background: #161D2B; }"
-        "QPushButton:pressed { background: #0F131C; }"
+        "QPushButton:hover { background: #3d3d4d; }"
+        "QPushButton:pressed { background: #2d2d3d; }"
     );
     connect(refresh_btn_, &QPushButton::clicked, this, &RollCallWidget::onRefresh);
     header_layout->addWidget(refresh_btn_);
@@ -92,12 +92,12 @@ void RollCallWidget::setupUI() {
     create_btn_->setMinimumSize(140, 48);
     create_btn_->setStyleSheet(
         "QPushButton {"
-        "  background: #38BDF8;"
-        "  color: #05070C;"
+        "  background: #4fc3f7;"
+        "  color: #1e1e2e;"
         "  border: none;"
         "  border-radius: 12px;"
         "  padding: 8px 32px;"
-        "  font-size: 16px;"
+        "  font-size:18px;"
         "  font-weight: 700;"
         "}"
         "QPushButton:hover { background: #0EA5E9; }"
@@ -131,27 +131,27 @@ void RollCallWidget::setupUI() {
     task_table_->verticalHeader()->setDefaultSectionSize(64);
     task_table_->setStyleSheet(
         "QTableWidget {"
-        "  background: #0A0D12;"
-        "  border: 2px solid #161D2B;"
+        "  background: #262636;"
+        "  border: 2px solid #3d3d4d;"
         "  border-radius: 12px;"
-        "  gridline-color: #161D2B;"
+        "  gridline-color: #3d3d4d;"
         "  color: #E5E7EB;"
-        "  font-size: 14px;"
+        "  font-size:16px;"
         "}"
         "QTableWidget::item {"
         "  padding: 16px 20px;"
-        "  border-bottom: 1px solid #0F131C;"
+        "  border-bottom: 1px solid #2d2d3d;"
         "}"
         "QTableWidget::item:selected {"
-        "  background: #161D2B;"
+        "  background: #3d3d4d;"
         "}"
         "QHeaderView::section {"
-        "  background: #0F131C;"
+        "  background: #2d2d3d;"
         "  color: #9CA3AF;"
         "  padding: 16px 20px;"
         "  border: none;"
-        "  border-bottom: 2px solid #38BDF8;"
-        "  font-size: 14px;"
+        "  border-bottom: 2px solid #4fc3f7;"
+        "  font-size:16px;"
         "  font-weight: 600;"
         "  text-align: left;"
         "}"
@@ -191,7 +191,7 @@ void RollCallWidget::loadTasks() {
         auto* name_item = new QTableWidgetItem(QString::fromStdString(task.name));
         name_item->setForeground(QBrush(QColor("#E5E7EB")));
         QFont name_font = name_item->font();
-        name_font.setPointSize(14);
+        name_font.setPixelSize(16);
         name_font.setBold(true);
         name_item->setFont(name_font);
         task_table_->setItem(row, 0, name_item);
@@ -205,10 +205,10 @@ void RollCallWidget::loadTasks() {
         auto* count_item = new QTableWidgetItem(
             QStringLiteral("%1 人").arg(task.registered_count));
         QFont count_font;
-        count_font.setPointSize(16);
+        count_font.setPixelSize(18);
         count_font.setBold(true);
         count_item->setFont(count_font);
-        count_item->setForeground(QBrush(QColor("#6EE7B7")));
+        count_item->setForeground(QBrush(QColor("#4caf50")));
         count_item->setTextAlignment(Qt::AlignCenter);
         task_table_->setItem(row, 2, count_item);
         
@@ -217,10 +217,10 @@ void RollCallWidget::loadTasks() {
             ? QStringLiteral("已注销")
             : QStringLiteral("处理中");
         const QString status_color = task.is_cancelled
-            ? QStringLiteral("#6EE7B7") : QStringLiteral("#E9A568");
+            ? QStringLiteral("#4caf50") : QStringLiteral("#ff9800");
         auto* status_item = new QTableWidgetItem(task_status);
         QFont status_font = status_item->font();
-        status_font.setPointSize(13);
+        status_font.setPixelSize(16);
         status_font.setBold(true);
         status_item->setFont(status_font);
         status_item->setForeground(QBrush(QColor(status_color)));
@@ -238,20 +238,20 @@ void RollCallWidget::loadTasks() {
 
         QString button_style = 
             "QPushButton {"
-            "  background: #1E2636;"
+            "  background: #45455c;"
             "  color: %1;"
             "  border: none;"
             "  border-radius: 8px;"
             "  padding: 6px 16px;"
-            "  font-size: 13px;"
+            "  font-size:16px;"
             "  font-weight: 600;"
             "}"
             "QPushButton:hover { background: %1; color: white; }"
-            "QPushButton:pressed { background: #0F131C; color: white; }";
+            "QPushButton:pressed { background: #2d2d3d; color: white; }";
 
         auto* view_btn = new QPushButton("查看", actions_widget);
         view_btn->setFixedSize(82, 38);
-        view_btn->setStyleSheet(button_style.arg("#38BDF8"));
+        view_btn->setStyleSheet(button_style.arg("#4fc3f7"));
         connect(view_btn, &QPushButton::clicked, [this, task_id]() { onViewTask(task_id); });
         actions_layout->addWidget(view_btn);
 
@@ -259,7 +259,7 @@ void RollCallWidget::loadTasks() {
         if (!is_cancelled) {
             auto* cancel_btn = new QPushButton("注销", actions_widget);
             cancel_btn->setFixedSize(82, 38);
-            cancel_btn->setStyleSheet(button_style.arg("#E9A568"));
+            cancel_btn->setStyleSheet(button_style.arg("#ff9800"));
             connect(cancel_btn, &QPushButton::clicked, [this, task_id]() { onCancelTask(task_id); });
             actions_layout->addWidget(cancel_btn);
         }
@@ -268,15 +268,15 @@ void RollCallWidget::loadTasks() {
         delete_btn->setFixedSize(82, 38);
         delete_btn->setStyleSheet(
             "QPushButton {"
-            "  background: #1E2636;"
-            "  color: #DC2626;"
+            "  background: #45455c;"
+            "  color: #f44336;"
             "  border: none;"
             "  border-radius: 8px;"
             "  padding: 6px 16px;"
-            "  font-size: 13px;"
+            "  font-size:16px;"
             "  font-weight: 600;"
             "}"
-            "QPushButton:hover { background: #DC2626; color: white; }"
+            "QPushButton:hover { background: #f44336; color: white; }"
             "QPushButton:pressed { background: #B91C1C; color: white; }"
         );
         connect(delete_btn, &QPushButton::clicked, [this, task_id]() { onDeleteTask(task_id); });
@@ -314,9 +314,9 @@ void RollCallWidget::onCreateTask() {
     input_dialog.setInputMode(QInputDialog::TextInput);
     input_dialog.setTextValue(default_name);
     input_dialog.setStyleSheet(
-        "QInputDialog QLabel { font-size: 28px; }"
-        "QInputDialog QLineEdit { min-width: 720px; min-height: 84px; padding: 12px 20px; font-size: 28px; }"
-        "QInputDialog QPushButton { min-width: 152px; min-height: 68px; font-size: 28px; }");
+        "QInputDialog QLabel { font-size:30px; }"
+        "QInputDialog QLineEdit { min-width: 720px; min-height: 84px; padding: 12px 20px; font-size:30px; }"
+        "QInputDialog QPushButton { min-width: 152px; min-height: 68px; font-size:30px; }");
     input_dialog.resize(900, 260);
     const bool ok = input_dialog.exec() == QDialog::Accepted;
     const QString task_name = input_dialog.textValue();
@@ -444,7 +444,7 @@ void RollCallWidget::showTaskDetailDialog(int task_id) {
     detail_dialog->setWindowTitle(QString("任务详情 - %1").arg(QString::fromStdString(task.name)));
     detail_dialog->setWindowFlags(Qt::Window);
     detail_dialog->resize(1400, 900);
-    detail_dialog->setStyleSheet("QWidget { background: #05070C; }");
+    detail_dialog->setStyleSheet("QWidget { background: #1e1e2e; }");
     
     auto* main_layout = new QVBoxLayout(detail_dialog);
     main_layout->setContentsMargins(24, 24, 24, 24);
@@ -454,11 +454,11 @@ void RollCallWidget::showTaskDetailDialog(int task_id) {
     auto* info_group = new QGroupBox("任务信息", detail_dialog);
     info_group->setStyleSheet(
         "QGroupBox {"
-        "  background: #0A0D12;"
-        "  border: 2px solid #161D2B;"
+        "  background: #262636;"
+        "  border: 2px solid #3d3d4d;"
         "  border-radius: 12px;"
         "  color: #E5E7EB;"
-        "  font-size: 16px;"
+        "  font-size:18px;"
         "  font-weight: 600;"
         "  padding: 20px;"
         "  margin-top: 12px;"
@@ -477,22 +477,22 @@ void RollCallWidget::showTaskDetailDialog(int task_id) {
     
     auto add_info_row = [&](const QString& label, const QString& value, const QString& color = "#E5E7EB") {
         auto* label_widget = new QLabel(label + ":", info_group);
-        label_widget->setStyleSheet("color: #9CA3AF; font-size: 14px;");
+        label_widget->setStyleSheet("color: #9CA3AF; font-size:16px;");
         info_layout->addWidget(label_widget, row, 0);
         
         auto* value_widget = new QLabel(value, info_group);
-        value_widget->setStyleSheet(QString("color: %1; font-size: 14px; font-weight: 600;").arg(color));
+        value_widget->setStyleSheet(QString("color: %1; font-size:16px; font-weight: 600;").arg(color));
         info_layout->addWidget(value_widget, row, 1);
         row++;
     };
     
     add_info_row("任务名称", QString::fromStdString(task.name));
     add_info_row("创建时间", QString::fromStdString(task.create_time));
-    add_info_row("登记人数", QString::number(task.registered_count), "#6EE7B7");
+    add_info_row("登记人数", QString::number(task.registered_count), "#4caf50");
     if (task.is_cancelled)
-        add_info_row("注销人数", QString::number(task.cancelled_count), "#E9A568");
+        add_info_row("注销人数", QString::number(task.cancelled_count), "#ff9800");
     add_info_row("任务状态", task.is_cancelled ? "已注销" : "处理中",
-                 task.is_cancelled ? "#6EE7B7" : "#E9A568");
+                 task.is_cancelled ? "#4caf50" : "#ff9800");
     
     main_layout->addWidget(info_group);
     
@@ -500,28 +500,28 @@ void RollCallWidget::showTaskDetailDialog(int task_id) {
     auto* tab_widget = new QTabWidget(detail_dialog);
     tab_widget->setStyleSheet(
         "QTabWidget::pane {"
-        "  background: #0A0D12;"
-        "  border: 2px solid #161D2B;"
+        "  background: #262636;"
+        "  border: 2px solid #3d3d4d;"
         "  border-radius: 12px;"
         "  top: -2px;"
         "}"
         "QTabBar::tab {"
-        "  background: #0F131C;"
+        "  background: #2d2d3d;"
         "  color: #9CA3AF;"
         "  padding: 12px 24px;"
         "  margin-right: 4px;"
         "  border-top-left-radius: 8px;"
         "  border-top-right-radius: 8px;"
-        "  font-size: 14px;"
+        "  font-size:16px;"
         "  font-weight: 600;"
         "}"
         "QTabBar::tab:selected {"
-        "  background: #0A0D12;"
-        "  color: #38BDF8;"
-        "  border-bottom: 3px solid #38BDF8;"
+        "  background: #262636;"
+        "  color: #4fc3f7;"
+        "  border-bottom: 3px solid #4fc3f7;"
         "}"
         "QTabBar::tab:hover {"
-        "  background: #161D2B;"
+        "  background: #3d3d4d;"
         "}"
     );
     
@@ -552,14 +552,14 @@ void RollCallWidget::showTaskDetailDialog(int task_id) {
                                 const QString& caption) {
         auto* card = new QWidget(parent);
         card->setStyleSheet(
-            "QWidget { background: #0F131C; border: 2px solid #161D2B; border-radius: 12px; }");
+            "QWidget { background: #2d2d3d; border: 2px solid #3d3d4d; border-radius: 12px; }");
         auto* card_layout = new QVBoxLayout(card);
         card_layout->setContentsMargins(12, 12, 12, 12);
         card_layout->setSpacing(10);
 
         auto* image = new QLabel(card);
         image->setAlignment(Qt::AlignCenter);
-        image->setStyleSheet("background: #0A0D12; border: none; border-radius: 8px; padding: 8px;");
+        image->setStyleSheet("background: #262636; border: none; border-radius: 8px; padding: 8px;");
         const QPixmap pixmap = loadPixmapSafe(QString::fromStdString(image_path));
         if (!pixmap.isNull())
             image->setPixmap(pixmap.scaled(600, 400, Qt::KeepAspectRatio, Qt::SmoothTransformation));
@@ -569,7 +569,7 @@ void RollCallWidget::showTaskDetailDialog(int task_id) {
 
         auto* text = new QLabel(caption, card);
         text->setAlignment(Qt::AlignCenter);
-        text->setStyleSheet("color: #38BDF8; border: none; font-size: 16px; font-weight: 700;");
+        text->setStyleSheet("color: #4fc3f7; border: none; font-size:18px; font-weight: 700;");
         card_layout->addWidget(text);
         return card;
     };
@@ -594,7 +594,7 @@ void RollCallWidget::showTaskDetailDialog(int task_id) {
         registration_layout->setContentsMargins(0, 0, 0, 0);
         registration_layout->setSpacing(12);
         auto* registration_title = new QLabel(QStringLiteral("登记后处理图片"), registration_column);
-        registration_title->setStyleSheet("color: #38BDF8; font-size: 16px; font-weight: 700;");
+        registration_title->setStyleSheet("color: #4fc3f7; font-size:18px; font-weight: 700;");
         registration_layout->addWidget(registration_title);
         for (const auto& photo : registration_result.photos) {
             registration_layout->addWidget(create_photo_card(
@@ -608,7 +608,7 @@ void RollCallWidget::showTaskDetailDialog(int task_id) {
         cancellation_layout->setContentsMargins(0, 0, 0, 0);
         cancellation_layout->setSpacing(12);
         auto* cancellation_title = new QLabel(QStringLiteral("注销后处理图片"), cancellation_column);
-        cancellation_title->setStyleSheet("color: #E9A568; font-size: 16px; font-weight: 700;");
+        cancellation_title->setStyleSheet("color: #ff9800; font-size:18px; font-weight: 700;");
         cancellation_layout->addWidget(cancellation_title);
         const auto cancellation_photos =
             service_->getDatabase()->getCancellationPhotosByTask(task_id);
@@ -674,7 +674,7 @@ void RollCallWidget::showTaskDetailDialog(int task_id) {
             image->setFixedSize(240, 190);
             image->setAlignment(Qt::AlignCenter);
             image->setStyleSheet(
-                "background: #0A0D12; border: 1px solid #1E2636; border-radius: 8px;");
+                "background: #262636; border: 1px solid #45455c; border-radius: 8px;");
             const QPixmap pixmap = loadPixmapSafe(QString::fromStdString(path));
             if (!pixmap.isNull())
                 image->setPixmap(pixmap.scaled(image->size(), Qt::IgnoreAspectRatio,
@@ -722,7 +722,7 @@ void RollCallWidget::showTaskDetailDialog(int task_id) {
         for (size_t i = 0; i < unique_faces.size(); ++i) {
             auto* face_card = new QWidget(faces_container);
             face_card->setStyleSheet(
-                "QWidget { background: #0F131C; border: 2px solid #161D2B; border-radius: 8px; }");
+                "QWidget { background: #2d2d3d; border: 2px solid #3d3d4d; border-radius: 8px; }");
             auto* face_card_layout = new QVBoxLayout(face_card);
             face_card_layout->setContentsMargins(8, 8, 8, 8);
             face_card_layout->setSpacing(8);
@@ -734,11 +734,11 @@ void RollCallWidget::showTaskDetailDialog(int task_id) {
                 face_image->setPixmap(pixmap.scaled(
                     120, 120, Qt::KeepAspectRatio, Qt::SmoothTransformation));
             face_image->setAlignment(Qt::AlignCenter);
-            face_image->setStyleSheet("background: #0A0D12; border: none; border-radius: 6px;");
+            face_image->setStyleSheet("background: #262636; border: none; border-radius: 6px;");
             face_card_layout->addWidget(face_image);
             auto* face_index = new QLabel(QStringLiteral("人脸 %1").arg(i + 1), face_card);
             face_index->setAlignment(Qt::AlignCenter);
-            face_index->setStyleSheet("color: #9CA3AF; border: none; font-size: 12px;");
+            face_index->setStyleSheet("color: #9CA3AF; border: none; font-size:13px;");
             face_card_layout->addWidget(face_index);
             faces_grid->addWidget(face_card, face_row, face_column);
             if (++face_column >= 5) {
@@ -761,12 +761,12 @@ void RollCallWidget::showTaskDetailDialog(int task_id) {
     export_btn->setMinimumSize(120, 44);
     export_btn->setStyleSheet(
         "QPushButton {"
-        "  background: #6EE7B7;"
-        "  color: #05070C;"
+        "  background: #4caf50;"
+        "  color: #1e1e2e;"
         "  border: none;"
         "  border-radius: 999px;"
         "  padding: 0 24px;"
-        "  font-size: 15px;"
+        "  font-size:18px;"
         "  font-weight: 600;"
         "}"
         "QPushButton:hover { background: #34D399; }"
@@ -780,15 +780,15 @@ void RollCallWidget::showTaskDetailDialog(int task_id) {
     close_btn->setMinimumSize(120, 44);
     close_btn->setStyleSheet(
         "QPushButton {"
-        "  background: #1E2636;"
+        "  background: #45455c;"
         "  color: #E5E7EB;"
         "  border: none;"
         "  border-radius: 999px;"
         "  padding: 0 24px;"
-        "  font-size: 15px;"
+        "  font-size:18px;"
         "  font-weight: 600;"
         "}"
-        "QPushButton:hover { background: #161D2B; }"
+        "QPushButton:hover { background: #3d3d4d; }"
     );
     connect(close_btn, &QPushButton::clicked, detail_dialog, &QWidget::close);
     bottom_layout->addWidget(close_btn);

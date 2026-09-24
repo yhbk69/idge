@@ -1202,7 +1202,7 @@
                                                     <string>逗号分隔，留空则默认只报 person。可用: person, bicycle, car, motorcycle, bus, truck 等 COCO 类别</string>
                                                 </property>
                                                 <property name="styleSheet">
-                                                    <string>color: #888; font-size: 11px;</string>
+                                                    <string>color: #9ca3af; font-size: 13px;</string>
                                                 </property>
                                                 <property name="wordWrap">
                                                     <bool>true</bool>
@@ -1236,10 +1236,10 @@
                             </item>
                         </layout>
                         <property name="styleSheet">
-                            <string>QLabel{font-size:12px;} QGroupBox{font-size:14px; font-weight:bold;} QLineEdit{font-size:12px;} QDoubleSpinBox{font-size:12px;} QPushButton{font-size:12px;}</string>
+                            <string>QGroupBox{font-weight:bold;}</string>
                         </property>
                         <property name="styleSheet">
-                            <string>QLabel{font-size:12px;} QGroupBox{font-size:14px; font-weight:bold;} QLineEdit{font-size:12px;} QDoubleSpinBox{font-size:12px;} QPushButton{font-size:12px;}</string>
+                            <string>QGroupBox{font-weight:bold;}</string>
                         </property>
                     </widget>
                     <widget class="QWidget" name="pageRoll">

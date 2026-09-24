@@ -59,21 +59,21 @@ QWidget *DashboardWidget::createCard(const QString &titleText, const QString &un
 
     // 创建标题标签
     QLabel *titleLabel = new QLabel(titleText);
-    titleLabel->setStyleSheet("color: #9aa0a6; font-size: 15px; font-weight: bold;");
+    titleLabel->setStyleSheet("color: #9aa0a6; font-size:18px; font-weight: bold;");
     lay->addWidget(titleLabel);
 
     // 创建数值显示区域
     QHBoxLayout *valLay = new QHBoxLayout();
     valLay->setSpacing(6);
     *valueLabel = new QLabel("0");  // 初始化数值为0
-    (*valueLabel)->setStyleSheet("color: #fff; font-size: 36px; font-weight: bold;");
+    (*valueLabel)->setStyleSheet("color: #fff; font-size:30px; font-weight: bold;");
     (*valueLabel)->setAlignment(Qt::AlignVCenter);  // 垂直居中对齐
     valLay->addWidget(*valueLabel);
 
     // 如果有单位，添加单位标签
     if (!unit.isEmpty()) {
         QLabel *unitLabel = new QLabel(unit);
-        unitLabel->setStyleSheet("color: #666; font-size: 14px;");
+        unitLabel->setStyleSheet("color: #9ca3af; font-size:16px;");
         unitLabel->setAlignment(Qt::AlignBottom | Qt::AlignLeft);  // 左下角对齐
         valLay->addWidget(unitLabel);
     }
@@ -82,7 +82,7 @@ QWidget *DashboardWidget::createCard(const QString &titleText, const QString &un
 
     // 创建描述标签
     *descLabel = new QLabel("");
-    (*descLabel)->setStyleSheet("color: #aaa; font-size: 13px;");
+    (*descLabel)->setStyleSheet("color: #aaa; font-size:16px;");
     (*descLabel)->setWordWrap(true);  // 启用自动换行
     lay->addWidget(*descLabel);
 
@@ -104,7 +104,7 @@ void DashboardWidget::setupUi()
 
     // 创建标题标签
     QLabel *header = new QLabel("数据看板");
-    header->setStyleSheet("color: #fff; font-size: 22px; font-weight: bold;");
+    header->setStyleSheet("color: #fff; font-size:22px; font-weight: bold;");
     mainLay->addWidget(header);
 
     /* 
@@ -141,7 +141,7 @@ void DashboardWidget::setupUi()
     ====================================================
     */
     QLabel *sysTitle = new QLabel("系统状态");
-    sysTitle->setStyleSheet("color: #fff; font-size: 17px; font-weight: bold;");
+    sysTitle->setStyleSheet("color: #fff; font-size:18px; font-weight: bold;");
     mainLay->addWidget(sysTitle);
 
     QGridLayout *sysGrid = new QGridLayout();
@@ -157,11 +157,11 @@ void DashboardWidget::setupUi()
         QHBoxLayout *h = new QHBoxLayout(frame);
         h->setContentsMargins(14, 6, 14, 6);
         QLabel *lbl = new QLabel(label);
-        lbl->setStyleSheet("color: #aaa; font-size: 14px;");
+        lbl->setStyleSheet("color: #aaa; font-size:16px;");
         h->addWidget(lbl);
         h->addStretch();
         *val = new QLabel("--");  // 初始显示"--"
-        (*val)->setStyleSheet("color: #4fc3f7; font-size: 16px; font-weight: bold;");
+        (*val)->setStyleSheet("color: #4fc3f7; font-size:18px; font-weight: bold;");
         h->addWidget(*val);
         sysGrid->addWidget(frame, row, col);
     };
@@ -181,7 +181,7 @@ void DashboardWidget::setupUi()
     ====================================================
     */
     QLabel *clsTitle = new QLabel("类别统计");
-    clsTitle->setStyleSheet("color: #fff; font-size: 17px; font-weight: bold;");
+    clsTitle->setStyleSheet("color: #fff; font-size:18px; font-weight: bold;");
     mainLay->addWidget(clsTitle);
 
     // 创建滚动区域
@@ -201,7 +201,7 @@ void DashboardWidget::setupUi()
 
     // 创建空数据提示标签
     QLabel *emptyLabel = new QLabel("暂无数据");
-    emptyLabel->setStyleSheet("color: #666; font-size: 13px;");
+    emptyLabel->setStyleSheet("color: #9ca3af; font-size:16px;");
     classStatsLayout_->insertWidget(0, emptyLabel);
 
     // 设置滚动组件
@@ -355,7 +355,7 @@ void DashboardWidget::refreshStats()
     if (stats.isEmpty()) {
         // 没有数据时显示提示
         QLabel *emptyLabel = new QLabel("暂无数据");
-        emptyLabel->setStyleSheet("color: #666; font-size: 12px;");
+        emptyLabel->setStyleSheet("color: #9ca3af; font-size:13px;");
         classStatsLayout_->addWidget(emptyLabel);
     } else {
         // 按数量排序统计结果
@@ -376,7 +376,7 @@ void DashboardWidget::refreshStats()
 
             // 类别名称标签
             QLabel *nameLbl = new QLabel(pair.first);
-            nameLbl->setStyleSheet("color: #ccc; font-size: 12px;");
+            nameLbl->setStyleSheet("color: #ccc; font-size:13px;");
             nameLbl->setFixedWidth(120);
             h->addWidget(nameLbl);
 
@@ -387,12 +387,12 @@ void DashboardWidget::refreshStats()
             int barLen = (pair.second * 30) / (sorted.first().second > 0 ? sorted.first().second : 1);
             QString barText = QString("█").repeated(barLen);
             QLabel *barLbl = new QLabel(barText);
-            barLbl->setStyleSheet("color: #4fc3f7; font-size: 12px;");
+            barLbl->setStyleSheet("color: #4fc3f7; font-size:13px;");
             h->addWidget(barLbl, 1);
 
             // 数量标签
             QLabel *countLbl = new QLabel(QString::number(pair.second));
-            countLbl->setStyleSheet("color: #aaa; font-size: 12px;");
+            countLbl->setStyleSheet("color: #aaa; font-size:13px;");
             countLbl->setFixedWidth(60);
             countLbl->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
             h->addWidget(countLbl);

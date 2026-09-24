@@ -27,7 +27,7 @@ void VideoAlarmWidget::setupUi()
 
     // 标题
     QLabel *title = new QLabel("报警信息");
-    title->setStyleSheet("color: #fff; font-size: 14px; font-weight: bold; padding: 8px 12px; background: #2d2d3d;");
+    title->setStyleSheet("color: #fff; font-size:16px; font-weight: bold; padding: 8px 12px; background: #2d2d3d;");
     mainLayout->addWidget(title);
 
     // 滚动区域
@@ -115,17 +115,17 @@ void VideoAlarmWidget::addAlarmItem(const AlarmRecord &alarm)
 
     QDateTime dt = QDateTime::fromString(alarm.alarmTime, Qt::ISODate);
     QLabel *timeLabel = new QLabel(dt.toString("HH:mm:ss"));
-    timeLabel->setStyleSheet("color: #aaa; font-size: 11px;");
+    timeLabel->setStyleSheet("color: #aaa; font-size:13px;");
     infoLayout->addWidget(timeLabel);
 
     QLabel *classLabel = new QLabel(QString("%1 (%2%)")
         .arg(alarm.className)
         .arg(alarm.confidence * 100, 0, 'f', 0));
-    classLabel->setStyleSheet("color: #fff; font-size: 12px; font-weight: bold;");
+    classLabel->setStyleSheet("color: #fff; font-size:13px; font-weight: bold;");
     infoLayout->addWidget(classLabel);
 
     QLabel *channelLabel = new QLabel(QString("通道%1").arg(alarm.channel + 1));
-    channelLabel->setStyleSheet("color: #888; font-size: 11px;");
+    channelLabel->setStyleSheet("color: #9ca3af; font-size:13px;");
     infoLayout->addWidget(channelLabel);
 
     itemLayout->addLayout(infoLayout, 1);
@@ -133,7 +133,7 @@ void VideoAlarmWidget::addAlarmItem(const AlarmRecord &alarm)
     // 操作按钮（详情）
     QPushButton *btnDetail = new QPushButton("详情");
     btnDetail->setStyleSheet(
-        "QPushButton { color: #fff; background: #4a6fa5; border-radius: 4px; padding: 3px 8px; font-size: 11px; }"
+        "QPushButton { color: #fff; background: #4a6fa5; border-radius: 4px; padding: 3px 8px; font-size:13px; }"
         "QPushButton:hover { background: #5a8fc5; }"
     );
     connect(btnDetail, &QPushButton::clicked, this, [this, alarmId = alarm.id]() {

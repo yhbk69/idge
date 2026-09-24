@@ -60,7 +60,7 @@ PlayerWidget::PlayerWidget(QWidget* parent)
         "QLabel {"
         "   background: transparent;"  // 透明背景
         "   color: white;"  // 白色文字
-        "   font-size: 24px;"  // 字体大小
+        "   font-size:22px;"  // 字体大小
         "   font-weight: bold;"  // 粗体
         "}"
     );
@@ -139,7 +139,7 @@ void PlayerWidget::setupExpandButton()
         "   border: none;"
         "   border-radius: 4px;"
         "   color: white;"
-        "   font-size: 16px;"
+        "   font-size:18px;"
         "}"
         "QPushButton:hover {"
         "   background-color: rgba(0, 0, 0, 180);"
