@@ -2,7 +2,7 @@
 // 全部刷新由 2s QTimer 驱动，在 GUI 线程读 AlarmManager 单例（其内部
 // 有锁）并重建 QLabel 树；文件读取均为同步小 I/O，不构成卡顿源。
 #include "dashboard_widget.h"
-#include "../core_helper/theme.h"
+#include "theme.h"
 #include "alarm_manager.h"
 #include <QGridLayout>
 #include <QHBoxLayout>

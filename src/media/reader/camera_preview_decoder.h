@@ -32,7 +32,7 @@
 #include <opencv2/core/types.hpp>
 
 // 引入video_decoder相同的头文件
-#include "../ui/gl_video_widget.h"
+#include "gl_video_widget.h"
 #include "DmaBufferPool.h"
 #include "priority_queue.h"
 #include "ppe_task.hpp"

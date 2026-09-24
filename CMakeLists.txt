@@ -190,8 +190,8 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src                         # 根目录
     ${CMAKE_SOURCE_DIR}/src/base                    # 运行时路径等基础设施（runtime_paths.h）
     ${CMAKE_SOURCE_DIR}/src/base/config                  # 配置管理（CLI/JSON 解析）
-    ${CMAKE_SOURCE_DIR}/src/core_helper             # 核心辅助（单例、样式、日志）
-    ${CMAKE_SOURCE_DIR}/src/core_qss                # QSS 样式表
+    ${CMAKE_SOURCE_DIR}/src/ui/core_helper             # 核心辅助（单例、样式、日志）
+    ${CMAKE_SOURCE_DIR}/src/ui/core_qss                # QSS 样式表
     ${CMAKE_SOURCE_DIR}/src/draw                    # 绘图模块
     ${CMAKE_SOURCE_DIR}/src/engine                  # 引擎模块
     ${CMAKE_SOURCE_DIR}/src/media/model                   # 模型管理（RKNN 模型池）
@@ -211,7 +211,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/videoplay_gl            # OpenGL 视频播放
     ${CMAKE_SOURCE_DIR}/src/VideoPlay               # 视频播放器
     ${CMAKE_SOURCE_DIR}/src/player                  # 播放器控件
-    ${CMAKE_SOURCE_DIR}/src/form                    # 窗口界面（主窗口、视频窗口）
+    ${CMAKE_SOURCE_DIR}/src/ui/form                    # 窗口界面（主窗口、视频窗口）
 
     # --- YOLO 检测模块 ---
     ${CMAKE_SOURCE_DIR}/src/media/reader                  # 视频读取（FFmpeg/MPP 解码）
@@ -241,7 +241,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/ai/recognition             # 人脸识别桥接
 
     # --- UI 模块 ---
-    ${CMAKE_SOURCE_DIR}/src/ui                      # OpenGL 渲染、EGL、数据看板
+    ${CMAKE_SOURCE_DIR}/src/ui/widgets                     # OpenGL 渲染、EGL、数据看板
 )
 
 # ============================================================================
@@ -319,6 +319,7 @@ file(GLOB PROJECT_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/*/*/*.cpp          # 二级子目录源文件
     ${CMAKE_SOURCE_DIR}/src/*.ui               # UI 布局文件
     ${CMAKE_SOURCE_DIR}/src/*/*.ui             # 一级子目录 UI 文件
+    ${CMAKE_SOURCE_DIR}/src/*/*/*.ui           # 二级子目录 UI 文件（域分组后 .ui 位于 src/ui/*）
 )
 
 # ============================================================================
@@ -327,14 +328,14 @@ file(GLOB PROJECT_SOURCES CONFIGURE_DEPENDS
 # qt5_add_big_resources: 将资源文件嵌入到可执行文件中
 # 使用大资源模式（big resources），适合包含大量资源的项目
 qt5_add_big_resources(CORE_HELPER_SOURCES_QRC
-    ${CMAKE_SOURCE_DIR}/src/core_helper/qrc/font.qrc    # 字体资源
-    ${CMAKE_SOURCE_DIR}/src/core_helper/qrc/image.qrc   # 图片资源
-    ${CMAKE_SOURCE_DIR}/src/core_helper/qrc/qm.qrc      # 翻译文件
-    ${CMAKE_SOURCE_DIR}/src/core_helper/qrc/wasm.qrc    # WebAssembly 资源（可选）
+    ${CMAKE_SOURCE_DIR}/src/ui/core_helper/qrc/font.qrc    # 字体资源
+    ${CMAKE_SOURCE_DIR}/src/ui/core_helper/qrc/image.qrc   # 图片资源
+    ${CMAKE_SOURCE_DIR}/src/ui/core_helper/qrc/qm.qrc      # 翻译文件
+    ${CMAKE_SOURCE_DIR}/src/ui/core_helper/qrc/wasm.qrc    # WebAssembly 资源（可选）
 )
 
 qt5_add_big_resources(CORE_QRC
-    ${CMAKE_SOURCE_DIR}/src/core_qss/qss.qrc            # QSS 样式表资源
+    ${CMAKE_SOURCE_DIR}/src/ui/core_qss/qss.qrc            # QSS 样式表资源
 )
 
 # 拍照快门音效资源（人员点名/设备盘点模块）

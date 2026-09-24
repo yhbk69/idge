@@ -1,4 +1,6 @@
-# src/core_qss
+# src/ui/core_qss
+
+> 所属域：**ui 界面域**（目录重组 S4e 迁入）
 
 ## 功能概述
 

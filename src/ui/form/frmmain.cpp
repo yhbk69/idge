@@ -20,9 +20,9 @@
 
 #include "frmmain.h"
 #include "ui_frmmain.h"
-#include "core_helper/iconhelper.h"
-#include "core_helper/qthelper.h"
-#include "core_helper/theme.h"
+#include "iconhelper.h"
+#include "qthelper.h"
+#include "theme.h"
 #include "SharedTypes.hpp"
 #include "ConfigManager.h"
 #include "frmvideowindow.h"

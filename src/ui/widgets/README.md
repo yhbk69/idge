@@ -1,4 +1,7 @@
-# src/ui
+# src/ui/widgets
+
+> 所属域：**ui 界面域**。原 `src/ui` 模块目录，S4e 域分组时更名 `widgets`
+> （避免与域目录同名），承载可复用控件与 EGL/GL 渲染。
 
 ## 功能概述（在流水线中的位置）
 零拷贝渲染终点与业务界面前端。上游（FFmpeg 硬解 → RGA 转 RGBA 的 DMA-BUF fd）经 Qt 队列信号送入本模块，由 EGL `EGL_EXT_image_dma_buf_import` 把 fd 直接导入为 GLES 纹理绘制——像素全程不落主存；同时提供数据看板、报警列表、播放窗体等业务界面。

@@ -60,7 +60,7 @@
   <customwidget>
    <class>PlayerWidget</class>
    <extends>QWidget</extends>
-   <header>ui/player_widget.h</header>
+   <header>player_widget.h</header>
    <container>1</container>
   </customwidget>
  </customwidgets>
