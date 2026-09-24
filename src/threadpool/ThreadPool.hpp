@@ -116,7 +116,7 @@ public:
         std::vector<ModelConfig> configs = modelConfigs;
         if (configs.empty()) {
             configs = {
-                {"model/yolo11n.rknn", "model/coco_80_labels_list.txt", "默认模型"}
+                {"model/library/yolo11n-coco/model.rknn", "model/library/yolo11n-coco/labels.txt", "默认模型"}
             };
         }
 

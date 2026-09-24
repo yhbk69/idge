@@ -15,8 +15,8 @@
 //       "notes": ["", "", "", ""]
 //     },
 //     "model": {
-//       "path": "model/yolo11n.rknn",
-//       "label": "model/coco_80_labels_list.txt",
+//       "path": "model/library/yolo11n-coco/model.rknn",
+//       "label": "model/library/yolo11n-coco/labels.txt",
 //       "input_size": "640x640",
 //       "type": "YOLO11"
 //     },
@@ -99,7 +99,7 @@ void ConfigManager::load(const QString &path)
         // 每个模型独立指定路径、标签、备注
         root_["cascade"] = QJsonObject{
             {"models", QJsonArray{
-                QJsonObject{{"path", "model/yolo11n.rknn"}, {"label", "model/coco_80_labels_list.txt"}, {"note", "默认模型"}},
+                QJsonObject{{"path", "model/library/yolo11n-coco/model.rknn"}, {"label", "model/library/yolo11n-coco/labels.txt"}, {"note", "默认模型"}},
                 QJsonObject{{"path", ""}, {"label", ""}, {"note", ""}},
                 QJsonObject{{"path", ""}, {"label", ""}, {"note", ""}},
                 QJsonObject{{"path", ""}, {"label", ""}, {"note", ""}},
@@ -141,8 +141,83 @@ void ConfigManager::load(const QString &path)
         qWarning() << "[ConfigManager] 文件打开失败:" << path;
     }
 
+    // 旧配置一次性迁移（绝对路径/平铺模型路径 → 模型库相对路径），有变化才落盘
+    if (migrateModelPaths()) {
+        qInfo() << "[ConfigManager] 已将旧模型路径迁移到模型库规范 (model/library/)";
+        saveUnsafe();
+    }
+
     // 从 root_ 更新缓存值（避免每次 getter 都反序列化 JSON）
     updateCache();
+}
+
+// ============================================================================
+// 模型路径一次性迁移（load 内持锁调用）
+// ============================================================================
+// 规则（详见 plan/model_management.md §2.3）：
+//   1) 绝对路径去前缀：/任意前缀/model/xxx → model/xxx，仓库整体搬迁后配置不失效
+//   2) 旧平铺模型路径 → 模型库路径（仅当库内文件确实存在时才改写）
+// 返回是否发生了修改；调用方据此决定是否 saveUnsafe() 落盘。
+// ============================================================================
+static QString migrateOneModelPath(QString p)
+{
+    p = p.trimmed();
+    if (p.isEmpty())
+        return p;
+
+    const int cut = p.indexOf("/model/");
+    if (cut >= 0 && p.startsWith('/'))
+        p = p.mid(cut + 1);  // "/xxx/model/yyy" → "model/yyy"
+
+    static const struct { const char *legacySuffix; const char *libPath; } kMap[] = {
+        { "yolo11n.rknn", "model/library/yolo11n-coco/model.rknn" },
+        { "yolo11s.rknn", "model/library/yolo11s-coco/model.rknn" },
+        { "yolo11m.rknn", "model/library/yolo11m-coco/model.rknn" },
+    };
+    for (const auto &m : kMap) {
+        if (p.endsWith(m.legacySuffix) && QFile::exists(m.libPath)) {
+            p = m.libPath;
+            break;
+        }
+    }
+    return p;
+}
+
+bool ConfigManager::migrateModelPaths()
+{
+    bool changed = false;
+    auto fix = [&changed](const QString &v) {
+        const QString n = migrateOneModelPath(v);
+        if (n != v)
+            changed = true;
+        return n;
+    };
+
+    // 全局 model.path / model.label
+    QJsonObject model = root_["model"].toObject();
+    if (!model.isEmpty()) {
+        if (model.contains("path")) model["path"] = fix(model["path"].toString());
+        if (model.contains("label")) model["label"] = fix(model["label"].toString());
+        root_["model"] = model;
+    }
+
+    // cascade.models[] 每槽 path / label
+    QJsonObject cascade = root_["cascade"].toObject();
+    QJsonArray arr = cascade["models"].toArray();
+    for (int i = 0; i < arr.size(); ++i) {
+        QJsonObject o = arr[i].toObject();
+        const QString p = o["path"].toString();
+        const QString l = o["label"].toString();
+        const QString np = fix(p);
+        const QString nl = fix(l);
+        if (np != p) o["path"] = np;
+        if (nl != l) o["label"] = nl;
+        arr[i] = o;
+    }
+    cascade["models"] = arr;
+    root_["cascade"] = cascade;
+
+    return changed;
 }
 
 // ============================================================================

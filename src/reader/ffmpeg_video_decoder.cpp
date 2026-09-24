@@ -81,6 +81,7 @@
 
 #include "ffmpeg_video_decoder.h"
 #include "rga_converter.h"
+#include "../model_repo/model_registry.h"
 
 #include <QDebug>
 #include <QElapsedTimer>
@@ -339,11 +340,25 @@ FFmpegVideoDecoder::FFmpegVideoDecoder(QObject *parent) : QObject(parent)
 
 // ============================================================
 // 级联任务构建：
-//   model.path(模型1) + cascade.models 2~5 中非空的路径，各建一个 PpeTask。
-//   PpeTask 每个占一个 std::thread，NPU 核心 0/1/2 轮流分配，避免全部挤在同一核。
-//   每个任务配一个独立结果队列 slotQueues_[i]，画框时按模型上色、互不干扰。
+//   由 ModelRegistry::resolveCascadeSlots() 解析 5 个槽位
+//   （槽位 1 = 全局 model.path，2~5 = cascade.models；每槽自带标签）。
+//   每个启用槽位建一个 PpeTask（独立推理线程）+ 一个结果队列，
+//   NPU 核心 0/1/2 轮流分配；taskConfig.result_id = 紧凑任务下标，
+//   推理结果经 od.id 路由到 AlarmManager 的按槽类名表。
 //   空路径 = 不启用该槽（界面里空着即可）。
 // ============================================================
+static std::vector<std::string> readLabelNames(const QString &labelPath)
+{
+    std::vector<std::string> names;
+    std::ifstream infile(labelPath.toStdString());
+    std::string line;
+    while (infile && std::getline(infile, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (!line.empty()) names.push_back(line);
+    }
+    return names;
+}
+
 void FFmpegVideoDecoder::buildCascadeTasks()
 {
     ConfigManager &cfg = ConfigManager::instance();
@@ -351,52 +366,57 @@ void FFmpegVideoDecoder::buildCascadeTasks()
     if (cfg.modelPath().isEmpty() && cfg.labelPath().isEmpty()) {
         cfg.load("config.json");
     }
-    QString labelPath = cfg.labelPath();
-    if (labelPath.isEmpty()) labelPath = "model/coco_80_labels_list.txt";
 
-    // 收集启用的模型路径：模型1 永远取全局 model.path；2~5 读 cascade 配置
-    QStringList modelPaths;
-    QString m1 = cfg.modelPath().trimmed();
-    if (!m1.isEmpty()) modelPaths << m1;
-    for (int i = 2; i <= 5; ++i) {
-        QString p = cfg.cascadeModelPath(i).trimmed();
-        if (!p.isEmpty()) modelPaths << p;
+    // 槽位解析：模型路径 + 每槽专属标签（库内 labels.txt 优先于全局 label）
+    QList<SlotModel> slotList = ModelRegistry::resolveCascadeSlots();
+    bool anyEnabled = false;
+    for (const SlotModel &s : slotList) {
+        if (!s.modelPath.trimmed().isEmpty()) { anyEnabled = true; break; }
     }
-    if (modelPaths.isEmpty()) {
-        // 兜底：什么也没配就用默认模型
-        modelPaths << "model/yolo11n.rknn";
-    }
-
-    // 读一次类别名（各模型共用同一标签文件）
-    classNames_.clear();
-    {
-        std::ifstream infile(labelPath.toStdString());
-        std::string line;
-        while (infile && std::getline(infile, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            classNames_.push_back(line);
-        }
+    if (!anyEnabled) {
+        // 兜底：什么也没配就用模型库默认模型
+        SlotModel fb;
+        fb.modelPath = "model/library/yolo11n-coco/model.rknn";
+        fb.labelPath = cfg.labelPath().isEmpty()
+                           ? QStringLiteral("model/library/yolo11n-coco/labels.txt")
+                           : cfg.labelPath();
+        slotList.clear();
+        slotList.append(fb);
     }
 
-    // 每个非空模型一个推理任务 + 一个结果队列
-    int idx = 0;
-    for (const QString &mp : modelPaths) {
+    // 每个启用槽位一个推理任务 + 一个结果队列 + 一份类名表
+    for (const SlotModel &s : slotList) {
+        QString mp = s.modelPath.trimmed();
+        if (mp.isEmpty())
+            continue;
+        QString lp = s.labelPath.trimmed();
+        if (lp.isEmpty()) lp = "model/library/yolo11n-coco/labels.txt";
+
+        const int slotIdx = (int)tasks_.size();  // 紧凑下标，即 result_id
+
         TaskConfig taskConfig;
-        taskConfig.core_mask = (rknn_core_mask)(RKNN_NPU_CORE_0 + (idx % 3)); // 0/1/2 轮流
+        taskConfig.core_mask = (rknn_core_mask)(RKNN_NPU_CORE_0 + (slotIdx % 3)); // 0/1/2 轮流
         taskConfig.modelPath = mp.toStdString();
-        taskConfig.labelPath = labelPath.toStdString();
+        taskConfig.labelPath = lp.toStdString();
+        taskConfig.result_id = slotIdx;
 
         PpeTask *task = new PpeTask(taskConfig);
         tasks_.push_back(task);
 
         // 每个任务一个独立结果队列（容量 8，满了丢旧保新）
         slotQueues_.push_back(std::make_shared<PriorityQueue<object_detect_result_list>>(8));
-        idx++;
+
+        // 类名表：画框用 std 版，报警侧用 QString 版（同一数据源，同下标）
+        slotClassNames_.push_back(readLabelNames(lp));
+        QStringList qnames;
+        for (const auto &n : slotClassNames_.back()) qnames << QString::fromStdString(n);
+        AlarmManager::instance().setSlotClassNames(slotIdx, qnames);
     }
 
-    qDebug() << "Cascade tasks:" << tasks_.size() << "label:" << labelPath;
+    qDebug() << "Cascade tasks:" << tasks_.size();
     for (size_t k = 0; k < tasks_.size(); ++k) {
-        qDebug() << "  slot" << k + 1 << "->" << modelPaths[k];
+        qDebug() << "  slot" << k + 1 << "->" << QString::fromStdString(tasks_[k]->getModelPath())
+                 << "labels:" << (int)slotClassNames_[k].size();
     }
 }
 
@@ -529,21 +549,20 @@ int FFmpegVideoDecoder::reloadAllModels(const QStringList &modelPaths, const QSt
         if (ok) {
             successCount++;
             qInfo() << "Model" << i << "reloaded:" << path;
+
+            // 同步该槽位的类名表（画框 + 报警侧都要换成新模型的标签）
+            if (taskIndex < (int)slotClassNames_.size()) {
+                slotClassNames_[taskIndex] = readLabelNames(labelPath);
+                QStringList qnames;
+                for (const auto &n : slotClassNames_[taskIndex])
+                    qnames << QString::fromStdString(n);
+                AlarmManager::instance().setSlotClassNames(taskIndex, qnames);
+            }
         } else {
             qWarning() << "Model" << i << "reload failed:" << path;
         }
 
         taskIndex++;
-    }
-
-    // 更新类别名称（使用第一个模型的标签文件）
-    if (!labelPaths.isEmpty() && !labelPaths[0].isEmpty()) {
-        classNames_.clear();
-        // 从新模型获取类别名称
-        if (!tasks_.empty()) {
-            // PpeTask 的模型已经更新，类别名称也已更新
-            qInfo() << "Class names updated from new model";
-        }
     }
 
     return successCount;
@@ -1024,10 +1043,11 @@ void FFmpegVideoDecoder::decodeLoop()
                                            d.box.bottom - d.box.top,
                                            color, 3);
 
-                            // 画标签文字：M1 person 87.3%
-                            if (d.cls_id >= 0 && d.cls_id < (int)classNames_.size())
+                            // 画标签文字：M1 person 87.3%（用该槽位自己的类名表）
+                            const std::vector<std::string> &slotNames = slotClassNames_[k];
+                            if (d.cls_id >= 0 && d.cls_id < (int)slotNames.size())
                                 snprintf(text, sizeof(text), "M%zu %s %.1f%%",
-                                         k + 1, classNames_[d.cls_id].c_str(), d.prop * 100);
+                                         k + 1, slotNames[d.cls_id].c_str(), d.prop * 100);
                             else
                                 snprintf(text, sizeof(text), "M%zu cls_%d %.1f%%",
                                          k + 1, d.cls_id, d.prop * 100);
@@ -1068,12 +1088,9 @@ void FFmpegVideoDecoder::decodeLoop()
                             filteredOd.count = 0;
                             for (int i = 0; i < od.count; i++) {
                                 const auto &d = od.results[i];
-                                QString clsName;
-                                const QStringList &classNames = AlarmManager::instance().classNames();
-                                if (d.cls_id >= 0 && d.cls_id < classNames.size())
-                                    clsName = classNames[d.cls_id];
-                                else
-                                    clsName = QString("cls_%1").arg(d.cls_id);
+                                // 按该结果所属槽位取类名（与报警侧同口径）
+                                QString clsName = AlarmManager::instance()
+                                                      .resolveClassName(od.id, d.cls_id);
 
                                 // 类别检查：只处理围栏类别中定义的目标
                                 bool classMatch = fenceClasses.isEmpty() ||

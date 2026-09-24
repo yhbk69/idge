@@ -172,6 +172,7 @@ RGBA8888 DMA-BUF fd（带检测框的最终画面）
 | `src/reader/` | FFmpeg 解码线程、摄像头预览解码、SCRFD 人脸检测 | [README](src/reader/README.md) |
 | `src/yolo11/` | YOLO11 RKNN 推理核心、前后处理 | [README](src/yolo11/README.md) |
 | `src/model/` | 推理模型池（NPU 核心借还调度） | [README](src/model/README.md) |
+| `src/model_repo/` | 模型库注册表（library 扫描/元数据/级联槽位解析） | [README](src/model_repo/README.md) |
 | `src/task/` | 检测任务体系（安全帽/PPE 任务与任务池） | [README](src/task/README.md) |
 | `src/recognition/` | 人脸特征提取与比对 | [README](src/recognition/README.md) |
 | `src/service/` | 人员点名 / 设备盘点业务服务 | [README](src/service/README.md) |
@@ -187,7 +188,7 @@ RGBA8888 DMA-BUF fd（带检测框的最终画面）
 | `src/utils/` | 图像/绘制/路径/日志等通用工具 | [README](src/utils/README.md) |
 | `src/core_helper/` | 无边框窗体、图标字体、QSS 换肤组件 | [README](src/core_helper/README.md) |
 | `src/core_qss/` | blacksoft 皮肤资源 | [README](src/core_qss/README.md) |
-| `model/` | 检测模型与标签（yolo11n/s/m、coco 标签等） | [README](model/README.md) |
+| `model/` | 模型库 `library/<id>/`（yolo11n/s/m 收编）+ 专项标签 | [README](model/README.md) |
 | `python/` | ONNX→RKNN 转换与验证脚本 | [README](python/README.md) |
 | `tests/` | 数据库层测试（test_database，随主构建生成） | [README](tests/README.md) |
 | `docs/` | 技术知识库 | [README](docs/README.md) |

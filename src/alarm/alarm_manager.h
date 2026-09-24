@@ -118,6 +118,24 @@ public:
     // 获取类别名称列表
     const QStringList &classNames() const { return classNames_; }
 
+    /**
+     * @brief 设置某个级联槽位的专属类别名列表
+     * @param slot  槽位索引（= TaskConfig.result_id = object_detect_result_list.id，0 基）
+     * @param names 该槽位模型标签文件读出的类别名，行序 = cls_id
+     *
+     * 级联各模型类别不同（coco80 / helmet 2 类 / vest 2 类…），
+     * ingest 按 results.id 选表，避免 helmet 的 cls_id 被套用 coco 类名。
+     */
+    void setSlotClassNames(int slot, const QStringList &names);
+
+    /**
+     * @brief 按槽位解析类别名
+     * @param slot  槽位索引（results.id），越界或未设置时回退全局 classNames_
+     * @param clsId 模型输出的类别 ID
+     * @return 类别名；两处表都命中不了时返回 "cls_N"
+     */
+    QString resolveClassName(int slot, int clsId) const;
+
     // ============================================================================
     // ingest: 接收检测结果，判断是否需要生成报警
     // ============================================================================
@@ -244,7 +262,8 @@ private:
     mutable QMutex mutex_;                     // 互斥锁（保护并发访问）
     int totalDetections_ = 0;                  // 总检测次数
     QMap<QString, int> classCount_;            // 各类别检测次数
-    QStringList classNames_;                   // 类别名称列表
+    QStringList classNames_;                   // 类别名称列表（全局兜底）
+    QVector<QStringList> slotClassNames_;      // 按级联槽位存的类别名表，下标=results.id
     QStringList alarmClasses_;                 // 报警类别列表
     QMap<QString, long> lastAlarmTime_;        // 上次报警时间（steady 单调纳秒，仅内存态，用于去重限流）
                                                // key: "通道号:类别ID" -> 上次报警时间(ns)

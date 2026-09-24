@@ -119,7 +119,10 @@ private:
     // ===== 级联多模型：每个非空模型一个推理任务 + 一个结果队列 =====
     std::vector<PpeTask*> tasks_;                  // 推理任务(每个一个线程)
     std::vector<std::shared_ptr<PriorityQueue<object_detect_result_list>>> slotQueues_; // 各任务的结果
-    std::vector<std::string> classNames_;          // 类别名(所有模型共用同一标签文件)
+    // 每槽位独立的类别名表：slotClassNames_[k] 对应 tasks_[k] 模型的标签文件。
+    // 级联各模型类别不同（coco80 / helmet 2类 / vest 2类…），共用一张表会把
+    // helmet 的 cls_id 套用 coco 类名导致报警类别错标（2026-09-24 修复）。
+    std::vector<std::vector<std::string>> slotClassNames_;
 
     // ===== 视频录制 =====
     VideoRecorder* videoRecorder_ = nullptr;       // 视频录制器（环形缓冲区）

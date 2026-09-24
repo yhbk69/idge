@@ -240,6 +240,16 @@ private:
 
     void saveUnsafe();  ///< 内部不加锁的保存方法
     void updateCache(); ///< 从 root_ 更新缓存值
+    /**
+     * @brief 旧配置一次性迁移（load 内持锁调用，勿单独使用）
+     *
+     * 规则：
+     *   1) 绝对路径去前缀：/任意前缀/model/xxx → model/xxx（保持仓库可搬迁）
+     *   2) 旧平铺模型 model/yolo11{,n,s,m}.rknn → model/library/yolo11X-coco/model.rknn
+     *      （仅当库内新文件存在时替换）
+     * @return true=root_ 有改动（调用方负责 saveUnsafe 落盘）
+     */
+    bool migrateModelPaths();
 
     QString configPath_;   ///< 配置文件路径
     QJsonObject root_;     ///< JSON 根对象

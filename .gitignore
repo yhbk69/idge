@@ -39,3 +39,7 @@ config.json
 # Test
 test_database
 test_*.cpp
+
+*.db-shm
+*.db-wal
+.qoder/

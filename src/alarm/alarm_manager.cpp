@@ -83,6 +83,31 @@ void AlarmManager::setClassNames(const QStringList &names)
     classNames_ = names;
 }
 
+// 设置某个级联槽位的专属类别名列表（slot = results.id，0 基）
+void AlarmManager::setSlotClassNames(int slot, const QStringList &names)
+{
+    if (slot < 0)
+        return;
+    QMutexLocker lock(&mutex_);
+    if (slotClassNames_.size() <= slot)
+        slotClassNames_.resize(slot + 1);
+    slotClassNames_[slot] = names;
+}
+
+// 按槽位解析类别名：槽位表优先，全局表兜底，都落空返回 "cls_N"
+QString AlarmManager::resolveClassName(int slot, int clsId) const
+{
+    QMutexLocker lock(&mutex_);
+    if (slot >= 0 && slot < slotClassNames_.size()) {
+        const QStringList &names = slotClassNames_[slot];
+        if (clsId >= 0 && clsId < names.size())
+            return names[clsId];
+    }
+    if (clsId >= 0 && clsId < classNames_.size())
+        return classNames_[clsId];
+    return QString("cls_%1").arg(clsId);
+}
+
 // ============================================================================
 // ingest: 接收检测结果，判断是否需要生成报警
 // ============================================================================
@@ -126,12 +151,19 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
         QMutexLocker lock(&mutex_);
         totalDetections_ += results.count;
 
+        // 级联槽位（= TaskConfig.result_id），用于选择该模型专属类名表
+        const int slot = results.id;
+
         for (int i = 0; i < results.count; i++) {
             const object_detect_result &det = results.results[i];
 
-            // 将 cls_id 转换为类别名称
+            // 将 cls_id 转换为类别名称：槽位表优先、全局表兜底
+            // （锁已持有，不走 resolveClassName 避免 QMutex 重入死锁）
             QString className;
-            if (det.cls_id >= 0 && det.cls_id < classNames_.size()) {
+            if (slot >= 0 && slot < slotClassNames_.size() &&
+                det.cls_id >= 0 && det.cls_id < slotClassNames_[slot].size()) {
+                className = slotClassNames_[slot][det.cls_id];
+            } else if (det.cls_id >= 0 && det.cls_id < classNames_.size()) {
                 className = classNames_[det.cls_id];
             } else {
                 className = QString("cls_%1").arg(det.cls_id);
@@ -142,10 +174,11 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
 
             // 检查是否需要生成报警
             if (alarmClasses_.contains(className)) {
-                // 去重限流：同通道同类别在限流窗口内只报一次
-                // key 格式: "通道号:类别ID"，如 "0:0" 表示通道 0 的 person
-                // 用"通道:类别"作复合键，使不同通道、不同类别各自独立计数互不影响。
-                QString key = QString("%1:%2").arg(channel).arg(det.cls_id);
+                // 去重限流：同通道同槽位同类别在限流窗口内只报一次
+                // key 格式: "通道:槽位:类别ID"，如 "0:1:0" 表示通道 0、级联第 2 槽的 cls_0。
+                // 槽位入键后，不同模型恰好同类号（helmet cls_1 与 vest cls_1）
+                // 不再互相压制报警。
+                QString key = QString("%1:%2:%3").arg(channel).arg(slot).arg(det.cls_id);
                 long last = lastAlarmTime_.value(key, 0);  // 首次为 0，必然放行
                 // 与 kAlarmThrottleNs 同为 steady 纳秒，量纲一致；
                 // 注意 bypassThrottle 形参当前所有调用方均传 false，
@@ -202,7 +235,11 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
                     singleResult.id = results.id;
                     singleResult.count = 1;
                     singleResult.results[0] = det;
-                    detDao.insertFromDetectResult(channel, singleResult, classNames_);
+                    // 与报警侧同口径：该槽位表可用则用槽位表解析类别名
+                    const QStringList &detNames =
+                        (slot >= 0 && slot < slotClassNames_.size() && !slotClassNames_[slot].isEmpty())
+                            ? slotClassNames_[slot] : classNames_;
+                    detDao.insertFromDetectResult(channel, singleResult, detNames);
                 }
             }
         }
