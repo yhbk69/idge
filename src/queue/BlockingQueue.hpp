@@ -35,7 +35,7 @@
 //   mqtt_queue(16)  — 推理→MQTT，容量大避免 MQTT 网络延迟反压推理线程
 //
 // close() 后所有阻塞的 push/pop 立即返回 false，线程可据此退出循环。
-// close 是单向操作：closed_ 无复位接口，关闭后队列不可复用（如需复用请重建对象）。
+// close 默认单向；热更新复位场景用 reopen()（见其安全前提注释）。
 //
 // 复杂度与唤醒正确性：
 //   - push/pop 均为 O(1)：互斥锁内只做 deque 端点操作 + 单次 notify；
@@ -169,6 +169,20 @@ public:
     bool is_closed() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return closed_;
+    }
+
+    // ============================================================================
+    // reopen: 复位关闭状态（closed_ = false），供队列复用
+    // ============================================================================
+    // 使用前提（安全纪律）：必须由"确认旧消费者线程已退出"的一方调用
+    // （如 PpeTask::reloadModel 在 finished_ 置位并 join 之后）。
+    // 否则旧线程会因 closed_ 被复位而重新进入等待/消费，与新线程形成双消费者。
+    void reopen() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        closed_ = false;
+        lock.unlock();
+        not_empty_.notify_all();
+        not_full_.notify_all();
     }
 
     size_t size() const {

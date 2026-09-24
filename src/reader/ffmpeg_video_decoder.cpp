@@ -525,7 +525,9 @@ void FFmpegVideoDecoder::stop()
 //
 // 注意：
 //   - 解码线程继续运行，但推理会短暂暂停（~100ms/模型）
-//   - 如果新模型加载失败，旧模型保持不变
+//   - 新模型加载失败：旧模型原样重启，保持不变
+//   - 推理线程未在时限内退出：放弃该槽位热更新（旧线程随后自行停止，
+//     可稍后再次触发重试；期间该槽位不产结果但不崩溃、不丢 NPU 上下文）
 // ============================================================================
 int FFmpegVideoDecoder::reloadAllModels(const QStringList &modelPaths, const QStringList &labelPaths)
 {
@@ -541,10 +543,11 @@ int FFmpegVideoDecoder::reloadAllModels(const QStringList &modelPaths, const QSt
         QString labelPath = (i < labelPaths.size()) ? labelPaths[i] : labelPaths[0];
 
         PpeTask *task = tasks_[taskIndex];
+        // 热更新只换模型、不改核分配：沿用 buildCascadeTasks 为该槽位定的核掩码
         bool ok = task->reloadModel(
             path.toStdString(),
             labelPath.toStdString(),
-            RKNN_NPU_CORE_0);  // TODO: 支持配置核心掩码
+            task->currentCoreMask());
 
         if (ok) {
             successCount++;

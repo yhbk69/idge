@@ -284,15 +284,36 @@ PpeTask::~PpeTask()
 }
 
 // ============================================================================
+// restartThread: 复位队列并重启推理线程
+// ============================================================================
+// 前提：调用方已确认旧线程退出（finished_），否则旧线程复活后与新线程
+// 双消费同一队列，且形成对 model_ 的并发读写。
+// requestStop() 已把 taskQueue_ close，close 复位必须经 reopen()——
+// 这正是旧实现换模型后该槽位永久丢帧（push_latest 恒 false、pop 恒空转）的根因。
+// ============================================================================
+void PpeTask::restartThread()
+{
+    taskQueue_->clear();
+    taskQueue_->reopen();
+    running_ = true;
+    finished_ = false;
+    thread_ = std::thread(&PpeTask::run, this);
+}
+
+// ============================================================================
 // reloadModel: 热更新模型
 // ============================================================================
 // 安全地替换推理模型，流程：
-//   1. 停止推理线程（等待当前推理完成）
-//   2. 销毁旧模型（释放 NPU 资源）
-//   3. 创建新模型（加载到 NPU）
-//   4. 重启推理线程
+//   1. 有界停止推理线程，并确认其已退出（finished_）
+//   2. 创建新模型（失败则用旧模型原样重启）
+//   3. 替换模型 + 复位队列 + 重启推理线程
 //
-// 如果新模型加载失败，旧模型保持不变，返回 false
+// UAF 防线（修复旧实现的三连隐患）：
+//   旧实现 stopBestEffort 超时 detach 后**照常**替换 model_ 并重启线程——
+//   在途线程仍引用旧 model_/队列，属 use-after-free + 双消费者；且重启后
+//   队列保持 close 状态，该槽位永久丢帧。现在：线程未确认退出就直接放弃
+//   本次热更新（本槽位保持停止，上层可稍后重试——旧线程 soon 会因
+//   running_==false 自行退出并置 finished_）。
 // ============================================================================
 bool PpeTask::reloadModel(const std::string &newPath,
                            const std::string &newLabelPath,
@@ -300,37 +321,38 @@ bool PpeTask::reloadModel(const std::string &newPath,
 {
     qInfo() << "PpeTask: Reloading model from" << QString::fromStdString(newPath);
 
-    // 1. 停止推理线程
+    // 1. 停止推理线程（有界等待）并确认已退出
     stopBestEffort(2000);
+    if (!finished_.load()) {
+        qWarning() << "PpeTask: reload aborted - inference thread still in flight"
+                   << "(model unchanged for this slot; retry after it exits)";
+        return false;
+    }
+    // finished_ 已置位但线程对象仍 joinable（超时边界上刚好退出的竞态）：回收之
+    if (thread_.joinable()) {
+        thread_.join();
+    }
     running_ = false;
-    finished_ = false;
 
-    // 2. 尝试创建新模型（如果失败，旧模型继续工作）
+    // 2. 尝试创建新模型（如果失败，旧模型原样重启）
     std::shared_ptr<YOLO11Model> newModel;
     try {
         newModel = std::make_shared<YOLO11Model>(newPath, newLabelPath, coreMask);
     } catch (const std::exception &e) {
         qWarning() << "PpeTask: Failed to load new model:" << e.what();
-        // 重启旧模型的推理线程
-        running_ = true;
-        finished_ = false;
-        taskQueue_->clear();
-        thread_ = std::thread(&PpeTask::run, this);
+        restartThread();  // 旧线程已确认退出，重启安全
         return false;
     }
 
-    // 3. 替换模型（旧模型在 shared_ptr 析构时自动释放 NPU 资源）
+    // 3. 替换模型与配置（旧模型在 shared_ptr 析构时自动释放 NPU 资源；
+    //    此刻已无任何线程引用旧模型——第 1 步的 finished_ 门槛保证）
     model_ = newModel;
     config.modelPath = newPath;
     config.labelPath = newLabelPath;
+    config.core_mask = coreMask;
 
-    // 4. 清空队列中残留的旧帧
-    taskQueue_->clear();
-
-    // 5. 重启推理线程
-    running_ = true;
-    finished_ = false;
-    thread_ = std::thread(&PpeTask::run, this);
+    // 4. 清空残留旧帧 + 复位队列 + 重启推理线程
+    restartThread();
 
     qInfo() << "PpeTask: Model reloaded successfully";
     return true;
