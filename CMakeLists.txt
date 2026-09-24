@@ -194,7 +194,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/core_qss                # QSS 样式表
     ${CMAKE_SOURCE_DIR}/src/draw                    # 绘图模块
     ${CMAKE_SOURCE_DIR}/src/engine                  # 引擎模块
-    ${CMAKE_SOURCE_DIR}/src/model                   # 模型管理（RKNN 模型池）
+    ${CMAKE_SOURCE_DIR}/src/media/model                   # 模型管理（RKNN 模型池）
     ${CMAKE_SOURCE_DIR}/src/process                 # 处理模块
     ${CMAKE_SOURCE_DIR}/src/rkmedia                 # RK 媒体库封装
     ${CMAKE_SOURCE_DIR}/src/rkmedia/utils           # RK 媒体工具
@@ -214,7 +214,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/form                    # 窗口界面（主窗口、视频窗口）
 
     # --- YOLO 检测模块 ---
-    ${CMAKE_SOURCE_DIR}/src/reader                  # 视频读取（FFmpeg/MPP 解码）
+    ${CMAKE_SOURCE_DIR}/src/media/reader                  # 视频读取（FFmpeg/MPP 解码）
     ${CMAKE_SOURCE_DIR}/src/yolo11                  # YOLOv11 检测
     ${CMAKE_SOURCE_DIR}/src/yolo8                   # YOLOv8 检测
     ${CMAKE_SOURCE_DIR}/src/yolo8_pose              # YOLOv8 姿态估计
@@ -226,7 +226,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/base/queue                   # 帧队列（生产者-消费者）
     ${CMAKE_SOURCE_DIR}/src/infer                   # 推理模块
     ${CMAKE_SOURCE_DIR}/src/rknn                    # RKNN 封装
-    ${CMAKE_SOURCE_DIR}/src/rga                     # RGA 色彩转换
+    ${CMAKE_SOURCE_DIR}/src/media/rga                     # RGA 色彩转换
 
     # --- 报警模块 ---
     ${CMAKE_SOURCE_DIR}/src/alarm                   # 报警管理（去重、限流）

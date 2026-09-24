@@ -1,4 +1,6 @@
-# src/rga
+# src/media/rga
+
+> 所属域：**media 视频管线域**（目录重组 S4b 迁入）
 
 ## 功能概述（在流水线中的位置）
 RGA2/RGA3 硬件 2D 加速的封装层，承担两条关键零拷贝路径：① NV12 解码帧 → RGBA 帧（供 CPU 画框 + GLES 渲染）；② NV12/RGBA 帧 → 640×640 RGB 模型输入（含 YOLO letterbox），全部通过 DMA-BUF fd 在设备间直传，CPU 不搬运像素。

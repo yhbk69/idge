@@ -61,7 +61,7 @@
 #include <sys/time.h>
 
 #include "dma_alloc.h"
-#include "rga/RgaUtils.h"
+#include "RgaUtils.h"
 
 typedef unsigned long long __u64;
 typedef  unsigned int __u32;

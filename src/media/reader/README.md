@@ -1,4 +1,6 @@
-# src/reader
+# src/media/reader
+
+> 所属域：**media 视频管线域**（目录重组 S4b 迁入）
 
 ## 功能概述
 

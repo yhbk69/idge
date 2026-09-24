@@ -15,7 +15,7 @@
 #include "photo_selection_widget.h"
 #include "theme.h"
 #include "qt_image_utils.h"
-#include "../reader/camera_preview_decoder.h"
+#include "camera_preview_decoder.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFileDialog>

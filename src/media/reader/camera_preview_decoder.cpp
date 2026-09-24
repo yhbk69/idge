@@ -17,7 +17,7 @@
 
 #include "DmaFrameBuffer.h"
 #include "dma_alloc.h"
-#include "../rga/rga_converter.h"
+#include "rga_converter.h"
 #include "image_utils.h"
 #include "image_drawing.h"
 

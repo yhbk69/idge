@@ -24,7 +24,7 @@
 #include <memory>
 
 #include "../service/roll_call_service.h"
-#include "../reader/camera_preview_decoder.h"
+#include "camera_preview_decoder.h"
 #include "../ui/gl_video_widget.h"
 
 /**
