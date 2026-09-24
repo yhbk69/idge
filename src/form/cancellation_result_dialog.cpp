@@ -11,6 +11,7 @@
 // 实现约定：本文件所有中文 UI 文案写作 QStringLiteral("\uXXXX") 转义，
 // 规避不同编译器/编辑器对源文件 UTF-8 BOM 处理的差异（防止乱码），并非笔误。
 #include "cancellation_result_dialog.h"
+#include "theme.h"
 #include "photo_selection_widget.h"
 #include "../utils/qt_image_utils.h"
 #include <QVBoxLayout>
@@ -31,7 +32,7 @@ QWidget* imageCell(const std::string& path, QWidget* parent) {
     auto* label = new QLabel(parent);
     label->setFixedSize(240, 190);
     label->setAlignment(Qt::AlignCenter);
-    label->setStyleSheet(QStringLiteral("background: #262636; border: 1px solid #45455c; border-radius: 8px;"));
+    label->setStyleSheet(QString("background: %1; border: 1px solid %2; border-radius: 8px;").arg(theme::FIELD, theme::HOVER));
     const QPixmap pixmap = loadPixmapSafe(QString::fromUtf8(path.c_str()));
     if (!pixmap.isNull())
         label->setPixmap(pixmap.scaled(label->size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
@@ -97,7 +98,9 @@ CancellationResultDialog::CancellationResultDialog(int id, const QStringList& pa
 
     auto* header = new QHBoxLayout;
     status_ = new QLabel(QStringLiteral("\u6b63\u5728\u8bc6\u522b\u4e2d..."), this);
-    status_->setStyleSheet(QStringLiteral("color: #4fc3f7; font-size:18px; font-weight: 600;"));
+    status_->setStyleSheet(QString("color: %1; font-size:%2px; font-weight: 600;")
+                               .arg(theme::ACCENT)
+                               .arg(theme::FS_CARD));
     header->addWidget(status_);
     header->addSpacing(20);
     header->addWidget(new QLabel(QStringLiteral("\u6ce8\u9500\u4eba\u6570:"), this));
@@ -182,7 +185,9 @@ void CancellationResultDialog::onRecognitionFinished(const CancellationProcessRe
     recognize();
     loading_->setVisible(false);
     status_->setText(QStringLiteral("\u8bc6\u522b\u5b8c\u6210"));
-    status_->setStyleSheet(QStringLiteral("color: #4caf50; font-size:18px; font-weight: 600;"));
+    status_->setStyleSheet(QString("color: %1; font-size:%2px; font-weight: 600;")
+                               .arg(theme::SUCCESS)
+                               .arg(theme::FS_CARD));
     table_->setEnabled(true);
     count_->setEnabled(true);
     previous_btn_->setEnabled(true);

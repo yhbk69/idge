@@ -2,6 +2,7 @@
 // 职责：设备盘点识别结果对话框实现（caichao 分支合入），
 //       后台 QThread + Worker(moveToThread) 执行 NPU 设备检测，结果回 GUI 线程渲染
 #include "equipment_recognition_dialog.h"
+#include "theme.h"
 
 #include <QAbstractItemView>
 #include <QHeaderView>
@@ -91,7 +92,7 @@ void EquipmentRecognitionDialog::setupUi() {
                                           : QStringLiteral("设备注销识别结果"));
     resize(1400, 900);
     setMinimumSize(1000, 700);
-    setStyleSheet(QStringLiteral("QDialog { background: #1e1e2e; color: #E5E7EB; }"));
+    setStyleSheet(QString("QDialog { background: %1; color: %2; }").arg(theme::BG, theme::TEXT));
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(24, 24, 24, 24);
@@ -99,11 +100,13 @@ void EquipmentRecognitionDialog::setupUi() {
 
     auto* header = new QHBoxLayout;
     status_label_ = new QLabel(QStringLiteral("正在识别中..."), this);
-    status_label_->setStyleSheet(QStringLiteral("color:#4fc3f7; font-size:18px; font-weight:600;"));
+    status_label_->setStyleSheet(QString("color:%1; font-size:%2px; font-weight:600;")
+                                     .arg(theme::ACCENT)
+                                     .arg(theme::FS_CARD));
     header->addWidget(status_label_);
     header->addSpacing(24);
     total_label_ = new QLabel(QStringLiteral("标签总数：0"), this);
-    total_label_->setStyleSheet(QStringLiteral("color:#4caf50; font-size:22px; font-weight:700;"));
+    total_label_->setStyleSheet(theme::text(theme::SUCCESS, theme::FS_PAGE, true));
     header->addWidget(total_label_);
     progress_ = new QProgressBar(this);
     progress_->setRange(0, 0);
@@ -192,7 +195,9 @@ void EquipmentRecognitionDialog::onRecognitionFinished(const EquipmentTaskResult
     result_ = result;
     renderResults();
     status_label_->setText(QStringLiteral("识别完成"));
-    status_label_->setStyleSheet(QStringLiteral("color:#4caf50; font-size:18px; font-weight:600;"));
+    status_label_->setStyleSheet(QString("color:%1; font-size:%2px; font-weight:600;")
+                                     .arg(theme::SUCCESS)
+                                     .arg(theme::FS_CARD));
     total_label_->setText(QStringLiteral("标签总数\n%1").arg(countsText(result_.total_counts)));
     progress_->setVisible(false);
     table_->setEnabled(true);
@@ -222,7 +227,7 @@ void EquipmentRecognitionDialog::renderResults() {
         image->setMinimumSize(0, 320);
         image->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
         image->setAlignment(Qt::AlignCenter);
-        image->setStyleSheet(QStringLiteral("background:#262636; border:1px solid #45455c;"));
+        image->setStyleSheet(QString("background:%1; border:1px solid %2;").arg(theme::FIELD, theme::HOVER));
         const QPixmap pixmap = loadPixmapSafe(path);
         if (!pixmap.isNull())
             image->setPixmap(pixmap.scaled(760, 320, Qt::KeepAspectRatio, Qt::SmoothTransformation));
@@ -232,7 +237,9 @@ void EquipmentRecognitionDialog::renderResults() {
 
         auto* counts = new QLabel(countsText(photo.counts), table_);
         counts->setAlignment(Qt::AlignCenter);
-        counts->setStyleSheet(QStringLiteral("color:#E5E7EB; font-size:18px; font-weight:600;"));
+        counts->setStyleSheet(QString("color:%1; font-size:%2px; font-weight:600;")
+                                  .arg(theme::TEXT)
+                                  .arg(theme::FS_CARD));
         counts->setMinimumWidth(220);
         table_->setCellWidget(row, 1, counts);
         table_->setRowHeight(row, 350);

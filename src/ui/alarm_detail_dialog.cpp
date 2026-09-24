@@ -1,4 +1,5 @@
 #include "alarm_detail_dialog.h"
+#include "theme.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGridLayout>
@@ -21,7 +22,7 @@ void AlarmDetailDialog::setupUi()
 {
     setWindowTitle("报警详情");
     setMinimumSize(480, 520);
-    setStyleSheet("background: #2d2d3d; color: #ccc;");
+    setStyleSheet(QString("background: %1; color: %2;").arg(theme::PANEL, theme::TEXT));
 
     QVBoxLayout *mainLay = new QVBoxLayout(this);
     mainLay->setContentsMargins(16, 16, 16, 16);
@@ -30,7 +31,8 @@ void AlarmDetailDialog::setupUi()
     // 截图预览区域
     imageLabel_ = new QLabel();
     imageLabel_->setMinimumSize(440, 280);
-    imageLabel_->setStyleSheet("background: #1e1e2e; border: 1px solid #444; border-radius: 4px;");
+    imageLabel_->setStyleSheet(QString("background: %1; border: 1px solid %2; border-radius: 4px;")
+                                   .arg(theme::BG, theme::BORDER));
     imageLabel_->setAlignment(Qt::AlignCenter);
     imageLabel_->setText("无截图");
     mainLay->addWidget(imageLabel_);
@@ -42,9 +44,9 @@ void AlarmDetailDialog::setupUi()
 
     auto addRow = [&](int row, const QString &label, const QString &value) {
         QLabel *lbl = new QLabel(label);
-        lbl->setStyleSheet("color: #aaa; font-size:16px;");
+        lbl->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
         QLabel *val = new QLabel(value);
-        val->setStyleSheet("color: #fff; font-size:16px; font-weight: bold;");
+        val->setStyleSheet(theme::text(theme::TEXT, theme::FS_BODY, true));
         infoLay->addWidget(lbl, row, 0);
         infoLay->addWidget(val, row, 1);
         return val;
@@ -59,9 +61,9 @@ void AlarmDetailDialog::setupUi()
     addRow(4, "ID:", alarm_.id);
     statusLabel_ = addRow(5, "状态:", alarm_.status == "rectified" ? "已确认" : "未确认");
     if (alarm_.status != "rectified") {
-        statusLabel_->setStyleSheet("color: #ff9800; font-size:16px; font-weight: bold;");
+        statusLabel_->setStyleSheet(theme::text(theme::WARNING, theme::FS_BODY, true));
     } else {
-        statusLabel_->setStyleSheet("color: #4caf50; font-size:16px; font-weight: bold;");
+        statusLabel_->setStyleSheet(theme::text(theme::SUCCESS, theme::FS_BODY, true));
     }
 
     mainLay->addLayout(infoLay);
@@ -74,17 +76,19 @@ void AlarmDetailDialog::setupUi()
 
     QPushButton *btnFalse = new QPushButton("确认误报");
     btnFalse->setStyleSheet(
-        "QPushButton { color: #fff; background: #f44336; border-radius: 4px; padding: 8px 20px; font-size:16px; }"
-        "QPushButton:hover { background: #d32f2f; }"
-    );
+        QString("QPushButton { color: %1; background: %2; border-radius: 4px; padding: 8px 20px; font-size:%3px; }"
+                "QPushButton:hover { background: %2; }")
+            .arg(theme::TEXT, theme::DANGER)
+            .arg(theme::FS_BODY));
     connect(btnFalse, &QPushButton::clicked, this, &AlarmDetailDialog::onMarkFalsePositive);
     btnLay->addWidget(btnFalse);
 
     QPushButton *btnNormal = new QPushButton("不是误报");
     btnNormal->setStyleSheet(
-        "QPushButton { color: #fff; background: #4caf50; border-radius: 4px; padding: 8px 20px; font-size:16px; }"
-        "QPushButton:hover { background: #388e3c; }"
-    );
+        QString("QPushButton { color: %1; background: %2; border-radius: 4px; padding: 8px 20px; font-size:%3px; }"
+                "QPushButton:hover { background: %2; }")
+            .arg(theme::TEXT, theme::SUCCESS)
+            .arg(theme::FS_BODY));
     connect(btnNormal, &QPushButton::clicked, this, &AlarmDetailDialog::onMarkNormal);
     btnLay->addWidget(btnNormal);
 
@@ -92,9 +96,10 @@ void AlarmDetailDialog::setupUi()
 
     QPushButton *btnCancel = new QPushButton("取消");
     btnCancel->setStyleSheet(
-        "QPushButton { color: #fff; background: #555; border-radius: 4px; padding: 8px 20px; font-size:16px; }"
-        "QPushButton:hover { background: #666; }"
-    );
+        QString("QPushButton { color: %1; background: %2; border-radius: 4px; padding: 8px 20px; font-size:%3px; }"
+                "QPushButton:hover { background: %2; }")
+            .arg(theme::TEXT, theme::HOVER)
+            .arg(theme::FS_BODY));
     connect(btnCancel, &QPushButton::clicked, this, &QDialog::reject);
     btnLay->addWidget(btnCancel);
 

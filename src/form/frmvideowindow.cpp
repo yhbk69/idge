@@ -13,6 +13,7 @@
 
 #include "frmvideowindow.h"
 #include "ui_frmvideowindow.h"
+#include "theme.h"
 #include <QTimer>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -215,13 +216,19 @@ void frmVideoWindow::setupFenceToolbar()
 
     // 设置工具栏的暗色主题样式
     toolbar->setStyleSheet(
-        "QFrame { background: #2d2d3d; border: 1px solid #3d3d4d; }"        // 框架背景和边框
-        "QPushButton { background: #3d3d4d; color: #E5E7EB; border: 1px solid #45455c;"  // 按钮默认样式
-        "  border-radius: 4px; padding: 2px 8px; font-size:13px; }"    // 圆角、内边距、字体
-        "QPushButton:hover { background: #45455c; }"                    // 鼠标悬停样式
-        "QPushButton:checked { background: #4fc3f7; color: #1e1e2e; }"  // 选中状态样式（主题强调色）
-        "QLabel { color: #9ca3af; font-size:13px; }"                   // 标签文字样式
-    );
+        QString("QFrame { background: %1; border: 1px solid %2; }"                 // 框架背景和边框
+                "QPushButton { background: %2; color: %3; border: 1px solid %4;"   // 按钮默认样式
+                "  border-radius: 4px; padding: 2px 8px; font-size:%5px; }"        // 圆角、内边距、字体
+                "QPushButton:hover { background: %4; }"                            // 鼠标悬停样式
+                "QPushButton:checked { background: %6; color: %7; }"               // 选中状态样式（主题强调色）
+                "QLabel { color: %8; font-size:%5px; }")                           // 标签文字样式
+            .arg(theme::PANEL, theme::BORDER)
+            .arg(theme::TEXT)
+            .arg(theme::HOVER)
+            .arg(theme::FS_HINT)
+            .arg(theme::ACCENT)
+            .arg(theme::BG)
+            .arg(theme::TEXT_MUTED));
 
     // ========================================================================
     // 第二步：创建水平布局并设置间距

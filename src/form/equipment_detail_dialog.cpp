@@ -1,6 +1,7 @@
 // 文件：equipment_detail_dialog.cpp
 // 职责：设备盘点任务详情对话框实现（caichao 分支合入），构造时同步取数建表，模态展示
 #include "equipment_detail_dialog.h"
+#include "theme.h"
 
 #include <QAbstractItemView>
 #include <QHeaderView>
@@ -31,7 +32,7 @@ QWidget* EquipmentDetailDialog::imageWidget(const std::string& path, QWidget* pa
     auto* image = new QLabel(parent);
     image->setMinimumSize(300, 210);
     image->setAlignment(Qt::AlignCenter);
-    image->setStyleSheet(QStringLiteral("background:#262636; border:1px solid #45455c;"));
+    image->setStyleSheet(QString("background:%1; border:1px solid %2;").arg(theme::FIELD, theme::HOVER));
     const QPixmap pixmap = loadPixmapSafe(QString::fromUtf8(path.c_str()));
     if (!pixmap.isNull())
         image->setPixmap(pixmap.scaled(420, 260, Qt::KeepAspectRatio, Qt::SmoothTransformation));
@@ -65,7 +66,9 @@ QWidget* EquipmentDetailDialog::photoCell(const EquipmentPhotoRecord& photo, QWi
     const auto detections = service_->getDetections(photo.id);
     auto* counts = new QLabel(countsText(detections), cell);
     counts->setAlignment(Qt::AlignCenter);
-    counts->setStyleSheet(QStringLiteral("color:#E5E7EB; font-size:18px; font-weight:600;"));
+    counts->setStyleSheet(QString("color:%1; font-size:%2px; font-weight:600;")
+                              .arg(theme::TEXT)
+                              .arg(theme::FS_CARD));
     layout->addWidget(counts);
     return cell;
 }
@@ -74,7 +77,7 @@ void EquipmentDetailDialog::setupUi() {
     setWindowTitle(QStringLiteral("设备盘点任务详情"));
     resize(1500, 950);
     setMinimumSize(1100, 700);
-    setStyleSheet(QStringLiteral("QDialog { background:#1e1e2e; color:#E5E7EB; }"));
+    setStyleSheet(QString("QDialog { background:%1; color:%2; }").arg(theme::BG, theme::TEXT));
 }
 
 /**
@@ -96,7 +99,7 @@ void EquipmentDetailDialog::loadData() {
 
     auto* header = new QHBoxLayout;
     auto* title = new QLabel(QString::fromUtf8(task.name.c_str()), this);
-    title->setStyleSheet(QStringLiteral("font-size:22px; font-weight:700; color:#E5E7EB;"));
+    title->setStyleSheet(theme::text(theme::TEXT, theme::FS_PAGE, true));
     header->addWidget(title);
     header->addSpacing(24);
     const auto registration = service_->getPhotos(task_id_, 0);
@@ -119,12 +122,14 @@ void EquipmentDetailDialog::loadData() {
             QStringLiteral("注销标签总数\n%1").arg(countsText(cancellation_counts)), totals);
         for (auto* label : {registration_total, cancellation_total}) {
             label->setAlignment(Qt::AlignCenter);
-            label->setStyleSheet(QStringLiteral(
-                "font-size:22px; font-weight:700; color:#4caf50;"
-                "padding:4px 12px;"));
+            label->setStyleSheet(QString("font-size:%1px; font-weight:700; color:%2;"
+                                         "padding:4px 12px;")
+                                     .arg(theme::FS_PAGE)
+                                     .arg(theme::SUCCESS));
         }
-        cancellation_total->setStyleSheet(QStringLiteral(
-            "font-size:22px; font-weight:700; color:#ff9800; padding:4px 12px;"));
+        cancellation_total->setStyleSheet(QString("font-size:%1px; font-weight:700; color:%2; padding:4px 12px;")
+                                              .arg(theme::FS_PAGE)
+                                              .arg(theme::WARNING));
         totals_layout->addWidget(registration_total);
         totals_layout->addWidget(cancellation_total);
         header->addWidget(totals);
@@ -132,7 +137,7 @@ void EquipmentDetailDialog::loadData() {
         auto* total = new QLabel(
             QStringLiteral("标签总数\n%1").arg(countsText(registration_counts)), this);
         total->setAlignment(Qt::AlignCenter);
-        total->setStyleSheet(QStringLiteral("font-size:22px; font-weight:700; color:#4caf50;"));
+        total->setStyleSheet(theme::text(theme::SUCCESS, theme::FS_PAGE, true));
         header->addWidget(total);
     }
     header->addStretch();
@@ -150,7 +155,9 @@ void EquipmentDetailDialog::loadData() {
             table->setCellWidget(i, 0, imageWidget(registration[i].processed_photo_path, table));
             auto* counts = new QLabel(countsText(detections), table);
             counts->setAlignment(Qt::AlignCenter);
-            counts->setStyleSheet(QStringLiteral("font-size:18px; font-weight:600; color:#E5E7EB;"));
+            counts->setStyleSheet(QString("font-size:%1px; font-weight:600; color:%2;")
+                                      .arg(theme::FS_CARD)
+                                      .arg(theme::TEXT));
             table->setCellWidget(i, 1, counts);
             table->setRowHeight(i, 300);
         }
