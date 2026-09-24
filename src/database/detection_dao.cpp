@@ -125,7 +125,11 @@ int64_t DetectionDAO::insertFromDetectResult(int channel,
         const object_detect_result &det = results.results[i];
 
         DetectionRecord record;
-        record.timestamp = results.time;
+        // results.time 是推理管线透传的**epoch 纳秒**（taskData->time），
+        // 而本表所有查询/清理接口的时间参数约定为毫秒。历史上直接存纳秒
+        // 导致 cleanOldDetections 的 `timestamp < cutoffMs` 永假、表无限
+        // 增长。统一在写入口换算为毫秒，全表口径就此收敛。
+        record.timestamp = results.time / 1000000;
         record.channel = channel;
         record.frameId = results.id;
         record.classId = det.cls_id;

@@ -18,6 +18,9 @@
 #include <cmath>
 #include <iostream>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <cerrno>
+#include <cstring>
 #include <unistd.h>
 
 // 使用第三方JSON库（推荐jsoncpp或nlohmann/json）
@@ -56,9 +59,9 @@ void FaceRecognitionWrapper::setThresholds(float det_threshold, float nms_thresh
 // detectAndExtract - 拉起外部 exe 并解析其 JSON 输出
 // ============================================================================
 // 审查注记：
-//   - 命令为**空格分隔的位置参数拼接**，未做 shell 转义：路径含空格或
-//     ;、&、$() 等元字符不仅会破坏解析，还构成命令注入面——输入路径
-//     必须来自可信配置（当前调用方传入的是程序内部生成的抓拍文件路径）；
+//   - 命令以 **argv 数组经 fork+execv 直接执行，不经过 shell**：路径含空格
+//     或 ;、&、$() 等元字符只会作为普通参数传给 exe，不再构成命令注入面
+//     （旧实现用字符串拼接 + system()，任务名可控即任意命令执行，已废弃）；
 //   - 输出文件名 = image_path + "_faces.json"（临时文件约定由 exe 写出）：
 //     1) 同一图片路径并发识别会互相覆写结果文件（读到的可能是另一路结果）；
 //     2) unlink 被注释掉（见下），解析后临时 JSON 残留在磁盘，长期运行
@@ -72,21 +75,17 @@ FaceDetectionResult FaceRecognitionWrapper::detectAndExtract(const std::string& 
     // 生成临时输出JSON文件名
     std::string output_json = image_path + "_faces.json";
     
-    // 构建命令（7 个位置参数，顺序即与 exe 的接口契约）
-    std::ostringstream cmd;
-    cmd << exe_path_ << " "
-        << det_model_ << " "
-        << rec_model_ << " "
-        << image_path << " "
-        << output_json << " "
-        << det_threshold_ << " "
-        << nms_threshold_;
-    
-    std::string command = cmd.str();
-    std::cout << "Executing: " << command << std::endl;
+    // 组装 argv（7 个位置参数，顺序即与 exe 的接口契约）
+    std::vector<std::string> args = {
+        exe_path_, det_model_, rec_model_, image_path, output_json,
+        std::to_string(det_threshold_), std::to_string(nms_threshold_)
+    };
+    std::cout << "Executing:";
+    for (const auto& a : args) std::cout << " [" << a << "]";
+    std::cout << std::endl;
     
     // 执行命令
-    if (!executeCommand(command)) {
+    if (!executeCommand(args)) {
         std::cerr << "Failed to execute face detection command" << std::endl;
         return result;
     }
@@ -102,20 +101,42 @@ FaceDetectionResult FaceRecognitionWrapper::detectAndExtract(const std::string& 
 }
 
 // ============================================================================
-// executeCommand - system() 包装
+// executeCommand - fork+execv 包装（不经过 shell）
 // ============================================================================
-// 返回值语义（易错点）：system() 返回的是 wait(2) 风格状态字，
-// ret == 0 才表示"子进程正常退出且 exit code 为 0"；非 0 可能是
-// 非零退出码（ret>>8）或被信号杀死（ret&0x7f），本函数不区分原因。
-// 另两点约束：
-//   - 同步阻塞：调用线程会挂起直到 exe 结束（识别一张脸通常数百 ms 级），
+// 返回值语义：仅当子进程正常退出且 exit code 为 0 时返回 true；
+//   execv 失败（exe 不存在/无权限）、被信号杀死、非零退出统一返回 false，
+//   不区分原因。旧实现为 system()+字符串命令，存在命令注入面且返回值
+//   是 wait(2) 状态字，现已改为参数数组直传 execv：
+//   - 子进程 execv 失败时 _exit(127)，与 shell 惯例一致；
+//   - 父进程用 waitpid 阻塞等待，同步语义与原 system() 相同（数百 ms 级），
 //     禁止在 UI/解码关键路径上直接调用；
 //   - exe 内部使用 NPU，与本进程常驻的 RKNN 推理任务竞争核心算力，
 //     高并发点名时主检测帧率会受影响（部署层面的隐含约束）。
 // ============================================================================
-bool FaceRecognitionWrapper::executeCommand(const std::string& command) {
-    int ret = system(command.c_str());
-    return (ret == 0);
+bool FaceRecognitionWrapper::executeCommand(const std::vector<std::string>& args) {
+    if (args.empty()) return false;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        std::cerr << "fork failed: " << strerror(errno) << std::endl;
+        return false;
+    }
+    if (pid == 0) {
+        // 子进程：把 std::string 数组转换为 execv 需要的 NULL 结尾 char* 数组
+        std::vector<char*> argv;
+        argv.reserve(args.size() + 1);
+        for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+        argv.push_back(nullptr);
+        execv(argv[0], argv.data());
+        _exit(127);  // execv 失败（路径不存在/不可执行）
+    }
+
+    // 父进程：等待子进程结束，仅"正常退出且 code==0"算成功
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return false;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 // ============================================================================

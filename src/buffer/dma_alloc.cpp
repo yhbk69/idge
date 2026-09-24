@@ -199,6 +199,7 @@ int dma_buf_alloc(const char *path, size_t size, int *fd, void **va) {
     ret = ioctl(dma_heap_fd, DMA_HEAP_IOCTL_ALLOC, &buf_data);
     if (ret < 0) {
         printf("RK_DMA_HEAP_ALLOC_BUFFER failed\n");
+        close(dma_heap_fd);
         return ret;
     }
 
@@ -211,12 +212,14 @@ int dma_buf_alloc(const char *path, size_t size, int *fd, void **va) {
 
     // mmap: 将 GPU 可访问的内存映射到 CPU 地址空间
     // 映射后，CPU 可以像访问普通内存一样读写这块 GPU 显存
-    // ⚠ 隐患警示：此处若 mmap 失败直接 return，ioctl 已分配的 buf_data.fd
-    //   未被关闭，造成 DMA-BUF fd 泄漏（内核物理内存被该 fd 引用计数持有，
-    //   直到进程退出才回收）。正确做法应先 close(buf_data.fd) 再返回。
+    // 【失败路径清理】ioctl 已分配的 buf_data.fd 与已打开的 dma_heap_fd
+    //   都必须在返回前关闭：前者不关则 DMA-BUF 引用计数常驻，物理内存
+    //   直到进程退出才回收；后者不关则每次失败泄漏一个 heap 句柄。
     mmap_va = (void *)mmap(NULL, buf_data.len, prot, MAP_SHARED, buf_data.fd, 0);
     if (mmap_va == MAP_FAILED) {
         printf("mmap failed: %s\n", strerror(errno));
+        close(buf_data.fd);
+        close(dma_heap_fd);
         return -errno;
     }
 

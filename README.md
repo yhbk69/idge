@@ -297,10 +297,13 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
 以下问题已在源码中以注释警示（详见各目录 README 的"注意事项"）：
 
 1. 点击关闭按钮后，解码线程和 player_widget 没有完全关闭，解码线程可能仍在运行
-2. **报警时间戳单位口径不一**：`src/yolo11/common.hpp` 文档约定 `results.time` 为毫秒，但生产端实际写入 epoch 纳秒；限流常量 `kAlarmThrottleNs` 按纳秒比较，当前行为正确、文档口径错误（统一前勿依赖"time=毫秒"写新代码）
+2. 报警时间戳口径：生产端 `results.time` 为 epoch 纳秒（common.hpp"毫秒"注释是文档误差）；限流窗口已改用 steady_clock 单调纳秒、与墙钟解耦；detections 表写入口已统一换算为毫秒
 3. `DmaBufferPool::acquire` 返回裸指针有生命周期约束（池回收后悬垂）；`DmaFrameBuffer` 浅拷贝双释放隐患已通过 `= delete` 修复
-4. `src/queue/priority_queue` 的 `waitAndPop` 出队不移除元素、push 不 notify（`tryPop` 已修复为取出即删除）；`src/queue/frame_queue` 的 `pushAndReplace` 存在错序释放隐患；`src/rga/rga_converter.h` 个别错误路径存在句柄泄漏、返回值恒真
+4. `src/queue/priority_queue` 的 `waitAndPop` 出队不移除元素、push 不 notify（`tryPop` 已修复为取出即删除）；`src/queue/frame_queue` 的 `pushAndReplace` 存在错序释放隐患
 5. `src/form/photo_selection_dialog.h` 为无引用遗留文件；识别结果对话框存在未调用的画框死代码
+6. 围栏报警 `bypassThrottle` 当前所有调用方均传 false——围栏报警同样受 2 秒限流窗口约束，"围栏不限流"的设计意图尚未落地
+
+**已修复批次（2026-09-24，明细见 `plan/update_log.md`）**：DmaBufferPool fd 缺省 0→-1（close(0) 误关 stdin）、free 顺序致 DMA 泄漏、dma_alloc 失败路径 fd 泄漏、rga_converter 恒真返回值/错误路径句柄泄漏/letterbox 未填灰边、shell 命令注入（face_recognizer 改 fork+execv、roll_call 回退改 QProcess）、detections 表 ns 存值 vs ms 清理失配（含存量数据一次性迁移）、报警限流墙钟回拨致抑制数天（改 steady_clock）。注：批内曾按"get_bpp_from_format 返回位宽"结论做 /8 缓冲换算，板端实测证伪（该函数返回**字节**/像素）并已回退，详见 update_log 回归实录。
 
 # 九、文档
 

@@ -99,16 +99,12 @@ public:
     //   驱动得到 handle（驱动内部做了 fd→物理地址表缓存，之后每次任务
     //   免重复 pin/unpin），wrapbuffer_handle 才生成带几何信息的 rga_buffer_t。
     //   与 nv12_to_rgba 直接填 fd 的轻量路径相比，适合同一缓冲反复使用的场景。
-    //
-    // ⚠⚠【返回值恒为真陷阱（上轮审查确认，仅警示不改代码）】
-    //   本函数末尾无条件 `return true`：importbuffer 失败、imcheck 失败、
-    //   甚至 imcvtcolor 失败（ret!=SUCCESS 只打印不改变返回）全部返回 true。
-    //   调用方以此判断转换成败的逻辑完全失效——失败时输出缓冲保持旧内容/
-    //   未定义内容，画面表现为"显示上一帧"或花屏，且无错误可查。
-    //   （convertNV12ToRGBbyRGA 同病。）使用方切勿依赖返回值。
-    // ⚠ src_buf_size 用 hor_stride*ver_stride*bpp 计算，NV12 的 bpp=12
-    //   （位/像素）时 RgaUtils 返回的是"位宽"，importbuffer_fd(fd, size)
-    //   重载内部按字节处理，两处约定不同勿混用。
+    // 【返回值语义（本轮已修复）】此前末尾无条件 return true，import/imcheck/
+    //   转换失败全部报成功，调用方判断完全失效；现各失败路径均返回 false。
+    // 【缓冲区大小口径】get_bpp_from_format 返回的是**字节/像素**（板端实测
+    //   BGR_888→3），乘积即字节数，与 importbuffer_fd(fd, size) 约定一致，
+    //   无需任何 /8 换算（2026-09-24 曾误按"位"理解除以 8，导致导入
+    //   尺寸只剩 1/8、全部失败——注释旧说法"返回位宽"是错的）。
     // ============================================================================
     static bool convertNV12ToRGBAbyRGA(int src_dma_fd, int dst_dma_fd, int width, int height,
                                       int src_hor_stride, int src_ver_stride,
@@ -121,14 +117,17 @@ public:
         int src_format = source_rga_format;  // NV12(默认) 或 NV21 等半平面 YUV
         int dst_format = RK_FORMAT_RGBA_8888;      // RGBA
         int src_buf_size, dst_buf_size;
+        bool ok = false;
 
         rga_buffer_t src_img, dst_img;
-        rga_buffer_handle_t src_handle, dst_handle;
+        rga_buffer_handle_t src_handle = 0, dst_handle = 0;
 
         memset(&src_img, 0, sizeof(src_img));
         memset(&dst_img, 0, sizeof(dst_img));
 
         // 计算缓冲区大小（行跨度 × 高度 × 每像素字节数）
+        // 【实测】get_bpp_from_format 返回字节/像素（BGR_888→3、NV12→1.5），
+        // 并非位数；勿再"顺手 /8"（2026-09-24 曾误改导致导入失败）。
         src_buf_size = src_hor_stride * src_ver_stride * get_bpp_from_format(src_format);
         dst_buf_size = dst_widt * dst_height * get_bpp_from_format(dst_format);
 
@@ -163,7 +162,10 @@ public:
         ret = imcvtcolor(src_img, dst_img, src_format, dst_format);
         if (ret != IM_STATUS_SUCCESS) {
             printf("imcvtcolor error %s\n", imStrError((IM_STATUS)ret));
+            goto release_buffer;
         }
+
+        ok = true;  // 仅全部步骤成功才置真
 
     release_buffer:
         // 释放 RGA 缓冲区句柄
@@ -174,7 +176,7 @@ public:
             releasebuffer_handle(dst_handle);
         }
 
-        return true;
+        return ok;
     }
 
     // ============================================================================
@@ -182,9 +184,10 @@ public:
     // ============================================================================
     // 与 convertNV12ToRGBAbyRGA 类似，但输出 RGB888 格式（3字节/像素）
     // 适用于需要更小内存占用的场景
-    // ⚠ 继承同一缺陷：所有失败路径同样 `return true`（恒真返回值），
-    //   且 RGB888 行需按像素三元组排布，RGA 对 wstride 有额外对齐要求，
-    //   输出缓冲若按 width*3 紧凑分配可能触发 imcheck 失败（但没人看得见）。
+    // 【返回值语义（本轮已修复）】与 RGBA 版同步整改：失败路径返回 false。
+    // ⚠ RGB888 行需按像素三元组排布，RGA 对 wstride 有额外对齐要求，
+    //   输出缓冲若按 width*3 紧凑分配可能触发 imcheck 失败（现在调用方
+    //   能通过返回 false 感知）。
     // ============================================================================
     static bool convertNV12ToRGBbyRGA(int src_dma_fd, int dst_dma_fd, int width, int height,
                                       int src_hor_stride, int src_ver_stride)
@@ -196,13 +199,15 @@ public:
         int src_format = RK_FORMAT_YCbCr_420_SP;  // NV12
         int dst_format = RK_FORMAT_RGB_888;        // RGB888（3字节/像素）
         int src_buf_size, dst_buf_size;
+        bool ok = false;
 
         rga_buffer_t src_img, dst_img;
-        rga_buffer_handle_t src_handle, dst_handle;
+        rga_buffer_handle_t src_handle = 0, dst_handle = 0;
 
         memset(&src_img, 0, sizeof(src_img));
         memset(&dst_img, 0, sizeof(dst_img));
 
+        // 缓冲区字节数 = 跨度 × 高度 × 每像素字节数（get_bpp 返回字节，非位）
         src_buf_size = src_hor_stride * src_ver_stride * get_bpp_from_format(src_format);
         dst_buf_size = dst_widt * dst_height * get_bpp_from_format(dst_format);
 
@@ -232,7 +237,10 @@ public:
         ret = imcvtcolor(src_img, dst_img, src_format, dst_format);
         if (ret != IM_STATUS_SUCCESS) {
             printf("imcvtcolor error %s\n", imStrError((IM_STATUS)ret));
+            goto release_buffer;
         }
+
+        ok = true;  // 仅全部步骤成功才置真
 
     release_buffer:
         if (src_handle) {
@@ -242,7 +250,7 @@ public:
             releasebuffer_handle(dst_handle);
         }
 
-        return true;
+        return ok;
     }
 
     // ============================================================================
@@ -399,15 +407,10 @@ public:
     // 【imconfig 是进程全局】双核调度配置一次生效于后续所有 im* 调用，
     //   并非本函数私有——多线程下后写者覆盖前者，注意跨模块干扰。
     //
-    // ⚠⚠【错误路径句柄泄漏（上轮审查确认，仅警示不改代码）】
-    //   letterbox / 非 letterbox 两分支中 improcess / imcvtcolor 失败时
-    //   直接 `return -1`，跳过了函数尾的 release_buffer 标签——
-    //   此前 importbuffer_fd 得到的 src_handle/dst_handle 未释放，
-    //   RGA 驱动内的 fd 注册表与内核资源随之泄漏（泄漏累积后
-    //   importbuffer 会开始失败）。正确路径应 goto release_buffer。
-    // ⚠ 反之，走 release_buffer 收尾的路径末尾无条件 `return 0`：
-    //   import 失败/imcheck 失败也报"成功"——返回值仅"转换执行失败"
-    //   一种错误可信，调用方不能以返回值判断转换质量。
+    // 【返回值语义（本轮已修复）】失败路径统一 goto release_buffer 归还
+    //   RGA 句柄后再返回 -1（此前 import/imcheck 失败走标签尾返回旧值、
+    //   转换失败直接 return -1 跳过句柄释放，两处均已纠正）；
+    //   成功返回 0。调用方可以且应当检查返回值。
     // ⚠ 第二处 `if (src_handle == 0 || dst_handle == 0)`（wrapbuffer 后）
     //   是死代码：handle 非零已在第一处 goto 前判过，此处恒为假。
     // ⚠ src_buf_size/dst_buf_size 计算后未使用（importbuffer_fd 走的是
@@ -459,7 +462,7 @@ public:
             IM_STATUS status = imcvtcolor(src_img, dst_img, src_img.format, dst_img.format, IM_SYNC);
             if (status != IM_STATUS_SUCCESS) {
                 printf("[RGA] cvtcolor failed: %s\n", imStrError(status));
-                return -1;
+                goto release_buffer;  // ret 保持 -1，但句柄必须归还
             }
         } else {
             // Letterbox：保持宽高比，居中放置
@@ -472,15 +475,22 @@ public:
             int offset_x = (dst_w - new_w) / 2;
             int offset_y = (dst_h - new_h) / 2;
 
+            // 先填充灰色背景 (114,114,114)：不填充则 letterbox 黑边位置
+            // 残留目标缓冲的上一帧像素，作为脏数据进入模型输入
+            im_rect fill_rect = {0, 0, dst_w, dst_h};
+            imfill(dst_img, fill_rect, 0x727272);
+
             im_rect src_rect = {0, 0, src_w, src_h};
             im_rect dst_rect = {offset_x, offset_y, new_w, new_h};
 
             IM_STATUS status = improcess(src_img, dst_img, {}, src_rect, dst_rect, {}, IM_SYNC);
             if (status != IM_STATUS_SUCCESS) {
                 printf("[RGA] letterbox resize failed: %s\n", imStrError(status));
-                return -1;
+                goto release_buffer;  // ret 保持 -1，但句柄必须归还
             }
         }
+
+        ret = 0;  // 转换成功
 
     release_buffer:
         if (src_handle) {
@@ -490,7 +500,7 @@ public:
             releasebuffer_handle(dst_handle);
         }
 
-        return 0;
+        return ret;
     }
     
     // ============================================================================

@@ -47,7 +47,10 @@ struct DmaBuffer {
     int ref_count = 0;          // 引用计数（当前使用次数）
     int frame_id = 0;           // 帧编号（用于跟踪帧序）
     void *va = nullptr;         // DMA 缓冲区的虚拟地址
-    int fd = 0;                 // DMA 缓冲区的文件描述符
+    // fd 缺省必须是 -1：dma_buf_alloc 失败时不会写回 fd，
+    // 若缺省为 0 会被 `fd >= 0` 误判为分配成功，后续清理路径
+    // close(0) 将关掉进程 stdin，产生极难定位的连锁故障。
+    int fd = -1;                // DMA 缓冲区的文件描述符
     size_t size = 0;            // 缓冲区大小（字节）
     int width = 0;              // 图像宽度
     int height = 0;             // 图像高度
@@ -270,7 +273,12 @@ private:
     void init_dma_buffer_pool(int width, int height, int width_stride, int height_stride) 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        size_t size = width_stride * height * get_bpp_from_format(format_);
+        // 【单位教训（2026-09-24 板端实测）】get_bpp_from_format 返回的是
+        // **字节/像素**（BGR_888→3），不是位！曾按"位"理解加 /8 换算，导致
+        // 分配尺寸缩为 1/8、importbuffer 全失败、池为空、检测停摆——勿再
+        // "顺手除以8"。此处乘得的就是缓冲字节数，与构造函数的 size_ 一致。
+        size_t size = static_cast<size_t>(width_stride * height *
+                                          get_bpp_from_format(format_));
         
         for (int i = 0; i < capacity_; ++i)
         {
@@ -296,6 +304,8 @@ private:
                 buf->rga_handle = importbuffer_fd(buf->fd, &infer_param);
                 if (buf->rga_handle == 0)
                 {
+                    printf("[DmaBufferPool] importbuffer_fd failed idx=%d size=%zu\n",
+                           i, size);
                     // RGA 导入失败，释放已分配的 DMA 内存和 DmaBuffer 对象
                     dma_buf_free(size, &(buf->fd), buf->va);
                     delete buf;
@@ -314,19 +324,19 @@ private:
 
     /**
      * @brief 释放单个 DMA 缓冲区
-     * 作用：先释放 RGA 句柄，再释放 DMA 内存和重置元信息
-     * ⚠ 已知缺陷（仅警示，不改逻辑）：buf->reset() 会把 fd/va/size
-     *   先清零，随后的 dma_buf_free(buf->size=0, &fd=-1, va=nullptr)
-     *   实际是 munmap(nullptr,0)+close(-1)，两个系统调用都失败——
-     *   即 RGA 导入成功的缓冲区其 DMA 内存与映射在此路径并未真正
-     *   释放，仅在进程退出时由内核回收。修复方向：先 free 再 reset。
+     * 作用：先释放 RGA 句柄，再用真实的 size/fd/va 释放 DMA 内存，最后重置元信息
+     * 【顺序说明】必须先 dma_buf_free 再 reset：此前实现先 reset 把
+     *   fd/va/size 清零，随后 dma_buf_free(0, &fd=-1, nullptr) 实际是
+     *   munmap(nullptr,0)+close(-1) 双双失败静默吞掉——DMA 内存与映射
+     *   直到进程退出才被内核回收。reset 只应作为释放完成后的收尾。
      */
     void free_dma_buffer(DmaBuffer* buf) {
         if (buf->rga_handle != 0) {
             releasebuffer_handle(buf->rga_handle);  // 释放 RGA 硬件句柄
-            buf->reset();                            // 重置元信息
+            buf->rga_handle = 0;
         }
         dma_buf_free(buf->size, &(buf->fd), buf->va);  // 释放 DMA 内存
+        buf->reset();                                  // 重置元信息
     }
 
     int capacity_;                  // 缓冲池容量

@@ -118,6 +118,23 @@ bool DatabaseManager::initialize(const QString &dbPath)
         return false;
     }
 
+    // 一次性单位迁移：旧版本把 detections.timestamp 写成了 epoch 纳秒，
+    // 而查询/清理按毫秒约定（纳秒值恒大于毫秒 cutoff，导致永不清删）。
+    // 现写入口已统一换算为毫秒；这里把存量纳秒行原地换算（epoch 纳秒
+    // 约 1.7e18、毫秒约 1.7e12，以 1e15 为不可能混淆的分界）。条件在
+    // 迁移完成后自然失效，重复执行为无害空操作。
+    {
+        QSqlQuery migrate(db_);
+        if (!migrate.exec("UPDATE detections SET timestamp = timestamp / 1000000 "
+                          "WHERE timestamp >= 1000000000000000")) {
+            qWarning() << "Detections timestamp unit migration failed:"
+                       << migrate.lastError().text();
+        } else if (migrate.numRowsAffected() > 0) {
+            qInfo() << "Migrated" << migrate.numRowsAffected()
+                    << "legacy ns detection records to ms";
+        }
+    }
+
     emit databaseOpened();
     return true;
 }

@@ -44,6 +44,7 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QUuid>
+#include <chrono>
 
 // 获取单例实例
 // 使用静态局部变量实现线程安全的单例
@@ -115,6 +116,12 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
                                          bool bypassThrottle)
 {
     QVector<AlarmRecord> newAlarms;
+    // 限流窗口计时用单调时钟：results.time 源自 system_clock 墙钟纳秒，
+    // NTP 校时/手动改时间发生**回拨**时 `results.time - last` 变负，
+    // 恒小于窗口阈值 → 同键报警可被抑制数天。steady_clock 只增不减，
+    // 与墙钟彻底解耦（lastAlarmTime_ 因此改存 steady 纳秒，仅内存态）。
+    const long steadyNow = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
     {
         QMutexLocker lock(&mutex_);
         totalDetections_ += results.count;
@@ -135,19 +142,19 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
 
             // 检查是否需要生成报警
             if (alarmClasses_.contains(className)) {
-                // 去重限流：同通道同类别在限流窗口内只报一次（围栏报警不限流）
+                // 去重限流：同通道同类别在限流窗口内只报一次
                 // key 格式: "通道号:类别ID"，如 "0:0" 表示通道 0 的 person
                 // 用"通道:类别"作复合键，使不同通道、不同类别各自独立计数互不影响。
                 QString key = QString("%1:%2").arg(channel).arg(det.cls_id);
                 long last = lastAlarmTime_.value(key, 0);  // 首次为 0，必然放行
-                // 检查是否在限流窗口内（名义 2 秒），围栏报警跳过此检查
-                // 【单位隐患】kAlarmThrottleNs 是纳秒值，而 results.time / last 源自
-                //   common.hpp 注释为"毫秒"的时间戳，二者相减再与 ns 阈值比较，量纲
-                //   不一致会使窗口远大于 2 秒（详见 alarm_manager.h 常量处说明）。
-                if (!bypassThrottle && results.time - last < kAlarmThrottleNs) {
+                // 与 kAlarmThrottleNs 同为 steady 纳秒，量纲一致；
+                // 注意 bypassThrottle 形参当前所有调用方均传 false，
+                // 围栏报警实际同样走这个 2 秒窗口（宣称"不限流"与实现不符，
+                // 若要围栏豁免需调用方显式传 true）。
+                if (!bypassThrottle && steadyNow - last < kAlarmThrottleNs) {
                     continue;  // 在限流窗口内，跳过
                 }
-                lastAlarmTime_[key] = results.time;  // 更新最后报警时间（记录本次时间戳）
+                lastAlarmTime_[key] = steadyNow;  // 记录本次报警的单调时钟值
 
                 // 创建报警记录
                 AlarmRecord alarm;

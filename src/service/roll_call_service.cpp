@@ -23,6 +23,7 @@
 #include <map>
 #include <utility>
 #include <QImage>
+#include <QProcess>
 #include <cmath>
 #include <chrono>
 
@@ -30,14 +31,19 @@ namespace {
 // 读图并带兜底：优先 OpenCV 解码；板端部分镜像的 JPEG 后端会解码失败甚至崩溃，
 // 此时退回调用 ImageMagick 的 convert 命令把任意受支持格式转成 PNG 再读。
 // 临时文件名带 tag 和 pid：多张图/多进程并发转码时不会互相覆盖，读取后立即 unlink。
+// 【为何用 QProcess 而非 system()】system() 走 /bin/sh 解析整条命令串，
+//   图片路径来自任务名/文件名时 `; rm -rf` 一类元字符即命令注入；
+//   QProcess::execute 直接把参数数组传给 execv，不经过 shell，路径按
+//   普通字符串传参，注入面归零。
 cv::Mat loadImageWithFallback(const std::string& path, const std::string& tag) {
     cv::Mat image = cv::imread(path, cv::IMREAD_COLOR);
     if (!image.empty()) return image;
 
     const std::string converted = "/tmp/idge_rollcall_" + tag + "_" +
                                   std::to_string(static_cast<long long>(getpid())) + ".png";
-    const std::string command = "convert \"" + path + "\" \"" + converted + "\"";
-    if (std::system(command.c_str()) == 0) {
+    const int ret = QProcess::execute(
+        "convert", {QString::fromStdString(path), QString::fromStdString(converted)});
+    if (ret == 0) {
         image = cv::imread(converted, cv::IMREAD_COLOR);
         unlink(converted.c_str());
     }

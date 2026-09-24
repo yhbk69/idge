@@ -7,7 +7,7 @@
 //
 // 职责：
 //   本类不做任何推理，只是"外部识别 exe + JSON 文件 IPC"的薄包装：
-//   detectAndExtract() 拼命令行 → system() 拉起子进程（exe 内部完成
+//   detectAndExtract() 组装 argv 数组 → fork+execv 拉起子进程（exe 内部完成
 //   人脸检测/对齐/512维特征提取，RKNN 工具链独立开发）→ 解析 exe 写出的
 //   JSON 文件为结构化结果。选择在子进程里跑而非 C++ 内嵌 RKNN，是为了
 //   复用一个已独立验证过的识别程序（含检测+识别两级模型），避免与主
@@ -15,7 +15,7 @@
 //   创建与文件 IO 开销（同步阻塞）。
 //
 // 线程/并发警示：
-//   - detectAndExtract() 内部 system() 阻塞直到底层命令结束，同一实例
+//   - detectAndExtract() 内部 fork+execv 阻塞等待子进程结束（同步），同一实例
 //     不保证线程安全（成员只是配置，无锁）；
 //   - 输出 JSON 文件名由 image_path 派生（见 .cpp），**并发识别同一张
 //     图片路径会互相覆写**结果文件；调用方须自行错峰或保证路径唯一。
@@ -90,8 +90,10 @@ private:
     // 解析JSON结果
     FaceDetectionResult parseJsonResult(const std::string& json_path);
     
-    // 执行外部命令
-    bool executeCommand(const std::string& command);
+    // 执行外部命令：args[0] 为可执行文件路径，其余为参数。
+    // 经 fork+execv 直接拉起，**不经过 shell**，路径中的空格/;/&/$() 等
+    // 元字符只按普通字符串传参，消除命令注入面。
+    bool executeCommand(const std::vector<std::string>& args);
 };
 
 #endif // FACE_RECOGNITION_WRAPPER_H

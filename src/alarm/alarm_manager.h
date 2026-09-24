@@ -102,13 +102,14 @@ public:
     // 同通道同类别去重限流间隔（纳秒），名义上 2 秒
     // 例如：通道 0 检测到 person 后，2 秒内不会再次报警
     //
-    // 【单位隐患·重要】本常量按"纳秒"定义，但 ingest() 中与 results.time 相减比较；
-    //   而 src/yolo11/common.hpp 中 object_detect_result_list::time 明确注释为"毫秒"，
-    //   alarm.timestamp 也直接取 results.time。若 results.time 确为毫秒，则：
-    //     毫秒差 < 2,000,000,000(ns值) 恒成立约 23 天，
-    //   等价于限流窗口被放大百万倍——同通道同类一旦首报，长期不再复报（限流失真）。
-    //   核查/统一单位前请勿依赖此处"2 秒"的实际行为；围栏报警因 bypassThrottle=true
-    //   不走此窗口，故不受影响。此处仅登记隐患，未改动代码。
+    // 【时钟源（本轮已修复）】旧实现用 results.time（system_clock 墙钟
+    //   纳秒）与 lastAlarmTime_ 相减——NTP 回拨后差值变负、恒小于阈值，
+    //   报警可被抑制数天；且早期注释声称 time 为"毫秒"（实为纳秒，
+    //   该"单位隐患"系文档误差，量纲本就一致）。现改用 steady_clock
+    //   单调纳秒参与窗口比较，lastAlarmTime_ 存 steady 纳秒，
+    //   与本常量量纲一致且不受墙钟跳变影响。
+    // ⚠ bypassThrottle 形参当前所有调用方均传 false，围栏报警实际
+    //   同样受本窗口限流（"围栏不限流"的说法与实现不符）。
     static const long kAlarmThrottleNs = 2000LL * 1000000LL;
 
     // 设置类别名称列表（用于将 cls_id 转换为类别名称）
@@ -245,7 +246,7 @@ private:
     QMap<QString, int> classCount_;            // 各类别检测次数
     QStringList classNames_;                   // 类别名称列表
     QStringList alarmClasses_;                 // 报警类别列表
-    QMap<QString, long> lastAlarmTime_;        // 上次报警时间（用于去重限流）
+    QMap<QString, long> lastAlarmTime_;        // 上次报警时间（steady 单调纳秒，仅内存态，用于去重限流）
                                                // key: "通道号:类别ID" -> 上次报警时间(ns)
     QSet<int> onlineChannels_;                 // 当前在线通道集合
     std::atomic<bool> screenshotsOn_{true};    // 报警是否截图（原子变量，线程安全）
