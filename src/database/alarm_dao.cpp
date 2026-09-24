@@ -15,6 +15,7 @@
 // ============================================================================
 
 #include "alarm_dao.h"
+#include "runtime_paths.h"
 #include "database_manager.h"
 #include <QSqlQuery>
 #include <QSqlError>
@@ -894,7 +895,7 @@ AlarmRecord AlarmDAO::recordFromQuery(QSqlQuery &query)
     record.clsId = query.value("class_id").toInt();
     record.className = query.value("class_name").toString();
     record.confidence = query.value("confidence").toFloat();
-    record.imagePath = query.value("image_path").toString();
+    record.imagePath = RuntimePaths::resolveStoredPath(query.value("image_path").toString());
     record.videoPath = query.value("video_path").toString();
     record.status = query.value("status").toString();
     record.disposeResult = query.value("dispose_result").toString();

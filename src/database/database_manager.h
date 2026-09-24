@@ -28,6 +28,7 @@
 #include <QObject>
 #include <QString>
 #include <QSqlDatabase>
+#include "runtime_paths.h"
 #include <QMutex>
 #include <QDir>
 #include <QThreadStorage>
@@ -41,8 +42,8 @@ public:
     static DatabaseManager &instance();
 
     // 初始化数据库
-    // dbPath: 数据库文件路径（默认 "idge.db"）
-    bool initialize(const QString &dbPath = "idge.db");
+    // dbPath: 数据库文件路径（默认 data/idge.db，见 RuntimePaths）
+    bool initialize(const QString &dbPath = RuntimePaths::database());
 
     // 关闭数据库
     void close();

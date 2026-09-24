@@ -33,6 +33,7 @@
 #include <QSet>
 #include <atomic>
 #include "common.hpp"
+#include "runtime_paths.h"
 
 // 前向声明
 class QSqlDatabase;
@@ -51,7 +52,7 @@ class QSqlDatabase;
 //                   批量置 true，用于 unacknowledgedCount() 的未读角标；不入库
 //   - imgPath: 报警抓拍图路径（可为空）——本管理器只负责判定与产出记录，
 //              截图落盘由 SnapWriter 后台线程异步完成并回填，与 SQLite 落库解耦：
-//              一条报警 = 一行 DB 记录 + 一张 alarms/日期/ 下的抓拍图，二者非同一生命周期
+//              一条报警 = 一行 DB 记录 + 一张 data/alarms/日期/ 下的抓拍图，二者非同一生命周期
 //   - isFenceAlarm: 是否为电子围栏侵入报警（区别于安全帽/PPE 类报警，通常限流被绕过）
 //
 // ============================================================================
@@ -233,7 +234,7 @@ public:
     // ============================================================================
 
     // 初始化数据库连接
-    bool initDatabase(const QString &dbPath = "idge.db");
+    bool initDatabase(const QString &dbPath = RuntimePaths::database());
 
     // 数据库是否已初始化
     bool isDatabaseInitialized() const { return dbInitialized_; }

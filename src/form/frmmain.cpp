@@ -37,6 +37,7 @@
 #include "service/roll_call_service.h"
 #include "service/equipment_inventory_service.h"
 #include "model_repo/model_registry.h"
+#include "runtime_paths.h"
 #include "easy_timer.h"  // yolo11_model.hpp 依赖 TIMER（与 ppe_task 同序）
 #include "yolo11/yolo11_model.hpp"
 #include <QDateTime>
@@ -294,7 +295,7 @@ void frmMain::initForm()
     videoWindow = ui->lab1;
 
     // 9. 加载配置文件
-    ConfigManager::instance().load("config.json");
+    ConfigManager::instance().load(RuntimePaths::configFile());
     AlarmManager::instance().setAlarmClasses(ConfigManager::instance().alarmClasses());
 
     // 10. 从配置加载视频到4个通道（必须在 config 加载之后）
@@ -550,7 +551,7 @@ void frmMain::initBusinessPages()
 
 // 点名服务资源约定（根目录 = 环境变量 IDGE_WORKSPACE，缺省回退当前工作目录）：
 //   model/face/ 下三件套：face_recognition(可执行/库路径)、detection.rknn(SCRFD 检测)、
-//   recognition.rknn(特征比对)；数据统一放 roll_call_data/（SQLite: roll_call.db）
+//   recognition.rknn(特征比对)；数据统一放 data/roll_call_data/（SQLite: roll_call.db）
 bool frmMain::initRollCallService()
 {
     rollCallService_ = std::make_shared<RollCallService>();
@@ -559,8 +560,8 @@ bool frmMain::initRollCallService()
         ws + "/model/face/face_recognition",
         ws + "/model/face/detection.rknn",
         ws + "/model/face/recognition.rknn",
-        ws + "/roll_call_data/roll_call.db",
-        ws + "/roll_call_data");
+        RuntimePaths::rollCallDb(QString::fromStdString(ws)).toStdString(),
+        RuntimePaths::rollCallDir(QString::fromStdString(ws)).toStdString());
     if (success) qDebug() << "RollCallService initialized successfully";
     return success;
 }
@@ -1463,7 +1464,7 @@ void frmMain::testSelectedModel()
         QMessageBox::warning(this, "模型测试", "模型不在库中: " + id);
         return;
     }
-    const QString testImage = QStringLiteral("assets/test/test.jpg");
+    const QString testImage = RuntimePaths::assetsTestImage();
     if (!QFileInfo::exists(testImage)) {
         QMessageBox::warning(this, "模型测试", "测试图片不存在: " + testImage);
         return;

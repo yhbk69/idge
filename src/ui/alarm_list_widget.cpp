@@ -1,4 +1,5 @@
 #include "alarm_list_widget.h"
+#include "runtime_paths.h"
 #include "alarm_manager.h"
 #include "alarm_detail_dialog.h"
 #include "fence_manager.h"
@@ -439,7 +440,7 @@ void AlarmListWidget::onClear()
 void AlarmListWidget::onOpenDir()
 {
     // 获取告警截图目录路径
-    QDir dir("alarms");
+    QDir dir(RuntimePaths::alarmsDir());
     if (!dir.exists()) dir.mkpath(".");  // 如果目录不存在则创建
     QString path = dir.absolutePath();
 

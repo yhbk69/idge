@@ -44,6 +44,10 @@ test_*.cpp
 *.db-wal
 *.db.corrupt-*
 
+# 运行时数据目录（内容不入库，保留骨架；路径常量见 src/base/runtime_paths.h）
+data/*
+!data/.gitkeep
+
 # face_recognition 构建产物（源码在 tools/face_recognition，输出到 model/face/）
 model/face/face_recognition
 .qoder/

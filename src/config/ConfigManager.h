@@ -13,7 +13,7 @@
  *   - 报警类别、电子围栏整段（geofence）
  *
  * 使用方式：
- *   ConfigManager::instance().load("config.json");   // 启动时加载
+ *   ConfigManager::instance().load(RuntimePaths::configFile());   // 启动时加载
  *   ConfigManager::instance().setVideoChannel(1, path); // 修改配置
  *   ConfigManager::instance().save();                 // 保存到文件
  *
@@ -33,6 +33,7 @@
 
 #include <QString>
 #include <QStringList>
+#include "runtime_paths.h"
 #include <QJsonObject>
 #include <mutex>
 
@@ -46,9 +47,9 @@ public:
 
     /**
      * @brief 从 JSON 文件加载配置
-     * @param path 配置文件路径，默认 "config.json"
+     * @param path 配置文件路径，默认 data/config.json
      */
-    void load(const QString &path = "config.json");
+    void load(const QString &path = RuntimePaths::configFile());
 
     /**
      * @brief 将当前配置保存到 JSON 文件

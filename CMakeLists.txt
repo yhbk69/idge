@@ -188,6 +188,7 @@ include_directories(
 
     # --- 核心模块 ---
     ${CMAKE_SOURCE_DIR}/src                         # 根目录
+    ${CMAKE_SOURCE_DIR}/src/base                    # 运行时路径等基础设施（runtime_paths.h）
     ${CMAKE_SOURCE_DIR}/src/config                  # 配置管理（CLI/JSON 解析）
     ${CMAKE_SOURCE_DIR}/src/core_helper             # 核心辅助（单例、样式、日志）
     ${CMAKE_SOURCE_DIR}/src/core_qss                # QSS 样式表

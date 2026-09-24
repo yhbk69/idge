@@ -19,6 +19,7 @@
 
 #include <chrono>
 #include <functional>
+#include "runtime_paths.h"
 #include "frmmain.h"
 #include "appinit.h"
 #include "qthelper.h"
@@ -245,6 +246,9 @@ static int runCli(int argc, char *argv[])
 // ============================================================================
 int main(int argc, char *argv[])
 {
+    // 运行时数据路径一次性迁移（旧布局 → data/），必须先于一切文件打开
+    RuntimePaths::migrateLegacy();
+
     // 检查是否为 CLI 模式
     if (isCliMode(argc, argv)) {
         return runCli(argc, argv);
@@ -290,7 +294,7 @@ int main(int argc, char *argv[])
     QtHelper::setCode();
 
     // 初始化数据库
-    AlarmManager::instance().initDatabase("idge.db");
+    AlarmManager::instance().initDatabase(RuntimePaths::database());
     AlarmManager::instance().loadAlarmsFromDatabase();
 
     // 注册信号处理（优雅关闭）
@@ -307,8 +311,7 @@ int main(int argc, char *argv[])
         QDateTime now = QDateTime::currentDateTime();
         // 每天凌晨 3 点执行备份
         if (now.time().hour() == 3 && now.time().minute() == 0) {
-            QString backupPath = QString("backups/idge_%1.db")
-                .arg(now.toString("yyyyMMdd"));
+            QString backupPath = RuntimePaths::backupFile(now.toString("yyyyMMdd"));
             if (DatabaseManager::instance().backup(backupPath)) {
                 qInfo() << "Daily backup completed:" << backupPath;
             }
@@ -318,8 +321,8 @@ int main(int argc, char *argv[])
 
     // 启动时立即执行一次备份（确保有备份）
     {
-        QString backupPath = QString("backups/idge_%1.db")
-            .arg(QDateTime::currentDateTime().toString("yyyyMMdd"));
+        QString backupPath = RuntimePaths::backupFile(
+            QDateTime::currentDateTime().toString("yyyyMMdd"));
         DatabaseManager::instance().backup(backupPath);
     }
 

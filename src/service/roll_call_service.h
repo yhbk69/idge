@@ -81,8 +81,8 @@ public:
     //  @param exe_path      face_recognition 可执行程序（RKNN 推理宿主，子进程方式调用）
     //  @param det_model_path SCRFD 人脸检测 rknn 模型（工作区约定 model/face/detection.rknn）
     //  @param rec_model_path 人脸特征提取 rknn 模型（model/face/recognition.rknn，输出 512 维特征）
-    //  @param db_path        SQLite 注册库文件（roll_call_data/roll_call.db）
-    //  @param base_storage_path 任务文件夹根目录（roll_call_data/），每个任务一个子目录
+    //  @param db_path        SQLite 注册库文件（data/roll_call_data/roll_call.db）
+    //  @param base_storage_path 任务文件夹根目录（data/roll_call_data/），每个任务一个子目录
     bool initialize(const std::string& exe_path,
                    const std::string& det_model_path,
                    const std::string& rec_model_path,

@@ -80,6 +80,7 @@
 // ============================================================================
 
 #include "ffmpeg_video_decoder.h"
+#include "runtime_paths.h"
 #include "rga_converter.h"
 #include "../model_repo/model_registry.h"
 
@@ -121,7 +122,7 @@
 //   PNG 的 zlib 压缩在板子上非常慢；JPG(turbojpeg) 快得多、文件也小。
 //   image_utils 的 jpg 写入只支持 RGB(3通道)，所以先把 RGBA 转成 RGB 再写。
 //
-// 目录：alarms/日期/通道N_类别_时间.jpg
+// 目录：data/alarms/日期/通道N_类别_时间.jpg
 // ============================================================
 namespace {
 
@@ -239,13 +240,14 @@ private:
 static QString submitAlarmSnapshot(int channel, const QString &className,
                                    int w, int h, const unsigned char *rgba)
 {
-    // 一级目录 alarms/ 存截图根目录
-    if (::mkdir("alarms", 0755) != 0 && errno != EEXIST) {
+    // 一级目录 data/alarms/ 存截图根目录
+    const QString alarmRoot = RuntimePaths::alarmsDir();
+    if (::mkdir(alarmRoot.toUtf8().constData(), 0755) != 0 && errno != EEXIST) {
         return QString();
     }
-    // 二级目录 alarms/yyyyMMdd 按天归档
+    // 二级目录 data/alarms/yyyyMMdd 按天归档
     QString day = QDate::currentDate().toString("yyyyMMdd");
-    QString dir = QString("alarms/%1").arg(day);
+    QString dir = alarmRoot + QStringLiteral("/") + day;
     if (::mkdir(dir.toUtf8().constData(), 0755) != 0 && errno != EEXIST) {
         return QString();
     }
@@ -364,7 +366,7 @@ void FFmpegVideoDecoder::buildCascadeTasks()
     ConfigManager &cfg = ConfigManager::instance();
     // 解码器构造比主窗口 ConfigManager::load() 早，这里确保配置已读入
     if (cfg.modelPath().isEmpty() && cfg.labelPath().isEmpty()) {
-        cfg.load("config.json");
+        cfg.load(RuntimePaths::configFile());
     }
 
     // 槽位解析：模型路径 + 每槽专属标签（库内 labels.txt 优先于全局 label）

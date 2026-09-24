@@ -40,6 +40,7 @@
 // ============================================================================
 
 #include "ConfigManager.h"
+#include "runtime_paths.h"
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -69,7 +70,7 @@ ConfigManager &ConfigManager::instance()
 //   - NMS阈值: 0.45
 //
 // 参数：
-//   - path: 配置文件路径（默认 "config.json"）
+//   - path: 配置文件路径（默认 data/config.json）
 //
 // ============================================================================
 void ConfigManager::load(const QString &path)
