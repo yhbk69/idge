@@ -42,4 +42,5 @@ test_*.cpp
 
 *.db-shm
 *.db-wal
+*.db.corrupt-*
 .qoder/

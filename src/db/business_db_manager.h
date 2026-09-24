@@ -29,15 +29,16 @@
 //     把"先删后插"包成原子事务，中途失败统一 ROLLBACK，避免半更新状态。
 //
 // 线程安全：
-//   单个 sqlite3* 连接、无互斥保护。sqlite3 默认 serialized 模式，但本类未做任何
-//   应用层同步，且开启 WAL/多连接并发需额外 PRAGMA（此处未设），故约定单线程使用
-//   或由上层串行化调用；不要跨线程共享同一 BusinessDBManager 实例并发读写。
+//   单个 sqlite3* 连接由 mutex_ 做方法级互斥（recursive：deleteTask /
+//   replaceCancellationData 等公开方法内部会调用其他公开方法）。
+//   注意这只保证"单个方法原子"，跨方法的读-改-写序列仍需调用方自行串行化。
 //
 // ============================================================================
 
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <mutex>
 #include <sqlite3.h>
 
 // tasks 表的一行：一个业务任务（登记或注销）
@@ -157,8 +158,9 @@ public:
     std::vector<EquipmentDetectionRecord> getEquipmentDetectionsByPhoto(int photo_id);
     bool deleteEquipmentDataByTask(int task_id);
 private:
-    sqlite3* db_;            // 唯一的原生 sqlite3 连接句柄（非线程安全共享）
+    sqlite3* db_;            // 唯一的原生 sqlite3 连接句柄（由 mutex_ 保护）
     bool initialized_;       // open() 成功后置位；所有增删改查先检查它，未初始化即空返回
+    std::recursive_mutex mutex_;  // 方法级互斥（recursive 以允许公开方法互调）
     
     bool createTables();
     std::vector<float> blobToFeature(const void* blob, int size);

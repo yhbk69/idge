@@ -33,6 +33,7 @@ BusinessDBManager::~BusinessDBManager() {
 // 打开库文件：sqlite3_open 成功(含首次创建空文件)后立即建表；建表失败则回滚关闭句柄，
 // 保证 initialized_ 不会在库不完整时被置真。IF NOT EXISTS 使重复 open 幂等。
 bool BusinessDBManager::open(const std::string& db_path) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     int ret = sqlite3_open(db_path.c_str(), &db_);
     if (ret != SQLITE_OK) {
         std::cerr << "Failed to open database: " << sqlite3_errmsg(db_) << std::endl;
@@ -50,6 +51,7 @@ bool BusinessDBManager::open(const std::string& db_path) {
 
 // 释放连接句柄并把指针置空，避免析构 + 手动 close 造成 double-close。
 void BusinessDBManager::close() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (db_) {
         sqlite3_close(db_);
         db_ = nullptr;
@@ -193,6 +195,7 @@ bool BusinessDBManager::createTables() {
 // 注意 localtime() 返回静态缓冲、非线程安全，本类约定单线程使用故可接受。
 // type 由调用方决定，决定后续 getRegistrationTasks/getTasksByType 的归类。
 int BusinessDBManager::createTask(const std::string& name, const std::string& type, const std::string& folder_path) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) return -1;
     
     // 获取当前时间
@@ -228,6 +231,7 @@ int BusinessDBManager::createTask(const std::string& name, const std::string& ty
 }
 
 bool BusinessDBManager::updateTask(int task_id, int registered_count, int cancelled_count, int is_cancelled) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) return false;
     
     const char* sql = "UPDATE tasks SET registered_count = ?, cancelled_count = ?, is_cancelled = ? WHERE id = ?;";
@@ -253,6 +257,7 @@ bool BusinessDBManager::updateTask(int task_id, int registered_count, int cancel
 // 这里各步是独立的自动提交语句、非单事务，中途失败可能残留部分删除（可接受，重删幂等）。
 // deleteEquipmentDataByTask 内部又按"先 detection 后 photo"两级删除，勿调换顺序。
 bool BusinessDBManager::deleteTask(int task_id) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) return false;
 
     deleteCancellationDataByTask(task_id);
@@ -277,6 +282,7 @@ bool BusinessDBManager::deleteTask(int task_id) {
 }
 
 Task BusinessDBManager::getTask(int task_id) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     Task task = {0};
     if (!initialized_) return task;
     
@@ -306,6 +312,7 @@ Task BusinessDBManager::getTask(int task_id) {
 }
 
 std::vector<Task> BusinessDBManager::getAllTasks() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<Task> tasks;
     if (!initialized_) return tasks;
     
@@ -335,6 +342,7 @@ std::vector<Task> BusinessDBManager::getAllTasks() {
 }
 
 std::vector<Task> BusinessDBManager::getRegistrationTasks() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<Task> tasks;
     if (!initialized_) return tasks;
     
@@ -367,6 +375,7 @@ std::vector<Task> BusinessDBManager::getRegistrationTasks() {
 // is_duplicate/similar_to_id 由上层比对逻辑决定：重复项仍入库，只是置 is_duplicate=1
 // 并用 similar_to_id 指向首个唯一记录，从而保留"谁和谁撞脸"的可追溯链。
 int BusinessDBManager::insertFaceRecord(const FaceRecord& record) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) return -1;
     
     const char* sql = R"(
@@ -405,6 +414,7 @@ int BusinessDBManager::insertFaceRecord(const FaceRecord& record) {
 }
 
 bool BusinessDBManager::deleteFaceRecordsByTask(int task_id) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) return false;
     
     const char* sql = "DELETE FROM face_records WHERE task_id = ?;";
@@ -423,6 +433,7 @@ bool BusinessDBManager::deleteFaceRecordsByTask(int task_id) {
 }
 
 std::vector<FaceRecord> BusinessDBManager::getFaceRecordsByTask(int task_id) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<FaceRecord> records;
     if (!initialized_) return records;
     
@@ -461,6 +472,7 @@ std::vector<FaceRecord> BusinessDBManager::getFaceRecordsByTask(int task_id) {
 // 取任务内"去重后"的人脸：仅 is_duplicate=0 的记录，用作点名/比对的基准人脸集，
 // 避免同一人被重复采集的多张图重复计入。getFaceRecordsByTask 则返回含重复项的全集。
 std::vector<FaceRecord> BusinessDBManager::getUniqueFacesByTask(int task_id) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<FaceRecord> records;
     if (!initialized_) return records;
     
@@ -522,6 +534,7 @@ std::vector<uint8_t> BusinessDBManager::featureToBlob(const std::vector<float>& 
 }
 
 bool BusinessDBManager::updateFaceRecord(int record_id, const FaceRecord& record) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) return false;
     
     const char* sql = R"(
@@ -563,6 +576,7 @@ bool BusinessDBManager::replaceCancellationData(
     int task_id,
     const std::vector<CancellationPhotoRecord>& photos,
     const std::vector<CancellationMatchRecord>& matches) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) return false;
 
     // 拿写锁的事务起点；失败（含并发写忙）立即返回，不进入后续删插
@@ -638,6 +652,7 @@ bool BusinessDBManager::replaceCancellationData(
 }
 
 bool BusinessDBManager::deleteCancellationDataByTask(int task_id) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) return false;
 
     auto delete_from = [this, task_id](const char* sql) {
@@ -659,6 +674,7 @@ bool BusinessDBManager::deleteCancellationDataByTask(int task_id) {
 
 std::vector<CancellationPhotoRecord>
 BusinessDBManager::getCancellationPhotosByTask(int task_id) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<CancellationPhotoRecord> photos;
     if (!initialized_) return photos;
 
@@ -684,6 +700,7 @@ BusinessDBManager::getCancellationPhotosByTask(int task_id) {
 
 std::vector<CancellationMatchRecord>
 BusinessDBManager::getCancellationMatchesByTask(int task_id) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<CancellationMatchRecord> matches;
     if (!initialized_) return matches;
 
@@ -712,6 +729,7 @@ BusinessDBManager::getCancellationMatchesByTask(int task_id) {
 }
 
 std::vector<Task> BusinessDBManager::getTasksByType(const std::string& type) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<Task> tasks;
     if (!initialized_) return tasks;
 
@@ -754,6 +772,7 @@ bool BusinessDBManager::replaceEquipmentData(
     int task_id, int phase,
     const std::vector<EquipmentPhotoRecord>& photos,
     const std::vector<EquipmentDetectionRecord>& detections) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) return false;
     if (sqlite3_exec(db_, "BEGIN IMMEDIATE TRANSACTION;", nullptr, nullptr, nullptr) != SQLITE_OK)
         return false;
@@ -865,6 +884,7 @@ bool BusinessDBManager::replaceEquipmentData(
 
 std::vector<EquipmentPhotoRecord>
 BusinessDBManager::getEquipmentPhotosByTask(int task_id, int phase) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<EquipmentPhotoRecord> photos;
     if (!initialized_) return photos;
     const char* sql =
@@ -890,6 +910,7 @@ BusinessDBManager::getEquipmentPhotosByTask(int task_id, int phase) {
 
 std::vector<EquipmentDetectionRecord>
 BusinessDBManager::getEquipmentDetectionsByPhoto(int photo_id) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<EquipmentDetectionRecord> detections;
     if (!initialized_) return detections;
     const char* sql =
@@ -920,6 +941,7 @@ BusinessDBManager::getEquipmentDetectionsByPhoto(int photo_id) {
 // detections，再删 photos。若删反顺序，detections 的 photo_id 子查询已无父行可匹配，
 // 会残留孤儿检测记录（外键 CASCADE 未启用，不会自动清理）。注意本函数跨 phase 全删。
 bool BusinessDBManager::deleteEquipmentDataByTask(int task_id) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) return false;
     const char* detection_sql =
         "DELETE FROM equipment_detections WHERE photo_id IN "

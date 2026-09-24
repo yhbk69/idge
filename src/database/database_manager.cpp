@@ -10,7 +10,7 @@
 //   ┌─────────────────────────────────────────────────────────────┐
 //   │                    DatabaseManager (单例)                   │
 //   │   - initialize(): 打开SQLite连接 + 启用WAL模式 + 建表        │
-//   │   - database(): 返回 QSqlDatabase 供 DAO 使用               │
+//   │   - database(): 返回"当前线程"的 QSqlDatabase 供 DAO 使用    │
 //   │   - vacuum/backup/clean: 数据库维护功能                      │
 //   └─────────────────────────────────────────────────────────────┘
 //         │                    │                    │
@@ -27,6 +27,7 @@
 #include <QSqlError>
 #include <QDateTime>
 #include <QFileInfo>
+#include <QFile>
 #include <QDebug>
 
 // 获取单例实例
@@ -52,20 +53,17 @@ DatabaseManager::~DatabaseManager()
 // initialize: 初始化数据库
 // ============================================================================
 // 流程：
-//   1. 确保数据目录存在
-//   2. 打开 SQLite 数据库连接
-//   3. 启用 WAL 模式（提高并发性能）
-//   4. 创建表结构
+//   1. 规范化路径、确保数据目录存在
+//   2. 取得（或按新路径重建）调用线程的连接并打开 SQLite
+//   3. 启用 WAL 模式（文件级持久设置，提高并发性能）
+//   4. 创建表结构 + 一次性单位迁移
 //
+// 注意：其他线程的连接在各自首次调用 database() 时惰性创建，
+//       每个连接自带 foreign_keys/busy_timeout 等连接级 PRAGMA。
 // ============================================================================
 bool DatabaseManager::initialize(const QString &dbPath)
 {
     QMutexLocker lock(&mutex_);
-
-    // 如果已经打开，先关闭
-    if (db_.isOpen()) {
-        db_.close();
-    }
 
     // 设置数据库路径
     dbPath_ = dbPath;
@@ -82,12 +80,10 @@ bool DatabaseManager::initialize(const QString &dbPath)
         dir.mkpath(".");
     }
 
-    // 打开数据库连接
-    db_ = QSqlDatabase::addDatabase("QSQLITE");
-    db_.setDatabaseName(dbPath_);
-
-    if (!db_.open()) {
-        QString error = db_.lastError().text();
+    // 打开当前线程的连接（路径变化时自动重建；连接级 PRAGMA 在其中设置）
+    QSqlDatabase db = currentConnection();
+    if (!db.isOpen()) {
+        QString error = db.lastError().text();
         qCritical() << "Failed to open database:" << error;
         emit errorOccurred(error);
         return false;
@@ -95,26 +91,15 @@ bool DatabaseManager::initialize(const QString &dbPath)
 
     qInfo() << "Database opened:" << dbPath_;
 
-    // 启用 WAL 模式（Write-Ahead Logging，提高并发性能）
-    QSqlQuery query(db_);
+    // 启用 WAL 模式（Write-Ahead Logging）：文件级持久设置，只需设置一次
+    QSqlQuery query(db);
     if (!query.exec("PRAGMA journal_mode=WAL;")) {
         qWarning() << "Failed to set WAL mode:" << query.lastError().text();
-    }
-
-    // 启用外键约束
-    if (!query.exec("PRAGMA foreign_keys=ON;")) {
-        qWarning() << "Failed to enable foreign keys:" << query.lastError().text();
-    }
-
-    // 设置 busy timeout（5秒）
-    if (!query.exec("PRAGMA busy_timeout=5000;")) {
-        qWarning() << "Failed to set busy timeout:" << query.lastError().text();
     }
 
     // 创建表结构
     if (!createTables()) {
         qCritical() << "Failed to create tables";
-        db_.close();
         return false;
     }
 
@@ -124,7 +109,7 @@ bool DatabaseManager::initialize(const QString &dbPath)
     // 约 1.7e18、毫秒约 1.7e12，以 1e15 为不可能混淆的分界）。条件在
     // 迁移完成后自然失效，重复执行为无害空操作。
     {
-        QSqlQuery migrate(db_);
+        QSqlQuery migrate(db);
         if (!migrate.exec("UPDATE detections SET timestamp = timestamp / 1000000 "
                           "WHERE timestamp >= 1000000000000000")) {
             qWarning() << "Detections timestamp unit migration failed:"
@@ -135,6 +120,7 @@ bool DatabaseManager::initialize(const QString &dbPath)
         }
     }
 
+    initialized_ = true;
     emit databaseOpened();
     return true;
 }
@@ -142,32 +128,94 @@ bool DatabaseManager::initialize(const QString &dbPath)
 // ============================================================================
 // close: 关闭数据库
 // ============================================================================
+// Qt 规定连接只能由创建线程访问，故此处只回收调用线程（通常为主线程）的
+// 连接；其他线程的连接在各自线程退出时由 QThreadStorage 自动释放。
+// ============================================================================
 void DatabaseManager::close()
 {
     QMutexLocker lock(&mutex_);
-    if (db_.isOpen()) {
-        db_.close();
-        qInfo() << "Database closed";
-        emit databaseClosed();
+    if (!initialized_) {
+        return;
     }
+    initialized_ = false;
+    if (threadConn_.hasLocalData()) {
+        threadConn_.localData().clear();
+    }
+    qInfo() << "Database closed";
+    emit databaseClosed();
 }
 
 // ============================================================================
-// isOpen: 数据库是否已打开
+// isOpen: 数据库是否已初始化（连接按线程划分，可用性以 database() 结果为准）
 // ============================================================================
 bool DatabaseManager::isOpen() const
 {
     QMutexLocker lock(&mutex_);
-    return db_.isOpen();
+    return initialized_;
 }
 
 // ============================================================================
-// database: 获取数据库连接
+// currentConnection: 取得（必要时惰性创建）当前线程的数据库连接
+// ============================================================================
+// 前置条件：持有 mutex_（保护 connSeq_ / threadConn_ 槽位 / dbPath_ 快照）。
+// 每个线程一个命名连接："idge_conn_<seq>"，序号保证注册名全局唯一，
+// 线程 ID 被系统复用也不会拿到别人的连接。
+// 连接级 PRAGMA（foreign_keys、busy_timeout）不随连接共享，逐连接设置；
+// journal_mode=WAL 是文件级持久设置，由 initialize() 负责。
+// ============================================================================
+QSqlDatabase DatabaseManager::currentConnection() const
+{
+    if (threadConn_.hasLocalData()) {
+        QSharedPointer<ThreadConnection> &slot = threadConn_.localData();
+        if (slot && slot->path == dbPath_ && slot->db.isOpen()) {
+            return slot->db;
+        }
+        if (slot) {
+            slot.clear();   // 在本线程析构旧连接（close + removeDatabase）
+        }
+    }
+
+    const QString name = QStringLiteral("idge_conn_%1").arg(++connSeq_);
+    QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", name);
+    db.setDatabaseName(dbPath_);
+
+    if (!db.open()) {
+        qCritical() << "Failed to open thread database connection:" << db.lastError().text();
+        db = QSqlDatabase();
+        QSqlDatabase::removeDatabase(name);
+        return QSqlDatabase();
+    }
+
+    QSqlQuery pragma(db);
+    if (!pragma.exec("PRAGMA foreign_keys=ON;")) {
+        qWarning() << "Failed to enable foreign keys:" << pragma.lastError().text();
+    }
+    if (!pragma.exec("PRAGMA busy_timeout=5000;")) {
+        qWarning() << "Failed to set busy timeout:" << pragma.lastError().text();
+    }
+
+    QSharedPointer<ThreadConnection> tc(new ThreadConnection());
+    tc->name = name;
+    tc->path = dbPath_;
+    tc->db = db;
+    if (threadConn_.hasLocalData()) {
+        threadConn_.localData() = tc;
+    } else {
+        threadConn_.setLocalData(tc);
+    }
+    return db;
+}
+
+// ============================================================================
+// database: 获取当前线程的数据库连接
 // ============================================================================
 QSqlDatabase DatabaseManager::database() const
 {
     QMutexLocker lock(&mutex_);
-    return db_;
+    if (!initialized_) {
+        return QSqlDatabase();
+    }
+    return currentConnection();
 }
 
 // ============================================================================
@@ -267,7 +315,7 @@ bool DatabaseManager::createTables()
 // ============================================================================
 bool DatabaseManager::executeSQL(const QString &sql)
 {
-    QSqlQuery query(db_);
+    QSqlQuery query(currentConnection());
     if (!query.exec(sql)) {
         QString error = query.lastError().text();
         qWarning() << "SQL execution failed:" << error;
@@ -284,11 +332,12 @@ bool DatabaseManager::executeSQL(const QString &sql)
 bool DatabaseManager::vacuum()
 {
     QMutexLocker lock(&mutex_);
-    if (!db_.isOpen()) {
+    QSqlDatabase db = currentConnection();
+    if (!initialized_ || !db.isOpen()) {
         return false;
     }
 
-    QSqlQuery query(db_);
+    QSqlQuery query(db);
     if (!query.exec("VACUUM;")) {
         qWarning() << "VACUUM failed:" << query.lastError().text();
         return false;
@@ -304,7 +353,8 @@ bool DatabaseManager::vacuum()
 bool DatabaseManager::backup(const QString &backupPath)
 {
     QMutexLocker lock(&mutex_);
-    if (!db_.isOpen()) {
+    QSqlDatabase db = currentConnection();
+    if (!initialized_ || !db.isOpen()) {
         return false;
     }
 
@@ -328,8 +378,19 @@ bool DatabaseManager::backup(const QString &backupPath)
         dir.mkpath(".");
     }
 
+    // VACUUM INTO 要求目标文件不存在，否则报 "output file already exists"。
+    // 每日备份按日期命名（backups/idge_yyyyMMdd.db），当天重复触发
+    // （启动即备份 + 凌晨定时）属于常态，语义即"覆盖为最新快照"，
+    // 因此先删除同名旧备份再执行。
+    if (QFile::exists(backupPath)) {
+        if (!QFile::remove(backupPath)) {
+            qWarning() << "Backup failed: cannot remove existing file" << backupPath;
+            return false;
+        }
+    }
+
     // 使用 SQLite 的备份 API
-    QSqlQuery query(db_);
+    QSqlQuery query(db);
     QString sql = QString("VACUUM INTO '%1';").arg(backupPath);
     if (!query.exec(sql)) {
         qWarning() << "Backup failed:" << query.lastError().text();
@@ -368,7 +429,8 @@ int64_t DatabaseManager::databaseSize() const
 int DatabaseManager::cleanOldDetections(int daysToKeep)
 {
     QMutexLocker lock(&mutex_);
-    if (!db_.isOpen()) {
+    QSqlDatabase db = currentConnection();
+    if (!initialized_ || !db.isOpen()) {
         return 0;
     }
 
@@ -376,7 +438,7 @@ int DatabaseManager::cleanOldDetections(int daysToKeep)
     QDateTime cutoff = QDateTime::currentDateTime().addDays(-daysToKeep);
     long cutoffMs = cutoff.toMSecsSinceEpoch();
 
-    QSqlQuery query(db_);
+    QSqlQuery query(db);
     query.prepare("DELETE FROM detections WHERE timestamp < :cutoff");
     query.bindValue(":cutoff", static_cast<qlonglong>(cutoffMs));
 
@@ -405,7 +467,8 @@ int DatabaseManager::cleanOldDetections(int daysToKeep)
 int DatabaseManager::cleanOldAlarms(int daysToKeep)
 {
     QMutexLocker lock(&mutex_);
-    if (!db_.isOpen()) {
+    QSqlDatabase db = currentConnection();
+    if (!initialized_ || !db.isOpen()) {
         return 0;
     }
 
@@ -413,7 +476,7 @@ int DatabaseManager::cleanOldAlarms(int daysToKeep)
     QDateTime cutoff = QDateTime::currentDateTime().addDays(-daysToKeep);
     QString cutoffStr = cutoff.toString(Qt::ISODate);
 
-    QSqlQuery query(db_);
+    QSqlQuery query(db);
     query.prepare("DELETE FROM alarms WHERE create_time < :cutoff");
     query.bindValue(":cutoff", cutoffStr);
 
