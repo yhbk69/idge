@@ -1,5 +1,6 @@
 #include "video_alarm_widget.h"
 #include "alarm_detail_dialog.h"
+#include "theme.h"
 #include <QScrollArea>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -27,17 +28,18 @@ void VideoAlarmWidget::setupUi()
 
     // 标题
     QLabel *title = new QLabel("报警信息");
-    title->setStyleSheet("color: #fff; font-size:16px; font-weight: bold; padding: 8px 12px; background: #2d2d3d;");
+    title->setStyleSheet(QString("color: %1; font-size:%2px; font-weight: bold; padding: 8px 12px; background: %3;")
+                             .arg(theme::TEXT).arg(theme::FS_BODY).arg(theme::PANEL));
     mainLayout->addWidget(title);
 
     // 滚动区域
     scrollArea_ = new QScrollArea();
     scrollArea_->setWidgetResizable(true);
     scrollArea_->setFrameShape(QFrame::NoFrame);
-    scrollArea_->setStyleSheet("QScrollArea { background: #1e1e2e; border: none; }");
+    scrollArea_->setStyleSheet(QString("QScrollArea { background: %1; border: none; }").arg(theme::BG));
 
     contentWidget_ = new QWidget();
-    contentWidget_->setStyleSheet("background: #1e1e2e;");
+    contentWidget_->setStyleSheet(QString("background: %1;").arg(theme::BG));
     contentLayout_ = new QVBoxLayout(contentWidget_);
     contentLayout_->setContentsMargins(8, 8, 8, 8);
     contentLayout_->setSpacing(8);
@@ -83,7 +85,7 @@ void VideoAlarmWidget::refreshAlarms()
 void VideoAlarmWidget::addAlarmItem(const AlarmRecord &alarm)
 {
     QWidget *itemWidget = new QWidget();
-    itemWidget->setStyleSheet("background: #2d2d3d; border-radius: 6px;");
+    itemWidget->setStyleSheet(QString("background: %1; border-radius: 6px;").arg(theme::PANEL));
     itemWidget->setFixedHeight(80);
 
     QHBoxLayout *itemLayout = new QHBoxLayout(itemWidget);
@@ -93,7 +95,8 @@ void VideoAlarmWidget::addAlarmItem(const AlarmRecord &alarm)
     // 截图缩略图
     QLabel *imageLabel = new QLabel();
     imageLabel->setFixedSize(64, 48);
-    imageLabel->setStyleSheet("background: #1e1e2e; border: 1px solid #444; border-radius: 4px;");
+    imageLabel->setStyleSheet(QString("background: %1; border: 1px solid %2; border-radius: 4px;")
+                                  .arg(theme::BG, theme::BORDER));
     imageLabel->setAlignment(Qt::AlignCenter);
 
     if (!alarm.imagePath.isEmpty() && QFile::exists(alarm.imagePath)) {
@@ -115,17 +118,17 @@ void VideoAlarmWidget::addAlarmItem(const AlarmRecord &alarm)
 
     QDateTime dt = QDateTime::fromString(alarm.alarmTime, Qt::ISODate);
     QLabel *timeLabel = new QLabel(dt.toString("HH:mm:ss"));
-    timeLabel->setStyleSheet("color: #aaa; font-size:13px;");
+    timeLabel->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
     infoLayout->addWidget(timeLabel);
 
     QLabel *classLabel = new QLabel(QString("%1 (%2%)")
         .arg(alarm.className)
         .arg(alarm.confidence * 100, 0, 'f', 0));
-    classLabel->setStyleSheet("color: #fff; font-size:13px; font-weight: bold;");
+    classLabel->setStyleSheet(theme::text(theme::TEXT, theme::FS_HINT, true));
     infoLayout->addWidget(classLabel);
 
     QLabel *channelLabel = new QLabel(QString("通道%1").arg(alarm.channel + 1));
-    channelLabel->setStyleSheet("color: #9ca3af; font-size:13px;");
+    channelLabel->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
     infoLayout->addWidget(channelLabel);
 
     itemLayout->addLayout(infoLayout, 1);
@@ -133,9 +136,11 @@ void VideoAlarmWidget::addAlarmItem(const AlarmRecord &alarm)
     // 操作按钮（详情）
     QPushButton *btnDetail = new QPushButton("详情");
     btnDetail->setStyleSheet(
-        "QPushButton { color: #fff; background: #4a6fa5; border-radius: 4px; padding: 3px 8px; font-size:13px; }"
-        "QPushButton:hover { background: #5a8fc5; }"
-    );
+        QString("QPushButton { color: %1; background: %2; border-radius: 4px; padding: 3px 8px; font-size:%3px; }"
+                "QPushButton:hover { background: %4; }")
+            .arg(theme::TEXT, theme::BTN_SECONDARY)
+            .arg(theme::FS_HINT)
+            .arg(theme::BTN_SECONDARY_HOVER));
     connect(btnDetail, &QPushButton::clicked, this, [this, alarmId = alarm.id]() {
         onAlarmClicked(alarmId);
     });

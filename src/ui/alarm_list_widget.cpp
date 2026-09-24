@@ -2,6 +2,7 @@
 #include "alarm_manager.h"
 #include "alarm_detail_dialog.h"
 #include "fence_manager.h"
+#include "theme.h"
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -97,8 +98,8 @@ void AlarmListWidget::onStatsUpdated()
     
     // 根据未确认数设置不同颜色
     lblUnack_->setStyleSheet(unack > 0
-        ? "color: #ff9800; font-size:16px;"  // 橙色（有未确认）
-        : "color: #4caf50; font-size:16px;"); // 绿色（全部已确认）
+        ? theme::text(theme::WARNING, theme::FS_BODY)   // 橙色（有未确认）
+        : theme::text(theme::SUCCESS, theme::FS_BODY)); // 绿色（全部已确认）
 }
 
 /* 
@@ -130,7 +131,7 @@ void AlarmListWidget::setupUi()
 
     // 创建标题标签
     QLabel *header = new QLabel("报警记录");
-    header->setStyleSheet("color: #fff; font-size:22px; font-weight: bold;");
+    header->setStyleSheet(theme::text(theme::TEXT, theme::FS_PAGE, true));
     mainLay->addWidget(header);
 
     /* 
@@ -141,11 +142,11 @@ void AlarmListWidget::setupUi()
     */
     QHBoxLayout *statsLay = new QHBoxLayout();
     lblTotal_ = new QLabel("共 0 条");  // 总数标签
-    lblTotal_->setStyleSheet("color: #aaa; font-size:16px;");
+    lblTotal_->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
     statsLay->addWidget(lblTotal_);
 
     lblUnack_ = new QLabel("未确认: 0 条");  // 未确认数标签
-    lblUnack_->setStyleSheet("color: #ff9800; font-size:16px;");
+    lblUnack_->setStyleSheet(theme::text(theme::WARNING, theme::FS_BODY));
     statsLay->addWidget(lblUnack_);
 
     statsLay->addStretch();  // 弹性空间
@@ -162,25 +163,29 @@ void AlarmListWidget::setupUi()
 
     // 刷新按钮
     QPushButton *btnRefresh = new QPushButton("刷新");
-    btnRefresh->setStyleSheet("color: #fff; background: #4a6fa5; border-radius: 4px; padding: 6px 16px;");
+    btnRefresh->setStyleSheet(QString("color: %1; background: %2; border-radius: 4px; padding: 6px 16px;")
+                                  .arg(theme::TEXT, theme::BTN_SECONDARY));
     connect(btnRefresh, &QPushButton::clicked, this, &AlarmListWidget::onRefresh);
     toolLay->addWidget(btnRefresh);
 
     // 全部确认按钮
     QPushButton *btnAck = new QPushButton("全部确认");
-    btnAck->setStyleSheet("color: #fff; background: #4caf50; border-radius: 4px; padding: 6px 16px;");
+    btnAck->setStyleSheet(QString("color: %1; background: %2; border-radius: 4px; padding: 6px 16px;")
+                              .arg(theme::TEXT, theme::SUCCESS));
     connect(btnAck, &QPushButton::clicked, this, &AlarmListWidget::onAcknowledge);
     toolLay->addWidget(btnAck);
 
     // 清空按钮
     QPushButton *btnClear = new QPushButton("清空");
-    btnClear->setStyleSheet("color: #fff; background: #f44336; border-radius: 4px; padding: 6px 16px;");
+    btnClear->setStyleSheet(QString("color: %1; background: %2; border-radius: 4px; padding: 6px 16px;")
+                                .arg(theme::TEXT, theme::DANGER));
     connect(btnClear, &QPushButton::clicked, this, &AlarmListWidget::onClear);
     toolLay->addWidget(btnClear);
 
     // 打开截图目录按钮
     QPushButton *btnOpenDir = new QPushButton("打开截图目录");
-    btnOpenDir->setStyleSheet("color: #fff; background: #ff9800; border-radius: 4px; padding: 6px 16px;");
+    btnOpenDir->setStyleSheet(QString("color: %1; background: %2; border-radius: 4px; padding: 6px 16px;")
+                                  .arg(theme::TEXT, theme::WARNING));
     connect(btnOpenDir, &QPushButton::clicked, this, &AlarmListWidget::onOpenDir);
     toolLay->addWidget(btnOpenDir);
 
@@ -196,16 +201,20 @@ void AlarmListWidget::setupUi()
     snapBtn_->setChecked(snapOn);
     snapBtn_->setText(snapOn ? "截图: 开" : "截图: 关");
     snapBtn_->setStyleSheet(snapOn
-        ? "color: #fff; background: #4caf50; border-radius: 4px; padding: 6px 16px;"  // 绿色（开启）
-        : "color: #aaa; background: #555; border-radius: 4px; padding: 6px 16px;");  // 灰色（关闭）
+        ? QString("color: %1; background: %2; border-radius: 4px; padding: 6px 16px;")  // 绿色（开启）
+              .arg(theme::TEXT, theme::SUCCESS)
+        : QString("color: %1; background: %2; border-radius: 4px; padding: 6px 16px;")  // 灰色（关闭）
+              .arg(theme::TEXT_MUTED, theme::HOVER));
     
     // 截图开关切换处理
     connect(snapBtn_, &QPushButton::toggled, this, [this](bool on) {
         AlarmManager::instance().setScreenshotsEnabled(on);  // 保存设置
         snapBtn_->setText(on ? "截图: 开" : "截图: 关");
         snapBtn_->setStyleSheet(on
-            ? "color: #fff; background: #4caf50; border-radius: 4px; padding: 6px 16px;"
-            : "color: #aaa; background: #555; border-radius: 4px; padding: 6px 16px;");
+            ? QString("color: %1; background: %2; border-radius: 4px; padding: 6px 16px;")
+                  .arg(theme::TEXT, theme::SUCCESS)
+            : QString("color: %1; background: %2; border-radius: 4px; padding: 6px 16px;")
+                  .arg(theme::TEXT_MUTED, theme::HOVER));
     });
     toolLay->addWidget(snapBtn_);
 
@@ -218,11 +227,11 @@ void AlarmListWidget::setupUi()
     */
     tabWidget_ = new QTabWidget(this);
     tabWidget_->setStyleSheet(
-        "QTabWidget::pane { border: 1px solid #444; background: #1e1e2e; }"
-        "QTabBar::tab { background: #2d2d3d; color: #aaa; padding: 8px 20px;"
-        "  border: 1px solid #444; border-bottom: none; }"
-        "QTabBar::tab:selected { background: #1e1e2e; color: #fff; }"
-    );
+        QString("QTabWidget::pane { border: 1px solid %1; background: %2; }"
+                "QTabBar::tab { background: %3; color: %4; padding: 8px 20px;"
+                "  border: 1px solid %1; border-bottom: none; }"
+                "QTabBar::tab:selected { background: %2; color: %5; }")
+            .arg(theme::BORDER, theme::BG, theme::PANEL, theme::TEXT_MUTED, theme::TEXT));
 
     /* 
     ====================================================
@@ -237,10 +246,11 @@ void AlarmListWidget::setupUi()
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setAlternatingRowColors(true);
     table_->setStyleSheet(
-        "QTableWidget { background: #1e1e2e; color: #ccc; gridline-color: #333; }"
-        "QTableWidget::item:selected { background: #3d5a80; }"
-        "QHeaderView::section { background: #2d2d3d; color: #aaa; padding: 6px; border: 1px solid #333; }"
-    );
+        QString("QTableWidget { background: %1; color: %2; gridline-color: %3; }"
+                "QTableWidget::item:selected { background: %4; }"
+                "QHeaderView::section { background: %5; color: %6; padding: 6px; border: 1px solid %3; }")
+            .arg(theme::BG, theme::TEXT, theme::BORDER, theme::BTN_SECONDARY, theme::PANEL,
+                 theme::TEXT_MUTED));
     table_->verticalHeader()->setVisible(false);
     connect(table_, &QTableWidget::cellDoubleClicked,
             this, &AlarmListWidget::onRowDoubleClicked);
@@ -259,10 +269,11 @@ void AlarmListWidget::setupUi()
     fenceTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     fenceTable_->setAlternatingRowColors(true);
     fenceTable_->setStyleSheet(
-        "QTableWidget { background: #1e1e2e; color: #ccc; gridline-color: #333; }"
-        "QTableWidget::item:selected { background: #3d5a80; }"
-        "QHeaderView::section { background: #2d2d3d; color: #aaa; padding: 6px; border: 1px solid #333; }"
-    );
+        QString("QTableWidget { background: %1; color: %2; gridline-color: %3; }"
+                "QTableWidget::item:selected { background: %4; }"
+                "QHeaderView::section { background: %5; color: %6; padding: 6px; border: 1px solid %3; }")
+            .arg(theme::BG, theme::TEXT, theme::BORDER, theme::BTN_SECONDARY, theme::PANEL,
+                 theme::TEXT_MUTED));
     fenceTable_->verticalHeader()->setVisible(false);
     tabWidget_->addTab(fenceTable_, "电子围栏");
 
@@ -315,8 +326,8 @@ void AlarmListWidget::refreshTable()
     lblTotal_->setText(statsText);
     lblUnack_->setText(QString("未确认: %1 条").arg(unack));
     lblUnack_->setStyleSheet(unack > 0
-        ? "color: #ff9800; font-size:16px;"
-        : "color: #4caf50; font-size:16px;");
+        ? theme::text(theme::WARNING, theme::FS_BODY)
+        : theme::text(theme::SUCCESS, theme::FS_BODY));
 
     /* 
     ====================================================
@@ -368,9 +379,9 @@ void AlarmListWidget::refreshTable()
         // 操作列（详情按钮）
         QPushButton *btnDetail = new QPushButton("详情");
         btnDetail->setStyleSheet(
-            "QPushButton { color: #fff; background: #4a6fa5; border-radius: 4px; padding: 4px 12px; }"
-            "QPushButton:hover { background: #5a8fc5; }"
-        );
+            QString("QPushButton { color: %1; background: %2; border-radius: 4px; padding: 4px 12px; }"
+                    "QPushButton:hover { background: %3; }")
+                .arg(theme::TEXT, theme::BTN_SECONDARY, theme::BTN_SECONDARY_HOVER));
         connect(btnDetail, &QPushButton::clicked, this, [this, i]() {
             showAlarmDetail(i);
         });
@@ -569,9 +580,9 @@ void AlarmListWidget::onHeaderSectionClicked(int logicalIndex)
 
     QMenu menu(this);
     menu.setStyleSheet(
-        "QMenu { background: #2d2d3d; color: #ccc; border: 1px solid #444; }"
-        "QMenu::item:selected { background: #3d5a80; }"
-    );
+        QString("QMenu { background: %1; color: %2; border: 1px solid %3; }"
+                "QMenu::item:selected { background: %4; }")
+            .arg(theme::PANEL, theme::TEXT, theme::BORDER, theme::BTN_SECONDARY));
 
     if (logicalIndex == 1) {
         // 通道筛选

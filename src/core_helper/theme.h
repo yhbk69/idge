@@ -36,6 +36,13 @@ constexpr const char *SUCCESS       = "#4caf50";  ///< 成功/正常
 constexpr const char *WARNING       = "#ff9800";  ///< 警告
 constexpr const char *BTN_SECONDARY = "#4a6fa5";  ///< 次级按钮底
 
+// ========== 交互态（hover/pressed，来自点名/盘点批次并全站收敛） ==========
+constexpr const char *BTN_SECONDARY_HOVER = "#5a8fc5";  ///< 次级按钮悬停
+constexpr const char *SKY                 = "#0EA5E9";  ///< 亮蓝按钮悬停
+constexpr const char *SKY_PRESSED         = "#0284C7";  ///< 亮蓝按钮按下
+constexpr const char *DANGER_PRESSED      = "#B91C1C";  ///< 危险按钮按下
+constexpr const char *SUCCESS_HOVER       = "#34D399";  ///< 成功按钮悬停（亮）
+
 // ========== 字阶（px，ARM 上 QtHelper 不再强制放大） ==========
 constexpr int FS_BADGE = 12;  ///< 角标
 constexpr int FS_HINT  = 13;  ///< 提示文字

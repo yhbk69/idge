@@ -13,6 +13,7 @@
 */
 // photo_selection_widget.cpp
 #include "photo_selection_widget.h"
+#include "theme.h"
 #include "../utils/qt_image_utils.h"
 #include "../reader/camera_preview_decoder.h"
 #include <QVBoxLayout>
@@ -35,7 +36,7 @@
 
 namespace {
 // 圆形快门按钮：纯 QPainter 自绘（QSS 画不出正圆+粗圆环），
-// 7px 圆环 #CBD5E1，内部填充按 禁用/按下/悬停/常态 四档灰阶变化；
+// 7px 圆环 theme::BORDER，内部填充按 禁用/按下/悬停/常态 四档灰阶变化；
 // NoFocus 防止触摸屏点击后残留焦点框
 class RoundCaptureButton final : public QPushButton {
 public:
@@ -56,16 +57,16 @@ protected:
             border_width / 2.0, border_width / 2.0,
             -border_width / 2.0, -border_width / 2.0);
 
-        QColor fill = QColor(QStringLiteral("#F8FAFC"));
+        QColor fill = QColor(theme::TEXT);
         if (!isEnabled()) {
-            fill = QColor(QStringLiteral("#CBD5E1"));
+            fill = QColor(theme::TEXT);
         } else if (isDown()) {
-            fill = QColor(QStringLiteral("#94A3B8"));
+            fill = QColor(theme::TEXT_MUTED);
         } else if (underMouse()) {
-            fill = QColor(QStringLiteral("#E2E8F0"));
+            fill = QColor(theme::TEXT);
         }
 
-        painter.setPen(QPen(QColor(QStringLiteral("#CBD5E1")), border_width));
+        painter.setPen(QPen(QColor(theme::BORDER), border_width));
         painter.setBrush(fill);
         painter.drawEllipse(circle);
     }
@@ -103,7 +104,7 @@ void PhotoSelectionDialog::setupUI() {
     setWindowTitle(QStringLiteral("照片识别"));
     resize(1600, 900);
     setMinimumSize(1400, 800);
-    setStyleSheet(QStringLiteral("QWidget { background: #1e1e2e; }"));
+    setStyleSheet(QString("QWidget { background: %1; }").arg(theme::BG));
 
     auto* main_layout = new QHBoxLayout(this);
     main_layout->setContentsMargins(16, 16, 16, 16);
@@ -111,7 +112,7 @@ void PhotoSelectionDialog::setupUI() {
 
     // === 左侧：相机预览区域 ===
     auto* left_widget = new QWidget(this);
-    left_widget->setStyleSheet(QStringLiteral("QWidget { background: #1e1e2e; }"));
+    left_widget->setStyleSheet(QString("QWidget { background: %1; }").arg(theme::BG));
     auto* left_layout = new QVBoxLayout(left_widget);
     left_layout->setContentsMargins(0, 0, 0, 0);
     left_layout->setSpacing(16);
@@ -122,17 +123,20 @@ void PhotoSelectionDialog::setupUI() {
     toolbar_layout->setContentsMargins(0, 0, 0, 0);
 
     QString button_style = 
-        QStringLiteral("QPushButton {"
-        "  background: #4fc3f7;"
-        "  color: #1e1e2e;"
+        QString("QPushButton {"
+        "  background: %1;"
+        "  color: %2;"
         "  border: none;"
         "  border-radius: 12px;"
         "  padding: 10px 24px;"
-        "  font-size:18px;"
+        "  font-size:%3px;"
         "  font-weight: 600;"
         "}"
-        "QPushButton:hover { background: #0EA5E9; }"
-        "QPushButton:pressed { background: #0284C7; }");
+        "QPushButton:hover { background: %4; }"
+        "QPushButton:pressed { background: %5; }")
+        .arg(theme::ACCENT, theme::BG)
+        .arg(theme::FS_CARD)
+        .arg(theme::SKY, theme::SKY_PRESSED);
 
     upload_btn_ = new QPushButton(QStringLiteral("选择照片"), toolbar);
     upload_btn_->setMinimumSize(140, 44);
@@ -149,9 +153,10 @@ void PhotoSelectionDialog::setupUI() {
     // on boards whose screen is close to the dialog's minimum height.
     camera_preview_->setMinimumSize(960, 540);
     camera_preview_->setStyleSheet(
-        QStringLiteral("background: #262636;"
-        "border: 2px solid #3d3d4d;"
-        "border-radius: 12px;"));
+        QString("background: %1;"
+        "border: 2px solid %2;"
+        "border-radius: 12px;")
+        .arg(theme::FIELD, theme::BORDER));
     left_layout->addWidget(camera_preview_, 1);
 
     // 快门闪白效果
@@ -170,9 +175,10 @@ void PhotoSelectionDialog::setupUI() {
     thumbnail_label_->setFixedSize(128, 92);
     thumbnail_label_->setAlignment(Qt::AlignCenter);
     thumbnail_label_->setStyleSheet(
-        QStringLiteral("background: #000000;"
-        "border: 2px solid #283244;"
-        "border-radius: 8px;"));
+        QString("background: #000000;"
+        "border: 2px solid %1;"
+        "border-radius: 8px;")
+        .arg(theme::BORDER));
     controls->addWidget(thumbnail_label_, 0, Qt::AlignLeft | Qt::AlignVCenter);
     controls->addStretch(1);
 
@@ -197,17 +203,20 @@ void PhotoSelectionDialog::setupUI() {
     next_btn_->setFixedSize(140, 48);
     next_btn_->setEnabled(false);
     next_btn_->setStyleSheet(
-        QStringLiteral("QPushButton {"
-        "  background: #4caf50;"
-        "  color: #1e1e2e;"
+        QString("QPushButton {"
+        "  background: %1;"
+        "  color: %2;"
         "  border: none;"
         "  border-radius: 12px;"
         "  padding: 10px 32px;"
-        "  font-size:18px;"
+        "  font-size:%3px;"
         "  font-weight: 700;"
         "}"
-        "QPushButton:hover { background: #34D399; }"
-        "QPushButton:disabled { background: #2d2d3d; color: #9ca3af; }"));
+        "QPushButton:hover { background: %4; }"
+        "QPushButton:disabled { background: %5; color: %6; }")
+        .arg(theme::SUCCESS, theme::BG)
+        .arg(theme::FS_CARD)
+        .arg(theme::SUCCESS_HOVER, theme::PANEL, theme::TEXT_MUTED));
     connect(next_btn_, &QPushButton::clicked, this, &PhotoSelectionDialog::onNext);
     controls->addWidget(next_btn_, 0, Qt::AlignRight | Qt::AlignVCenter);
 
@@ -218,43 +227,47 @@ void PhotoSelectionDialog::setupUI() {
     right_widget->setMinimumWidth(320);
     right_widget->setMaximumWidth(400);
     right_widget->setStyleSheet(
-        QStringLiteral("QWidget {"
-        "  background: #262636;"
-        "  border: 2px solid #3d3d4d;"
+        QString("QWidget {"
+        "  background: %1;"
+        "  border: 2px solid %2;"
         "  border-radius: 12px;"
-        "}"));
+        "}")
+        .arg(theme::FIELD, theme::BORDER));
     auto* right_layout = new QVBoxLayout(right_widget);
     right_layout->setContentsMargins(16, 16, 16, 16);
     right_layout->setSpacing(12);
 
     auto* list_title = new QLabel(QStringLiteral("已选照片"), right_widget);
     list_title->setStyleSheet(
-        QStringLiteral("color: #E5E7EB;"
-        "font-size:18px;"
+        QString("color: %1;"
+        "font-size:%2px;"
         "font-weight: 600;"
         "background: transparent;"
-        "border: none;"));
+        "border: none;")
+        .arg(theme::TEXT)
+        .arg(theme::FS_CARD));
     right_layout->addWidget(list_title);
 
     photo_list_scroll_ = new QScrollArea(right_widget);
     photo_list_scroll_->setWidgetResizable(true);
     photo_list_scroll_->setStyleSheet(
-        QStringLiteral("QScrollArea {"
+        QString("QScrollArea {"
         "  background: transparent;"
         "  border: none;"
         "}"
         "QScrollBar:vertical {"
-        "  background: #2d2d3d;"
+        "  background: %1;"
         "  width: 8px;"
         "  border-radius: 4px;"
         "}"
         "QScrollBar::handle:vertical {"
-        "  background: #45455c;"
+        "  background: %2;"
         "  border-radius: 4px;"
         "}"
         "QScrollBar::handle:vertical:hover {"
-        "  background: #4fc3f7;"
-        "}"));
+        "  background: %3;"
+        "}")
+        .arg(theme::PANEL, theme::HOVER, theme::ACCENT));
 
     photo_list_container_ = new QWidget();
     photo_list_container_->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
@@ -397,11 +410,12 @@ void PhotoSelectionDialog::addPhotoToList(const QString& path, const QImage& ima
     auto* card = new QWidget(photo_list_container_);
     card->setFixedSize(280, 210);
     card->setStyleSheet(
-        QStringLiteral("QWidget {"
-        "  background: #2d2d3d;"
-        "  border: 2px solid #45455c;"
+        QString("QWidget {"
+        "  background: %1;"
+        "  border: 2px solid %2;"
         "  border-radius: 8px;"
-        "}"));
+        "}")
+        .arg(theme::PANEL, theme::HOVER));
     
     auto* card_layout = new QVBoxLayout(card);
     card_layout->setContentsMargins(0, 0, 0, 0);
@@ -423,7 +437,7 @@ void PhotoSelectionDialog::addPhotoToList(const QString& path, const QImage& ima
         image_label->setPixmap(pixmap.scaled(280, 210, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     } else {
         image_label->setText(QStringLiteral("无法加载"));
-        image_label->setStyleSheet(QStringLiteral("color: #f44336; font-size:16px;"));
+        image_label->setStyleSheet(theme::text(theme::DANGER, theme::FS_BODY));
     }
     
     card_layout->addWidget(image_label);
@@ -434,15 +448,17 @@ void PhotoSelectionDialog::addPhotoToList(const QString& path, const QImage& ima
     delete_btn->move(280 - 36, 8);
     delete_btn->setCursor(Qt::PointingHandCursor);
     delete_btn->setStyleSheet(
-        QStringLiteral("QPushButton {"
+        QString("QPushButton {"
         "  background: rgba(220, 38, 38, 0.9);"
         "  color: white;"
         "  border: none;"
         "  border-radius: 14px;"
-        "  font-size:18px;"
+        "  font-size:%1px;"
         "  font-weight: bold;"
         "}"
-        "QPushButton:hover { background: #f44336; }"));
+        "QPushButton:hover { background: %2; }")
+        .arg(theme::FS_CARD)
+        .arg(theme::DANGER));
     
     connect(delete_btn, &QPushButton::clicked, this, [this, path, card]() {
         selected_photos_.removeAll(path);

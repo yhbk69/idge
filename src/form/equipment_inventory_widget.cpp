@@ -1,6 +1,7 @@
 // 文件：equipment_inventory_widget.cpp
 // 职责：设备盘点任务列表页实现（caichao 分支合入），页面风格与 RollCallWidget 保持一致
 #include "equipment_inventory_widget.h"
+#include "theme.h"
 
 #include <QAbstractItemView>
 #include <QDateTime>
@@ -41,7 +42,7 @@ void EquipmentInventoryWidget::setupUi() {
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(24, 24, 24, 24);
     root->setSpacing(20);
-    setStyleSheet(QStringLiteral("QWidget { background:#1e1e2e; color:#E5E7EB; }"));
+    setStyleSheet(QString("QWidget { background:%1; color:%2; }").arg(theme::BG, theme::TEXT));
 
     auto* header = new QHBoxLayout;
     auto* title = new QLabel(QStringLiteral("设备盘点"), this);
@@ -49,22 +50,28 @@ void EquipmentInventoryWidget::setupUi() {
     title_font.setPixelSize(22);
     title_font.setBold(true);
     title->setFont(title_font);
-    title->setStyleSheet(QStringLiteral("color:#E5E7EB;"));
+    title->setStyleSheet(QString("color:%1;").arg(theme::TEXT));
     header->addWidget(title);
     header->addStretch();
     refresh_button_ = new QPushButton(QStringLiteral("刷新"), this);
     create_button_ = new QPushButton(QStringLiteral("创建任务"), this);
     create_button_->setToolTip(QStringLiteral("请先部署设备识别程序、模型和标签文件"));
     refresh_button_->setMinimumSize(100, 48);
-    refresh_button_->setStyleSheet(QStringLiteral(
-        "QPushButton { background:#45455c; color:#E5E7EB; border:none; border-radius:12px; "
-        "padding:8px 24px; font-size:18px; font-weight:600; }"
-        "QPushButton:hover { background:#3d3d4d; } QPushButton:pressed { background:#2d2d3d; }"));
+    refresh_button_->setStyleSheet(QString(
+        "QPushButton { background:%1; color:%2; border:none; border-radius:12px; "
+        "padding:8px 24px; font-size:%3px; font-weight:600; }"
+        "QPushButton:hover { background:%4; } QPushButton:pressed { background:%5; }")
+        .arg(theme::HOVER, theme::TEXT)
+        .arg(theme::FS_CARD)
+        .arg(theme::BORDER, theme::PANEL));
     create_button_->setMinimumSize(140, 48);
-    create_button_->setStyleSheet(QStringLiteral(
-        "QPushButton { background:#4fc3f7; color:#1e1e2e; border:none; border-radius:12px; "
-        "padding:8px 32px; font-size:18px; font-weight:700; }"
-        "QPushButton:hover { background:#0EA5E9; } QPushButton:pressed { background:#0284C7; }"));
+    create_button_->setStyleSheet(QString(
+        "QPushButton { background:%1; color:%2; border:none; border-radius:12px; "
+        "padding:8px 32px; font-size:%3px; font-weight:700; }"
+        "QPushButton:hover { background:%4; } QPushButton:pressed { background:%5; }")
+        .arg(theme::ACCENT, theme::BG)
+        .arg(theme::FS_CARD)
+        .arg(theme::SKY, theme::SKY_PRESSED));
     header->addWidget(refresh_button_);
     header->addWidget(create_button_);
     root->addLayout(header);
@@ -92,13 +99,16 @@ void EquipmentInventoryWidget::setupUi() {
     task_table_->setShowGrid(false);
     task_table_->setAlternatingRowColors(false);
     task_table_->verticalHeader()->setDefaultSectionSize(64);
-    task_table_->setStyleSheet(QStringLiteral(
-        "QTableWidget { background:#262636; border:2px solid #3d3d4d; border-radius:12px; "
-        "gridline-color:#3d3d4d; color:#E5E7EB; font-size:16px; }"
-        "QTableWidget::item { padding:16px 20px; border-bottom:1px solid #2d2d3d; }"
-        "QTableWidget::item:selected { background:#3d3d4d; }"
-        "QHeaderView::section { background:#2d2d3d; color:#9CA3AF; padding:16px 20px; "
-        "border:none; border-bottom:2px solid #4fc3f7; font-size:16px; font-weight:600; }"));
+    task_table_->setStyleSheet(QString(
+        "QTableWidget { background:%1; border:2px solid %2; border-radius:12px; "
+        "gridline-color:%2; color:%3; font-size:%4px; }"
+        "QTableWidget::item { padding:16px 20px; border-bottom:1px solid %5; }"
+        "QTableWidget::item:selected { background:%2; }"
+        "QHeaderView::section { background:%5; color:%6; padding:16px 20px; "
+        "border:none; border-bottom:2px solid %7; font-size:%4px; font-weight:600; }")
+        .arg(theme::FIELD, theme::BORDER, theme::TEXT)
+        .arg(theme::FS_BODY)
+        .arg(theme::PANEL, theme::TEXT_MUTED, theme::ACCENT));
     root->addWidget(task_table_, 1);
 }
 
@@ -114,15 +124,15 @@ void EquipmentInventoryWidget::loadTasks() {
         const int row = task_table_->rowCount();
         task_table_->insertRow(row);
         auto* name = new QTableWidgetItem(QString::fromUtf8(task.name.c_str()));
-        name->setForeground(QColor("#E5E7EB")); name->setFont(QFont("", 14, QFont::Bold));
+        name->setForeground(QColor(theme::TEXT)); name->setFont(QFont("", 14, QFont::Bold));
         task_table_->setItem(row, 0, name);
         auto* time = new QTableWidgetItem(QString::fromUtf8(task.create_time.c_str()));
-        time->setForeground(QColor("#9CA3AF")); task_table_->setItem(row, 1, time);
+        time->setForeground(QColor(theme::TEXT_MUTED)); task_table_->setItem(row, 1, time);
         auto* count = new QTableWidgetItem(QStringLiteral("%1 件").arg(task.registered_count));
-        count->setForeground(QColor("#4caf50")); count->setTextAlignment(Qt::AlignCenter);
+        count->setForeground(QColor(theme::SUCCESS)); count->setTextAlignment(Qt::AlignCenter);
         count->setFont(QFont("", 16, QFont::Bold)); task_table_->setItem(row, 2, count);
         auto* status = new QTableWidgetItem(task.is_cancelled ? QStringLiteral("已注销") : QStringLiteral("处理中"));
-        status->setForeground(task.is_cancelled ? QColor("#4caf50") : QColor("#ff9800"));
+        status->setForeground(task.is_cancelled ? QColor(theme::SUCCESS) : QColor(theme::WARNING));
         status->setTextAlignment(Qt::AlignCenter); status->setFont(QFont("", 13, QFont::Bold));
         task_table_->setItem(row, 3, status);
 
@@ -130,16 +140,21 @@ void EquipmentInventoryWidget::loadTasks() {
         auto* layout = new QHBoxLayout(actions);
         layout->setContentsMargins(12, 10, 12, 10);
         layout->setSpacing(10);
-        const QString button_style = QStringLiteral(
-            "QPushButton { background:#45455c; color:%1; border:none; border-radius:8px; "
-            "padding:6px 16px; font-size:16px; font-weight:600; }"
-            "QPushButton:hover { background:%1; color:white; } "
-            "QPushButton:pressed { background:#2d2d3d; color:white; }");
-        auto* view = new QPushButton(QStringLiteral("查看"), actions); view->setFixedSize(82, 38); view->setStyleSheet(button_style.arg("#4fc3f7"));
-        auto* delete_button = new QPushButton(QStringLiteral("删除"), actions); delete_button->setFixedSize(82, 38); delete_button->setStyleSheet(button_style.arg("#f44336"));
+        const auto button_style = [](const char *accent) {
+            return QString(
+                "QPushButton { background:%1; color:%2; border:none; border-radius:8px; "
+                "padding:6px 16px; font-size:%3px; font-weight:600; }"
+                "QPushButton:hover { background:%2; color:white; } "
+                "QPushButton:pressed { background:%4; color:white; }")
+                .arg(theme::HOVER, accent)
+                .arg(theme::FS_BODY)
+                .arg(theme::PANEL);
+        };
+        auto* view = new QPushButton(QStringLiteral("查看"), actions); view->setFixedSize(82, 38); view->setStyleSheet(button_style(theme::ACCENT));
+        auto* delete_button = new QPushButton(QStringLiteral("删除"), actions); delete_button->setFixedSize(82, 38); delete_button->setStyleSheet(button_style(theme::DANGER));
         layout->addWidget(view);
         if (!task.is_cancelled) {
-            auto* cancel = new QPushButton(QStringLiteral("注销"), actions); cancel->setFixedSize(82, 38); cancel->setStyleSheet(button_style.arg("#ff9800"));
+            auto* cancel = new QPushButton(QStringLiteral("注销"), actions); cancel->setFixedSize(82, 38); cancel->setStyleSheet(button_style(theme::WARNING));
             layout->addWidget(cancel);
             connect(cancel, &QPushButton::clicked, this,
                     [this, id = task.id]() { onCancelTask(id); });
@@ -179,10 +194,11 @@ void EquipmentInventoryWidget::onCreateTask() {
     input_dialog.setLabelText(QStringLiteral("任务名称"));
     input_dialog.setInputMode(QInputDialog::TextInput);
     input_dialog.setTextValue(default_name);
-    input_dialog.setStyleSheet(QStringLiteral(
-        "QInputDialog QLabel { font-size:30px; }"
-        "QInputDialog QLineEdit { min-width:720px; min-height:84px; padding:12px 20px; font-size:30px; }"
-        "QInputDialog QPushButton { min-width:152px; min-height:68px; font-size:30px; }"));
+    input_dialog.setStyleSheet(QString(
+        "QInputDialog QLabel { font-size:%1px; }"
+        "QInputDialog QLineEdit { min-width:720px; min-height:84px; padding:12px 20px; font-size:%1px; }"
+        "QInputDialog QPushButton { min-width:152px; min-height:68px; font-size:%1px; }")
+        .arg(theme::FS_KPI));
     input_dialog.resize(900, 260);
     const bool ok = input_dialog.exec() == QDialog::Accepted;
     const QString name = input_dialog.textValue();
