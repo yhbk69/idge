@@ -495,3 +495,25 @@ target_link_libraries(test_database
 )
 
 target_compile_definitions(test_database PRIVATE ZERO_COPY)
+
+# ============================================================================
+# 人脸识别工具（原 cc_face，命令行接口：<det.rknn> <rec.rknn> <image> [out.json]）
+# 由 src/recognition/face_recognizer.cpp 经 fork+execv 调起（人员点名功能）
+# 产物固定输出到 model/face/face_recognition，与主程序约定路径一致
+# ============================================================================
+add_executable(face_recognition tools/face_recognition/main.cpp)
+
+target_include_directories(face_recognition PRIVATE
+    ${CMAKE_SOURCE_DIR}/tools/face_recognition
+    ${CMAKE_SOURCE_DIR}/3rdparty/rknpu2/include
+    ${OpenCV_INCLUDE_DIRS}
+)
+
+target_link_libraries(face_recognition
+    rknnrt
+    ${OpenCV_LIBS}
+)
+
+set_target_properties(face_recognition PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/model/face
+)

@@ -43,4 +43,7 @@ test_*.cpp
 *.db-shm
 *.db-wal
 *.db.corrupt-*
+
+# face_recognition 构建产物（源码在 tools/face_recognition，输出到 model/face/）
+model/face/face_recognition
 .qoder/
