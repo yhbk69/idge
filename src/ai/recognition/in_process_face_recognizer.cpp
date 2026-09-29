@@ -303,8 +303,7 @@ bool InProcessFaceRecognizer::detectFaces(const cv::Mat& bgr,
         outputs, bgr.cols, bgr.rows, prep.scale, det_threshold_);
     rknn_outputs_release(det_ctx_, 9, outputs);
 
-    std::vector<InProcessFaceBox> kept = nms(std::move(raw), nms_threshold_);
-    faces = std::move(kept);
+    faces = nms(std::move(raw), nms_threshold_);
     return true;
 }
 

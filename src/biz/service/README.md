@@ -84,7 +84,7 @@ equipmentService_->saveResult(inv);
 
 - **推理链路（均进程内常驻）**：点名为 `src/ai/recognition/InProcessFaceRecognizer`（SCRFD 检测 + 512 维识别，两个 rknn 上下文，核 AUTO）；盘点为 `src/ai/yolo11/YOLO11Model`（权重 `.rknn` 由本进程加载到 NPU，核 0/1）；
 - **BusinessDBManager**（`src/biz/db`）：SQLite 注册库唯一入口，点名与盘点共用同一连接（`getDatabase()` 暴露）；
-- **Qt5 Core/Gui**：QImage（绘制回写，绕开板端 cv::imwrite JPEG 编码器崩溃问题）；
+- **Qt5 Core/Gui**：QImage（绘制回写，绕开板端 cv::imwrite JPEG 编码器崩溃问题）、QProcess（`loadImageWithFallback` 的 ImageMagick 转码兜底，参数数组直传不经 shell）；
 - **OpenCV**：图片读取、人脸裁剪与画框；
 - **std::vector 手写点积匹配**：当前余弦相似度匹配为逐对手工计算（贪心内按需算分），**未使用 Eigen 矩阵库**——注册库规模小（百人级），O(R·C·d) 足够，且避免引入矩阵构建与内存拷贝开销；
 - **src/base/utils**：`task_manager`（任务目录/唯一文件名）、`draw_utils`（绿实线/黄虚线框）、`qt_image_utils`（安全解码）。

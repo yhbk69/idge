@@ -137,12 +137,13 @@ int RollCallService::findSimilarFaceVectorized(
     }
 
     // 相似度即归一化向量的点积（此处按行手写内积，未引入 Eigen；规模小收益不显著）
-    // 边界：若模型换维度导致在册特征比 query 短，此处按 feature_dim 读取会越界——
-    // 注册库与识别模型必须同维度配套（见 README 注意事项）
+    // 边界：按 min(query, 行) 截断——注册库里若混入更短的特征（换模型/损坏 blob），
+    // 退化为"前缀维内积"而非越界读（与 matchCancellation 的 similarity 同一口径）
     std::vector<float> similarities(num_registered);
     for (int i = 0; i < num_registered; ++i) {
         float s = 0.f;
-        for (int j = 0; j < feature_dim; ++j) {
+        const int dim = std::min<int>(feature_dim, registered_matrix[i].size());
+        for (int j = 0; j < dim; ++j) {
             s += registered_matrix[i][j] * query[j];
         }
         similarities[i] = s;
@@ -542,9 +543,8 @@ CancellationProcessResult RollCallService::matchCancellation(
     }
 
     const int num_registered = registered.size();
-    const int feature_dim = 512;   // 识别模型约定的特征维数（文档性常量：真正的维度
-                                   // 保护在下方 lambda 里按 min(a,b) 截断，防止两侧
-                                   // 维度不一致时越界——模型与注册库必须同模型配套）
+    // 特征维数不在此处固定：真正的维度保护在下方 similarity lambda 里按
+    // min(a,b) 截断，防止两侧维度不一致（换模型/损坏 blob）时越界
     
     std::cout << "Loaded " << num_registered << " registered faces" << std::endl;
     std::cout << "Starting detection of " << photo_paths.size() 
