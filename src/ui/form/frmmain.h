@@ -76,6 +76,7 @@ private:
     QLabel *alarmToast_ = nullptr;   ///< 悬浮报警提示
     QLabel *alarmBadge_ = nullptr;   ///< 未确认报警角标
     QTimer *toastTimer_ = nullptr;   ///< 悬浮提示消失定时器
+    QTimer *alarmRefreshTimer_ = nullptr;  ///< 报警面板刷新节流（合并高频报警，防刷屏拖垮 GUI event loop）
 
     QList<int> iconsMain;          ///< 主导航图标列表
     QList<QAbstractButton *> btnsMain;  ///< 主导航按钮列表

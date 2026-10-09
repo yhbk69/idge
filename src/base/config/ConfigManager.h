@@ -233,6 +233,25 @@ public:
      */
     void setDetectionRetentionDays(int days);
 
+    // ========== 报警视频录制配置 ==========
+    // 全部键可选：缺失即返回下面的默认值，现场老配置不改也能启动。
+    // enabled 默认 false —— 硬件编码器会常驻占用 VPU，必须由人显式打开。
+
+    /** @brief 是否启用报警片段录制（默认 false） */
+    bool recordingEnabled() const;
+
+    /** @brief 编码格式："hevc"（默认，hevc_rkmpp）或 "h264"（h264_rkmpp） */
+    QString recordingCodec() const;
+
+    /** @brief 环形缓冲区时长（秒，默认 5）——决定能回溯多久 */
+    int recordingBufferSeconds() const;
+
+    /** @brief 编码码率（bps，默认 2000000，CBR） */
+    int recordingBitRate() const;
+
+    /** @brief 关键帧间隔（秒，默认 1）——越小报警片段起点对齐误差越小 */
+    int recordingGopSeconds() const;
+
 private:
     /**
      * @brief 私有构造函数（单例模式）
@@ -251,6 +270,15 @@ private:
      * @return true=root_ 有改动（调用方负责 saveUnsafe 落盘）
      */
     bool migrateModelPaths();
+
+    /**
+     * @brief 老配置缺少 recording 段时补齐默认值（load 内持锁调用，勿单独使用）
+     *
+     * 只为让开关在 config.json 里可见可改，程序本身靠 getter 的默认值兜底；
+     * 已存在 recording 段时不做任何修改（现场配置不会被启动流程覆盖）。
+     * @return true=root_ 有改动（调用方负责 saveUnsafe 落盘）
+     */
+    bool migrateRecordingDefaults();
 
     QString configPath_;   ///< 配置文件路径
     QJsonObject root_;     ///< JSON 根对象

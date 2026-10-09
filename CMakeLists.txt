@@ -161,9 +161,6 @@ include_directories(
     # === Rockchip MPP 媒体处理平台 ===
     ${CMAKE_SOURCE_DIR}/3rdparty/mpp/include
 
-    # === ZLMediaKit 流媒体服务器 ===
-    ${CMAKE_SOURCE_DIR}/3rdparty/zlmediakit/include
-
     # === JsonCpp JSON 解析库 ===
     ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/include
 
@@ -277,7 +274,6 @@ set(CMAKE_INSTALL_RPATH "$ORIGIN/../lib")
 # 构建时的库搜索路径（编译时链接）
 set(CMAKE_BUILD_RPATH
     "${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg-rkmpp/lib"      # FFmpeg RKMPP 硬件解码库
-    "${CMAKE_SOURCE_DIR}/3rdparty/zlmediakit/aarch64"    # ZLMediaKit 流媒体库
     "${CMAKE_SOURCE_DIR}/3rdparty/rknpu2/Linux/aarch64"  # RKNN NPU 推理库
     "${CMAKE_SOURCE_DIR}/3rdparty/librga/Linux/aarch64"  # RGA 2D 加速库
     "${CMAKE_SOURCE_DIR}/3rdparty/kaldi_native_fbank/Linux/aarch64"  # 语音特征库（可选）
@@ -353,7 +349,6 @@ add_executable(${PROJECT_NAME}
 target_link_directories(${PROJECT_NAME} PUBLIC
     ${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg-rkmpp/lib       # FFmpeg 硬件解码库
     ${CMAKE_SOURCE_DIR}/3rdparty/libyuv/lib             # libyuv 色彩转换库
-    ${CMAKE_SOURCE_DIR}/3rdparty/zlmediakit/aarch64     # ZLMediaKit 流媒体库
     ${CMAKE_SOURCE_DIR}/3rdparty/librga/lib             # RGA 2D 加速库
     ${CMAKE_SOURCE_DIR}/3rdparty/rknpu2/Linux/aarch64   # RKNN NPU 推理库
     ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/lib            # JsonCpp JSON 库
@@ -394,7 +389,6 @@ target_link_libraries(${PROJECT_NAME}
     ssl                         # OpenSSL SSL/TLS
 
     # ==================== 第三方库 ====================
-    mk_api                      # ZLMediaKit 流媒体 API
     jsoncpp                     # JsonCpp JSON 解析库
     sqlite3                     # SQLite 嵌入式数据库
 

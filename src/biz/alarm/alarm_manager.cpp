@@ -42,7 +42,10 @@
 #include "alarm_dao.h"
 #include "detection_dao.h"
 #include <QDateTime>
+#include <QDate>
 #include <QDebug>
+#include <QDir>
+#include <QFileInfo>
 #include <QUuid>
 #include <chrono>
 
@@ -298,6 +301,37 @@ void AlarmManager::storeAndNotify(const QVector<AlarmRecord> &alarms)
     for (const AlarmRecord &alarm : alarms)
         emit alarmGenerated(alarm);  // 发送报警信号
     emit statsUpdated();  // 发送统计更新信号
+}
+
+// ============================================================================
+// attachVideoClip: 报警视频片段落盘后回填 videoPath
+// ============================================================================
+// 由 ClipWriter 后台线程调用（报警后 2 秒），此时 storeAndNotify 早已完成，
+// 所以这里的 UPDATE 必然能命中已存在的行。
+//
+// 内存按"扫到的改"、DB 按"传入的改"：内存列表只留最近 1000 条，
+// 若某条已被挤出内存，它在 DB 里的记录仍然应该拿到视频路径。
+// DatabaseManager 为每个线程分配独立连接，因此后台线程里 new AlarmDAO 是安全的。
+// ============================================================================
+void AlarmManager::attachVideoClip(const QStringList &alarmIds, const QString &videoPath)
+{
+    if (alarmIds.isEmpty() || videoPath.isEmpty()) return;
+
+    {
+        QMutexLocker lock(&mutex_);
+        for (auto &a : alarms_) {
+            if (alarmIds.contains(a.id)) {
+                a.videoPath = videoPath;
+            }
+        }
+    }
+
+    if (dbInitialized_) {
+        AlarmDAO dao;
+        for (const QString &id : alarmIds) {
+            dao.updateVideoPath(id, videoPath);
+        }
+    }
 }
 
 // 设置通道在线状态
@@ -669,10 +703,85 @@ void AlarmManager::syncToDatabase()
 }
 
 // ============================================================================
-// cleanOldData: 清理N天前的数据库数据
+// pruneAlarmMedia: 按天目录裁剪报警媒体（抓拍图 + 视频片段）
+// ============================================================================
+// 两道闸门，缺一不可：
+//   1) 天数：与 DB 的 cleanOldAlarms 同口径，过期归档整目录回收；
+//   2) 容量：4 路常驻硬编在报警密集的现场一天就能写出几十 GB（板端实测
+//      单段 1.2MB / 40 秒 12 段），分区写满会直接拖垮检测与落库主流程，
+//      所以超过上限时从最旧的一天开始删，直到落回上限内。
+// 只动"目录名能按 yyyyMMdd 解析"的目录，现场手工放的其它子目录一律不碰。
+// ============================================================================
+static const qint64 kAlarmMediaMaxBytes = 4LL * 1024 * 1024 * 1024;   // 4 GB
+
+static qint64 dirBytes(const QString &path)
+{
+    qint64 total = 0;
+    QDir dir(path);
+    const QFileInfoList files = dir.entryInfoList(QDir::Files);
+    for (const QFileInfo &fi : files) {
+        total += fi.size();
+    }
+    return total;
+}
+
+static void pruneAlarmMedia(int daysToKeep)
+{
+    QDir root(RuntimePaths::alarmsDir());
+    if (!root.exists()) {
+        return;
+    }
+
+    QStringList dayDirs;                      // 目录名（yyyyMMdd），从旧到新
+    const QFileInfoList entries = root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QFileInfo &fi : entries) {
+        if (QDate::fromString(fi.fileName(), "yyyyMMdd").isValid()) {
+            dayDirs << fi.fileName();
+        }
+    }
+    dayDirs.sort();                           // yyyyMMdd 字典序即时间序
+
+    // 闸门 1：过期归档
+    const QDate cutoff = QDate::currentDate().addDays(-qMax(1, daysToKeep));
+    while (!dayDirs.isEmpty() && QDate::fromString(dayDirs.first(), "yyyyMMdd") < cutoff) {
+        const QString path = root.absoluteFilePath(dayDirs.takeFirst());
+        if (!QDir(path).removeRecursively()) {
+            qWarning() << "AlarmManager: prune alarm media failed" << path;
+        }
+    }
+
+    // 闸门 2：容量上限（天数留着也可能超，例如当天就爆）
+    QList<qint64> sizes;
+    sizes.reserve(dayDirs.size());
+    qint64 total = 0;
+    for (const QString &name : dayDirs) {
+        const qint64 sz = dirBytes(root.absoluteFilePath(name));
+        sizes << sz;
+        total += sz;
+    }
+    for (int i = 0; i < dayDirs.size() && total > kAlarmMediaMaxBytes; ++i) {
+        const QString path = root.absoluteFilePath(dayDirs[i]);
+        if (QDir(path).removeRecursively()) {
+            total -= sizes[i];
+            qInfo() << "AlarmManager: alarm media over cap, dropped" << dayDirs[i];
+        } else {
+            qWarning() << "AlarmManager: prune alarm media failed" << path;
+            break;   // 删不动就别原地打转
+        }
+    }
+}
+
+// ============================================================================
+// cleanOldData: 清理N天前的数据库数据 + 报警媒体文件
+// ============================================================================
+// 报警媒体目录 = data/alarms/yyyyMMdd/（抓拍图 + 视频片段，命名与归档同规则），
+// 与 DB 里删掉的过期报警行一一对应，所以按同一个保留天数一起裁剪：
+// 只留 DB，磁盘会被每天几十到上千个 1MB 级片段慢慢填满。
 // ============================================================================
 void AlarmManager::cleanOldData(int daysToKeep)
 {
+    pruneAlarmMedia(daysToKeep);
+
     if (!dbInitialized_) {
         return;
     }

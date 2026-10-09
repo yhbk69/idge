@@ -4,7 +4,12 @@
         "channel2": "192.mp4",
         "channel3": "192.mp4",
         "channel4": "192.mp4",
-        "notes": ["", "", "", ""]
+        "notes": [
+            "",
+            "",
+            "",
+            ""
+        ]
     },
     "model": {
         "input_size": "640x640",
@@ -46,10 +51,21 @@
         "threads": 3
     },
     "alarm": {
-        "classes": ["person", "helmet", "vest"]
+        "classes": [
+            "person",
+            "helmet",
+            "vest"
+        ]
     },
     "database": {
         "storeDetections": true,
         "detectionRetentionDays": 30
+    },
+    "recording": {
+        "enabled": false,
+        "codec": "hevc",
+        "buffer_seconds": 5,
+        "bitrate": 2000000,
+        "gop_seconds": 1
     }
 }

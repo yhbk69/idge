@@ -382,11 +382,17 @@ void frmMain::initNewPages()
             updateAlarmBadge();
         });
 
-        // 连接新报警信号，刷新视频监控页面的报警列表
+        // 连接新报警信号：报警在 4 路通道上高频触发（person 每几帧一条），
+        // 若每条都同步重建视频页报警面板（delete+重建 20 个 widget + 遍历
+        // 全部 703 条内存记录），GUI 线程 event loop 会被彻底拖垮——实测表现
+        // 为解码已稳在 30fps、paintGL 本身仅 0.7ms，但 onFrameReady/paintGL
+        // 的"到达/绘制"仍被挤压成 2↔56 的抖动。这里改成节流：一个短窗内多次
+        // 报警只合并重建一次面板，把 event loop 还给视频渲染。
         connect(&AlarmManager::instance(), &AlarmManager::alarmGenerated,
                 this, [this](const AlarmRecord &) {
                     if (videoAlarmWidget_ && ui->stackedWidget->currentWidget() == ui->pageMonitor) {
-                        videoAlarmWidget_->refreshAlarms();
+                        if (!alarmRefreshTimer_->isActive())
+                            alarmRefreshTimer_->start();
                     }
                 });
     }
@@ -403,6 +409,16 @@ void frmMain::initNewPages()
     toastTimer_ = new QTimer(this);
     toastTimer_->setSingleShot(true);
     connect(toastTimer_, &QTimer::timeout, alarmToast_, &QLabel::hide);
+
+    // 报警面板节流定时器：单次触发 400ms。窗口内首个报警启动它，期间再来的
+    // 报警被忽略（timer 已 active），到期只重建一次面板 → 最多 2.5 次/秒，
+    // 而不是每帧一次。
+    alarmRefreshTimer_ = new QTimer(this);
+    alarmRefreshTimer_->setSingleShot(true);
+    alarmRefreshTimer_->setInterval(400);
+    connect(alarmRefreshTimer_, &QTimer::timeout, this, [this]() {
+        if (videoAlarmWidget_) videoAlarmWidget_->refreshAlarms();
+    });
 
     // ===== 未确认报警角标 =====
     alarmBadge_ = new QLabel(ui->btnEquipCheck);

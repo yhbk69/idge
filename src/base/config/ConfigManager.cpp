@@ -73,6 +73,8 @@ ConfigManager &ConfigManager::instance()
 //   - path: 配置文件路径（默认 data/config.json）
 //
 // ============================================================================
+static QJsonObject makeRecordingDefaults();
+
 void ConfigManager::load(const QString &path)
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -121,6 +123,9 @@ void ConfigManager::load(const QString &path)
             {"classes", QJsonArray{"person"}}  // 报警类别（检测到人时报警）
         };
 
+        // 报警视频录制（硬件编码环形缓冲区）
+        root_["recording"] = makeRecordingDefaults();
+
         saveUnsafe();  // 保存默认配置
         return;
     }
@@ -145,6 +150,12 @@ void ConfigManager::load(const QString &path)
     // 旧配置一次性迁移（绝对路径/平铺模型路径 → 模型库相对路径），有变化才落盘
     if (migrateModelPaths()) {
         qInfo() << "[ConfigManager] 已将旧模型路径迁移到模型库规范 (model/library/)";
+        saveUnsafe();
+    }
+
+    // 缺 recording 段时补齐默认值（enabled=false，不影响现网行为），让开关在文件里可见
+    if (migrateRecordingDefaults()) {
+        qInfo() << "[ConfigManager] 已补齐报警视频录制默认配置 (recording/)";
         saveUnsafe();
     }
 
@@ -219,6 +230,34 @@ bool ConfigManager::migrateModelPaths()
     root_["cascade"] = cascade;
 
     return changed;
+}
+
+// ============================================================================
+// 报警视频录制默认值一次性迁移（load 内持锁调用）
+// ============================================================================
+// 老配置里没有 recording 段时补上全默认值（enabled=false，不改变现网行为）。
+// 目的不是给程序兜底（getter 本来就有默认值），而是让这一段落进文件，
+// 现场运维能直接看到并改开关，否则要凭空手写一段 JSON。
+// 已有段一律不动：现场改过的值不能被启动流程覆盖。
+// ============================================================================
+static QJsonObject makeRecordingDefaults()
+{
+    return QJsonObject{
+        {"enabled", false},          // 常驻硬编要占 VPU，必须显式打开
+        {"codec", "hevc"},           // D2=b：主用 H.265（带宽减半）
+        {"buffer_seconds", 5},       // 环形缓冲区 5 秒
+        {"bitrate", 2000000},        // 2 Mbps CBR
+        {"gop_seconds", 1}           // 1 秒一个 IDR，报警片段起点对齐误差 ≤1s
+    };
+}
+
+bool ConfigManager::migrateRecordingDefaults()
+{
+    if (root_.contains("recording")) {
+        return false;
+    }
+    root_["recording"] = makeRecordingDefaults();
+    return true;
 }
 
 // ============================================================================
@@ -780,4 +819,48 @@ void ConfigManager::setDetectionRetentionDays(int days)
     db["detectionRetentionDays"] = days;
     root_["database"] = db;
     detectionRetentionDays_ = days;  // 更新缓存
+}
+
+// ============================================================================
+// recording 段：报警视频环形缓冲录制（硬件编码）
+// ----------------------------------------------------------------------------
+// 均为只读 getter：录制参数在解码器启动时一次性注入 VideoRecorder，
+// 运行期改动不会重建编码器，因此不提供 setter（避免"改了不生效"的假接口）。
+// 读取内存 root_，缺键回退到 makeRecordingDefaults() 的同一份默认值。
+// ============================================================================
+
+static QJsonObject recordingSection(const QJsonObject &root)
+{
+    return root["recording"].toObject();
+}
+
+bool ConfigManager::recordingEnabled() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return recordingSection(root_).value("enabled").toBool(false);
+}
+
+QString ConfigManager::recordingCodec() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QString codec = recordingSection(root_).value("codec").toString("hevc");
+    return codec == "h264" ? codec : QStringLiteral("hevc");
+}
+
+int ConfigManager::recordingBufferSeconds() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return qBound(1, recordingSection(root_).value("buffer_seconds").toInt(5), 60);
+}
+
+int ConfigManager::recordingBitRate() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return qBound(200000, recordingSection(root_).value("bitrate").toInt(2000000), 16000000);
+}
+
+int ConfigManager::recordingGopSeconds() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return qBound(1, recordingSection(root_).value("gop_seconds").toInt(1), 10);
 }

@@ -55,8 +55,12 @@ $IDGE_WORKSPACE/
 | `cascade` | 级联模型列表（最多 5 组 path + label，多模型串行检测） |
 | `geofence` | 每路通道的电子围栏：多边形顶点（widget 像素坐标）、报警类别 `alarmClasses`、开关 |
 | `alarm` | 参与报警的类别列表 |
+| `recording` | 报警视频硬件编码录制（默认 `enabled=false`，见下） |
 
 报警记录写入 `data/idge.db`（Qt SQL 检测库），抓拍图片保存在 `data/alarms/YYYYMMDD/` 目录。
+打开 `recording.enabled` 后，同一目录还会多出报警前后共 5 秒、**带检测框**的视频片段：
+`ch{N}_{类别}_{HHmmss_zzz}.h265`（Annex-B 裸流，用于上传/国标）与同名 `.mp4`（网页播放副本）。
+片段由后台线程在报警后 2 秒落盘，路径回填到 `alarms.video_path`，详情对话框的"视频"行可见。
 
 ## 4. 其他常用脚本
 
@@ -84,6 +88,7 @@ $IDGE_WORKSPACE/
 - **全链路零拷贝**：从 FFmpeg 解码到 EGL 渲染，全程通过 DMA-BUF fd 传递，无 CPU 内存拷贝
 - **3 NPU 核心并行推理**：充分利用 RK3588 的 3 个 NPU 核心，实现高吞吐量检测
 - **RGA 硬件加速预处理**：色彩转换和图像缩放由 RGA 引擎完成，释放 CPU
+- **报警视频硬件编码**：带检测框的 RGBA → RGA → `hevc_rkmpp` 零拷贝硬编 + 环形缓冲，报警时切出"前 3 秒 + 后 2 秒"裸流片段（CPU 软编 x264 已彻底移出链路）
 - **电子围栏**：多边形围栏绘制，inside/outside 两种侵入判定模式，按类别过滤报警
 - **报警管理**：限流去重、抓拍落盘、SQLite 持久化、GUI 悬浮提示与历史查询
 - **人员点名**：SCRFD 人脸检测 + 特征比对（进程内 RKNN 常驻推理），注册 / 点名 / 注销三阶段，余弦相似度 + 贪心一对一匹配
@@ -101,7 +106,7 @@ $IDGE_WORKSPACE/
 | C++17 | 主要开发语言 |
 | Qt5 | GUI 框架 |
 | RKNN Runtime (rknpu2) | Rockchip NPU 推理引擎 |
-| FFmpeg (rkmpp) | 视频硬件解码 (h264_rkmpp) |
+| FFmpeg (rkmpp) | 视频硬件解码 (h264/hevc_rkmpp) 与硬件编码 (hevc/h264_rkmpp) |
 | RGA | 硬件 2D 图像加速（色彩转换 + 缩放） |
 | OpenGL ES 2.0 / EGL | GPU 零拷贝视频渲染 |
 | SQLite3 | 检测库 (idge.db) + 业务库 (roll_call.db) |
@@ -111,7 +116,10 @@ $IDGE_WORKSPACE/
 ## 视频处理全流程
 
 ### 输入格式
-视频源可以是本地 `.mp4` 文件或 RTSP 摄像头流，编码格式为 **H.264 (AVC)**。文件通过 FFmpeg 的 `avformat` 打开，由 `h264_rkmpp` 硬件解码器在 RK3588 的 VPU 上解码。
+视频源可以是本地 `.mp4` 文件或 RTSP 摄像头流，通过 FFmpeg 的 `avformat` 打开，由 Rockchip MPP
+后端（VPU）硬解输出 DRM_PRIME(NV12) DMA-BUF。
+⚠️ **硬解器名目前写死优先 `h264_rkmpp`**（不按流的 `codec_id` 选路），所以 **H.264 源是唯一已验证路径**；
+4 路摄像头请统一投 H.264 基线，H.265 源要等"按 codec_id 选硬解器"改造后才能用（第八节已知问题第 7 条，P6 首项）。
 
 ### 格式转换链路
 ```
@@ -129,6 +137,15 @@ RGBA8888 DMA-BUF fd（带检测框的最终画面）
          NMS 后处理 → 检测结果队列 → 画框叠加到下一帧
              ↓
          电子围栏判定（脚点坐标映射到 widget 空间）→ 报警限流 → 抓拍落盘 + 写 idge.db
+
+带检测框的 RGBA8888 DMA-BUF fd
+    ↓  RGA rgba_to_nv12（fd → fd，零拷贝）+ DRM_PRIME 池帧
+    ↓  hevc_rkmpp 硬编码（VPU 硬件编码，CBR / GOP 1s / bframes=0）
+Annex-B H.265（或 h264_rkmpp → H.264）AVPacket —— **同一份包两路消费，不重复编码**
+    ├──→ 环形缓冲区（默认 5s，drop-front）
+    │        ↓  报警 +2s 到点后由 ClipWriter 后台线程取"前 3s + 后 2s"窗口（起点对齐 IDR）
+    │    .h265 裸流（上传/国标）+ 同名 .mp4（网页副本）→ 路径回填 alarms.video_path
+    └──→ 上传服务（P4，服务器 URL 预留接口）
 ```
 
 ### 各阶段详解
@@ -142,6 +159,9 @@ RGBA8888 DMA-BUF fd（带检测框的最终画面）
 | 画框叠加 | RGBA DMA-BUF + 检测结果 | 带框的 RGBA DMA-BUF | CPU (mmap) | `src/base/utils/draw_utils.*` |
 | 渲染 | RGBA DMA-BUF fd | 屏幕像素 | GPU (Mali) | `src/ui/widgets/EglImageRenderer.h` |
 | 围栏/报警 | 检测结果 | 报警记录 + 抓拍图 | CPU | `src/biz/geofence/`、`src/biz/alarm/` |
+| 反向色彩转换 | RGBA DMA-BUF (带框) | NV12 DMA-BUF | RGA 硬件 | `RgaConverter::rgba_to_nv12()` |
+| 硬编码 | NV12 DMA-BUF | H.265/H.264 Annex-B 包 | VPU (MPP) | `src/media/reader/video_recorder.cpp` |
+| 片段封装 | 环形缓冲窗口包 | `.h265` 裸流 + `.mp4` 副本 | CPU (仅 memcpy/remux) | `VideoRecorder::dumpAnnexB/dumpMp4`、`src/media/reader/` ClipWriter |
 
 ## 业务模块调用链
 
@@ -182,7 +202,7 @@ RGBA8888 DMA-BUF fd（带检测框的最终画面）
 | `src/ui/widgets/` | EGL/OpenGL ES 零拷贝渲染、视频控件、看板、报警列表 | [README](src/ui/widgets/README.md) |
 | `src/ui/core_helper/` | 无边框窗体、图标字体、QSS 换肤组件 | [README](src/ui/core_helper/README.md) |
 | `src/ui/core_qss/` | blacksoft 皮肤资源 | [README](src/ui/core_qss/README.md) |
-| `src/media/reader/` | FFmpeg 解码线程、摄像头预览解码、SCRFD 人脸检测 | [README](src/media/reader/README.md) |
+| `src/media/reader/` | FFmpeg 解码线程、硬编环形录像(VideoRecorder/ClipWriter)、摄像头预览解码、SCRFD 人脸检测 | [README](src/media/reader/README.md) |
 | `src/media/rga/` | RGA 硬件加速封装 | [README](src/media/rga/README.md) |
 | `src/media/model/` | 推理模型池（NPU 核心借还调度） | [README](src/media/model/README.md) |
 | `src/ai/yolo11/` | YOLO11 RKNN 推理核心、前后处理 | [README](src/ai/yolo11/README.md) |
@@ -315,6 +335,9 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
 4. `src/base/queue/priority_queue` 的 `waitAndPop` 出队不移除元素、push 不 notify（`tryPop` 已修复为取出即删除）；`src/base/queue/frame_queue` 的 `pushAndReplace` 存在错序释放隐患
 5. `src/ui/form/photo_selection_dialog.h` 为无引用遗留文件；识别结果对话框存在未调用的画框死代码
 6. 围栏报警 `bypassThrottle` 当前所有调用方均传 false——围栏报警同样受 2 秒限流窗口约束，"围栏不限流"的设计意图尚未落地
+7. **硬解器名写死优先 `h264_rkmpp`**（`ffmpeg_video_decoder.cpp` 未按 `codecpar->codec_id` 选路）：
+   HEVC 流会带着 h264 解码器打开成功但解不出帧（表现为"无画面"）。现网 4 路投 H.264 基线，
+   H.265 源接入前必须先做这条改造（已列入 P6 RTSP 加固首项）
 
 **已修复批次（2026-09-24，明细见 `plan/update_log.md`）**：DmaBufferPool fd 缺省 0→-1（close(0) 误关 stdin）、free 顺序致 DMA 泄漏、dma_alloc 失败路径 fd 泄漏、rga_converter 恒真返回值/错误路径句柄泄漏/letterbox 未填灰边、shell 命令注入（face_recognizer 改 fork+execv、roll_call 回退改 QProcess）、detections 表 ns 存值 vs ms 清理失配（含存量数据一次性迁移）、报警限流墙钟回拨致抑制数天（改 steady_clock）。注：批内曾按"get_bpp_from_format 返回位宽"结论做 /8 缓冲换算，板端实测证伪（该函数返回**字节**/像素）并已回退，详见 update_log 回归实录。
 

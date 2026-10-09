@@ -66,6 +66,26 @@ void AlarmDetailDialog::setupUi()
         statusLabel_->setStyleSheet(theme::text(theme::SUCCESS, theme::FS_BODY, true));
     }
 
+    // 报警视频片段：硬编环形缓冲区在"报警后 2 秒"才落盘，所以打开得快时可能还没有。
+    // 这里只报状态/路径，不做播放——裸流浏览器放不了，网页侧播同名的 .mp4 副本。
+    QString clipText;
+    if (alarm_.videoPath.isEmpty()) {
+        clipText = "未生成";
+    } else {
+        const QFileInfo clip(alarm_.videoPath);
+        if (!clip.exists()) {
+            clipText = "已清理";
+        } else {
+            const QFileInfo webCopy(clip.absolutePath() + QStringLiteral("/")
+                                    + clip.completeBaseName() + QStringLiteral(".mp4"));
+            clipText = QString("%1（%2 KB）%3")
+                .arg(clip.fileName())
+                .arg(clip.size() / 1024)
+                .arg(webCopy.exists() ? QStringLiteral(" · 网页副本 .mp4") : QString());
+        }
+    }
+    addRow(6, "视频:", clipText);
+
     mainLay->addLayout(infoLay);
 
     mainLay->addStretch();

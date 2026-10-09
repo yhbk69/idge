@@ -26,6 +26,7 @@
 #include <QDateTime>
 #include <QScrollBar>
 #include "fence_overlay.h"
+#include "ConfigManager.h"
 
 /* 
 ====================================================
@@ -190,6 +191,17 @@ void PlayerWidget::setExpanded(bool expanded)
 */
 void PlayerWidget::open(std::string url, int channel)
 {
+    // 报警视频录制参数一次性注入：编码器在 decodeLoop 打开流后才建，
+    // 运行期改配置不会重建编码器，所以这里不做热更新。
+    ConfigManager &cfg = ConfigManager::instance();
+    RecorderConfig recording;
+    recording.enabled = cfg.recordingEnabled();
+    recording.codec = cfg.recordingCodec();
+    recording.bufferSeconds = cfg.recordingBufferSeconds();
+    recording.bitRate = cfg.recordingBitRate();
+    recording.gopSeconds = cfg.recordingGopSeconds();
+    decoder_->setRecordingConfig(recording);
+
     decoder_->setChannel(channel);  // 设置解码器频道
     decoder_->start(QString::fromStdString(url));  // 启动解码
 }

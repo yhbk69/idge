@@ -55,8 +55,7 @@
 //#include "rkmedia/utils/mpp_decoder.h"
 //#include "rkmedia/utils/mpp_encoder.h"
 
-// MediaKit 头文件（可能用于流媒体协议支持）
-#include "mk_mediakit.h"
+#include "ConfigManager.h"
 #include <QWidget>
 #include <gelf.h>
 #include <GL/gl.h>
@@ -301,6 +300,9 @@ int main(int argc, char *argv[])
     signal(SIGTERM, signalHandler);  // kill 命令
     signal(SIGINT, signalHandler);   // Ctrl+C
 
+    // 主窗口收进内层作用域：退出事件循环后先析构窗口（连带停掉 4 路解码线程），
+    // 再进入程序末尾清理。这一段整体包在一个作用域里，不要往外挪。
+    {
     // 创建并显示主窗口
     frmMain w;
 
@@ -340,6 +342,7 @@ int main(int argc, char *argv[])
 
     // 进入 Qt 事件循环
     a.exec();
+    }   // ~frmMain / ~PlayerWidget 在这里跑：4 路解码线程随之停干净
 
     // 程序退出前清理和同步
     qInfo() << "Shutting down, cleaning up...";

@@ -89,6 +89,8 @@
 #include <QDateTime>
 #include <cerrno>
 #include <queue>
+#include <deque>
+#include <chrono>
 #include <mutex>
 #include <condition_variable>
 #include <thread>
@@ -234,7 +236,155 @@ private:
     bool stop_ = false;
 };
 
+// ============================================================
+// 报警视频片段异步写入器
+//
+// 与 SnapWriter 同一套范式（进程内唯一后台线程 + 有界队列），多一个"延迟"维度：
+//   片段要覆盖"报警前 3 秒 + 报警后 2 秒"，而后 2 秒在提交那一刻还没发生，
+//   所以任务带着 due 时刻（报警时刻 + post），到点才从环形缓冲区取窗口。
+//   解码线程只提交、不等待，绝不在这里同步 dump（否则帧率骤降）。
+//
+// 为什么丢最旧而不是丢最新：环形缓冲区只保留最近 bufferSeconds 秒，
+// 队列积压时队首任务的窗口早就被新包覆盖，dump 出来是残缺片段；
+// 丢掉它反而给后面的新任务腾出位置。
+// ============================================================
+
+// 片段窗口：D4 决策"前 3 秒 + 后 2 秒"，与 recording.buffer_seconds 之和等量
+static constexpr qint64 kClipPreMs = 3000;
+static constexpr qint64 kClipPostMs = 2000;
+
+struct ClipJob {
+    std::shared_ptr<VideoRecorder> recorder;   // 持有引用计数：解码器已停止也不会悬垂
+    QStringList alarmIds;                      // 本片段对应的一批报警（同通道同瞬间只出一个片段）
+    QString rawPath;                           // Annex-B 裸流（上传服务器用）
+    QString mp4Path;                           // 同名 MP4 副本（网页/播放器用）
+    qint64 centerMs = 0;                       // 窗口中心 = 报警时刻（本机毫秒墙钟）
+    qint64 dueMs = 0;                          // 到点才 dump：centerMs + kClipPostMs
+};
+
+class ClipWriter {
+public:
+    static ClipWriter &get()
+    {
+        static ClipWriter w;                // 首次提交时启动
+        return w;
+    }
+
+    // 提交一个延迟 dump 任务，立即返回（解码线程不等待）
+    void submit(ClipJob job)
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (static_cast<int>(q_.size()) >= kMaxPending) q_.pop_front();   // 满了丢最旧
+        q_.push_back(std::move(job));
+        cv_.notify_one();
+    }
+
+private:
+    static const int kMaxPending = 8;   // 报警限流 2s/次 × 4 路，8 段足够缓冲突发
+
+    ClipWriter() { th_ = std::thread([this] { run(); }); }
+    ~ClipWriter()
+    {
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        if (th_.joinable()) th_.join();   // 退出前把队列里剩余的片段都落盘
+    }
+
+    void run()
+    {
+        for (;;) {
+            ClipJob job;
+            {
+                std::unique_lock<std::mutex> lk(mtx_);
+                for (;;) {
+                    if (stop_ && q_.empty()) return;
+                    if (!q_.empty()) {
+                        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+                        // 队首到了 dump 时刻（或正在退出）就取走，否则睡到点
+                        if (stop_ || now >= q_.front().dueMs) break;
+                        cv_.wait_for(lk, std::chrono::milliseconds(q_.front().dueMs - now),
+                                     [this] { return stop_; });
+                        continue;
+                    }
+                    cv_.wait(lk, [this] { return stop_ || !q_.empty(); });
+                }
+                job = std::move(q_.front());
+                q_.pop_front();
+            }
+            writeClip(job);
+        }
+    }
+
+    // 真正取窗口 + 落盘 + 回填报警（只在后台线程调用）
+    static void writeClip(ClipJob &job)
+    {
+        if (!job.recorder || !job.recorder->isInitialized()) {
+            return;
+        }
+        if (!job.recorder->dumpAnnexB(job.rawPath, job.centerMs, kClipPreMs, kClipPostMs)) {
+            return;   // dumpAnnexB 内部已 qWarning，且不留残档
+        }
+        // MP4 只是网页可播的副本，失败不影响报警本身（裸流已落盘）
+        const bool mp4Ok = job.recorder->dumpMp4(job.mp4Path, job.centerMs, kClipPreMs, kClipPostMs);
+
+        // 两次 collectWindow 取到的是同一批包：本任务到点时墙钟已达
+        // center+post，之后入环的包 wall_ms 必然 > 窗口上界，不会再进窗口。
+        AlarmManager::instance().attachVideoClip(job.alarmIds, job.rawPath);
+        qInfo() << "Alarm clip:" << job.rawPath << "mp4" << (mp4Ok ? "ok" : "skipped");
+    }
+
+    std::thread th_;
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    std::deque<ClipJob> q_;
+    bool stop_ = false;
+};
+
 } // namespace
+
+// 生成本通道片段路径并提交延迟 dump。
+// 这里不返回路径：文件此刻还不存在（要等 post 秒），videoPath 由 ClipWriter
+// 在真正落盘后通过 AlarmManager::attachVideoClip() 回填，避免报警记录指向空文件。
+//
+// 目录/命名与截图完全同规则（data/alarms/yyyyMMdd/chN_类别_时分秒毫秒.*），
+// 只是扩展名换成裸流与 MP4，便于同一报警的图片/视频成对查找。
+// VideoRecorder 本身不知道通道与路径（保持与业务无关），所以在这里拼。
+static void submitAlarmClip(const std::shared_ptr<VideoRecorder> &recorder,
+                            int channel, const QString &className,
+                            const QStringList &alarmIds, qint64 centerMs)
+{
+    if (!recorder || !recorder->isInitialized() || alarmIds.isEmpty()) {
+        return;
+    }
+
+    const QString day = QDate::currentDate().toString("yyyyMMdd");
+    const QString dir = RuntimePaths::alarmsDir() + QStringLiteral("/") + day;
+    if (::mkdir(dir.toUtf8().constData(), 0755) != 0 && errno != EEXIST) {
+        return;
+    }
+
+    // 扩展名跟实际启用的编码器走：hevc_rkmpp → .h265，h264_rkmpp → .h264
+    // （退档时编码器已换，只认配置会与实际产物不符）
+    const QString ext = recorder->encoderName().startsWith(QStringLiteral("hevc"))
+                            ? QStringLiteral("h265") : QStringLiteral("h264");
+    const QString stem = QString("%1/ch%2_%3_%4")
+        .arg(dir)
+        .arg(channel + 1)
+        .arg(className)
+        .arg(QDateTime::currentDateTime().toString("HHmmss_zzz"));
+
+    ClipJob job;
+    job.recorder = recorder;
+    job.alarmIds = alarmIds;
+    job.rawPath = stem + QStringLiteral(".") + ext;
+    job.mp4Path = stem + QStringLiteral(".mp4");
+    job.centerMs = centerMs;
+    job.dueMs = centerMs + kClipPostMs;
+    ClipWriter::get().submit(std::move(job));
+}
 
 // 生成截图路径并提交给后台线程，返回保存路径
 static QString submitAlarmSnapshot(int channel, const QString &className,
@@ -589,32 +739,20 @@ int FFmpegVideoDecoder::reloadAllModels(const QStringList &modelPaths, const QSt
 }
 
 // ============================================================================
-// setVideoRecordingEnabled: 启用/禁用视频录制
+// setRecordingConfig: 注入录制参数（不在此分配资源）
 // ============================================================================
-void FFmpegVideoDecoder::setVideoRecordingEnabled(bool enabled, int bufferSeconds)
+void FFmpegVideoDecoder::setRecordingConfig(const RecorderConfig &cfg)
 {
-    if (enabled && !videoRecorder_) {
-        videoRecorder_ = new VideoRecorder(bufferSeconds, 25, this);
-        videoRecordingEnabled_ = true;
-        qInfo() << "Video recording enabled, buffer:" << bufferSeconds << "s";
-    } else if (!enabled && videoRecorder_) {
-        delete videoRecorder_;
-        videoRecorder_ = nullptr;
-        videoRecordingEnabled_ = false;
-        qInfo() << "Video recording disabled";
+    recordingCfg_ = cfg;
+    qInfo() << "Video recording config:" << (cfg.enabled ? "enabled" : "disabled")
+            << "buffer" << cfg.bufferSeconds << "s codec" << cfg.codec
+            << "bitrate" << cfg.bitRate << "gop" << cfg.gopSeconds << "s";
+    // 环形缓冲区必须装得下整个报警窗口，否则"前 3 秒"会被新包覆盖而截断
+    if (qint64(cfg.bufferSeconds) * 1000 < kClipPreMs + kClipPostMs) {
+        qWarning() << "recording.buffer_seconds" << cfg.bufferSeconds
+                   << "< clip window" << (kClipPreMs + kClipPostMs) / 1000
+                   << "s — 报警片段前向会被截断";
     }
-}
-
-// ============================================================================
-// dumpVideoToFile: 将环形缓冲区 dump 到 MP4 文件
-// ============================================================================
-bool FFmpegVideoDecoder::dumpVideoToFile(const QString &filePath)
-{
-    if (!videoRecorder_ || !videoRecorder_->isInitialized()) {
-        qWarning() << "Video recorder not initialized";
-        return false;
-    }
-    return videoRecorder_->dumpToFile(filePath);
 }
 
 // ============================================================================
@@ -773,9 +911,28 @@ void FFmpegVideoDecoder::decodeLoop()
     int vid_h = dec_ctx->height;
     qDebug() << "Decoder:" << codec->name << vid_w << "x" << vid_h;
 
-    // 初始化视频录制器（如果已启用）
-    if (videoRecordingEnabled_ && videoRecorder_) {
-        videoRecorder_->init(vid_w, vid_h);
+    // 初始化视频录制器（报警片段环形缓冲，如果已启用）
+    // 分辨率要用解码器实际输出的宽高，帧率要用流的平均帧率：
+    // 编码器的 time_base=1/fps，帧率填错会让 dump 出来的片段时长失真。
+    if (recordingCfg_.enabled) {
+        RecorderConfig rc = recordingCfg_;
+        AVRational fr = fmt_ctx->streams[vidx]->avg_frame_rate;
+        if (fr.den == 0 || fr.num == 0) {
+            fr = fmt_ctx->streams[vidx]->r_frame_rate;
+        }
+        if (fr.den != 0 && fr.num != 0) {
+            rc.fps = qBound(1, qRound(av_q2d(fr)), 120);
+        }
+        if (!videoRecorder_) {
+            // shared_ptr：ClipWriter 的延迟 dump 任务各持一份引用，
+            // 本对象析构/线程停止都不会让后台任务摸到已释放的编码器
+            videoRecorder_ = std::make_shared<VideoRecorder>(rc);
+        }
+        if (!videoRecorder_->init(vid_w, vid_h)) {
+            // 硬编不可用只关掉录制，检测/显示主流程照常
+            qWarning() << "Video recorder unavailable, recording disabled for ch" << channel_;
+            videoRecorder_.reset();
+        }
     }
 
     emit statusChanged(channel_, 1);
@@ -867,10 +1024,31 @@ void FFmpegVideoDecoder::decodeLoop()
     }
     int frame_count = 0;
 
-    QElapsedTimer timer;
-    timer.start();
-    timer.elapsed();
     TIMER t;
+
+    // ===== 帧率节拍（截止期式，限"产生"速率）=====
+    // 用流自身帧率定 target_fps；循环末尾对每个解码帧"睡到发布点 / 落后重锚"（见 4.12）。
+    // 关键：限的是解码产生速率，不只是显示——否则解码/推理/RGA 会被超量喂爆（实测卡死根因）。
+    // 落后时重锚到 now，绝不"睡到累计目标线去补追赶连发"（那正是 1↔50 的来源）。
+    int target_fps = 25;
+    {
+        AVRational pfr = fmt_ctx->streams[vidx]->avg_frame_rate;
+        if (pfr.den == 0 || pfr.num == 0) {
+            pfr = fmt_ctx->streams[vidx]->r_frame_rate;
+        }
+        if (pfr.den != 0 && pfr.num != 0) {
+            target_fps = qBound(1, qRound(av_q2d(pfr)), 120);
+        }
+    }
+    const qint64 publish_interval_us = 1000000 / target_fps;
+    QElapsedTimer pub_clock;
+    pub_clock.start();
+    qint64 next_due_us = 0;   // 下一发布点的单调微秒时刻（相对 pub_clock 起点）
+
+    // ===== 节拍目标帧率识别（每路开流打印一次，便于核对源帧率口径）=====
+    qInfo() << "decoder pacer ch" << channel_ << "target_fps=" << target_fps
+            << "(avg_fps=" << av_q2d(fmt_ctx->streams[vidx]->avg_frame_rate)
+            << " r_fps=" << av_q2d(fmt_ctx->streams[vidx]->r_frame_rate) << ")";
 
     while (running_)
     {
@@ -924,6 +1102,11 @@ void FFmpegVideoDecoder::decodeLoop()
         {
             t.tik();  // 计时开始
             frame_count++;
+
+            // 不在这里丢帧：解码帧率由循环末尾的"睡眠到点 + 落后重锚"节拍器整体限住
+            // （见 4.12）。若在此丢弃超前的解码帧，解码线程仍会全速把源抽到 ~250fps，
+            // 而推理(frame_count%3)、MPP 解码、RGA 缩放都跟着解码帧率走 → 会被超量喂爆
+            // （实测 RGA_COLORFILL 每帧失败刷屏 + 卡死）。限住"产生"才是根治。
 
             // ===== 4.4 从解码帧中提取 DMA-BUF fd =====
             //
@@ -1239,6 +1422,12 @@ void FFmpegVideoDecoder::decodeLoop()
                         //   - 解码线程只负责拷贝像素 + 提交（不阻塞）
                         //   - PNG/JPEG 编码在独立后台线程完成
                         //   - 避免编码耗时拖低帧率
+                        //
+                        // 片段机制（与截图同理，但多一层"等后 2 秒"的延迟）：
+                        //   - 一批 newAlarms 只出一个片段：同通道同瞬间的多类别报警
+                        //     共享同一段带框画面，命名取 front().className
+                        //   - videoPath 不在这里填（文件还没生成），
+                        //     由 ClipWriter 落盘后调 attachVideoClip() 回填内存 + DB
                         if (!newAlarms.isEmpty()) {
                             QString snap;
                             if (AlarmManager::instance().screenshotsEnabled()) {
@@ -1256,6 +1445,17 @@ void FFmpegVideoDecoder::decodeLoop()
                             //   2. 写入 SQLite 数据库
                             //   3. 发送 alarmGenerated 信号通知界面刷新
                             AlarmManager::instance().storeAndNotify(newAlarms);
+
+                            // 先入库再提交 dump：attachVideoClip 的 UPDATE 必须
+                            // 能命中已存在的行（队列一空就可能立刻执行）
+                            if (videoRecorder_) {
+                                QStringList alarmIds;
+                                alarmIds.reserve(newAlarms.size());
+                                for (const auto &a : newAlarms) alarmIds << a.id;
+                                submitAlarmClip(videoRecorder_, channel_,
+                                                newAlarms.front().className, alarmIds,
+                                                QDateTime::currentMSecsSinceEpoch());
+                            }
                         }
                     }
 
@@ -1276,15 +1476,17 @@ void FFmpegVideoDecoder::decodeLoop()
                     rf.height = vid_h;
                     rf.stride = dst_buf->stride();
 
-                    // 视频录制：将帧编码并存入环形缓冲区
-                    // 在报警时可以 dump 最近 N 秒的视频
-                    if (videoRecordingEnabled_ && videoRecorder_ && videoRecorder_->isInitialized()) {
-                        // 获取当前时间戳（毫秒）
-                        qint64 timestamp_ms = QDateTime::currentMSecsSinceEpoch();
-                        // RGBA 数据在 dst_buf->ptr() 中，直接读取编码
+                    // 视频录制：把"已画框的 RGBA DMA-BUF"零拷贝编码进环形缓冲区
+                    // 报警时可 dump 报警前后各若干秒的带框片段
+                    //
+                    // 传 fd 而不是 ptr：RGA 在 DMA-BUF 之间搬像素，CPU 不碰像素数据。
+                    // stride 口径：DmaFrameBuffer::stride() 是字节 pitch，
+                    // RGA 要的是像素跨度，RGBA 为 4 字节/像素 → 除以 4。
+                    if (videoRecorder_ && videoRecorder_->isInitialized()) {
                         videoRecorder_->encodeFrame(
-                            (const unsigned char*)dst_buf->ptr(),
-                            vid_w, vid_h, timestamp_ms);
+                            dst_buf->fd(), vid_w, vid_h,
+                            dst_buf->stride() / 4,
+                            QDateTime::currentMSecsSinceEpoch());
                     }
 
                     emit frameReady(rf);
@@ -1299,24 +1501,21 @@ void FFmpegVideoDecoder::decodeLoop()
             // 释放帧的引用，允许 FFmpeg 重用底层内存
             av_frame_unref(frame);
 
-            // ===== 4.12 帧率控制（30fps） =====
-            //
-            // 如果解码+处理太快，主动等待以维持 30fps
-            // 预期每帧耗时 33333 微秒（1000000/30，取整略小于 1/30s）
-            // 实际耗时 < 预期时，sleep 补齐差值
-            // 审查点：expected 随 frame_count 线性累积，若中途某帧处理超时，
-            // 后续帧不会"追帧"（sleep 条件自动失效），等价于平滑限速而非
-            // 严格节拍；QElapsedTimer::elapsed() 单位是 ms，故 *1000 换算成 us。
-            //
-            // 为什么需要帧率控制？：
-            //   - RTSP 流通常是 25-30fps
-            //   - 如果解码太快，缓冲区会堆积大量待处理帧
-            //   - 主动等待可以减少延迟和内存占用
-            qint64 expected_us = frame_count * 33333;
-            qint64 elapsed_us = timer.elapsed() * 1000;
-            if (expected_us > elapsed_us)
-            {
-                QThread::usleep(expected_us - elapsed_us);
+            // ===== 4.12 解码帧率节拍（限"产生"速率，而非仅显示）=====
+            // 每解出一帧就正常处理并发布；这里把解码节奏钉死在 target_fps：
+            //  - 领先计划(next_due>now)：睡到 next_due 再去收下一帧。这样解码/推理(frame%3)/
+            //    MPP 解码器/RGA 缩放都被限制在 target_fps，不会全速把源抽到 ~250fps 而超量喂爆
+            //    （实测：不限产生 → RGA_COLORFILL 每帧失败刷屏 + 卡死）。这就是 caichao 平滑的根本。
+            //  - 落后计划(now>next_due，慢帧/RTSP 断流)：重锚 next_due=now，绝不"攒着连发补帧"，
+            //    杜绝旧累计限速落后→→50 暴冲、再睡→→1 停顿的抖动。
+            // 分片短睡(≤4ms)并复查 running_，保证 stop() 及时返回。
+            next_due_us += publish_interval_us;
+            while (running_ && next_due_us > pub_clock.nsecsElapsed() / 1000) {
+                const qint64 rem_us = next_due_us - pub_clock.nsecsElapsed() / 1000;
+                QThread::usleep(static_cast<unsigned long>(rem_us > 4000 ? 4000 : rem_us));
+            }
+            if (next_due_us < pub_clock.nsecsElapsed() / 1000) {
+                next_due_us = pub_clock.nsecsElapsed() / 1000;   // 落后 → 重锚，丢弃欠账，不连发
             }
 
             t.tok();

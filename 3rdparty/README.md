@@ -17,7 +17,7 @@ Rockchip（rknn_model_zoo 系）交叉编译第三方预编译依赖集合，供
 | `opencv/` | **3.4.5** 静态库（`opencv-linux-aarch64/lib/libopencv_*.a`；另有 armhf/android 版） | 图像处理 | ⚠️ 实际未生效，见"注意事项"第 1 条 |
 | `jsoncpp/` | **1.9.7**（`include/json/version.h`） | 配置文件 JSON 解析 | include + `jsoncpp` 链接（libjsoncpp.so.1.9.7） |
 | `sqlite/` | **3.49.1** amalgamation（`sqlite/sqlite3.c/h`） | SQLite 源码包 | 本目录有独立 CMakeLists，但根工程未 `add_subdirectory`；主程序链接的是**系统 sqlite3** |
-| `zlmediakit/` | C API（`include/mk_*.h`）+ `aarch64/libmk_api.so` + `MediaServer` 二进制 | 流媒体协议（RTSP/FLV 等） | include + `mk_api` 链接，RPATH 收录 |
+| `zlmediakit/` | **git hash e628cba / 2023-08-14 / build 2023-08-16**（库内字符串实测）；C API 头 + `aarch64/libmk_api.so` + 独立 `MediaServer` 二进制（留作对照，不启动） | 流媒体分发（RTSP/HLS/fMP4、国标 RTP 发流） | include + `mk_api` 链接；**进程内嵌**使用，见 `3rdparty/zlmediakit/README.md`、`src/media/server/README.md` |
 | `jpeg_turbo/` | libturbojpeg.a（Linux/{aarch64,armhf,...}） | JPEG 硬加速解码 | `LIBJPEG`+`LIBJPEG_INCLUDES` 经 3rdparty/CMakeLists 传递 |
 | `libyuv/` | libyuv.a | CPU 色彩转换备选 | link_directories 收录 |
 | `openssl1.1.0/` | **1.1.0l**（2019-09-10） | TLS 头文件路径（实际链接系统 crypto/ssl） | include 路径 |
@@ -42,7 +42,7 @@ Rockchip（rknn_model_zoo 系）交叉编译第三方预编译依赖集合，供
 
 ## 依赖关系
 
-- 上游消费方：`src/yolo11`（rknn_api）、`src/rga`（im2d）、`src/reader`（avformat/avcodec rkmpp）、`src/buffer`（allocator/dma）、`src/config`（jsoncpp）、`src/RtspWorker`/流处理（mk_api）；
+- 上游消费方：`src/ai/yolo11`（rknn_api）、`src/media/rga`（im2d）、`src/media/reader`（avformat/avcodec rkmpp）、`src/base/buffer`（allocator/dma）、`src/base/config`（jsoncpp）；
 - 本目录自身不依赖工程代码，纯被依赖方；
 - 运行期还依赖板端系统库：libdrm、libEGL/libGLESv2、libasound/Qt 多媒体后端。
 
@@ -52,5 +52,8 @@ Rockchip（rknn_model_zoo 系）交叉编译第三方预编译依赖集合，供
 - 根 CMake 的 `3rdparty/librga/lib` 与 `3rdparty/stb` 两个路径**不存在**（rga 实际链接名/`${LIBRGA}`、stb 经 `STB_INCLUDES` 指向 `stb_image`），属冗余死路径，遇到 -lrga 解析失败时优先检查系统库目录。
 - 预编译库均为 aarch64（部分含 armhf/Android 多套），**不可在本机 x86 直接链接**；换 SoC 需同步核对 `3rdparty/CMakeLists.txt` 的 SOC 分支。
 - `install(PROGRAMS ${LIBRKNNRT} ...)` 会把 librknnrt.so 拷入 install/lib；部署到板子时注意板上 NPU 驱动版本与 librknnrt 配套（不匹配报 RKNN_ERR_DRIVER_*）。
-- zlmediakit/MediaServer 是独立可执行流媒体服务器，不随主程序启动，需要时手动运行。
+- zlmediakit（`3rdparty/zlmediakit/`）**当前未接入主程序**：随仓仍保留预编译 `libmk_api.so`，但内嵌实时分发
+  链路已移除，根 `CMakeLists.txt` 不再链接 `mk_api`，也不再引用其 include / rpath。日后若恢复 RTSP/HLS 分发，
+  需重新接入并处理端口与进程级单例互斥（`mk_env_init` 与独立 `MediaServer` 抢同一组端口），
+  能力与限制见 `3rdparty/zlmediakit/README.md`。
 - 第三方许可证各异（RKNN/RGA Apache-2.0、jsoncpp MIT、zmq MPL、zlmediakit MIT、libyuv BSD 等），对外发布前过一遍法务清单；`librga/README.md`、各 LICENSE 文件保留在原目录。

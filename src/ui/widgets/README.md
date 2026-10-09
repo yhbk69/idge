@@ -18,7 +18,7 @@
 | dashboard_widget.h/.cpp | DashboardWidget：统计卡片、/proc 系统监控（CPU/内存/温度）、类别排行条 |
 | alarm_list_widget.h/.cpp | AlarmListWidget：类别/围栏双 Tab 报警表，300ms 防抖刷新与筛选 |
 | video_alarm_widget.h/.cpp | VideoAlarmWidget：视频监控页右侧报警卡片列表（QScrollArea），点击跳转详情 |
-| alarm_detail_dialog.h/.cpp | AlarmDetailDialog：报警详情对话框，支持误报标记与单条确认 |
+| alarm_detail_dialog.h/.cpp | AlarmDetailDialog：报警详情对话框，支持误报标记与单条确认；"视频"行展示片段文件名/大小与网页副本是否随行 |
 
 ## 核心类与数据流
 帧流：解码线程 dup(RGBA fd) → `RenderFrame` 经 `QueuedConnection` 投递 → GLVideoWidget::onFrameReady（互斥锁保护，prev/pending 两级 fd 管理）→ paintGL 中 `importRGBA → bindToTexture` 写入后台缓冲 → 双缓冲交换 drawQuad。EGL 引用计数保证"fd 已 close、画面仍可读"的重叠窗口。fd 生命周期：每个副本恰好一次 close（帧更替或析构）。界面流：AlarmManager 信号 → 防抖定时器 → 全表重建；QTimer 2s → DashboardWidget::refreshStats。
@@ -46,5 +46,11 @@ GLuint tex = pool.acquire(fd, w, h, stride, DRM_FORMAT_ABGR8888);
 - EglFramePool 导入失败槽位仍被占用（in_use 未回滚 + dup fd 泄漏，4 槽漏完池失效）；仅支持单平面格式，勿传 NV12；无析构，GL 对象靠上下文销毁兜底。
 - GLVideoWidget 每帧创建/销毁 EGLImage（未接池，高帧率热点）；paintGL 中原生 GL 与 QPainter 混用未走 beginNativePainting 交接，改动需谨慎；widget 析构与在途信号竞态会漏收 fd——须先停解码器。
 - 每帧 `eglCreateImageKHR` 走驱动 ioctl，4 通道 25fps 下注意驱动开销与 fd 表压力。
+- **报警详情对话框的"视频"行是尽力而为的快照**：片段在报警后 2 秒才由 ClipWriter 落盘，
+  `videoPath` 由 `AlarmManager::attachVideoClip` 事后回填且**不发信号**，对话框只在打开时
+  读一次 `alarms()`。所以刚报警立刻点开可能显示"未生成"；片段文件已被按天/容量清理时显示
+  "已清理"。要看到路径请等 2 秒后再打开。
+- **录制参数只在 `PlayerWidget::open()` 注入一次**：编码器在解码线程打开流后按真实宽高创建，
+  运行期改 `config.json` 的 recording 段不会重建编码器，必须换流/重启才生效（界面不提供入口）。
 - EglImageRenderer：无 include guard、着色器 uniform 未赋值（tex_height/img_height 默认 0 → 除零 NaN），且 BT.601 假设与 RGBA 主路径不符——仅存档参考。
 - 业务界面：报警时间由 `AlarmRecord::alarmTime`（ISO 字符串）解析展示；`timestamp` 字段单位口径见 yolo11 README 警示；通道筛选硬编码 4 路（filterChannel_ 0~3）；Dashboard CPU 差分基线为函数级 static 变量（多实例互相污染）。

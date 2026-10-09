@@ -94,24 +94,34 @@ db.replaceEquipmentData(tid, /*phase=0登记*/0, photos, dets);
 |------|------|
 | `database_manager.h/.cpp` | 单例：initialize(dbPath)/close/vacuum/backup/cleanOld*(days)，Qt SQL 连接管理 |
 | `detection_dao.h/.cpp` | 检测记录表 DAO：插入/批量插入/按时间·类别查询/统计 |
-| `alarm_dao.h/.cpp` | 报警记录表 DAO：插入/查询/确认状态更新/误报标记 |
+| `alarm_dao.h/.cpp` | 报警记录表 DAO：插入/查询/确认状态更新/误报标记/`updateVideoPath` 片段回填 |
 
 ### 核心类与数据流
 
 ```
 AlarmManager::storeAndNotify → AlarmDAO::insertAlarms → idge.db(alarms 表)
+ClipWriter(报警+2s) → AlarmManager::attachVideoClip → AlarmDAO::updateVideoPath → alarms.video_path
 FFmpegVideoDecoder(检测明细) → DetectionDAO → idge.db(detections 表)
 报警查询页/看板 ← DetectionDAO/AlarmDAO 查询 ← DatabaseManager::instance()
 ```
+
+`alarms.video_path` 在 insert 时必为空（片段要等"报警后 2 秒"才生成），只能事后 UPDATE。
+这条 UPDATE 路径由 P2 首次接通，`updateVideoPath` 此前无任何调用方。
 
 ### 使用方法
 
 ```cpp
 DatabaseManager::instance().initialize("idge.db");   // 启动时一次
 AlarmDAO dao;
-dao.insertAlarms(alarms);                            // 批量写入
+dao.insertAlarms(alarms);                            // 批量写入（video_path 先留空）
+dao.updateVideoPath(id, rawClipPath);                // 片段落盘后按 id 回填
 auto rows = dao.query(...);                          // 条件查询
 DatabaseManager::instance().cleanOldDetections(30);  // 保留期维护
+```
+
+板端核对片段闭环（无需 GUI）：
+```sh
+sqlite3 data/idge.db "select count(*) from alarms where video_path<>''"
 ```
 
 ### 依赖关系

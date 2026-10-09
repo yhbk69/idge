@@ -75,24 +75,23 @@ public:
     int reloadAllModels(const QStringList &modelPaths, const QStringList &labelPaths);
 
     /**
-     * @brief 获取视频录制器
-     * @return: VideoRecorder 指针
+     * @brief 报警片段录制器（硬件编码环形缓冲区）
+     * @return: 未启用录制时为空 shared_ptr
+     *
+     * 返回引用计数副本而非裸指针：报警片段是"报警后若干秒"才执行的延迟任务，
+     * 任务持有自己的 shared_ptr，解码线程停止/本对象销毁后编码器依然存活。
      */
-    VideoRecorder* videoRecorder() const { return videoRecorder_; }
+    std::shared_ptr<VideoRecorder> videoRecorder() const { return videoRecorder_; }
 
     /**
-     * @brief 启用/禁用视频录制
-     * @param enabled: true=启用，false=禁用
-     * @param bufferSeconds: 环形缓冲区时长（秒），仅启用时有效
+     * @brief 配置报警视频录制（须在 start() 前调用）
+     * @param cfg: 录制参数（来自 config.json 的 recording 段）
+     *
+     * 这里只保存参数：录制器与硬件编码器都要等 decodeLoop 打开流、
+     * 拿到真实分辨率和帧率之后才能建立，所以构造动作在 decodeLoop 里。
+     * cfg.enabled=false 时整条录制链路不分配任何硬件资源。
      */
-    void setVideoRecordingEnabled(bool enabled, int bufferSeconds = 30);
-
-    /**
-     * @brief 将环形缓冲区 dump 到文件
-     * @param filePath: 输出 MP4 文件路径
-     * @return: true=成功
-     */
-    bool dumpVideoToFile(const QString &filePath);
+    void setRecordingConfig(const RecorderConfig &cfg);
 
 signals:
     void frameReady(RenderFrame frame);
@@ -129,8 +128,10 @@ private:
     std::vector<std::vector<std::string>> slotClassNames_;
 
     // ===== 视频录制 =====
-    VideoRecorder* videoRecorder_ = nullptr;       // 视频录制器（环形缓冲区）
-    bool videoRecordingEnabled_ = false;           // 是否启用视频录制
+    // 硬件编码环形缓冲区录制器：用 shared_ptr 持有，ClipWriter 的延迟 dump
+    // 任务各持一份引用，因此本对象析构不会让后台线程摸到已释放的编码器。
+    std::shared_ptr<VideoRecorder> videoRecorder_;
+    RecorderConfig recordingCfg_;                  // 录制参数（start() 前注入）
 };
 
 #endif

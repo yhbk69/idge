@@ -6,7 +6,7 @@
 
 视频/摄像头解码与检测调度层。包含三条链路：
 
-1. **主流水线**（`FFmpegVideoDecoder`）：RTSP/文件 → FFmpeg `h264_rkmpp` 硬解出 NV12 DMA-BUF → RGA 转 RGBA 画框 + RGA 缩放 640x640 送 PpeTask（RKNN NPU YOLO11）推理 → 结果回填后 EGL 渲染上屏；
+1. **主流水线**（`FFmpegVideoDecoder`）：RTSP/文件 → FFmpeg `h264_rkmpp` 硬解出 NV12 DMA-BUF → RGA 转 RGBA 画框 + RGA 缩放 640x640 送 PpeTask（RKNN NPU YOLO11）推理 → 结果回填后 EGL 渲染上屏；画完框的 RGBA 帧还有一路硬件消费者——`VideoRecorder` 硬编环形缓冲（报警片段）；
 2. **摄像头预览**（`CameraPreviewDecoder`）：v4l2 设备（MJPEG）→ `mjpeg_rkmpp` 硬解（失败回退 `avcodec` 软解 + sws 转 RGB）→ 同步跑 SCRFD 人脸检测 + 异步跑 PpeTask → CPU 画框 → 帧信号上屏；同时缓存 JPEG 原始码流供抓拍**零重编码**直存；
 3. **人脸检测器**（`ScrfdFaceDetector`）：RKNN 版 SCRFD，anchor-free 解码，输出框 + 5 关键点。
 
@@ -14,7 +14,8 @@
 
 | 文件 | 职责 |
 |---|---|
-| `ffmpeg_video_decoder.h/.cpp` | 主流水线解码总控：硬解、零拷贝 DMA-BUF 借还、级联多模型任务分发、结果合成画框、帧限速（33333µs≈1/30s） |
+| `ffmpeg_video_decoder.h/.cpp` | 主流水线解码总控：硬解、零拷贝 DMA-BUF 借还、级联多模型任务分发、结果合成画框、帧限速（截止期节拍：按流 avg_frame_rate 定间隔，落后重锚丢弃连发）、报警片段录制挂钩 |
+| `video_recorder.h/.cpp` | `VideoRecorder`：画框后的 RGBA → RGA → rkmpp 硬编（hevc/h264）→ Annex-B 环形缓冲区；报警时 dump 裸流/MP4 片段 |
 | `camera_preview_decoder.h/.cpp` | 摄像头预览解码：v4l2/MJPEG、JPEG 魔数缓存抓拍、SCRFD 同步检测、PpeTask 异步检测、CPU 画框 |
 | `scrfd_face_detector.h/.cpp` | SCRFD 人脸检测器（RKNN NPU）：letterbox 预处理、9 输出解码、类别内 NMS |
 
@@ -43,6 +44,40 @@ ScrfdFaceDetector（final，禁拷贝）
   RGBA → letterbox(左上对齐黑边)→ (px-127.5)/128 float NHWC 640x640
       → rknn_run → 3 层级 [score/bbox/kps]×8/16/32 解码 → 阈值过滤 → NMS
 ```
+
+### 报警片段录制（VideoRecorder，全程不过 CPU）
+
+```
+config.json recording 段 → PlayerWidget::open() 组装 RecorderConfig
+  → FFmpegVideoDecoder::setRecordingConfig()（start 前注入，只存参数不分配资源）
+decodeLoop 打开流后：用 dec_ctx 的实际宽高 + 流的 avg_frame_rate(退化取 r_frame_rate)
+  → std::make_shared<VideoRecorder>(rc) → init(w,h)：
+      rkmpp hwdevice + DRM_PRIME/NV12 帧池 + hevc/h264_rkmpp
+      + avcodec_parameters 快照（供后台 dump remux 用）
+  （init 失败 → reset() + qWarning，只关录制，主流程不受影响）
+每帧画完框（RGBA DMA-BUF 已含检测框）：
+  videoRecorder_->encodeFrame(dst_buf->fd(), w, h, dst_buf->stride()/4 /*像素口径*/, 墙钟ms)
+    → RgaConverter::rgba_to_nv12(src fd → 池帧 NV12 fd)
+    → avcodec_send_frame(DRM_PRIME 池帧) → collectPackets() 收 Annex-B 包入环
+    → 环满 drop-front（容量 = bufferSeconds × fps）
+报警出片段（ClipWriter 后台线程，与 SnapWriter 同一套范式）：
+  报警分支 storeAndNotify() 之后 submitAlarmClip(videoRecorder_, ch, cls, ids, 墙钟ms)
+    → 路径 data/alarms/yyyyMMdd/ch{N}_{类别}_{HHmmss_zzz}.{h265|h264}（+ 同名 .mp4）
+      扩展名跟 recorder->encoderName() 走（退档成 h264_rkmpp 时不会误标 .h265）
+    → 任务带 due = 报警时刻 + kClipPostMs(2s)，到点才取窗口：
+      "前 3 秒 + 后 2 秒"里的后 2 秒在报警那一刻还没发生
+    → dumpAnnexB(上传用裸流) + dumpMp4(网页副本，同批包只加封装不重编)
+    → AlarmManager::attachVideoClip(ids, 裸流路径) 回填内存 + AlarmDAO::updateVideoPath
+  队列上限 8，积压时丢最旧（队首窗口的帧早被环覆盖，留着也是残缺）
+```
+
+`shared_ptr` 的所有权约定：片段是"报警后 2 秒"才做的延迟任务，ClipJob 自带一份
+`shared_ptr<VideoRecorder>`，所以解码线程停止、`FFmpegVideoDecoder` 析构都不会让
+后台 dump 摸到已释放的编码器。`VideoRecorder` 因此不再是 QObject（无 parent 语义）。
+
+- 起点自动对齐到窗口内第一个关键帧，故实际时长可能短于 `pre+post`；GOP 默认 1s，误差 ≤1s。
+- 每个 IDR 前编码器已内嵌 VPS/SPS/PPS，裸流窗口自足可解码，dump 侧不需要补参数集。
+- 池帧借不到时先排空编码器再重试一次，仍失败就丢该帧并计入 `droppedFrameCount()`，绝不阻塞解码线程。
 
 ## 使用方法
 
@@ -75,6 +110,13 @@ det.detectRgba(rgbaPixels, width, height, stride /*>=width*4*/,
 
 ## 注意事项
 
+- **录制只在硬编可用时开启**：`init()` 不回落 CPU 软编——4 路 1080p 的 x264 会把 CPU 吃满、
+  直接拖垮检测与显示，"宁可不录也不能为录制牺牲主流程"。因此 `droppedFrameCount()` 持续增长
+  或日志出现 `recording disabled` 时，应先看 VPU/RGA 负载而不是改码率。
+- **RGBA stride 必须换算成像素再传**：`DmaFrameBuffer::stride()` 是字节 pitch，而 RGA 的
+  `wstride/hstride` 单位是像素/行（详见 `src/media/rga/README.md`），RGBA 要 `/4`。
+  传错时内核会报 "required ... byte but only got ..."，`VideoRecorder::encodeFrame()`
+  入口另有 `wstride` 合理性检查（`<w` 或 `>2w` 直接判为误传并丢帧）。
 - **模型输入约定**：PpeTask 收到的是 RGA letterbox 后的 640x640 RGB888 DMA-BUF，坐标还原靠 `letterbox_t{x_pad,y_pad,scale}`；SCRFD 是左上对齐黑边填充，逆变换只除 scale。
 - **fd 所有权**：`RenderFrame` 的 fd 为 `dup()` 产物，接收方必须 `close()`；AVFrame DRM fd 归 ffmpeg，禁止关闭；`pHWDeviceCtx` 存在 1 个 buffer 引用泄漏（已登记）。
 - **线程约束**：ScrfdFaceDetector 的 `rknn_context` 非线程安全，仅在解码线程内使用；`stop()` 后 `tasks_` 故意不 delete（detach 线程可能仍在回调，防 UAF）；`dmaBufferPool_` 借用遵循"最后一个引用释放自动归还"，新增提前 return 必须保证归还。

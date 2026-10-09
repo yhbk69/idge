@@ -254,6 +254,90 @@ public:
     }
 
     // ============================================================================
+    // rgba_to_nv12 - RGBA → NV12 色彩转换（零拷贝，硬编前处理）
+    // ============================================================================
+    // 用途：显示侧已把检测框画在 RGBA DMA-BUF 上，编码器（h264/hevc_rkmpp）
+    //   要 NV12；用 RGA 做 RGBA→NV12 可让像素全程不过 CPU（替代 sws_scale）。
+    //
+    // 参数（⚠ 单位是"像素/行"，不是字节——见下方实测结论）：
+    //   - src_wstride_px: RGBA 行跨度（像素）。32bpp 缓冲 = 字节pitch / 4，
+    //     DmaFrameBuffer::stride() 返回的是字节 pitch，必须除以 4 再传入。
+    //   - dst_wstride_px/dst_hstride_lines: NV12 Y 平面行跨度（像素）与垂直
+    //     跨度（行数）。NV12 的 Y 平面是 1 字节/像素，所以 AVDRM 的
+    //     planes[0].pitch（字节）在数值上就等于像素跨度，可直接传；
+    //     vstride 用 planes[1].offset - planes[0].offset 再除 pitch 反推，
+    //     不要用 height（MPP 会把 UV 平面按对齐向上取整）。
+    //
+    // 【实测（2026-09-29，板端 /tmp/rga_probe）】RGA 内核按
+    //   required_bytes = wstride * hstride * bpp/8 计算并 map dma_buf，
+    //   因此 wstride 一律按像素解释。误传字节 pitch 时 dmesg 报
+    //   "Only get buffer 921600 byte ... but current image required 3686400
+    //   byte / memory param: w = 2560"（2560 即 640px×4），用户态只会看到
+    //   笼统的 "Failed to call RockChipRga interface"。
+    //   同类口径的本类轻量 fd 直填函数（nv12_to_rgba / nv12_to_xrgb /
+    //   nv12_to_rgba_async / resize）当前无调用方；若将来启用，注意它们
+    //   把调用方给的 stride 原样塞进 wstride，同样要求像素口径。
+    //
+    // 色彩范围：RGB full(0-255) → YUV BT.709 limited(16-235)，与本类反方向
+    //   转换（convertNV12ToRGBAbyRGA）保持同一约定，避免来回转换后色阶漂移。
+    //
+    // 【为什么走 importbuffer_fd + releasebuffer_handle，而不是直填 fd】
+    //   板端实测（2026-09-29，4 路 720p 常驻录制 12s）：直填 fd 时内核日志刷出
+    //   "rga_mm: Destroy handle[...] when the user exits" 512 条，而同场景关闭
+    //   录制只有 16 条——每个 fd 型任务都会在驱动里注册一个 buffer，不显式
+    //   release 就要等进程退出由内核兜底回收，等于把常驻编码的整条链路都泄漏
+    //   在驱动里。import 拿到 handle、用完 release 与 convertNV12ToRGBAbyRGA
+    //   的既有口径一致，且 handle 让驱动缓存 fd→物理地址表，省掉重复 pin/unpin。
+    // ============================================================================
+    static bool rgba_to_nv12(int src_fd, int src_w, int src_h, int src_wstride_px,
+                             int dst_fd, int dst_w, int dst_h,
+                             int dst_wstride_px, int dst_hstride_lines)
+    {
+        // 像素口径自检：字节 pitch 误传进来时 wstride 会是宽度的 4 倍，
+        // 这里直接拦下，避免只留下一条无法定位的内核 map 失败日志。
+        if (src_wstride_px < src_w || dst_wstride_px < dst_w ||
+            dst_hstride_lines < dst_h) {
+            printf("[RGA] rgba_to_nv12 bad stride(px): src=%d/%d dst=%d/%d\n",
+                   src_wstride_px, src_w, dst_wstride_px, dst_hstride_lines);
+            return false;
+        }
+
+        // 导入尺寸按各格式的实际字节数算：RGBA 4 字节/像素，NV12 1.5 字节/像素
+        // （wstride 是像素、hstride 是行，故 NV12 用 *3/2 而非 bpp 查表）。
+        int src_handle = importbuffer_fd(src_fd, src_wstride_px * src_h * 4);
+        int dst_handle = importbuffer_fd(dst_fd, dst_wstride_px * dst_hstride_lines * 3 / 2);
+        if (src_handle == 0 || dst_handle == 0) {
+            printf("[RGA] rgba_to_nv12 importbuffer failed: src=%d dst=%d\n",
+                   src_handle, dst_handle);
+            if (src_handle)
+                releasebuffer_handle(src_handle);
+            if (dst_handle)
+                releasebuffer_handle(dst_handle);
+            return false;
+        }
+
+        rga_buffer_t src = wrapbuffer_handle(src_handle, src_w, src_h,
+                                             RK_FORMAT_RGBA_8888, src_wstride_px, src_h);
+        rga_buffer_t dst = wrapbuffer_handle(dst_handle, dst_w, dst_h,
+                                             RK_FORMAT_YCbCr_420_SP,  // NV12
+                                             dst_wstride_px, dst_hstride_lines);
+
+        imsetColorSpace(&src, IM_RGB_FULL);
+        imsetColorSpace(&dst, IM_YUV_BT709_LIMIT_RANGE);
+
+        IM_STATUS status = imcvtcolor(src, dst, src.format, dst.format, IM_SYNC);
+
+        releasebuffer_handle(src_handle);
+        releasebuffer_handle(dst_handle);
+
+        if (status != IM_STATUS_SUCCESS) {
+            printf("[RGA] rgba_to_nv12 failed: %s\n", imStrError(status));
+            return false;
+        }
+        return true;
+    }
+
+    // ============================================================================
     // nv12_to_xrgb - NV12 → XRGB 色彩转换
     // ============================================================================
     // XRGB = 32 位，最高字节未使用（X = padding）
@@ -475,10 +559,13 @@ public:
             int offset_x = (dst_w - new_w) / 2;
             int offset_y = (dst_h - new_h) / 2;
 
-            // 先填充灰色背景 (114,114,114)：不填充则 letterbox 黑边位置
-            // 残留目标缓冲的上一帧像素，作为脏数据进入模型输入
-            im_rect fill_rect = {0, 0, dst_w, dst_h};
-            imfill(dst_img, fill_rect, 0x727272);
+            // 【不可用 imfill】RGA 的 COLORFILL 对 importbuffer_fd 导入的
+            // RGB888 handle 缓冲返回 EINVAL（无效的参数），每帧刷屏
+            // "RgaCollorFill fail"。参照 caichao 去掉填充：improcess 会把
+            // 等比缩放后的画面写进 dst_rect，letterbox 边残留的池内上一帧
+            // 像素是模型输入的轻微噪声，远好过每帧失败 ioctl+刷日志。
+            //im_rect fill_rect = {0, 0, dst_w, dst_h};
+            //imfill(dst_img, fill_rect, 0x727272);  // 灰色
 
             im_rect src_rect = {0, 0, src_w, src_h};
             im_rect dst_rect = {offset_x, offset_y, new_w, new_h};
