@@ -203,6 +203,11 @@ public:
         }
 
         // Set output tensor memory
+        // 边界检查：output_mems 数组固定大小为 9，超出会越界
+        if (io_num.n_output > 9) {
+            printf("init_yolo11_model: output count %u exceeds max 9\n", io_num.n_output);
+            return -1;
+        }
         for (uint32_t i = 0; i < io_num.n_output; ++i)
         {
             app_ctx->output_mems[i] = rknn_create_mem(ctx, output_native_attrs[i].size_with_stride);
@@ -217,7 +222,7 @@ public:
         // Set to context
         app_ctx->rknn_ctx = ctx;
 
-        // TODO
+        // 检测是否为量化模型（INT8 量化可加速推理）
         if (output_native_attrs[0].qnt_type == RKNN_TENSOR_QNT_AFFINE_ASYMMETRIC && output_native_attrs[0].type == RKNN_TENSOR_INT8)
         {
             app_ctx->is_quant = true;
@@ -962,23 +967,6 @@ public:
         return 0;
     }
 
-
-    // char *coco_cls_to_name(int cls_id)
-    // {
-
-    //     if (cls_id >= classNames_.size())
-    //     {
-    //         return "null";
-    //     }
-
-    //     return classNames_[cls_id].c_str();
-        
-    // }
-
-    void deinit_post_process()
-    {
-        
-    }
     /**
      * @brief 获取模型期望的输入尺寸
      *
@@ -1149,38 +1137,6 @@ public:
         }
         timer.tok();
         //timer.print_time("rknn_outputs_get");
-        // for (uint32_t i = 0; i < app_ctx->io_num.n_output; i++)
-        // {
-        //     int channel = app_ctx->output_attrs[i].dims[1];
-        //     int h = app_ctx->output_attrs[i].n_dims > 2 ? app_ctx->output_attrs[i].dims[2] : 1;
-        //     int w = app_ctx->output_attrs[i].n_dims > 3 ? app_ctx->output_attrs[i].dims[3] : 1;
-        //     int hw = h * w;
-        //     int zp = app_ctx->output_native_attrs[i].zp;
-        //     float scale = app_ctx->output_native_attrs[i].scale;
-        //     if (app_ctx->is_quant)
-        //     {
-        //         outputs[i].size = app_ctx->output_native_attrs[i].n_elems * sizeof(int8_t);
-        //         outputs[i].buf = (int8_t *)malloc(outputs[i].size);
-        //         if (app_ctx->output_native_attrs[i].fmt == RKNN_TENSOR_NC1HWC2)
-        //         {
-        //             timer.tik();
-        //             NC1HWC2_i8_to_NCHW_i8((int8_t *)app_ctx->output_mems[i]->virt_addr, (int8_t *)outputs[i].buf,
-        //                                   (int *)app_ctx->output_native_attrs[i].dims, channel, h, w, zp, scale);
-        //             timer.tok();
-        //             timer.print_time("NC1HWC2 to NCHW");
-        //         }
-        //         else
-        //         {
-        //             memcpy(outputs[i].buf, app_ctx->output_mems[i]->virt_addr, outputs[i].size);
-        //         }
-        //     }
-        //     else
-        //     {
-        //         printf("Currently zero copy does not support fp16!\n");
-        //         goto out;
-        //     }
-        // }
-        
         // Post Process
         timer.tik();
         post_process(app_ctx, outputs, &letter_box, box_conf_threshold, nms_threshold, od_results);

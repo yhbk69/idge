@@ -680,6 +680,43 @@ void FFmpegVideoDecoder::stop()
 }
 
 // ============================================================================
+// signalStop: 仅发送停止信号，不等待线程退出
+// ============================================================================
+// 用于多路解码器并行停止：先对所有解码器调用 signalStop()，
+// 再统一调用 waitForStop()，避免串行等待导致关闭时间叠加。
+void FFmpegVideoDecoder::signalStop()
+{
+    running_ = false;
+    for (PpeTask *task : tasks_) {
+        task->requestStop();
+    }
+    if (thread_) {
+        thread_->quit();
+    }
+}
+
+// ============================================================================
+// waitForStop: 等待解码线程和推理线程退出
+// ============================================================================
+// 前提：已调用 signalStop() 或 stop()。
+void FFmpegVideoDecoder::waitForStop()
+{
+    if (thread_)
+    {
+        if (!thread_->wait(3000)) {
+            qWarning() << "Decoder thread still alive after 3s, waiting cooperative exit";
+            if (!thread_->wait(10000)) {
+                qCritical() << "Decoder thread did not exit in 13s; abandoning it";
+            }
+        }
+        thread_ = nullptr;
+    }
+    for (PpeTask *task : tasks_) {
+        task->stopBestEffort(1500);
+    }
+}
+
+// ============================================================================
 // reloadAllModels: 热更新所有模型
 // ============================================================================
 // 在不停止解码的情况下替换所有推理模型。
@@ -837,12 +874,21 @@ void FFmpegVideoDecoder::decodeLoop()
     //   - "hevc_rkmpp"  → H.265/HEVC 硬件解码（Rockchip MPP 后端）
     //   - "h264" / "hevc" → FFmpeg 内置软解码（CPU，慢）
     //
-    // 搜索顺序：优先用硬件解码，找不到就退回到软解
-    const AVCodec *codec = avcodec_find_decoder_by_name("h264_rkmpp");
-    if (!codec)
+    // 根据流的 codec_id 选择合适的硬件解码器，找不到则退回软解
+    enum AVCodecID codec_id = fmt_ctx->streams[vidx]->codecpar->codec_id;
+    const AVCodec *codec = nullptr;
+
+    // 按 codec_id 选择对应的 rkmpp 硬件解码器
+    if (codec_id == AV_CODEC_ID_H264) {
+        codec = avcodec_find_decoder_by_name("h264_rkmpp");
+    } else if (codec_id == AV_CODEC_ID_HEVC) {
         codec = avcodec_find_decoder_by_name("hevc_rkmpp");
-    if (!codec)
-        codec = avcodec_find_decoder(fmt_ctx->streams[vidx]->codecpar->codec_id);  // 软解兜底
+    }
+
+    // 硬件解码器找不到，退回通用软解码
+    if (!codec) {
+        codec = avcodec_find_decoder(codec_id);
+    }
     if (!codec)
     {
         emit error("No decoder");
@@ -891,6 +937,8 @@ void FFmpegVideoDecoder::decodeLoop()
     // 将硬件设备上下文绑定到解码器上下文
     // 之后 avcodec_open2() 会使用这个硬件设备进行解码
     dec_ctx->hw_device_ctx = av_buffer_ref(pHWDeviceCtx);
+    // 释放本地引用（dec_ctx->hw_device_ctx 持有自己的引用，avcodec_free_context 会释放）
+    av_buffer_unref(&pHWDeviceCtx);
 
     // thread_count=1: 硬件解码器本身是单线程的，多线程反而会增加开销
     dec_ctx->thread_count = 1;
@@ -1387,9 +1435,9 @@ void FFmpegVideoDecoder::decodeLoop()
                                 QString("  [通道%1] 过滤结果: %2/%3 个目标在围栏内")
                                     .arg(channel_ + 1).arg(filteredOd.count).arg(od.count));
 
-                            // 使用正常限流（2秒内同通道同类别只报1次），避免报警洪水
-                            // bypassThrottle=false：围栏报警也受2秒限流
-                            newAlarms = AlarmManager::instance().ingest(channel_, filteredOd, false);
+                            // 围栏报警绕过限流：每次检测到围栏内目标立即报警
+                            // bypassThrottle=true：围栏报警不受2秒限流窗口约束
+                            newAlarms = AlarmManager::instance().ingest(channel_, filteredOd, true);
                             for (auto &a : newAlarms) a.isFenceAlarm = true;
 
                             // 报警结果：输出围栏报警触发信息
@@ -1539,10 +1587,8 @@ void FFmpegVideoDecoder::decodeLoop()
     // 审查点（释放配对核查）：
     //   - frame/pkt：与 av_frame_alloc/av_packet_alloc 一一对应，
     //     循环内所有 continue/break 路径都保持 unref 语义，无泄漏。
-    //   - dec_ctx 引用了 pHWDeviceCtx 的 buffer(ref)，free_context 时释放；
-    //     但本地这份 av_buffer_ref 前的"创建引用"未再 av_buffer_unref，
-    //     每次开流泄漏 1 个 hwdevice buffer 引用（量小、单流一次性，
-    //     如要求严格可对等补 unref——注释登记，不改代码）。
+    //   - dec_ctx->hw_device_ctx：av_buffer_ref(pHWDeviceCtx) 创建，
+    //     avcodec_free_context 自动释放；本地 pHWDeviceCtx 已 av_buffer_unref。
     //   - dst_bufs[2] 与 new 配对 delete；rgba_bufs 从未 alloc 无需释放。
     for (int i = 0; i < 2; i++)
     {

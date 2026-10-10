@@ -103,37 +103,25 @@ public:
     //       适用于实时视频场景，确保始终保留最新的帧数据。
     // @param temp 待入队的帧数据
     // @return 成功返回 true，已关闭返回 false
-    //
-    // ⚠⚠【实现与设计意图不符（上轮代码审查确认，仅警示不改代码）】
-    //   1) std::queue 是 FIFO：front() 才是最旧帧，back() 是最新帧。
-    //      此处取 queue_.back() 释放的是"最新帧"的 dmaBuffer，
-    //      与注释宣称的"释放最旧帧"相反，且该最新帧随后才被消费者
-    //      弹出时使用其已被归还的 dmaBuffer → 悬垂指针/双重归还风险。
-    //   2) 只 release 不 pop：队列尺寸会从 max_size 增长到 max_size+1，
-    //      下次进入时 size()==max_size 条件不再成立（等值比较），
-    //      队列可继续无界增长，"有界"语义失效。
-    //   3) 被 release 的帧仍留在队列中，其 dmaBuffer 已归还池内、
-    //      可能被其他线程 acquire 改写 —— 消费者弹出后读到撕裂/脏数据。
-    //   正确写法应为 pop front 后再 push 并归还 front 的缓冲区
-    //   （参考 BlockingQueue::push_latest 的实现）。
     // ========================================================================
     bool pushAndReplace(const image_buffer_t &temp)
     {
-        std::unique_lock<std::mutex> lock(mtx_);   // 获取互斥锁
-        
-        if (shutdown_)                              // 已关闭则放弃push
+        std::unique_lock<std::mutex> lock(mtx_);
+
+        if (shutdown_)
             return false;
-        // 如果队列已满，释放最旧帧（队尾）的 DMA 缓冲区
-        if (queue_.size() == max_size)
+
+        if (queue_.size() >= static_cast<size_t>(max_size) && !queue_.empty())
         {
-            image_buffer_t last = queue_.back();    // 取出最旧帧
-            if (last.dmaBuffer)
+            image_buffer_t oldest = queue_.front();
+            queue_.pop();
+            if (oldest.dmaBuffer && dmaBufferPool)
             {
-                dmaBufferPool->release(last.dmaBuffer);  // 归还 DMA 缓冲区到缓冲池
+                dmaBufferPool->release(oldest.dmaBuffer);
             }
         }
-        queue_.emplace(temp);                       // 拷贝构造元素到队列末尾
-        cond_not_empty_.notify_one();               // 唤醒等待非空的线程
+        queue_.emplace(temp);
+        cond_not_empty_.notify_one();
         return true;
     }
 

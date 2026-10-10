@@ -32,6 +32,7 @@
 #include <QStringList>
 #include <QSet>
 #include <atomic>
+#include <deque>
 #include "common.hpp"
 #include "runtime_paths.h"
 
@@ -109,8 +110,7 @@ public:
     //   该"单位隐患"系文档误差，量纲本就一致）。现改用 steady_clock
     //   单调纳秒参与窗口比较，lastAlarmTime_ 存 steady 纳秒，
     //   与本常量量纲一致且不受墙钟跳变影响。
-    // ⚠ bypassThrottle 形参当前所有调用方均传 false，围栏报警实际
-    //   同样受本窗口限流（"围栏不限流"的说法与实现不符）。
+    // bypassThrottle=true 时跳过此窗口检查（围栏报警使用）。
     static const long kAlarmThrottleNs = 2000LL * 1000000LL;
 
     // 设置类别名称列表（用于将 cls_id 转换为类别名称）
@@ -268,7 +268,7 @@ private:
     // 私有构造函数（单例模式）
     explicit AlarmManager(QObject *parent = nullptr);
 
-    QVector<AlarmRecord> alarms_;              // 报警记录列表
+    std::deque<AlarmRecord> alarms_;           // 报警记录列表（deque: O(1) pop_front）
     mutable QMutex mutex_;                     // 互斥锁（保护并发访问）
     int totalDetections_ = 0;                  // 总检测次数
     QMap<QString, int> classCount_;            // 各类别检测次数

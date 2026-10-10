@@ -47,13 +47,16 @@ public:
     */
     void open(std::string url, int channel = 0);
 
-    /* 
+    /*
     ====================================================
     作用：停止解码器
     说明：安全停止视频解码，释放相关资源
     ====================================================
     */
     void stopDecoder();
+    // 两阶段停止：先 signalStop 通知退出（不阻塞），再 waitForStop 等待
+    void signalStop() { if (decoder_) decoder_->signalStop(); }
+    void waitForStop() { if (decoder_) decoder_->waitForStop(); }
 
     /* 
     ====================================================

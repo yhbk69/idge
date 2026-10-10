@@ -40,11 +40,7 @@ extern "C" {
 #include <drm_fourcc.h>
 
 // 全局互斥锁，保护 DRM 操作的线程安全
-// ⚠ 线程安全陷阱：头文件内的 static 变量是"每个包含它的编译单元(TU)
-//   各有一份"的内部链接对象——不同 .cpp 里的 dma_mutex 根本不是同一把锁，
-//   跨 TU 的 DRM 分配/释放实际上并未互斥。真正全局唯一需要 extern 声明
-//   + 单一定义。当前仅单 TU 使用时侥幸无害。
-static std::mutex dma_mutex;
+extern std::mutex dma_mutex;
 
 // ============================================================================
 // DmaFrameBuffer 类 —— DMA 帧缓冲区
@@ -70,11 +66,7 @@ private:
     uint32_t m_handle = 0;     // DRM 缓冲区句柄
 
 public:
-    // 默认构造函数
-    // ⚠ = default 不会初始化 m_ptr/m_size/m_frame/m_width/m_height/
-    //   m_format/m_handle 等无默认成员初始值的字段（仅 m_drm_fd/m_fd/
-    //   m_stride 有类内初始化）。构造后必须走 alloc()/带参构造再使用，
-    //   否则析构中 if (m_ptr) 判断读取的是栈/堆垃圾值。
+    // 默认构造函数，所有字段均有类内默认初始化值
     DmaFrameBuffer() = default;
 
     /**
@@ -118,19 +110,29 @@ public:
      * @brief 移动构造函数
      * 作用：接管另一个 DmaFrameBuffer 的资源所有权，源对象置为无效状态
      *       实现零拷贝的所有权转移
-     * ⚠ 隐患：仅转移了 m_fd/m_ptr 两个成员，m_size、m_handle、
-     *   m_drm_fd、m_stride、m_frame 未转移也未在源对象中复位，
-     *   且这些成员在无参初始化路径上未定义（无默认值）。后果：
-     *   1) 源对象析构时 free_drm_buffer() 用残留的 m_handle/大小
-     *      对已移交的缓冲区重复销毁（double-free / 错误 munmap）；
-     *   2) 目标对象的 m_size 可能读到不确定值，munmap 长度错误。
-     *   被移动的对象应立即视为废品，不得再次使用。
      */
     DmaFrameBuffer(DmaFrameBuffer&& other) noexcept
-        :m_fd(other.m_fd), m_ptr(other.m_ptr)
+        : m_drm_fd(other.m_drm_fd)
+        , m_fd(other.m_fd)
+        , m_ptr(other.m_ptr)
+        , m_size(other.m_size)
+        , m_frame(other.m_frame)
+        , m_width(other.m_width)
+        , m_height(other.m_height)
+        , m_format(other.m_format)
+        , m_stride(other.m_stride)
+        , m_handle(other.m_handle)
     {
-        other.m_fd = -1;       // 源对象的 fd 置为无效
-        other.m_ptr = nullptr; // 源对象的指针置空
+        other.m_drm_fd = -1;
+        other.m_fd = -1;
+        other.m_ptr = nullptr;
+        other.m_size = 0;
+        other.m_frame = nullptr;
+        other.m_width = 0;
+        other.m_height = 0;
+        other.m_format = 0;
+        other.m_stride = 0;
+        other.m_handle = 0;
     }
 
     /**
@@ -142,11 +144,27 @@ public:
     {
         if (this != &other)
         {
-            release();                // 释放当前持有的资源
-            m_fd = other.m_fd;        // 接管源对象的 fd
-            m_ptr = other.m_ptr;      // 接管源对象的指针
-            other.m_fd = -1;          // 源对象置为无效
+            release();
+            m_drm_fd = other.m_drm_fd;
+            m_fd = other.m_fd;
+            m_ptr = other.m_ptr;
+            m_size = other.m_size;
+            m_frame = other.m_frame;
+            m_width = other.m_width;
+            m_height = other.m_height;
+            m_format = other.m_format;
+            m_stride = other.m_stride;
+            m_handle = other.m_handle;
+            other.m_drm_fd = -1;
+            other.m_fd = -1;
             other.m_ptr = nullptr;
+            other.m_size = 0;
+            other.m_frame = nullptr;
+            other.m_width = 0;
+            other.m_height = 0;
+            other.m_format = 0;
+            other.m_stride = 0;
+            other.m_handle = 0;
         }
         return *this;
     }

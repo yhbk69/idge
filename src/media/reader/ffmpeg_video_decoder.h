@@ -58,6 +58,10 @@ public:
 
     void start(const QString& url);
     void stop();
+    // 两阶段停止：先 signalStop 通知所有解码器退出（不阻塞），
+    // 再 waitForStop 等待线程实际退出。用于 closeEvent 并行停止多路解码器。
+    void signalStop();
+    void waitForStop();
     void setChannel(int ch) { channel_ = ch; }
 
     /**

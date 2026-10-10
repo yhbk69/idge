@@ -797,21 +797,29 @@ void frmMain::systemExit()
 
 void frmMain::closeEvent(QCloseEvent *event)
 {
-    // 停止时序（必须全部先于 accept/quit）：窗口即将析构会级联销毁
-    // PlayerWidget→其内部解码线程对象，若线程仍在运行 Qt 会报
-    // "QThread: Destroyed while thread is still running" 并 abort。
-    // 因此这里逐一 stopDecoder()（转发 FFmpegVideoDecoder::stop() 通知解码线程
-    // 退出）后才放行关闭。
+    // 停止时序（两阶段并行停止，避免串行等待导致关闭时间叠加）：
+    // 1. signalStop: 通知所有解码器退出（不阻塞）
+    // 2. waitForStop: 等待所有解码线程实际退出
+    // 这样 4 路解码器并行退出，总等待时间 ≈ max(单路) 而非 sum(4路)
+
     // 停止数据看板刷新定时器
     if (dashboardWidget_) {
         dashboardWidget_->stop();
     }
-    // 停止所有 4 路解码器和推理任务
+
+    // 第一阶段：通知所有 4 路解码器退出
     if (videoWindow) {
         for (int ch = 0; ch < 4; ch++) {
             PlayerWidget *pw = videoWindow->playerWidget(ch);
             if (pw) {
-                pw->stopDecoder();
+                pw->signalStop();
+            }
+        }
+        // 第二阶段：等待所有解码线程退出
+        for (int ch = 0; ch < 4; ch++) {
+            PlayerWidget *pw = videoWindow->playerWidget(ch);
+            if (pw) {
+                pw->waitForStop();
             }
         }
     }

@@ -279,12 +279,12 @@ void AlarmManager::storeAndNotify(const QVector<AlarmRecord> &alarms)
     {
         QMutexLocker lock(&mutex_);
         for (const AlarmRecord &a : alarms) {
-            alarms_.append(a);
+            alarms_.push_back(a);
         }
         // 限制报警数量，最多保留 1000 条
         // 避免内存无限增长
         while (alarms_.size() > 1000) {
-            alarms_.removeFirst();  // 删除最早的报警
+            alarms_.pop_front();  // 删除最早的报警 (O(1) for deque)
         }
     } // 解锁后再发信号，避免死锁
 
@@ -367,7 +367,12 @@ bool AlarmManager::screenshotsEnabled() const
 QVector<AlarmRecord> AlarmManager::alarms() const
 {
     QMutexLocker lock(&mutex_);
-    return alarms_;
+    QVector<AlarmRecord> result;
+    result.reserve(alarms_.size());
+    for (const auto &a : alarms_) {
+        result.append(a);
+    }
+    return result;
 }
 
 // 获取报警总数
@@ -418,7 +423,7 @@ bool AlarmManager::acknowledgeAlarm(int index)
     QString id;
     {
         QMutexLocker lock(&mutex_);
-        if (index < 0 || index >= alarms_.size()) {
+        if (index < 0 || index >= static_cast<int>(alarms_.size())) {
             return false;
         }
         alarms_[index].status = "rectified";
@@ -455,11 +460,11 @@ bool AlarmManager::removeAlarm(int index)
     QString id;
     {
         QMutexLocker lock(&mutex_);
-        if (index < 0 || index >= alarms_.size()) {
+        if (index < 0 || index >= static_cast<int>(alarms_.size())) {
             return false;
         }
         id = alarms_[index].id;
-        alarms_.removeAt(index);
+        alarms_.erase(alarms_.begin() + index);
     }
     // 从数据库删除
     if (dbInitialized_ && !id.isEmpty()) {
@@ -475,7 +480,7 @@ bool AlarmManager::markAsFalsePositive(int index)
     QString id;
     {
         QMutexLocker lock(&mutex_);
-        if (index < 0 || index >= alarms_.size()) {
+        if (index < 0 || index >= static_cast<int>(alarms_.size())) {
             return false;
         }
         alarms_[index].status = "false_alarm";
@@ -523,9 +528,9 @@ bool AlarmManager::removeAlarmById(const QString &id)
     bool found = false;
     {
         QMutexLocker lock(&mutex_);
-        for (int i = 0; i < alarms_.size(); ++i) {
-            if (alarms_[i].id == id) {
-                alarms_.removeAt(i);
+        for (auto it = alarms_.begin(); it != alarms_.end(); ++it) {
+            if (it->id == id) {
+                alarms_.erase(it);
                 found = true;
                 break;
             }
@@ -648,23 +653,22 @@ void AlarmManager::loadAlarmsFromDatabase(int limit)
     QVector<AlarmRecord> dbAlarms = dao.queryAll(limit);
 
     QMutexLocker lock(&mutex_);
-    // 合并数据库报警到内存（避免重复）
+    // 合并数据库报警到内存（用 hash 去重，O(n+m) 而非 O(n*m)）
+    QSet<QString> existingIds;
+    existingIds.reserve(alarms_.size());
+    for (const AlarmRecord &a : alarms_) {
+        existingIds.insert(a.id);
+    }
     for (const AlarmRecord &alarm : dbAlarms) {
-        bool exists = false;
-        for (const AlarmRecord &existing : alarms_) {
-            if (existing.id == alarm.id) {
-                exists = true;
-                break;
-            }
-        }
-        if (!exists) {
-            alarms_.append(alarm);
+        if (!existingIds.contains(alarm.id)) {
+            alarms_.push_back(alarm);
+            existingIds.insert(alarm.id);
         }
     }
 
     // 限制报警数量
     while (alarms_.size() > 1000) {
-        alarms_.removeFirst();
+        alarms_.pop_front();
     }
 
     qInfo() << "AlarmManager: Loaded" << dbAlarms.size() << "alarms from database";
@@ -691,10 +695,13 @@ void AlarmManager::syncToDatabase()
     QVector<AlarmRecord> alarmsCopy;
     {
         QMutexLocker lock(&mutex_);
-        if (alarms_.isEmpty()) {
+        if (alarms_.empty()) {
             return;
         }
-        alarmsCopy = alarms_;  // 复制数据
+        alarmsCopy.reserve(alarms_.size());
+        for (const auto &a : alarms_) {
+            alarmsCopy.append(a);
+        }
     } // 解锁后再调用 DAO
 
     AlarmDAO dao;

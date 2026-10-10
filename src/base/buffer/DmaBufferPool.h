@@ -92,10 +92,9 @@ struct DmaBuffer {
 //   - 继承 enable_shared_from_this，支持安全的 shared_ptr 回调
 //
 // ⚠【生命周期总警示】本池管理的 DmaBuffer 由池 new、由池 delete：
-//   任何方式取出的裸指针，其有效期都终止于析构。池析构只清理
-//   available_buffers 队列中的缓冲，仍在外部持有的（未 release 的）
-//   DmaBuffer 既不会被释放（泄漏），其指针也会在池销毁后成为悬垂。
-//   使用顺序必须是：先确保所有 acquire 都 release，再销毁池。
+//   任何方式取出的裸指针，其有效期都终止于析构。池析构会释放所有
+//   已分配的缓冲区（包括仍在外部借出的），但外部持有的指针会变成悬垂。
+//   最佳实践：先确保所有 acquire 都 release，再销毁池。
 // ============================================================================
 class DmaBufferPool : public std::enable_shared_from_this<DmaBufferPool>{
 public:
@@ -139,54 +138,51 @@ public:
 
     /**
      * @brief 析构函数 —— 释放所有预分配的 DMA 缓冲区
-     * 作用：遍历可用缓冲区队列，逐个释放 DMA 缓冲区和 RGA 句柄
-     * ⚠ 只能释放"已归还"的缓冲区：仍在外部借出（未 release）的
-     *   DmaBuffer 既不会被释放（内存+fd 泄漏），对象本体也随池消失，
-     *   外部若再访问即 use-after-free。销毁池前必须确保全部归还。
+     * 作用：遍历所有已分配的缓冲区，释放仍持有的（包括未归还的）
+     * 注意：未归还的缓冲区会被强制释放并打印警告
      */
     ~DmaBufferPool() {
         std::lock_guard<std::mutex> lock(mutex_);
+        // 释放所有已分配的缓冲区（包括仍在外部借出的）
+        for (auto buf : all_buffers_) {
+            if (buf) {
+                free_dma_buffer(buf);
+                delete buf;
+            }
+        }
+        all_buffers_.clear();
+        // 清空可用队列（缓冲区已释放）
         while (!available_buffers.empty()) {
-            auto buf = available_buffers.front();
             available_buffers.pop();
-            free_dma_buffer(buf);
         }
     }
 
     // ========================================================================
     // acquire —— 获取一个缓冲区（阻塞等待）
     // ========================================================================
-    // 作用：从缓冲池中获取一个可用的 DMA 缓冲区。如果所有缓冲区都被占用，
-    //       则阻塞等待直到有缓冲区被归还。
-    // @return 可用的 DmaBuffer 指针
-    //
-    // 复杂度：O(1)（条件变量唤醒 + 队列 front/pop），锁内仅做指针搬运。
-    //
-    // 【为什么返回裸指针而非智能指针】
-    //   帧缓冲的生命周期跨越多个流水线阶段（解码→RGA→渲染），
-    //   池化对象的所有权属于池本身，调用方只是"借用"；返回裸指针
-    //   表达"无所有权、必须显式 release 归还"的语义，避免误用
-    //   delete 释放本不属于调用方的内存。
-    //
-    // ⚠【生命周期约束（上轮审查确认）】返回的裸指针有效期严格受限于：
-    //   1) 调用方 release(buf) 之前 —— release 后 buf 可被其他线程
-    //      立即 acquire 并改写（frame_id/内容），继续使用即数据竞争；
-    //   2) 池析构之前 —— 池销毁后未归还的 buf 成为悬垂指针。
-    //   禁止把该指针存入长期容器或跨 release 继续解引用；
-    //   需要自动归还语义时应改用 tryAcquireSharedPtr 或 DmaBufferGuard。
-    //
-    // ⚠ 若 init 阶段部分缓冲区分配失败，实际可用数 < capacity_，
-    //   所有线程借出后再次 acquire 将永久阻塞（无超时版本），
-    //   调用方需评估死锁风险。
-    // ========================================================================
     DmaBuffer* acquire() {
         std::unique_lock<std::mutex> lock(mutex_);
-        // 阻塞等待直到缓冲池非空
         cv_.wait(lock, [this] { return !available_buffers.empty(); });
-        
-        auto buf = available_buffers.front();   // 取出队首缓冲区
-        available_buffers.pop();                // 从可用队列中移除
+        auto buf = available_buffers.front();
+        available_buffers.pop();
         return buf;
+    }
+
+    // ========================================================================
+    // tryAcquireFor —— 获取缓冲区（带超时）
+    // ========================================================================
+    // @param timeout_ms 超时毫秒数
+    // @return 成功返回缓冲区指针，超时返回 nullptr
+    // ========================================================================
+    DmaBuffer* tryAcquireFor(int timeout_ms) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                         [this] { return !available_buffers.empty(); })) {
+            auto buf = available_buffers.front();
+            available_buffers.pop();
+            return buf;
+        }
+        return nullptr;
     }
 
     // ========================================================================
@@ -312,6 +308,7 @@ private:
                 }else
                 {
                     available_buffers.push(buf);  // 成功，加入可用队列
+                    all_buffers_.push_back(buf);  // 记录到全量列表
                 }
             }
             else
@@ -346,6 +343,7 @@ private:
     int allocated_count_ = 0;       // 已分配计数
 
     std::queue<DmaBuffer*> available_buffers;  // 可用缓冲区队列
+    std::vector<DmaBuffer*> all_buffers_;      // 所有已分配的缓冲区（用于析构时完整释放）
     std::mutex mutex_;                          // 互斥锁
     std::condition_variable cv_;                // 条件变量（用于阻塞等待）
 };

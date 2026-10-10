@@ -382,20 +382,9 @@ struct object_detect_result_list{
                                     // 区分多检测器共享同一结果队列时的来源槽位；
                                     // 主流水线每槽独立队列，恒为默认值 0）
     int count;                      // 检测结果数量
-    // ⚠⚠【时间单位隐患·跨模块警示（勿改代码，先统一口径）】
-    //   本字段历史注释约定为"毫秒"，但实际生产端
-    //   (ffmpeg_video_decoder.cpp / camera_preview_decoder.cpp 的
-    //    chrono::system_clock::now().time_since_epoch().count()) 写入的是
-    //   epoch **纳秒**（Linux/libstdc++ 下 system_clock tick=1ns）；
-    //   而 src/biz/alarm/alarm_manager.h 的限流常量 kAlarmThrottleNs=2e9 又
-    //   按纳秒语义与 time 差值比较。三方定义不一致：
-    //     · 若 time 为毫秒 → 毫秒差 < 2e9 恒成立约 23 天，限流被放大成
-    //       "首报后长期不复报"（限流失真）；
-    //     · 若 time 为纳秒 → 2e9ns=2s，行为与注释宣称的"2秒去重"一致，
-    //       但本文件"毫秒"文档仍是错的。
-    //   审查结论：当前实测语义接近纳秒；在核查并统一三处单位前，任何
-    //   依赖 time 的新代码都必须先确认取数口径。
-    long time;                      // 时间戳（文档单位：毫秒；实测生产值为纳秒，见上）
+    // 时间戳：epoch 纳秒（由 chrono::system_clock::now().time_since_epoch().count() 生成）
+    // 报警限流 kAlarmThrottleNs=2e9 即 2 秒，与此字段量纲一致
+    long time;
     object_detect_result results[OBJ_NUMB_MAX_SIZE]; // 检测结果数组（最大128个）
 
     // 重载小于运算符，用于按时间戳排序（升序）
