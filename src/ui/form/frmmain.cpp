@@ -946,7 +946,7 @@ void frmMain::initDebugPage()
             QString text = ui->editAlarmClasses->text().trimmed();
             QStringList classes;
             if (!text.isEmpty()) {
-                for (const auto &s : text.split(",", Qt::SkipEmptyParts)) {
+                for (const auto &s : text.split(",", QString::SkipEmptyParts)) {
                     QString trimmed = s.trimmed();
                     if (!trimmed.isEmpty()) classes.append(trimmed);
                 }
@@ -998,7 +998,7 @@ void frmMain::initDebugPage()
             QString text = fenceClassesEdit_->text().trimmed();
             QStringList classes;
             if (!text.isEmpty()) {
-                for (const auto &s : text.split(",", Qt::SkipEmptyParts)) {
+                for (const auto &s : text.split(",", QString::SkipEmptyParts)) {
                     QString trimmed = s.trimmed();
                     if (!trimmed.isEmpty()) classes.append(trimmed);
                 }

@@ -5,6 +5,7 @@
 #include "fence_manager.h"
 #include "ConfigManager.h"
 #include <QJsonArray>
+#include <QDebug>
 
 namespace geofence {
 

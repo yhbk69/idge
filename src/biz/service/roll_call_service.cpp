@@ -380,9 +380,10 @@ std::string RollCallService::drawAndSaveProcessedImage(const cv::Mat& image,
     std::string filename = TaskManager::generateUniqueFilename("processed_" + original_filename, "png");
     std::string save_path = task_folder + "/" + filename;
     
-    // 保存图像。QImage 视图仅是 result_image 内存的浅封装，步长按 Mat::step 传入
-    // 以正确处理行填充；copy() 断开对 cv::Mat 内存的引用后再落盘，避免悬垂读
-    QImage qimg(result_image.data, result_image.cols, result_image.rows, (int)result_image.step, QImage::Format_BGR888);
+    // 保存图像。OpenCV 是 BGR，QImage 没有 BGR888 格式，先转 RGB 再用 Format_RGB888
+    cv::Mat rgb_image;
+    cv::cvtColor(result_image, rgb_image, cv::COLOR_BGR2RGB);
+    QImage qimg(rgb_image.data, rgb_image.cols, rgb_image.rows, (int)rgb_image.step, QImage::Format_RGB888);
     if (qimg.copy().save(QString::fromStdString(save_path), "PNG")) {
         std::cout << "  Saved processed image: " << save_path << std::endl;
         return save_path;
@@ -423,7 +424,9 @@ std::string RollCallService::saveDetectedFace(const cv::Mat& image,
     std::vector<unsigned char> encoded;
     bool saved = false;
     try {
-        QImage qimg(face_image.data, face_image.cols, face_image.rows, (int)face_image.step, QImage::Format_BGR888);
+        cv::Mat rgb_face;
+        cv::cvtColor(face_image, rgb_face, cv::COLOR_BGR2RGB);
+        QImage qimg(rgb_face.data, rgb_face.cols, rgb_face.rows, (int)rgb_face.step, QImage::Format_RGB888);
         saved = qimg.copy().save(QString::fromStdString(save_path), "PNG");
     } catch (const std::exception& e) {
         std::cerr << "  Face encode/write exception: " << e.what() << std::endl;

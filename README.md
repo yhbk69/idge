@@ -83,7 +83,74 @@ $IDGE_WORKSPACE/
 
 ---
 
-# 二、主要特性
+# 二、构建
+
+## 系统要求
+
+- **硬件**：Rockchip RK3588/RK3576/RK356x，建议 4GB+ 内存
+- **操作系统**：Linux (aarch64)
+- **依赖库**：见 `3rdparty/` 目录（版本明细见其 [README](3rdparty/README.md)）
+
+## 1. 构建 rkmpp FFmpeg（板子上原生编译）
+
+系统自带的 FFmpeg 4.x 不支持 rkmpp 硬解码，需从源码编译带 rkmpp 支持的 FFmpeg 6.1：
+
+```bash
+cd /tmp
+git clone https://github.com/nyanmisaka/ffmpeg-rockchip.git -b 6.1 ffmpeg-rockchip
+cd ffmpeg-rockchip
+./configure \
+    --enable-rkmpp --enable-libdrm --enable-version3 \
+    --enable-shared --disable-static \
+    --disable-doc --disable-debug \
+    --prefix=/path/to/idge-main/3rdparty/ffmpeg-rkmpp
+make -j$(nproc) && make install
+```
+
+## 2. 构建项目
+
+```bash
+./build-linux.sh -t rk3588 -b Release
+
+# 可选参数：
+# -t <target>   目标平台: rk356x / rk3588 / rk3576
+# -b <type>     构建类型: Debug / Release
+# -m            启用 Address Sanitizer (需要 Debug 模式)
+# -r            禁用 RGA, 使用 CPU 缩放
+# -d            启用 DMA32 (RGA2, 低于4G内存)
+```
+
+构建产物安装到 `install/rk3588_linux/`，可执行文件 RPATH 已设为 `$ORIGIN/../lib`。
+
+## 3. 手动运行（开发调试）
+
+```bash
+export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib:/usr/local/Qt-5.15.18/lib:$LD_LIBRARY_PATH
+./build/build_rk3588_linux/idge
+```
+
+### 关键环境变量
+
+| 变量 | 值 | 说明 |
+|------|------|------|
+| `DISPLAY` | `:0` | X11 显示服务器 |
+| `LD_LIBRARY_PATH` | 见上 | 动态库搜索路径 |
+| `XDG_RUNTIME_DIR` | `/run/user/$(id -u)` | 用户运行时目录 |
+| `IDGE_WORKSPACE` | 业务资源根目录 | 点名/盘点模型与数据（缺省=当前目录） |
+| `EGL_NO_X11` | 构建时全局定义 | 强制 EGL 走 DRM 后端（CMake 已处理） |
+
+### 库路径说明
+
+| 库 | 路径 | 说明 |
+|----|------|------|
+| Mali EGL/GLES | `/usr/lib/aarch64-linux-gnu/mali/` | GPU 渲染驱动（系统安装） |
+| ffmpeg-rkmpp | `3rdparty/ffmpeg-rkmpp/lib/` | 带 rkmpp 支持的 FFmpeg 6.1（板子原生编译） |
+| Qt5 | `/usr/local/Qt-5.15.18/lib/` | Qt5 运行库（板子安装） |
+| librga | `/usr/lib/` | RGA 硬件加速库（系统自带） |
+
+---
+
+# 三、主要特性
 
 - **全链路零拷贝**：从 FFmpeg 解码到 EGL 渲染，全程通过 DMA-BUF fd 传递，无 CPU 内存拷贝
 - **3 NPU 核心并行推理**：充分利用 RK3588 的 3 个 NPU 核心，实现高吞吐量检测
@@ -97,7 +164,7 @@ $IDGE_WORKSPACE/
 - **多路视频支持**：支持 4 路视频同时监控
 - **模型灵活配置**：支持 YOLO11 nano/small/medium 不同大小模型与级联多模型
 
-# 三、技术架构
+# 四、技术架构
 
 ## 核心技术栈
 
@@ -178,7 +245,7 @@ Annex-B H.265（或 h264_rkmpp → H.264）AVPacket —— **同一份包两路�
 
 ---
 
-# 四、目录结构与模块文档索引
+# 五、目录结构与模块文档索引
 
 **每个源码目录都有 README.md 详述功能、数据流、使用方法与注意事项**，下表为速查索引。
 
@@ -243,73 +310,6 @@ Annex-B H.265（或 h264_rkmpp → H.264）AVPacket —— **同一份包两路�
 ├── config_example.json         # 配置模板
 └── yolo11_videocapture_demo.cc # 独立 YOLO11 摄像头检测示例
 ```
-
----
-
-# 五、构建
-
-## 系统要求
-
-- **硬件**：Rockchip RK3588/RK3576/RK356x，建议 4GB+ 内存
-- **操作系统**：Linux (aarch64)
-- **依赖库**：见 `3rdparty/` 目录（版本明细见其 [README](3rdparty/README.md)）
-
-## 1. 构建 rkmpp FFmpeg（板子上原生编译）
-
-系统自带的 FFmpeg 4.x 不支持 rkmpp 硬解码，需从源码编译带 rkmpp 支持的 FFmpeg 6.1：
-
-```bash
-cd /tmp
-git clone https://github.com/nyanmisaka/ffmpeg-rockchip.git -b 6.1 ffmpeg-rockchip
-cd ffmpeg-rockchip
-./configure \
-    --enable-rkmpp --enable-libdrm --enable-version3 \
-    --enable-shared --disable-static \
-    --disable-doc --disable-debug \
-    --prefix=/path/to/idge-main/3rdparty/ffmpeg-rkmpp
-make -j$(nproc) && make install
-```
-
-## 2. 构建项目
-
-```bash
-./build-linux.sh -t rk3588 -b Release
-
-# 可选参数：
-# -t <target>   目标平台: rk356x / rk3588 / rk3576
-# -b <type>     构建类型: Debug / Release
-# -m            启用 Address Sanitizer (需要 Debug 模式)
-# -r            禁用 RGA, 使用 CPU 缩放
-# -d            启用 DMA32 (RGA2, 低于4G内存)
-```
-
-构建产物安装到 `install/rk3588_linux/`，可执行文件 RPATH 已设为 `$ORIGIN/../lib`。
-
-## 3. 手动运行（开发调试）
-
-```bash
-export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib:/usr/local/Qt-5.15.18/lib:$LD_LIBRARY_PATH
-./build/build_rk3588_linux/idge
-```
-
-### 关键环境变量
-
-| 变量 | 值 | 说明 |
-|------|------|------|
-| `DISPLAY` | `:0` | X11 显示服务器 |
-| `LD_LIBRARY_PATH` | 见上 | 动态库搜索路径 |
-| `XDG_RUNTIME_DIR` | `/run/user/$(id -u)` | 用户运行时目录 |
-| `IDGE_WORKSPACE` | 业务资源根目录 | 点名/盘点模型与数据（缺省=当前目录） |
-| `EGL_NO_X11` | 构建时全局定义 | 强制 EGL 走 DRM 后端（CMake 已处理） |
-
-### 库路径说明
-
-| 库 | 路径 | 说明 |
-|----|------|------|
-| Mali EGL/GLES | `/usr/lib/aarch64-linux-gnu/mali/` | GPU 渲染驱动（系统安装） |
-| ffmpeg-rkmpp | `3rdparty/ffmpeg-rkmpp/lib/` | 带 rkmpp 支持的 FFmpeg 6.1（板子原生编译） |
-| Qt5 | `/usr/local/Qt-5.15.18/lib/` | Qt5 运行库（板子安装） |
-| librga | `/usr/lib/` | RGA 硬件加速库（系统自带） |
 
 ---
 

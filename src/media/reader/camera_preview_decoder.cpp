@@ -773,8 +773,7 @@ void CameraPreviewDecoder::handleDecodedFrame(const uint8_t* pixels, int width, 
     output.close();
 
     // 创建缩略图 (从已解码的RGBA DMA-BUF创建,无需重新解码JPEG)
-    const QImage thumbnail(pixels, width, height, stride,
-                           bgr888 ? QImage::Format_BGR888 : QImage::Format_RGBA8888);
+    const QImage thumbnail(pixels, width, height, stride, QImage::Format_RGBA8888);
     
     // 发送拍照完成信号 (copy()确保数据独立)
     emit photoCaptured(path, thumbnail.copy());
