@@ -116,6 +116,17 @@ public:
      */
     void setCascadeModelLabel(int idx, const QString &label);
 
+    /**
+     * @brief 获取第 idx 个级联模型的报警类别（1~5）
+     * @return 类别名（如 "person"），空串表示该槽位不报警
+     */
+    QString cascadeModelAlarmClass(int idx) const;
+
+    /**
+     * @brief 设置第 idx 个级联模型的报警类别
+     */
+    void setCascadeModelAlarmClass(int idx, const QString &className);
+
     // ========== 模型配置 ==========
 
     /**

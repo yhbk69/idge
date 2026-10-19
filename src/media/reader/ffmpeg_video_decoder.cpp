@@ -96,6 +96,7 @@
 #include <thread>
 #include <vector>
 #include <cstring>
+#include <cmath>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "DmaFrameBuffer.h"
@@ -537,7 +538,8 @@ void FFmpegVideoDecoder::buildCascadeTasks()
     }
 
     // 每个启用槽位一个推理任务 + 一个结果队列 + 一份类名表
-    for (const SlotModel &s : slotList) {
+    for (int cfgIdx = 0; cfgIdx < slotList.size(); ++cfgIdx) {
+        const SlotModel &s = slotList[cfgIdx];
         QString mp = s.modelPath.trimmed();
         if (mp.isEmpty())
             continue;
@@ -563,6 +565,10 @@ void FFmpegVideoDecoder::buildCascadeTasks()
         QStringList qnames;
         for (const auto &n : slotClassNames_.back()) qnames << QString::fromStdString(n);
         AlarmManager::instance().setSlotClassNames(slotIdx, qnames);
+
+        // 加载该槽位的报警类别（cfgIdx+1 是 config 数组的 1-based 下标）
+        QString alarmClass = ConfigManager::instance().cascadeModelAlarmClass(cfgIdx + 1);
+        AlarmManager::instance().setSlotAlarmClass(slotIdx, alarmClass);
     }
 
     qDebug() << "Cascade tasks:" << tasks_.size();
@@ -764,6 +770,9 @@ int FFmpegVideoDecoder::reloadAllModels(const QStringList &modelPaths, const QSt
                 for (const auto &n : slotClassNames_[taskIndex])
                     qnames << QString::fromStdString(n);
                 AlarmManager::instance().setSlotClassNames(taskIndex, qnames);
+                // 同步更新该槽位的报警类别（i 是 config 数组下标）
+                QString alarmClass = ConfigManager::instance().cascadeModelAlarmClass(i + 1);
+                AlarmManager::instance().setSlotAlarmClass(taskIndex, alarmClass);
             }
         } else {
             qWarning() << "Model" << i << "reload failed:" << path;
@@ -1071,6 +1080,7 @@ void FFmpegVideoDecoder::decodeLoop()
         return;
     }
     int frame_count = 0;
+    boxSmoother_.clear();
 
     TIMER t;
 
@@ -1088,10 +1098,13 @@ void FFmpegVideoDecoder::decodeLoop()
             target_fps = qBound(1, qRound(av_q2d(pfr)), 120);
         }
     }
+    // 上限 30fps：RK3588 单路解码+推理能力约 30fps，
+    // 流元数据常报 50/90/120fps（摄像头默认值），超过硬件能力
+    // 会导致每帧都落后、累计线永远追不上 → 帧率振荡。
+    if (target_fps > 30) target_fps = 30;
     const qint64 publish_interval_us = 1000000 / target_fps;
     QElapsedTimer pub_clock;
     pub_clock.start();
-    qint64 next_due_us = 0;   // 下一发布点的单调微秒时刻（相对 pub_clock 起点）
 
     // ===== 节拍目标帧率识别（每路开流打印一次，便于核对源帧率口径）=====
     qInfo() << "decoder pacer ch" << channel_ << "target_fps=" << target_fps
@@ -1332,33 +1345,130 @@ void FFmpegVideoDecoder::decodeLoop()
 
                     for (size_t k = 0; k < slotQueues_.size(); ++k) {
                         // 从该模型的结果队列中取最新一次检测结果
-                        // tryPop: 非阻塞，如果队列为空则跳过
+                        // tryPop: 非阻塞，无新结果时 od 保持空（count=0）
                         object_detect_result_list od;
-                        if (!slotQueues_[k]->tryPop(od)) continue;
+                        memset(&od, 0, sizeof(od));
+                        bool hasNewResult = slotQueues_[k]->tryPop(od);
 
+                        // ===== 检测框时序平滑 =====
+                        // 每 3 帧才推理一次，直接画原始坐标会导致框"跳"。
+                        // 用指数平滑让显示坐标逐帧趋近检测目标，视觉连续。
+                        // 仅影响绘制；下方围栏/报警仍用 od 原始坐标。
+                        while (boxSmoother_.size() < slotQueues_.size())
+                            boxSmoother_.emplace_back();
+                        auto &smoother = boxSmoother_[k];
+
+                        // 有新检测结果时才更新 track（匹配 → 插值 → 新增 → 淡出）
+                        // 无新结果时保持现有 track 不变，继续画平滑位置
+                        if (hasNewResult) {
+                            const float iouThr = 0.2f;
+
+                            if (od.count > 0) {
+                                for (int i = 0; i < od.count; ++i) {
+                                    const auto &det = od.results[i];
+                                    float nx = (float)det.box.left;
+                                    float ny = (float)det.box.top;
+                                    float nw = (float)(det.box.right - det.box.left);
+                                    float nh = (float)(det.box.bottom - det.box.top);
+
+                                    int bestIdx = -1;
+                                    float bestIou = iouThr;
+                                    for (size_t t = 0; t < smoother.tracks.size(); ++t) {
+                                        auto &tr = smoother.tracks[t];
+                                        if (tr.cls_id != det.cls_id || tr.fade > 0) continue;
+                                        float ix1 = std::max(tr.dx, nx);
+                                        float iy1 = std::max(tr.dy, ny);
+                                        float ix2 = std::min(tr.dx + tr.dw, nx + nw);
+                                        float iy2 = std::min(tr.dy + tr.dh, ny + nh);
+                                        float iw = std::max(0.0f, ix2 - ix1);
+                                        float ih = std::max(0.0f, iy2 - iy1);
+                                        float inter = iw * ih;
+                                        float iou = inter / (tr.dw * tr.dh + nw * nh - inter + 1e-6f);
+                                        if (iou > bestIou) { bestIou = iou; bestIdx = (int)t; }
+                                    }
+
+                                    if (bestIdx >= 0) {
+                                        auto &tr = smoother.tracks[bestIdx];
+                                        tr.tx = nx; tr.ty = ny; tr.tw = nw; tr.th = nh;
+                                        tr.prop = det.prop;
+                                    } else {
+                                        BoxTrack nt;
+                                        nt.dx = nt.tx = nx;
+                                        nt.dy = nt.ty = ny;
+                                        nt.dw = nt.tw = nw;
+                                        nt.dh = nt.th = nh;
+                                        nt.cls_id = det.cls_id;
+                                        nt.prop = det.prop;
+                                        smoother.tracks.push_back(nt);
+                                    }
+                                }
+
+                                // 未匹配的活跃 track 开始淡出
+                                for (auto &tr : smoother.tracks) {
+                                    if (tr.fade > 0) continue;
+                                    bool matched = false;
+                                    for (int i = 0; i < od.count; ++i) {
+                                        if (tr.cls_id != od.results[i].cls_id) continue;
+                                        float nx = (float)od.results[i].box.left;
+                                        float ny = (float)od.results[i].box.top;
+                                        float nw = (float)(od.results[i].box.right - od.results[i].box.left);
+                                        float nh = (float)(od.results[i].box.bottom - od.results[i].box.top);
+                                        float ix1 = std::max(tr.dx, nx);
+                                        float iy1 = std::max(tr.dy, ny);
+                                        float ix2 = std::min(tr.dx + tr.dw, nx + nw);
+                                        float iy2 = std::min(tr.dy + tr.dh, ny + nh);
+                                        float iw = std::max(0.0f, ix2 - ix1);
+                                        float ih = std::max(0.0f, iy2 - iy1);
+                                        float inter = iw * ih;
+                                        float iou = inter / (tr.dw * tr.dh + nw * nh - inter + 1e-6f);
+                                        if (iou > iouThr) { matched = true; break; }
+                                    }
+                                    if (!matched) tr.fade = 6;
+                                }
+                            } else {
+                                // 新检测结果为空：所有活跃 track 开始淡出
+                                for (auto &tr : smoother.tracks)
+                                    if (tr.fade == 0) tr.fade = 6;
+                            }
+                        }
+
+                        // 指数平滑 + 淡出递减 + 清除已消失 track
+                        for (auto it = smoother.tracks.begin(); it != smoother.tracks.end(); ) {
+                            if (it->fade > 0 && --it->fade <= 0) {
+                                it = smoother.tracks.erase(it);
+                                continue;
+                            }
+                            float a = (it->fade > 0) ? 0.3f : 0.6f;
+                            it->dx += a * (it->tx - it->dx);
+                            it->dy += a * (it->ty - it->dy);
+                            it->dw += a * (it->tw - it->dw);
+                            it->dh += a * (it->th - it->dh);
+                            ++it;
+                        }
+
+                        // 画平滑后的框
                         int color = kSlotColors[(int)k % 5];
                         char text[256];
-                        for (int i = 0; i < od.count; i++) {
-                            const object_detect_result &d = od.results[i];
-                            // 画检测框
-                            draw_rectangle(&dislayImage,
-                                           d.box.left, d.box.top,
-                                           d.box.right - d.box.left,
-                                           d.box.bottom - d.box.top,
-                                           color, 3);
+                        for (const auto &tr : smoother.tracks) {
+                            int dl = (int)std::round(tr.dx);
+                            int dt = (int)std::round(tr.dy);
+                            int dw = (int)std::round(tr.dw);
+                            int dh = (int)std::round(tr.dh);
+                            draw_rectangle(&dislayImage, dl, dt, dw, dh, color, 3);
 
-                            // 画标签文字：M1 person 87.3%（用该槽位自己的类名表）
                             const std::vector<std::string> &slotNames = slotClassNames_[k];
-                            if (d.cls_id >= 0 && d.cls_id < (int)slotNames.size())
+                            if (tr.cls_id >= 0 && tr.cls_id < (int)slotNames.size())
                                 snprintf(text, sizeof(text), "M%zu %s %.1f%%",
-                                         k + 1, slotNames[d.cls_id].c_str(), d.prop * 100);
+                                         k + 1, slotNames[tr.cls_id].c_str(), tr.prop * 100);
                             else
                                 snprintf(text, sizeof(text), "M%zu cls_%d %.1f%%",
-                                         k + 1, d.cls_id, d.prop * 100);
-                            draw_text(&dislayImage, text, d.box.left, d.box.top - 20, color, 10);
+                                         k + 1, tr.cls_id, tr.prop * 100);
+                            draw_text(&dislayImage, text, dl, dt - 20, color, 10);
                         }
 
                         // ===== 4.10 电子围栏判断 + 告警 =====
+                        // 仅在有新检测结果时执行（非推理帧跳过，避免空结果误触发报警）
+                        if (!hasNewResult || od.count <= 0) continue;
                         // 流程：
                         //   1. 检查围栏是否启用且该通道有围栏
                         //   2. 如果有围栏：过滤出在围栏内的目标，再判断是否触发报警
@@ -1549,21 +1659,25 @@ void FFmpegVideoDecoder::decodeLoop()
             // 释放帧的引用，允许 FFmpeg 重用底层内存
             av_frame_unref(frame);
 
-            // ===== 4.12 解码帧率节拍（限"产生"速率，而非仅显示）=====
-            // 每解出一帧就正常处理并发布；这里把解码节奏钉死在 target_fps：
-            //  - 领先计划(next_due>now)：睡到 next_due 再去收下一帧。这样解码/推理(frame%3)/
-            //    MPP 解码器/RGA 缩放都被限制在 target_fps，不会全速把源抽到 ~250fps 而超量喂爆
-            //    （实测：不限产生 → RGA_COLORFILL 每帧失败刷屏 + 卡死）。这就是 caichao 平滑的根本。
-            //  - 落后计划(now>next_due，慢帧/RTSP 断流)：重锚 next_due=now，绝不"攒着连发补帧"，
-            //    杜绝旧累计限速落后→→50 暴冲、再睡→→1 停顿的抖动。
-            // 分片短睡(≤4ms)并复查 running_，保证 stop() 及时返回。
-            next_due_us += publish_interval_us;
-            while (running_ && next_due_us > pub_clock.nsecsElapsed() / 1000) {
-                const qint64 rem_us = next_due_us - pub_clock.nsecsElapsed() / 1000;
-                QThread::usleep(static_cast<unsigned long>(rem_us > 4000 ? 4000 : rem_us));
-            }
-            if (next_due_us < pub_clock.nsecsElapsed() / 1000) {
-                next_due_us = pub_clock.nsecsElapsed() / 1000;   // 落后 → 重锚，丢弃欠账，不连发
+            // ===== 4.12 解码帧率节拍（累计线 + 分片短睡）=====
+            // 采用 origin 验证过的"累计目标线"模型：
+            //   expected = frame_count × interval  —— 固定锚线
+            //   领先时：分片睡到锚线（≤4ms 一片，复查 running_ 保证 stop 及时）
+            //   落后时：不 sleep、不重置，自然靠后续帧追赶
+            //
+            // 为什么不用"截止期+落后重置"：
+            //   重置把欠账清零后，下一帧会睡满整个 interval，
+            //   当 target_fps > 硬件实际能力（流元数据报 50/90fps 而推理只能撑 30fps）时，
+            //   每帧都落后 → 每帧都重置 → 形成"密-密-密-疏"脉冲，瞬时帧率 17↔43 振荡。
+            //   累计线模型则天然阻尼：偏差越大 → sleep 越少 → 追赶越快 → 收敛到锚线。
+            {
+                const qint64 expected_us = (qint64)frame_count * publish_interval_us;
+                qint64 elapsed_us = pub_clock.nsecsElapsed() / 1000;
+                while (running_ && expected_us > elapsed_us) {
+                    const qint64 rem_us = expected_us - elapsed_us;
+                    QThread::usleep(static_cast<unsigned long>(rem_us > 4000 ? 4000 : rem_us));
+                    elapsed_us = pub_clock.nsecsElapsed() / 1000;
+                }
             }
 
             t.tok();

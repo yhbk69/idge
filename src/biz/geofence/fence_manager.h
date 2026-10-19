@@ -113,7 +113,7 @@ private:
     mutable QMutex mutex_;                                  // 保护所有成员变量的互斥锁
     bool enabled_ = false;                                  // 围栏总开关
     QString mode_ = "inside_alarm";                         // 报警模式
-    QStringList alarmClasses_ = {"person"};                 // 触发围栏报警的类别
+    QStringList alarmClasses_;                               // 触发围栏报警的类别（空 = 不报警）
     QMap<int, ChannelFence> fences_;                        // 各通道围栏数据
     QMap<int, QPair<int,int>> overlaySizes_;                // 各通道 overlay 尺寸
 };

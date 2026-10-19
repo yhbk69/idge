@@ -119,9 +119,9 @@ void ConfigManager::load(const QString &path)
             {"threads", 3}             // 推理线程数
         };
 
-        // 报警配置
+        // 报警配置（空数组 = 不报警，用户在调试界面配置后生效）
         root_["alarm"] = QJsonObject{
-            {"classes", QJsonArray{"person"}}  // 报警类别（检测到人时报警）
+            {"classes", QJsonArray{}}
         };
 
         // 报警视频录制（硬件编码环形缓冲区）
@@ -470,6 +470,30 @@ void ConfigManager::setCascadeModelLabel(int idx, const QString &label)
     root_["cascade"] = cascade;
 }
 
+// 获取级联模型报警类别
+QString ConfigManager::cascadeModelAlarmClass(int idx) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject cascade = root_["cascade"].toObject();
+    return cascadeModelObject(cascade, idx)["alarm_class"].toString();
+}
+
+// 设置级联模型报警类别
+void ConfigManager::setCascadeModelAlarmClass(int idx, const QString &className)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject cascade = root_["cascade"].toObject();
+    QJsonArray arr = cascade["models"].toArray();
+    while (arr.size() < 5) arr.append(QJsonObject());
+    if (idx >= 1 && idx <= 5) {
+        QJsonObject o = arr[idx - 1].toObject();
+        o["alarm_class"] = className;
+        arr[idx - 1] = o;
+    }
+    cascade["models"] = arr;
+    root_["cascade"] = cascade;
+}
+
 // ==========================================
 // 模型配置
 // ==========================================
@@ -742,7 +766,7 @@ QStringList ConfigManager::geofenceAlarmClasses() const
         if (!s.isEmpty()) result.append(s);
     }
     if (result.isEmpty()) {
-        result.append("person");  // 默认触发类别
+        // 空 = 不触发报警，由用户在调试界面配置
     }
     return result;
 }

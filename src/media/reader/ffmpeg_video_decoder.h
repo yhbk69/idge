@@ -131,6 +131,22 @@ private:
     // helmet 的 cls_id 套用 coco 类名导致报警类别错标（2026-09-24 修复）。
     std::vector<std::vector<std::string>> slotClassNames_;
 
+    // ===== 检测框时序平滑 =====
+    // 每 3 帧才做一次推理，非推理帧直接复用上一轮结果会导致框"跳"。
+    // BoxSmoother 维护浮点精度的显示坐标，每帧向最新检测目标做指数平滑，
+    // 视觉上框匀速滑到新位置而非瞬移。仅影响绘制，报警/围栏仍用原始坐标。
+    struct BoxTrack {
+        float dx, dy, dw, dh;
+        float tx, ty, tw, th;
+        int cls_id = -1;
+        float prop = 0;
+        int fade = 0;
+    };
+    struct BoxSmoother {
+        std::vector<BoxTrack> tracks;
+    };
+    std::vector<BoxSmoother> boxSmoother_;
+
     // ===== 视频录制 =====
     // 硬件编码环形缓冲区录制器：用 shared_ptr 持有，ClipWriter 的延迟 dump
     // 任务各持一份引用，因此本对象析构不会让后台线程摸到已释放的编码器。

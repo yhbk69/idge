@@ -72,11 +72,8 @@ AlarmManager &AlarmManager::instance()
 AlarmManager::AlarmManager(QObject *parent)
     : QObject(parent)
 {
-    // 从 config.json 读取报警类别
+    // 从 config.json 读取报警类别（空 = 不报警）
     alarmClasses_ = ConfigManager::instance().alarmClasses();
-    if (alarmClasses_.isEmpty()) {
-        alarmClasses_ << "person";  // 默认检测到人时报警
-    }
 }
 
 // 设置类别名称列表（用于将 cls_id 转换为类别名称）
@@ -109,6 +106,23 @@ QString AlarmManager::resolveClassName(int slot, int clsId) const
     if (clsId >= 0 && clsId < classNames_.size())
         return classNames_[clsId];
     return QString("cls_%1").arg(clsId);
+}
+
+void AlarmManager::setSlotAlarmClass(int slot, const QString &className)
+{
+    if (slot < 0) return;
+    QMutexLocker lock(&mutex_);
+    if (slotAlarmClasses_.size() <= slot)
+        slotAlarmClasses_.resize(slot + 1);
+    slotAlarmClasses_[slot] = className;
+}
+
+QString AlarmManager::slotAlarmClass(int slot) const
+{
+    QMutexLocker lock(&mutex_);
+    if (slot >= 0 && slot < slotAlarmClasses_.size())
+        return slotAlarmClasses_[slot];
+    return QString();
 }
 
 // ============================================================================
@@ -176,7 +190,18 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
             classCount_[className]++;
 
             // 检查是否需要生成报警
-            if (alarmClasses_.contains(className)) {
+            // 围栏报警（bypassThrottle=true）已由 fenceClasses 过滤，直接通过
+            // 普通报警检查该槽位的 alarm_class
+            bool shouldAlarm = false;
+            if (bypassThrottle) {
+                shouldAlarm = true;
+            } else {
+                QString slotClass = (slot >= 0 && slot < slotAlarmClasses_.size())
+                                        ? slotAlarmClasses_[slot] : QString();
+                shouldAlarm = !slotClass.isEmpty() && slotClass == className;
+            }
+
+            if (shouldAlarm) {
                 // 去重限流：同通道同槽位同类别在限流窗口内只报一次
                 // key 格式: "通道:槽位:类别ID"，如 "0:1:0" 表示通道 0、级联第 2 槽的 cls_0。
                 // 槽位入键后，不同模型恰好同类号（helmet cls_1 与 vest cls_1）

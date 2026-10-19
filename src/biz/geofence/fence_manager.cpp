@@ -46,7 +46,7 @@ void FenceManager::loadFromConfig()
     ConfigManager &cfg = ConfigManager::instance();
     enabled_ = cfg.geofenceEnabled();
     mode_ = cfg.geofenceMode();
-    alarmClasses_ = cfg.geofenceAlarmClasses();
+    alarmClasses_ = QStringList{"person"};  // 围栏报警类别硬编码为 person
 
     fences_.clear();
     overlaySizes_.clear();
@@ -165,9 +165,9 @@ QStringList FenceManager::alarmClasses() const { QMutexLocker locker(&mutex_); r
 
 void FenceManager::setAlarmClasses(const QStringList &classes)
 {
+    Q_UNUSED(classes);
     QMutexLocker locker(&mutex_);
-    alarmClasses_ = classes;
-    if (alarmClasses_.isEmpty()) alarmClasses_.append("person");
+    alarmClasses_ = QStringList{"person"};  // 围栏报警类别硬编码为 person
 }
 
 // ============================================================================

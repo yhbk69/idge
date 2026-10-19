@@ -946,88 +946,11 @@ void frmMain::initDebugPage()
     // ========== 模型库管理区（列表 + 导入/删除） ==========
     initModelLibraryUi();
 
-    // ========== 报警配置（从 config.json 读取，保存后实时生效） ==========
-    {
-        QStringList classes = cfg.alarmClasses();
-        ui->editAlarmClasses->setText(classes.join(", "));
-        connect(ui->btnSaveAlarmClasses, &QPushButton::clicked, this, [this]() {
-            QString text = ui->editAlarmClasses->text().trimmed();
-            QStringList classes;
-            if (!text.isEmpty()) {
-                for (const auto &s : text.split(",", QString::SkipEmptyParts)) {
-                    QString trimmed = s.trimmed();
-                    if (!trimmed.isEmpty()) classes.append(trimmed);
-                }
-            }
-            ConfigManager &c = ConfigManager::instance();
-            c.setAlarmClasses(classes);
-            c.save();
-            AlarmManager::instance().setAlarmClasses(classes);
-            QString display = classes.isEmpty() ? "(空, 不报警)" : classes.join(", ");
-            log("system", QString("报警类别已更新: %1").arg(display));
-        });
-    }
-
-    // ========== 电子围栏报警类别（动态创建，保存后实时生效） ==========
-    {
-        QGroupBox *grpFence = new QGroupBox("电子围栏配置");
-        grpFence->setStyleSheet(QString("QGroupBox{font-size:%1px; font-weight:bold;}"
-                                        "QLabel{font-size:%2px;}"
-                                        "QLineEdit{font-size:%2px;}"
-                                        "QPushButton{font-size:%2px;}")
-                                    .arg(theme::FS_CARD)
-                                    .arg(theme::FS_BODY));
-        QGridLayout *glFence = new QGridLayout(grpFence);
-        glFence->setHorizontalSpacing(20);
-        glFence->setVerticalSpacing(6);
-
-        // 围栏报警类别
-        QLabel *labFenceClasses = new QLabel("围栏报警类别:");
-        labFenceClasses->setMinimumWidth(120);
-        glFence->addWidget(labFenceClasses, 0, 0);
-
-        fenceClassesEdit_ = new QLineEdit();
-        fenceClassesEdit_->setPlaceholderText("person");
-        glFence->addWidget(fenceClassesEdit_, 0, 1);
-
-        QPushButton *btnSaveFenceClasses = new QPushButton("保存配置");
-        btnSaveFenceClasses->setMinimumWidth(80);
-        glFence->addWidget(btnSaveFenceClasses, 0, 2);
-
-        QLabel *labFenceHint = new QLabel("逗号分隔，留空默认只报 person。可用: person, bicycle, car 等");
-        labFenceHint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
-        labFenceHint->setWordWrap(true);
-        glFence->addWidget(labFenceHint, 1, 1, 1, 2);
-
-        // 初始值
-        fenceClassesEdit_->setText(cfg.geofenceAlarmClasses().join(", "));
-
-        connect(btnSaveFenceClasses, &QPushButton::clicked, this, [this]() {
-            QString text = fenceClassesEdit_->text().trimmed();
-            QStringList classes;
-            if (!text.isEmpty()) {
-                for (const auto &s : text.split(",", QString::SkipEmptyParts)) {
-                    QString trimmed = s.trimmed();
-                    if (!trimmed.isEmpty()) classes.append(trimmed);
-                }
-            }
-            ConfigManager &c = ConfigManager::instance();
-            c.setGeofenceAlarmClasses(classes);
-            c.save();
-            geofence::FenceManager::instance().setAlarmClasses(classes);
-            QString display = classes.isEmpty() ? "(默认 person)" : classes.join(", ");
-            log("system", QString("围栏报警类别已更新: %1").arg(display));
-        });
-
-        // 插入到 pageSettings 的垂直布局中（在 stackedWidget 之前）
-        QVBoxLayout *pageSettingsLayout = qobject_cast<QVBoxLayout *>(
-            ui->pageSettings->layout());
-        if (pageSettingsLayout) {
-            // 在运行日志分组框之前插入围栏配置
-            int count = pageSettingsLayout->count();
-            pageSettingsLayout->insertWidget(count - 1, grpFence);  // 倒数第二个（最后是日志）
-        }
-    }
+    // ========== 报警配置已改为每个模型独立配置（见 initCascadeUi 中的报警类别下拉） ==========
+    // 隐藏 .ui 文件中的全局报警类别控件
+    if (ui->editAlarmClasses) ui->editAlarmClasses->setVisible(false);
+    if (ui->btnSaveAlarmClasses) ui->btnSaveAlarmClasses->setVisible(false);
+    if (ui->labAlarmHint) ui->labAlarmHint->setVisible(false);
 
     // ========== 初始日志（带颜色） ==========
     log("system", "系统启动");
@@ -1078,6 +1001,7 @@ void frmMain::initCascadeUi()
     moveTo(ui->labModelTypeVal, 20, 3);
 
     // ===== 模型路径1：复用原来的"模型路径"行，路径框换为模型库下拉 =====
+    // 布局: Col0=标签, Col1=模型下拉, Col2=(空), Col3=报警类别, Col4=备注, Col5=清空
     ui->labModelPath->setText("模型路径1:");
     gl->removeWidget(ui->lineEditModelPath);
     ui->lineEditModelPath->setVisible(false);
@@ -1086,6 +1010,14 @@ void frmMain::initCascadeUi()
     connect(cascadeModelCombo_[0], QOverload<int>::of(&QComboBox::activated),
             this, [this](int) { applyCascadeCombo(0); });
     gl->addWidget(cascadeModelCombo_[0], 4, 1);
+
+    // 报警类别下拉（模型路径1）
+    cascadeAlarmClassCombo_[0] = new QComboBox;
+    cascadeAlarmClassCombo_[0]->setStyleSheet(theme::field(theme::PANEL));
+    connect(cascadeAlarmClassCombo_[0], QOverload<int>::of(&QComboBox::activated),
+            this, [this](int) { applyCascadeAlarmClass(0); });
+    gl->addWidget(cascadeAlarmClassCombo_[0], 4, 3);
+
     // 模型路径1 的备注（存 cascade idx1 的 note）
     cascadeNoteEdit_[0] = new QLineEdit(cfg.cascadeModelNote(1));
     cascadeNoteEdit_[0]->setPlaceholderText("备注");
@@ -1096,7 +1028,7 @@ void frmMain::initCascadeUi()
         c.setCascadeModelNote(1, cascadeNoteEdit_[0]->text().trimmed());
         c.save();
     });
-    gl->addWidget(cascadeNoteEdit_[0], 4, 3);
+    gl->addWidget(cascadeNoteEdit_[0], 4, 4);
     QPushButton *clear1 = new QPushButton("清空");
     clear1->setMaximumWidth(64);
     clear1->setStyleSheet(theme::miniButton(theme::DANGER));
@@ -1105,13 +1037,16 @@ void frmMain::initCascadeUi()
         ConfigManager &c = ConfigManager::instance();
         c.setModelPath("");
         c.setCascadeModelNote(1, "");
+        c.setCascadeModelAlarmClass(1, "");
         c.save();
+        if (cascadeAlarmClassCombo_[0]) cascadeAlarmClassCombo_[0]->setCurrentIndex(0);
         refreshCascadeModelCombos();
         log("system", "模型路径1 已清空");
     });
-    gl->addWidget(clear1, 4, 4);
+    gl->addWidget(clear1, 4, 5);
 
     // ===== 模型路径2~5：新行，占 row5~8 =====
+    // 布局: Col0=标签, Col1=模型下拉, Col2=浏览, Col3=报警类别, Col4=备注, Col5=清空
     // 说明：空路径 = 该路模型不用（级联只跑非空的行）
     for (int i = 1; i < 5; ++i) {          // i = 数组下标(1..4)，对应界面模型2~5
         int row = 4 + i;                   // 模型2在row5 ... 模型5在row8
@@ -1142,6 +1077,13 @@ void frmMain::initCascadeUi()
         });
         gl->addWidget(browse, row, 2);
 
+        // 报警类别下拉
+        cascadeAlarmClassCombo_[i] = new QComboBox;
+        cascadeAlarmClassCombo_[i]->setStyleSheet(theme::field(theme::PANEL));
+        connect(cascadeAlarmClassCombo_[i], QOverload<int>::of(&QComboBox::activated),
+                this, [this, i](int) { applyCascadeAlarmClass(i); });
+        gl->addWidget(cascadeAlarmClassCombo_[i], row, 3);
+
         cascadeNoteEdit_[i] = new QLineEdit(cfg.cascadeModelNote(i + 1));
         cascadeNoteEdit_[i]->setPlaceholderText("备注");
         cascadeNoteEdit_[i]->setMaximumWidth(180);
@@ -1152,7 +1094,7 @@ void frmMain::initCascadeUi()
                     c.setCascadeModelNote(i + 1, cascadeNoteEdit_[i]->text().trimmed());
                     c.save();
                 });
-        gl->addWidget(cascadeNoteEdit_[i], row, 3);
+        gl->addWidget(cascadeNoteEdit_[i], row, 4);
 
         QPushButton *clearBtn = new QPushButton("清空");
         clearBtn->setMaximumWidth(64);
@@ -1162,11 +1104,13 @@ void frmMain::initCascadeUi()
             ConfigManager &c = ConfigManager::instance();
             c.setCascadeModelPath(i + 1, "");
             c.setCascadeModelNote(i + 1, "");
+            c.setCascadeModelAlarmClass(i + 1, "");
             c.save();
+            if (cascadeAlarmClassCombo_[i]) cascadeAlarmClassCombo_[i]->setCurrentIndex(0);
             refreshCascadeModelCombos();
             log("system", QString("模型路径%1 已清空").arg(i + 1));
         });
-        gl->addWidget(clearBtn, row, 4);
+        gl->addWidget(clearBtn, row, 5);
     }
 
     // ===== 把"标签文件"(原row5)挪到 row9，输入尺寸/类型(原row6)挪到 row10 =====
@@ -1244,6 +1188,72 @@ void frmMain::refreshCascadeModelCombos()
         cb->setCurrentIndex(qMax(0, idx));
         cb->blockSignals(false);
     }
+    // 模型变更后，同步刷新报警类别下拉（labels.txt 可能不同）
+    refreshCascadeAlarmClassCombos();
+}
+
+// ============================================================
+// refreshCascadeAlarmClassCombos: 重建 5 个报警类别下拉
+//   选项 = "(不报警)" + 该槽位 labels.txt 中的类别列表
+// ============================================================
+void frmMain::refreshCascadeAlarmClassCombos()
+{
+    auto slotList = ModelRegistry::resolveCascadeSlots();
+    ConfigManager &cfg = ConfigManager::instance();
+
+    for (int i = 0; i < 5; ++i) {
+        QComboBox *cb = cascadeAlarmClassCombo_[i];
+        if (!cb) continue;
+
+        cb->blockSignals(true);
+        cb->clear();
+
+        // 读取该槽位 labels.txt 的类别列表
+        QStringList classes;
+        if (i < slotList.size()) {
+            QString labelPath = slotList[i].labelPath;
+            if (!labelPath.isEmpty() && QFile::exists(labelPath)) {
+                QFile f(labelPath);
+                if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                    QTextStream ts(&f);
+                    while (!ts.atEnd()) {
+                        QString line = ts.readLine().trimmed();
+                        if (!line.isEmpty()) classes.append(line);
+                    }
+                }
+            }
+        }
+
+        cb->addItem("(不报警)", QString(""));
+        for (const QString &cls : classes) {
+            cb->addItem(cls, cls);
+        }
+
+        // 设置当前值
+        QString current = cfg.cascadeModelAlarmClass(i + 1);
+        int idx = cb->findText(current);
+        cb->setCurrentIndex(idx >= 0 ? idx : 0);
+        cb->blockSignals(false);
+    }
+}
+
+// ============================================================
+// applyCascadeAlarmClass: 报警类别下拉写回 config 并热更新
+// ============================================================
+void frmMain::applyCascadeAlarmClass(int slotIdx)
+{
+    QComboBox *cb = cascadeAlarmClassCombo_[slotIdx];
+    if (!cb) return;
+    QString className = cb->currentText();
+    if (className == "(不报警)") className = "";
+
+    ConfigManager &c = ConfigManager::instance();
+    c.setCascadeModelAlarmClass(slotIdx + 1, className);
+    c.save();
+    AlarmManager::instance().setSlotAlarmClass(slotIdx, className);
+
+    log("system", QString("模型%1 报警类别: %2")
+            .arg(slotIdx + 1).arg(className.isEmpty() ? "(不报警)" : className));
 }
 
 // ============================================================

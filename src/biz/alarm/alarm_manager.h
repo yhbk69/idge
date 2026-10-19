@@ -137,6 +137,18 @@ public:
      */
     QString resolveClassName(int slot, int clsId) const;
 
+    /**
+     * @brief 设置某个级联槽位的报警类别
+     * @param slot  槽位索引（results.id，0 基）
+     * @param className 该槽位触发报警的类别名（如 "person"），空串=不报警
+     */
+    void setSlotAlarmClass(int slot, const QString &className);
+
+    /**
+     * @brief 获取某个级联槽位的报警类别
+     */
+    QString slotAlarmClass(int slot) const;
+
     // ============================================================================
     // ingest: 接收检测结果，判断是否需要生成报警
     // ============================================================================
@@ -274,7 +286,8 @@ private:
     QMap<QString, int> classCount_;            // 各类别检测次数
     QStringList classNames_;                   // 类别名称列表（全局兜底）
     QVector<QStringList> slotClassNames_;      // 按级联槽位存的类别名表，下标=results.id
-    QStringList alarmClasses_;                 // 报警类别列表
+    QVector<QString> slotAlarmClasses_;        // 按级联槽位存的报警类别，下标=results.id
+    QStringList alarmClasses_;                 // 报警类别列表（已废弃，改用 slotAlarmClasses_）
     QMap<QString, long> lastAlarmTime_;        // 上次报警时间（steady 单调纳秒，仅内存态，用于去重限流）
                                                // key: "通道号:类别ID" -> 上次报警时间(ns)
     QSet<int> onlineChannels_;                 // 当前在线通道集合
