@@ -65,7 +65,8 @@ void PpeTask::init()
     model_ = std::make_shared<YOLO11Model>(
             config.modelPath,
             config.labelPath,
-            config.core_mask);  // 指定 NPU 核心
+            config.core_mask,
+            config.numClasses);  // 指定 NPU 核心和类别数
     
     // 任务队列容量为 2：只保留最新 2 帧
     // 如果队列满，push_latest 会丢弃最旧的帧

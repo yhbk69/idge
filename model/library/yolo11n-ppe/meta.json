@@ -1,0 +1,21 @@
+{
+    "classes": [
+        "helmet",
+        "no-helmet",
+        "vest",
+        "no-vest"
+    ],
+    "display_name": "yolo11n-ppe",
+    "family": "yolo11n",
+    "id": "yolo11n-ppe",
+    "input_size": [
+        640,
+        640
+    ],
+    "notes": "PPE detection model (helmet/vest)",
+    "num_classes": 4,
+    "quant": "i8",
+    "sha256": "",
+    "task": "ppe",
+    "version": "2026-10-21"
+}

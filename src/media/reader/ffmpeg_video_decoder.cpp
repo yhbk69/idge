@@ -544,7 +544,11 @@ void FFmpegVideoDecoder::buildCascadeTasks()
         if (mp.isEmpty())
             continue;
         QString lp = s.labelPath.trimmed();
-        if (lp.isEmpty()) lp = "model/library/yolo11n-coco/labels.txt";
+        // 未指定标签路径时，自动使用模型同目录下的 labels.txt
+        if (lp.isEmpty()) {
+            QFileInfo modelInfo(mp);
+            lp = modelInfo.dir().filePath("labels.txt");
+        }
 
         const int slotIdx = (int)tasks_.size();  // 紧凑下标，即 result_id
 
@@ -553,6 +557,17 @@ void FFmpegVideoDecoder::buildCascadeTasks()
         taskConfig.modelPath = mp.toStdString();
         taskConfig.labelPath = lp.toStdString();
         taskConfig.result_id = slotIdx;
+        
+        // 从模型注册表获取类别数
+        QString modelId = ModelRegistry::instance().findIdByModelFile(mp);
+        if (!modelId.isEmpty()) {
+            ModelMeta meta = ModelRegistry::instance().meta(modelId);
+            taskConfig.numClasses = meta.numClasses;
+        } else {
+            // 未入库的模型，按标签文件行数估算
+            std::vector<std::string> labels = readLabelNames(lp);
+            taskConfig.numClasses = labels.size();
+        }
 
         PpeTask *task = new PpeTask(taskConfig);
         tasks_.push_back(task);

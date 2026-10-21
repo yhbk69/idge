@@ -24,6 +24,8 @@
 #include <QTextCharFormat>
 #include <QCloseEvent>
 #include <QVector>
+#include <QJsonObject>
+#include <QPushButton>
 #include <memory>
 #include <string>
 #include <vector>
@@ -150,6 +152,7 @@ private slots:
     void buttonClick();            ///< 顶部导航按钮点击处理
     void showAlarmToast(const AlarmRecord &alarm);  ///< 悬浮报警提示
     void updateAlarmBadge();       ///< 更新未确认报警角标
+    void onWsAlarmReceived(const QJsonObject &data);  ///< WebSocket 报警消息处理
     void initLeftMain();           ///< 初始化视频监控页左侧导航
     void leftMainClick();          ///< 视频监控页左侧按钮点击
     void systemExit();             ///< 系统退出确认
@@ -177,6 +180,11 @@ private:
     void refreshCascadeModelCombos();        ///< 重建 5 个下拉并同步 config 选中项
     void refreshCascadeAlarmClassCombos();   ///< 重建 5 个报警类别下拉（从 labels.txt 读取）
     void applyCascadeAlarmClass(int slotIdx); ///< 报警类别下拉写回 config 并热更新
+
+    // ========== WebSocket 配置控件 ==========
+    QLineEdit *wsUrlEdit_ = nullptr;         ///< 服务器地址输入框
+    QLabel *wsStatusLabel_ = nullptr;        ///< 连接状态标签
+    QPushButton *wsConnectBtn_ = nullptr;    ///< 连接/断开按钮
 
     // ========== 模型库管理区（P2：model/library 列表 + 导入/删除） ==========
     QTableWidget *modelLibTable_ = nullptr;

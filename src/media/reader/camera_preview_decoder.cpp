@@ -20,10 +20,13 @@
 #include "rga_converter.h"
 #include "image_utils.h"
 #include "image_drawing.h"
+#include "model_registry.h"
 
 #include <QFile>
 #include <QDebug>
 #include <QMetaType>
+#include <QFileInfo>
+#include <QDir>
 #include <chrono>
 #include <fstream>
 
@@ -160,8 +163,32 @@ void CameraPreviewDecoder::start(const QString& device)
             TaskConfig taskConfig;
             taskConfig.core_mask = config.npu_core_mask;
             taskConfig.modelPath = config.model_path;
-            taskConfig.labelPath = config.label_path;
+            
+            // 未指定标签路径时，自动使用模型同目录下的 labels.txt
+            std::string labelPath = config.label_path;
+            if (labelPath.empty()) {
+                QFileInfo modelInfo(QString::fromStdString(config.model_path));
+                labelPath = modelInfo.dir().filePath("labels.txt").toStdString();
+            }
+            taskConfig.labelPath = labelPath;
             taskConfig.result_id = static_cast<int>(detector_index);
+            
+            // 从模型注册表获取类别数
+            QString modelPath = QString::fromStdString(config.model_path);
+            QString modelId = ModelRegistry::instance().findIdByModelFile(modelPath);
+            if (!modelId.isEmpty()) {
+                ModelMeta meta = ModelRegistry::instance().meta(modelId);
+                taskConfig.numClasses = meta.numClasses;
+            } else {
+                // 未入库的模型，按标签文件行数估算
+                std::ifstream infile(labelPath);
+                int lineCount = 0;
+                std::string line;
+                while (std::getline(infile, line)) {
+                    if (!line.empty()) lineCount++;
+                }
+                taskConfig.numClasses = lineCount;
+            }
             
             PpeTask* task = new PpeTask(taskConfig);
             ppeTasks_.push_back(task);

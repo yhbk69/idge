@@ -263,6 +263,18 @@ public:
     /** @brief 关键帧间隔（秒，默认 1）——越小报警片段起点对齐误差越小 */
     int recordingGopSeconds() const;
 
+    // ========== WebSocket 配置 ==========
+
+    /** @brief WebSocket 服务器地址（如 "ws://192.168.1.100:8765"） */
+    QString wsServerUrl() const;
+    void setWsServerUrl(const QString &url);
+
+    /** @brief 心跳间隔（秒，默认 30） */
+    int wsHeartbeatInterval() const;
+
+    /** @brief 断线重连间隔（秒，默认 5） */
+    int wsReconnectInterval() const;
+
 private:
     /**
      * @brief 私有构造函数（单例模式）

@@ -889,3 +889,33 @@ int ConfigManager::recordingGopSeconds() const
     std::lock_guard<std::mutex> lock(mutex_);
     return qBound(1, recordingSection(root_).value("gop_seconds").toInt(1), 10);
 }
+
+// ==========================================
+// WebSocket 配置
+// ==========================================
+
+QString ConfigManager::wsServerUrl() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return root_["websocket"].toObject()["server_url"].toString();
+}
+
+void ConfigManager::setWsServerUrl(const QString &url)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject ws = root_["websocket"].toObject();
+    ws["server_url"] = url;
+    root_["websocket"] = ws;
+}
+
+int ConfigManager::wsHeartbeatInterval() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return root_["websocket"].toObject()["heartbeat_interval"].toInt(30);
+}
+
+int ConfigManager::wsReconnectInterval() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return root_["websocket"].toObject()["reconnect_interval"].toInt(5);
+}

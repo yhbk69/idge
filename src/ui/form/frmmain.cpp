@@ -32,6 +32,7 @@
 #include "alarm_manager.h"
 #include "video_alarm_widget.h"
 #include "fence_manager.h"
+#include "ws_client.h"
 #include "roll_call_widget.h"
 #include "equipment_inventory_widget.h"
 #include "roll_call_service.h"
@@ -455,6 +456,17 @@ void frmMain::initNewPages()
                 log(cat, msg);
             });
 
+    // WebSocket 客户端
+    connect(&WsClient::instance(), &WsClient::logMessage,
+            this, [this](const QString &cat, const QString &msg) {
+                log(cat, msg);
+            });
+    connect(&WsClient::instance(), &WsClient::alarmReceived,
+            this, &frmMain::onWsAlarmReceived);
+    connect(&WsClient::instance(), &WsClient::connected,
+            this, [this]() { log("system", "WebSocket 已连接到 Aibox"); });
+    WsClient::instance().start();
+
     // 设置类名到 AlarmManager（从模型加载）
     QStringList classNames;
     QFile labelFile(ConfigManager::instance().labelPath());
@@ -508,6 +520,31 @@ void frmMain::updateAlarmBadge()
     } else {
         alarmBadge_->hide();
     }
+}
+
+void frmMain::onWsAlarmReceived(const QJsonObject &data)
+{
+    QString alarmId = data["alarm_id"].toString();
+    QString alarmType = data["alarm_type"].toString();
+    long timestamp = static_cast<long>(data["timestamp"].toDouble());
+    QString imageUrl = data["image_url"].toString();
+    QString videoUrl = data["video_url"].toString();
+
+    log("alarm", QString("WebSocket 报警: %1 (ID: %2)").arg(alarmType).arg(alarmId));
+
+    if (!imageUrl.isEmpty()) {
+        log("info", QString("  截图: %1").arg(imageUrl));
+    }
+    if (!videoUrl.isEmpty()) {
+        log("info", QString("  视频: %1").arg(videoUrl));
+    }
+
+    // 发送 ack 确认
+    if (!alarmId.isEmpty()) {
+        WsClient::instance().sendAck(alarmId);
+    }
+
+    Q_UNUSED(timestamp);
 }
 
 // ==========================================
@@ -951,6 +988,117 @@ void frmMain::initDebugPage()
     if (ui->editAlarmClasses) ui->editAlarmClasses->setVisible(false);
     if (ui->btnSaveAlarmClasses) ui->btnSaveAlarmClasses->setVisible(false);
     if (ui->labAlarmHint) ui->labAlarmHint->setVisible(false);
+
+    // ========== WebSocket 配置 ==========
+    {
+        QGroupBox *grpWs = new QGroupBox("WebSocket 配置");
+        grpWs->setStyleSheet(QString("QGroupBox{font-size:%1px; font-weight:bold;}"
+                                     "QLabel{font-size:%2px;}"
+                                     "QLineEdit{font-size:%2px;}"
+                                     "QPushButton{font-size:%2px;}")
+                                 .arg(theme::FS_CARD)
+                                 .arg(theme::FS_BODY));
+        QGridLayout *glWs = new QGridLayout(grpWs);
+        glWs->setHorizontalSpacing(10);
+        glWs->setVerticalSpacing(6);
+
+        // 服务器地址
+        QLabel *labWsUrl = new QLabel("服务器地址:");
+        labWsUrl->setMinimumWidth(90);
+        glWs->addWidget(labWsUrl, 0, 0);
+
+        wsUrlEdit_ = new QLineEdit();
+        wsUrlEdit_->setPlaceholderText("ws://192.168.x.x:port");
+        wsUrlEdit_->setText(cfg.wsServerUrl());
+        wsUrlEdit_->setStyleSheet(theme::field(theme::PANEL));
+        glWs->addWidget(wsUrlEdit_, 0, 1, 1, 2);
+
+        QPushButton *btnWsSave = new QPushButton("保存");
+        btnWsSave->setMaximumWidth(60);
+        btnWsSave->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
+        glWs->addWidget(btnWsSave, 0, 3);
+
+        // 连接状态
+        QLabel *labWsStatus = new QLabel("连接状态:");
+        glWs->addWidget(labWsStatus, 1, 0);
+
+        wsStatusLabel_ = new QLabel("○ 未连接");
+        wsStatusLabel_->setStyleSheet("color: #dc3232;");
+        glWs->addWidget(wsStatusLabel_, 1, 1);
+
+        wsConnectBtn_ = new QPushButton("连接");
+        wsConnectBtn_->setMaximumWidth(80);
+        wsConnectBtn_->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
+        glWs->addWidget(wsConnectBtn_, 1, 3);
+
+        // 保存按钮
+        connect(btnWsSave, &QPushButton::clicked, this, [this]() {
+            QString url = wsUrlEdit_->text().trimmed();
+            ConfigManager &c = ConfigManager::instance();
+            c.setWsServerUrl(url);
+            c.save();
+            log("system", QString("WebSocket 服务器地址已保存: %1").arg(url.isEmpty() ? "(空)" : url));
+            // 重新连接
+            WsClient::instance().stop();
+            if (!url.isEmpty()) {
+                WsClient::instance().start();
+            }
+        });
+
+        // 连接/断开按钮
+        connect(wsConnectBtn_, &QPushButton::clicked, this, [this]() {
+            if (WsClient::instance().isConnected()) {
+                WsClient::instance().stop();
+                wsStatusLabel_->setText("○ 未连接");
+                wsStatusLabel_->setStyleSheet("color: #dc3232;");
+                wsConnectBtn_->setText("连接");
+                log("system", "WebSocket: 手动断开连接");
+            } else {
+                QString url = wsUrlEdit_->text().trimmed();
+                if (url.isEmpty()) {
+                    log("warning", "WebSocket: 请先配置服务器地址");
+                    return;
+                }
+                ConfigManager &c = ConfigManager::instance();
+                c.setWsServerUrl(url);
+                c.save();
+                WsClient::instance().start();
+            }
+        });
+
+        // WebSocket 信号 -> 更新状态
+        connect(&WsClient::instance(), &WsClient::connected, this, [this]() {
+            wsStatusLabel_->setText("● 已连接");
+            wsStatusLabel_->setStyleSheet("color: #32b432;");
+            wsConnectBtn_->setText("断开连接");
+        });
+        connect(&WsClient::instance(), &WsClient::disconnected, this, [this]() {
+            wsStatusLabel_->setText("○ 未连接");
+            wsStatusLabel_->setStyleSheet("color: #dc3232;");
+            wsConnectBtn_->setText("连接");
+        });
+
+        // 流列表展示
+        connect(&WsClient::instance(), &WsClient::streamsReceived, this,
+            [this](const QJsonArray &streams) {
+                log("system", QString("收到 %1 路视频流:").arg(streams.size()));
+                for (const auto &s : streams) {
+                    QJsonObject obj = s.toObject();
+                    log("info", QString("  通道%1: %2 (%3)")
+                        .arg(obj["stream_id"].toString())
+                        .arg(obj["name"].toString())
+                        .arg(obj["url"].toString()));
+                }
+            });
+
+        // 插入到 pageSettings 布局
+        QVBoxLayout *pageSettingsLayout = qobject_cast<QVBoxLayout *>(
+            ui->pageSettings->layout());
+        if (pageSettingsLayout) {
+            int count = pageSettingsLayout->count();
+            pageSettingsLayout->insertWidget(count - 1, grpWs);
+        }
+    }
 
     // ========== 初始日志（带颜色） ==========
     log("system", "系统启动");

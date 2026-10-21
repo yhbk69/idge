@@ -622,7 +622,7 @@ public:
     static int process_u8(uint8_t *box_tensor, int32_t box_zp, float box_scale,
                           uint8_t *score_tensor, int32_t score_zp, float score_scale,
                           uint8_t *score_sum_tensor, int32_t score_sum_zp, float score_sum_scale,
-                          int grid_h, int grid_w, int stride, int dfl_len,
+                          int grid_h, int grid_w, int stride, int dfl_len, int numClasses,
                           std::vector<float> &boxes,
                           std::vector<float> &objProbs,
                           std::vector<int> &classId,
@@ -650,7 +650,7 @@ public:
                 }
 
                 uint8_t max_score = -score_zp;
-                for (int c = 0; c < OBJ_CLASS_NUM; c++)
+                for (int c = 0; c < numClasses; c++)
                 {
                     if ((score_tensor[offset] > score_thres_u8) && (score_tensor[offset] > max_score))
                     {
@@ -697,7 +697,7 @@ public:
     static int process_i8(int8_t *box_tensor, int32_t box_zp, float box_scale,
                           int8_t *score_tensor, int32_t score_zp, float score_scale,
                           int8_t *score_sum_tensor, int32_t score_sum_zp, float score_sum_scale,
-                          int grid_h, int grid_w, int stride, int dfl_len,
+                          int grid_h, int grid_w, int stride, int dfl_len, int numClasses,
                           std::vector<float> &boxes,
                           std::vector<float> &objProbs,
                           std::vector<int> &classId,
@@ -725,7 +725,7 @@ public:
                 }
 
                 int8_t max_score = -score_zp;
-                for (int c = 0; c < OBJ_CLASS_NUM; c++)
+                for (int c = 0; c < numClasses; c++)
                 {
                     if ((score_tensor[offset] > score_thres_i8) && (score_tensor[offset] > max_score))
                     {
@@ -770,7 +770,7 @@ public:
     }
 
     static int process_fp32(float *box_tensor, float *score_tensor, float *score_sum_tensor,
-                            int grid_h, int grid_w, int stride, int dfl_len,
+                            int grid_h, int grid_w, int stride, int dfl_len, int numClasses,
                             std::vector<float> &boxes,
                             std::vector<float> &objProbs,
                             std::vector<int> &classId,
@@ -795,7 +795,7 @@ public:
                 }
 
                 float max_score = 0;
-                for (int c = 0; c < OBJ_CLASS_NUM; c++)
+                for (int c = 0; c < numClasses; c++)
                 {
                     if ((score_tensor[offset] > threshold) && (score_tensor[offset] > max_score))
                     {
@@ -906,13 +906,13 @@ public:
                 validCount += process_i8((int8_t *)_outputs[box_idx].buf, app_ctx->output_attrs[box_idx].zp, app_ctx->output_attrs[box_idx].scale,
                                          (int8_t *)_outputs[score_idx].buf, app_ctx->output_attrs[score_idx].zp, app_ctx->output_attrs[score_idx].scale,
                                          (int8_t *)score_sum, score_sum_zp, score_sum_scale,
-                                         grid_h, grid_w, stride, dfl_len,
+                                         grid_h, grid_w, stride, dfl_len, numClasses,
                                          filterBoxes, objProbs, classId, conf_threshold);
             }
             else
             {
                 validCount += process_fp32((float *)_outputs[box_idx].buf, (float *)_outputs[score_idx].buf, (float *)score_sum,
-                                           grid_h, grid_w, stride, dfl_len,
+                                           grid_h, grid_w, stride, dfl_len, numClasses,
                                            filterBoxes, objProbs, classId, conf_threshold);
             }
         }
