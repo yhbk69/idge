@@ -1,0 +1,16 @@
+{
+    "classes": [],
+    "display_name": "scrfd-face-recognition",
+    "family": "scrfd",
+    "id": "scrfd-face-recognition",
+    "input_size": [
+        112,
+        112
+    ],
+    "notes": "Face recognition model - extracts embeddings, no detection",
+    "num_classes": 0,
+    "quant": "fp16",
+    "sha256": "",
+    "task": "face_recognition",
+    "version": "2026-09-24"
+}

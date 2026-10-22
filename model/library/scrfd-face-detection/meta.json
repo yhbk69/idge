@@ -1,0 +1,18 @@
+{
+    "classes": [
+        "face"
+    ],
+    "display_name": "scrfd-face-detection",
+    "family": "scrfd",
+    "id": "scrfd-face-detection",
+    "input_size": [
+        640,
+        640
+    ],
+    "notes": "Face detection model (SCRFD)",
+    "num_classes": 1,
+    "quant": "i8",
+    "sha256": "",
+    "task": "face_detection",
+    "version": "2026-09-24"
+}

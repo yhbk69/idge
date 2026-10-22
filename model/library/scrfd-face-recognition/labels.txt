@@ -1,0 +1,2 @@
+# Face recognition model - no object detection classes
+# This model extracts face embeddings for recognition
