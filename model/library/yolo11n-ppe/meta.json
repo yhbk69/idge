@@ -1,9 +1,10 @@
 {
     "classes": [
+        "un_helmet",
         "helmet",
-        "no-helmet",
+        "people",
         "vest",
-        "no-vest"
+        "workWear"
     ],
     "display_name": "yolo11n-ppe",
     "family": "yolo11n",
@@ -12,8 +13,8 @@
         640,
         640
     ],
-    "notes": "PPE detection model (helmet/vest)",
-    "num_classes": 4,
+    "notes": "PPE detection model (helmet/vest/workwear/people)",
+    "num_classes": 5,
     "quant": "i8",
     "sha256": "",
     "task": "ppe",
