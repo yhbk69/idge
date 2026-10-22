@@ -614,8 +614,8 @@ bool frmMain::initRollCallService()
     rollCallService_ = std::make_shared<RollCallService>();
     const std::string ws = workspace_;
     const bool success = rollCallService_->initialize(
-        ws + "/model/face/detection.rknn",
-        ws + "/model/face/recognition.rknn",
+        ws + "/model/library/scrfd-face-detection/model.rknn",
+        ws + "/model/library/scrfd-face-recognition/model.rknn",
         RuntimePaths::rollCallDb(QString::fromStdString(ws)).toStdString(),
         RuntimePaths::rollCallDir(QString::fromStdString(ws)).toStdString());
     if (success) qDebug() << "RollCallService initialized successfully";
