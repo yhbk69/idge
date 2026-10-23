@@ -80,8 +80,8 @@ public:
     ~RollCallService();
     
     // 初始化：常驻加载两个 RKNN 模型（进程内识别器）、打开 SQLite 注册库、创建存储目录
-    //  @param det_model_path SCRFD 人脸检测 rknn 模型（model/library/scrfd-face-detection/model.rknn）
-    //  @param rec_model_path 人脸特征提取 rknn 模型（model/library/scrfd-face-recognition/model.rknn，输出 512 维特征）
+    //  @param det_model_path SCRFD 人脸检测 rknn 模型（model/face/detection/model.rknn）
+    //  @param rec_model_path 人脸特征提取 rknn 模型（model/face/recognition/model.rknn，输出 512 维特征）
     //  @param db_path        SQLite 注册库文件（data/roll_call_data/roll_call.db）
     //  @param base_storage_path 任务文件夹根目录（data/roll_call_data/），每个任务一个子目录
     //  核绑定 RKNN_NPU_CORE_AUTO：点名为低频批量操作，不与其他链路争抢固定核预算

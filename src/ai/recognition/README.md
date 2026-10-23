@@ -55,7 +55,7 @@ calculateSimilarity(featA, featB)                 // 单位向量点积 = 余弦
 #include "in_process_face_recognizer.h"
 
 InProcessFaceRecognizer rec;
-rec.init("/ws/model/face/detection.rknn", "/ws/model/face/recognition.rknn", RKNN_NPU_CORE_AUTO);
+rec.init("/ws/model/face/detection/model.rknn", "/ws/model/face/recognition/model.rknn", RKNN_NPU_CORE_AUTO);
 rec.setThresholds(0.6f, 0.4f);            // 默认即 0.6/0.4：点名场景宁缺毋滥
 FaceDetectionResult res = rec.detectAndExtract("/data/capture/snap_001.jpg");
 for (const auto& f : res.faces) {
@@ -66,7 +66,7 @@ for (const auto& f : res.faces) {
 
 ## 依赖关系
 
-- 依赖：`rknnrt`（librknn_api）、OpenCV（imread/warpAffine/SVD）、`nlohmann/json`（仅 wrapper 的 JSON 解析）；模型两件套 `model/face/{detection,recognition}.rknn`；
+- 依赖：`rknnrt`（librknn_api）、OpenCV（imread/warpAffine/SVD）、`nlohmann/json`（仅 wrapper 的 JSON 解析）；模型两件套 `model/face/detection/model.rknn` 和 `model/face/recognition/model.rknn`；
 - 被依赖：`src/biz/service/roll_call_service`（点名注册/注销比对，经 `InProcessFaceRecognizer`）；`tests/test_rollcall`（同时用两条链路做对照回归）。
 
 ## 注意事项

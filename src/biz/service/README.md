@@ -54,8 +54,8 @@ saveResult(result)                                // 确认后落库：photo_id 
 //    face_recognition 可执行文件不再是前置条件，仅保留为 CLI 对照工具）
 auto rollCallService_ = std::make_shared<RollCallService>();
 rollCallService_->initialize(
-    ws + "/model/face/detection.rknn",     // SCRFD 人脸检测模型
-    ws + "/model/face/recognition.rknn",   // ArcFace 风格识别模型(512维)
+    ws + "/model/face/detection/model.rknn",     // SCRFD 人脸检测模型
+    ws + "/model/face/recognition/model.rknn",   // ArcFace 风格识别模型(512维)
     ws + "/roll_call_data/roll_call.db",   // SQLite 注册库
     ws + "/roll_call_data");               // 任务产物根目录
 

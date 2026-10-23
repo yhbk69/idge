@@ -11,21 +11,52 @@ RKNN 模型收编进 `library/<id>/`，一个模型一个目录；专项标签 t
 
 ```
 model/
-├── library/                      # 模型库：一模型一目录，目录名即 id
+├── library/                      # 视频级联检测模型库（实时性要求）
 │   ├── yolo11n-coco/             # YOLO11n INT8，默认模型（COCO 80 类）
 │   │   ├── model.rknn            # 固定文件名
 │   │   ├── labels.txt            # 专属类别表（行序 = cls_id）
 │   │   └── meta.json             # 元数据（首次扫描自动生成，可手工修订）
 │   ├── yolo11s-coco/             # YOLO11s（精度优先备选）
-│   └── yolo11m-coco/             # YOLO11m（对照实验用）
+│   ├── yolo11m-coco/             # YOLO11m（对照实验用）
+│   ├── yolo11n-ppe/              # PPE安全装备检测（5类：un_helmet/helmet/people/vest/workWear）
+│   ├── yolo11n-behavior/         # [预留] 行为分析检测（跌倒/吸烟/打电话/入侵）
+│   ├── yolo11n-fire/             # [预留] 明火/烟雾检测
+│   ├── pp-liteseg-seg/           # [预留] 语义分割（区域入侵精确判定）
+│   └── ppocrv4-ocr/              # [预留] OCR文字识别（车牌/安全标识）
+├── face/                         # 人脸相关模型（照片处理，非实时）
+│   ├── detection/                # SCRFD 人脸检测
+│   │   ├── model.rknn
+│   │   ├── labels.txt
+│   │   └── meta.json
+│   └── recognition/              # 人脸特征提取（512维）
+│       ├── model.rknn
+│       ├── labels.txt
+│       └── meta.json
+├── tools/                        # [预留] 工器具检测模型（照片处理，非实时）
+├── audio/                        # [预留] 音频检测模型（声音事件检测）
 ├── coco_80_labels_list.txt       # COCO 标签母本（CLI 模式固定读取）
-├── person_labels.txt / helmet_labels.txt / vest_labels.txt   # 专项标签（模型文件未入库）
 └── dataset.txt                   # 量化小样本清单（内容指向 assets/test/bus.jpg）
 ```
 
 - 换库/分发：zip 整个 `library/` 覆盖即可；程序启动重扫。
 - 新模型入库：放入 `library/<id>/`（model.rknn + labels.txt）重启即被识别，
   或调用 `ModelRegistry::importModel()`（Phase 2 管理 UI 使用）。
+
+## 预留目录说明
+
+根据 `plan/plan.md` 功能规划，预留以下模型目录（各含 README.md 详细说明）：
+
+| 目录 | 用途 | 对应 plan | 状态 |
+|------|------|----------|------|
+| `library/yolo11n-behavior/` | 行为分析（跌倒/吸烟/打电话） | 方向2 - 行为分析 | 待模型选型 |
+| `library/yolo11n-fire/` | 明火/烟雾检测 | 方向5 - 增强AI | 待模型训练 |
+| `library/pp-liteseg-seg/` | 语义分割（区域入侵精确判定） | 方向5 - 增强AI | 待模型转换 |
+| `library/ppocrv4-ocr/` | OCR文字识别（车牌/安全标识） | 方向5 - 增强AI | 待模型选型 |
+| `tools/` | 工器具检测（照片处理） | 方向5 - 增强AI | 待模型训练 |
+| `audio/` | 音频检测（声音事件） | 方向7 - 音频能力 | 待模型选型 |
+
+**使用方式**：模型文件放入对应目录后，重启应用即可被 `ModelRegistry` 自动识别。
+视频级联模型还需在 `config.json` 的 `cascade.models[]` 中配置槽位。
 
 ## 配置引用
 
@@ -45,7 +76,7 @@ model/
 
 | 路径 | 引用位置 |
 |------|----------|
-| `model/face/detection.rknn`、`model/face/recognition.rknn` | `src/ui/form/frmmain.cpp`（RollCallService 初始化，进程内 `InProcessFaceRecognizer` 加载） |
+| `model/face/detection/model.rknn`、`model/face/recognition/model.rknn` | `src/ui/form/frmmain.cpp`（RollCallService 初始化，进程内 `InProcessFaceRecognizer` 加载） |
 | `model/face/face_recognition` | 仅 CLI 手工验证与 `tests/test_rollcall` 对照回归需要（点名生产链 2026-09 已进程内化，主程序不再调起） |
 
 设备盘点不再依赖外部 demo 与 `model/coco|fire/` 目录（2026-09-24 内化改造）：
@@ -80,7 +111,7 @@ python3 convert.py yolo11n.onnx rk3588 i8 ../model/library/yolo11n-coco/model.rk
 - **模型与驱动版本强绑定**：librknnrt.so 过旧会报 RKNN_ERR_MODEL_INVALID，换板/换固件后先跑 CLI 冒烟。
 - rknn 文件不进 git（`.gitignore` 排除），部署包需自行携带 `library/`。
 - `meta.json` 的 `sha256` 用于导入去重与完整性核对；删除后下次启动重扫会重新生成。
-- `model/face/` 的**两件套权重**（detection/recognition .rknn）缺失时，人员点名初始化会失败
+- `model/face/` 的**两件套权重**（detection/model.rknn 和 recognition/model.rknn）缺失时，人员点名初始化会失败
   （`initRollCallService` 返回 false；`face_recognition` exe 已降级为 CLI 对照工具，缺失不影响点名运行）；
   盘点权重改从 `library/` 解析，库中既无 `yolo11n-coco` 也无明火模型时 `initEquipmentService`
   返回 false——均为弹警告降级，视频监控主流程不受影响。

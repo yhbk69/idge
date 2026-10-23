@@ -99,7 +99,7 @@ endif ()
 # - Charts: 图表组件（数据看板）
 # - LinguistTools: 国际化工具（多语言支持）
 # - Network: 网络支持（RTSP 流、报警推送）
-find_package(Qt5 COMPONENTS Core Gui Sql OpenGL Qml Quick Charts Widgets LinguistTools Network Sql Multimedia REQUIRED)
+find_package(Qt5 COMPONENTS Core Gui Sql OpenGL Qml Quick Charts Widgets LinguistTools Network Sql Multimedia WebSockets REQUIRED)
 
 # 线程库查找（POSIX 线程）
 find_package(Threads REQUIRED)
@@ -210,6 +210,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/biz/db                  # 数据持久层（业务 sqlite3 + 报警 QtSQL 两套）
     ${CMAKE_SOURCE_DIR}/src/biz/geofence            # 电子围栏（形状、检测、覆盖层）
     ${CMAKE_SOURCE_DIR}/src/biz/service             # 点名/盘点业务服务
+    ${CMAKE_SOURCE_DIR}/src/biz/ws                  # WebSocket 客户端（Pad↔Aibox 通信）
 
     # --- ui 界面域 ---
     ${CMAKE_SOURCE_DIR}/src/ui/core_helper          # 核心辅助（单例、样式、日志）
@@ -367,6 +368,7 @@ target_link_libraries(${PROJECT_NAME}
     Qt5::OpenGL                 # OpenGL 模块
     Qt5::Sql                    # 数据库模块（报警记录）
     Qt5::Multimedia             # 多媒体模块（拍照快门音效）
+    Qt5::WebSockets             # WebSocket 模块（Pad↔Aibox 通信）
 
     # ==================== 业务模块依赖（caichao 分支合并） ====================
     sqlite3                     # 业务 SQLite（人员点名/设备盘点）

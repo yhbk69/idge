@@ -43,7 +43,7 @@ from rknn.api import RKNN
 # ============================================================================
 # 默认配置
 # ============================================================================
-DATASET_PATH = '../../../datasets/COCO/coco_subset_20.txt'  # 量化校准数据集（20 张 COCO 图片）
+DATASET_PATH = '../model/dataset_test.txt'  # 量化校准数据集（PPE 测试图片）
 DEFAULT_RKNN_PATH = '../model/yolo11.rknn'                  # 默认输出路径
 DEFAULT_QUANT = True                                         # 默认启用 INT8 量化
 
