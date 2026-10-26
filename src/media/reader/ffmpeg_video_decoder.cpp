@@ -82,6 +82,8 @@
 #include "ffmpeg_video_decoder.h"
 #include "runtime_paths.h"
 #include "rga_converter.h"
+#include "perf_probe.h"
+#include "qt_image_utils.h"   // thumbnailSidecarPath：抓拍 sidecar 的命名规则只留一份
 #include "model_registry.h"
 
 #include <QDebug>
@@ -228,6 +230,34 @@ private:
         img.height = job.h;
         img.width_stride = job.w;
         write_image(job.path.toUtf8().constData(), &img);
+        writeThumb(job);
+    }
+
+    // 顺带写一张 sidecar 缩略图，让报警面板不必在 GUI 线程解 720p。
+    //
+    // 【为什么写在这里】面板一次刷 20 张 64×48，读侧即便用 IMREAD_REDUCED_COLOR_8
+    //   也要 11~22ms/张（Huffman 得把全部 MCU 解完，降采样只省 IDCT），
+    //   冷启动 20 张实测 261ms，是当时唯一还能把 4 路 paintGL 一起顶到 374ms 的东西。
+    //   本函数在 SnapWriter 后台线程，解码线程只 submit 不等待，所以这里多花几毫秒
+    //   换掉 GUI 线程的十几毫秒是净赚。
+    // 【尺寸口径】与读侧 loadThumbnailScaled 一致：等比装进 64×48 框，
+    //   16:9 源出 64×36，读侧 ratio==1 直接用、不再二次缩放。
+    // 【色彩】job.rgb 是 RGB 序，cv::imwrite 按 BGR 解释 → 必须先转一次。
+    static void writeThumb(SnapJob &job)
+    {
+        static const int kBoxW = 64, kBoxH = 48;
+        if (job.w <= 0 || job.h <= 0) return;
+        const double ratio = std::min(double(kBoxW) / job.w, double(kBoxH) / job.h);
+        if (ratio >= 1.0) return;   // 源图本来就比较小，sidecar 没有收益
+
+        cv::Mat rgb(job.h, job.w, CV_8UC3, job.rgb.data());
+        cv::Mat bgr, thumb;
+        cv::cvtColor(rgb, bgr, cv::COLOR_RGB2BGR);
+        cv::resize(bgr, thumb, cv::Size(int(job.w * ratio), int(job.h * ratio)),
+                   0, 0, cv::INTER_AREA);
+        const QString thumbPath = thumbnailSidecarPath(job.path);
+        if (!cv::imwrite(thumbPath.toUtf8().constData(), thumb))
+            qWarning() << "alarm thumbnail write failed" << thumbPath;
     }
 
     std::thread th_;
@@ -553,7 +583,13 @@ void FFmpegVideoDecoder::buildCascadeTasks()
         const int slotIdx = (int)tasks_.size();  // 紧凑下标，即 result_id
 
         TaskConfig taskConfig;
-        taskConfig.core_mask = (rknn_core_mask)(RKNN_NPU_CORE_0 + (slotIdx % 3)); // 0/1/2 轮流
+        // 核掩码是位标志而非连续枚举：CORE_0=1、CORE_1=2、CORE_2=4。
+        // 老写法 RKNN_NPU_CORE_0 + (slotIdx % 3) 得到 1/2/3，第三档落到
+        // CORE_0_1（双核掩码）且 core2 永远轮不到——NPU 三个核只用两个。
+        static constexpr rknn_core_mask kCoreMasks[] = {
+            RKNN_NPU_CORE_0, RKNN_NPU_CORE_1, RKNN_NPU_CORE_2
+        };
+        taskConfig.core_mask = kCoreMasks[slotIdx % 3];
         taskConfig.modelPath = mp.toStdString();
         taskConfig.labelPath = lp.toStdString();
         taskConfig.result_id = slotIdx;
@@ -571,6 +607,10 @@ void FFmpegVideoDecoder::buildCascadeTasks()
 
         PpeTask *task = new PpeTask(taskConfig);
         tasks_.push_back(task);
+        // 每路 12 个上下文、启动一次，打印绑定核便于现场核对 NPU 三核是否真的都在用
+        // （debugfs 的 per-core load 需要 root，板端一般读不到）。
+        qInfo() << "cascade slot" << slotIdx << "npu_core_mask" << (int)taskConfig.core_mask
+                << mp;
 
         // 每个任务一个独立结果队列（容量 8，满了丢旧保新）
         slotQueues_.push_back(std::make_shared<PriorityQueue<object_detect_result_list>>(8));
@@ -1099,6 +1139,60 @@ void FFmpegVideoDecoder::decodeLoop()
 
     TIMER t;
 
+    // 解码线程分阶段计时（IDGE_PERF=1 才输出）。这条链是串行的：取解码帧 →
+    // RGA 转 RGBA → 每 3 帧投递推理 → 合帧画框/围栏/报警 → emit → 节拍睡眠，
+    // 帧率上限就由它一个周期的总耗时决定，所以先量清每段占多少微秒再谈优化。
+    // recv 段是"上一帧收尾到本帧进入循环体"，即 avcodec_send/receive 的等待，
+    // 只有把它算进来，total 才等于真实帧周期。每 120 帧出一个窗口均值。
+    //
+    // 4 路 1080p/30fps 修复前实测（us/帧，稳态）：recv 0.8~1.8k、rga 1.4~1.7k、
+    // infer 0.6k、slot 52k~65k（其中 draw 占 99.8%，pop 15us、alarm <250us）、
+    // emit 20~40、total 55k~69k → 实际 14.5~18fps，节拍器 sleep 只有 12us，
+    // 说明产帧侧才是瓶颈，且瓶颈就是叠加绘制那一段（draw_text_c4 在非缓存
+    // DRM dumb buffer 上逐像素读-改-写做 alpha 混合）。
+    //
+    // 改纯写绘制 + 去掉重复推理槽位后（us/帧，稳态）：draw 3.1k~4.5k、
+    // total 33.3k~34.6k → 4 路全部 29.5~30.0fps，sleep 25k~27k（节拍器重新生效、
+    // 有余量），进程 CPU 从 ~445% 降到 ~120%。rga 段拆开看是 import 0.3~0.7k、
+    // cvt 0.8~1.1k——每帧 import/release 只占 1.7ms 里的 0.5ms，缓存句柄不值得。
+    struct DecodeStages {
+        QElapsedTimer frame;   // 一个完整周期（含 recv）
+        QElapsedTimer stage;   // 当前阶段
+        qint64 recv = 0, rga1 = 0, infer = 0, slot = 0, em = 0, sleep = 0, total = 0;
+        qint64 sPop = 0, sDraw = 0, sAlarm = 0;
+        qint64 rgaImp = 0, rgaCvt = 0;   // RGA 段内部拆分：导入句柄 vs 真正转换
+        int n = 0;
+        // 每段结束时 add 并立刻 restart，避免某个分支被跳过时把时间记到下一段头上
+        void add(qint64 &acc) { acc += stage.nsecsElapsed() / 1000; }
+        void report(int channel) {
+            // 累加器必须在"出窗口"时才清零。写在 if 外面等于每帧清零，
+            // n 永远到不了阈值，探针一行都不会打印（本轮踩过）。
+            if (n < 120 || !perfProbe()) return;
+            const double us_per_frame = double(total) / n;
+            qWarning() << "[PROBE] ch" << channel << "us/frame"
+                       << "recv" << recv / n
+                       << "rga" << rga1 / n << "[import" << rgaImp / n << "cvt" << rgaCvt / n << "]"
+                       << "infer" << infer / n
+                       << "slot" << (sPop + sDraw + sAlarm) / n
+                       << "[pop" << sPop / n << "draw" << sDraw / n << "alarm" << sAlarm / n << "]"
+                       << "emit" << em / n << "sleep" << sleep / n
+                       << "total" << total / n
+                       << "fps" << (us_per_frame > 0 ? 1000000.0 / us_per_frame : 0.0);
+            recv = rga1 = infer = slot = em = sleep = total = 0;
+            sPop = sDraw = sAlarm = 0;
+            rgaImp = rgaCvt = 0;
+            n = 0;
+        }
+    } ds;
+    ds.frame.start();
+    ds.stage.start();
+    // 断点标记：每 300 帧在链路的 6 个位置各打一行。若只看到 A 而看不到 F，
+    // 说明卡在中间某段；配合 A 的 ms 还能算出真实出帧周期。
+    auto mark = [&](const char *tag) {
+        if (perfProbe() && frame_count % 300 == 0)
+            qWarning() << "[TRACE] ch" << channel_ << frame_count << tag;
+    };
+
     // ===== 帧率节拍（截止期式，限"产生"速率）=====
     // 用流自身帧率定 target_fps；循环末尾对每个解码帧"睡到发布点 / 落后重锚"（见 4.12）。
     // 关键：限的是解码产生速率，不只是显示——否则解码/推理/RGA 会被超量喂爆（实测卡死根因）。
@@ -1120,6 +1214,10 @@ void FFmpegVideoDecoder::decodeLoop()
     const qint64 publish_interval_us = 1000000 / target_fps;
     QElapsedTimer pub_clock;
     pub_clock.start();
+    // 锚线整体偏移量：只在"落后超过一个周期"时更新（见 4.12 的重锚分支）。
+    // 纯累计线（offset 恒 0）是开环的——一次抖动后 expected 永远落后于 elapsed，
+    // while 条件不再成立，节拍器从此形同虚设。
+    qint64 pacer_drift_us = 0;
 
     // ===== 节拍目标帧率识别（每路开流打印一次，便于核对源帧率口径）=====
     qInfo() << "decoder pacer ch" << channel_ << "target_fps=" << target_fps
@@ -1178,6 +1276,9 @@ void FFmpegVideoDecoder::decodeLoop()
         {
             t.tik();  // 计时开始
             frame_count++;
+            mark("A enter");
+            ds.add(ds.recv);
+            ds.stage.restart();
 
             // 不在这里丢帧：解码帧率由循环末尾的"睡眠到点 + 落后重锚"节拍器整体限住
             // （见 4.12）。若在此丢弃超前的解码帧，解码线程仍会全速把源抽到 ~250fps，
@@ -1243,13 +1344,23 @@ void FFmpegVideoDecoder::decodeLoop()
                 //     → releasebuffer_handle(): 释放 RGA 资源
 
                 DmaFrameBuffer* dst_buf = dst_bufs[back_buf];
+                long long rgaImpNs = 0, rgaCvtNs = 0;
+                long long *pImp = perfProbe() ? &rgaImpNs : nullptr;
+                long long *pCvt = perfProbe() ? &rgaCvtNs : nullptr;
                 bool ok = RgaConverter::convertNV12ToRGBAbyRGA(
                     src_fd, 
                     dst_buf->fd(), 
                     frame->width, 
                     frame->height, 
                     src_stride, 
-                    frame->height);
+                    frame->height,
+                    RK_FORMAT_YCbCr_420_SP,
+                    pImp, pCvt);
+                ds.rgaImp += rgaImpNs / 1000;
+                ds.rgaCvt += rgaCvtNs / 1000;
+                ds.add(ds.rga1);
+                ds.stage.restart();
+                mark("B rga");
 
                 if (ok)
                 {
@@ -1261,6 +1372,7 @@ void FFmpegVideoDecoder::decodeLoop()
                     //   - 足够用于实时告警，同时留出算力给其他通道
                     //
                     if (frame_count % 3==0) {
+                        ds.stage.restart();
                         
                         // 从 DMA 缓冲池获取一个可用的 RGB 缓冲区（非阻塞）
                         // 缓冲池预分配了 16 个 640×640 的 RGB 缓冲区
@@ -1334,8 +1446,11 @@ void FFmpegVideoDecoder::decodeLoop()
                                 tasks_[k]->put(td);  // 非阻塞放入，如果队列满则丢弃旧帧
                             }
                         }
+                        ds.add(ds.infer);
+                        ds.stage.restart();
+                        mark("C infer");
                     }
-                    
+
                     // ===== 4.9 合并推理结果并画框 =====
                     //
                     // 级联模型结果合并：
@@ -1352,6 +1467,7 @@ void FFmpegVideoDecoder::decodeLoop()
                     };
 
                     // 构造显示用的图像结构（指向 RGBA 缓冲区）
+                    ds.stage.restart();
                     image_buffer_t dislayImage;
                     dislayImage.format = image_format_t::IMAGE_FORMAT_RGBA8888;
                     dislayImage.virt_addr = (unsigned char*)dst_buf->ptr();
@@ -1359,6 +1475,7 @@ void FFmpegVideoDecoder::decodeLoop()
                     dislayImage.height = dst_buf->height();
 
                     for (size_t k = 0; k < slotQueues_.size(); ++k) {
+                        ds.stage.restart();
                         // 从该模型的结果队列中取最新一次检测结果
                         // tryPop: 非阻塞，无新结果时 od 保持空（count=0）
                         object_detect_result_list od;
@@ -1462,6 +1579,7 @@ void FFmpegVideoDecoder::decodeLoop()
                         }
 
                         // 画平滑后的框
+                        ds.add(ds.sPop); ds.stage.restart();
                         int color = kSlotColors[(int)k % 5];
                         char text[256];
                         for (const auto &tr : smoother.tracks) {
@@ -1469,7 +1587,8 @@ void FFmpegVideoDecoder::decodeLoop()
                             int dt = (int)std::round(tr.dy);
                             int dw = (int)std::round(tr.dw);
                             int dh = (int)std::round(tr.dh);
-                            draw_rectangle(&dislayImage, dl, dt, dw, dh, color, 3);
+                            if (!noOverlayDraw())
+                                draw_rectangle(&dislayImage, dl, dt, dw, dh, color, 3);
 
                             const std::vector<std::string> &slotNames = slotClassNames_[k];
                             if (tr.cls_id >= 0 && tr.cls_id < (int)slotNames.size())
@@ -1478,12 +1597,14 @@ void FFmpegVideoDecoder::decodeLoop()
                             else
                                 snprintf(text, sizeof(text), "M%zu cls_%d %.1f%%",
                                          k + 1, tr.cls_id, tr.prop * 100);
-                            draw_text(&dislayImage, text, dl, dt - 20, color, 10);
+                            if (!noOverlayDraw())
+                                draw_text(&dislayImage, text, dl, dt - 20, color, 10);
                         }
 
+                        ds.add(ds.sDraw); ds.stage.restart();
                         // ===== 4.10 电子围栏判断 + 告警 =====
                         // 仅在有新检测结果时执行（非推理帧跳过，避免空结果误触发报警）
-                        if (!hasNewResult || od.count <= 0) continue;
+                        if (!hasNewResult || od.count <= 0) { ds.add(ds.sAlarm); continue; }
                         // 流程：
                         //   1. 检查围栏是否启用且该通道有围栏
                         //   2. 如果有围栏：过滤出在围栏内的目标，再判断是否触发报警
@@ -1630,6 +1751,7 @@ void FFmpegVideoDecoder::decodeLoop()
                                                 QDateTime::currentMSecsSinceEpoch());
                             }
                         }
+                        ds.add(ds.sAlarm);
                     }
 
                     
@@ -1643,6 +1765,7 @@ void FFmpegVideoDecoder::decodeLoop()
                     // emit frameReady(): 通过 Qt 信号传递到 UI 线程
                     //   - UI 线程用 OpenGL/EGL 将 DMA-BUF 渲染到屏幕上
                     //   - 整个过程零拷贝：解码→RGA→渲染 全在 GPU 显存中完成
+                    mark("D slot");
                     RenderFrame rf;
                     rf.fd = dup(dst_buf->fd());
                     rf.width = vid_w;
@@ -1663,6 +1786,9 @@ void FFmpegVideoDecoder::decodeLoop()
                     }
 
                     emit frameReady(rf);
+                    ds.add(ds.em);
+                    ds.stage.restart();
+                    mark("E emit");
                    
                 }
 
@@ -1674,26 +1800,39 @@ void FFmpegVideoDecoder::decodeLoop()
             // 释放帧的引用，允许 FFmpeg 重用底层内存
             av_frame_unref(frame);
 
-            // ===== 4.12 解码帧率节拍（累计线 + 分片短睡）=====
-            // 采用 origin 验证过的"累计目标线"模型：
-            //   expected = frame_count × interval  —— 固定锚线
+            // ===== 4.12 解码帧率节拍（累计线 + 落后重锚 + 分片短睡）=====
+            //   expected = frame_count × interval + drift  —— 累计锚线
             //   领先时：分片睡到锚线（≤4ms 一片，复查 running_ 保证 stop 及时）
-            //   落后时：不 sleep、不重置，自然靠后续帧追赶
+            //   落后一个周期以内：不睡，靠后续帧自然收敛（阻尼，避免密-疏脉冲）
+            //   落后超过一个周期：把 drift 挪到"此刻正好对齐"，即重锚
             //
-            // 为什么不用"截止期+落后重置"：
-            //   重置把欠账清零后，下一帧会睡满整个 interval，
-            //   当 target_fps > 硬件实际能力（流元数据报 50/90fps 而推理只能撑 30fps）时，
-            //   每帧都落后 → 每帧都重置 → 形成"密-密-密-疏"脉冲，瞬时帧率 17↔43 振荡。
-            //   累计线模型则天然阻尼：偏差越大 → sleep 越少 → 追赶越快 → 收敛到锚线。
+            // 为什么必须重锚：文件源不是实时源，av_read_frame 想取多少帧就有多少帧。
+            // 纯累计线落后后再也不睡 → 实测同一份 30fps 素材被追到 50fps 播放
+            // （界面 FPS 短暂冲到 36+），MPP/RGA/推理全在超量空转。
+            // 为什么阈值取一个周期而不是"一落后就重锚"：后者正是老注释担心的
+            // "每帧落后→每帧重置→每帧睡满 interval"脉冲来源；只在落后超过一帧时
+            // 重锚，小抖动仍由累计线自然阻尼。
             {
-                const qint64 expected_us = (qint64)frame_count * publish_interval_us;
+                qint64 expected_us = (qint64)frame_count * publish_interval_us + pacer_drift_us;
                 qint64 elapsed_us = pub_clock.nsecsElapsed() / 1000;
+                if (elapsed_us - expected_us > publish_interval_us) {
+                    pacer_drift_us = elapsed_us - (qint64)frame_count * publish_interval_us;
+                    expected_us = elapsed_us;
+                }
                 while (running_ && expected_us > elapsed_us) {
                     const qint64 rem_us = expected_us - elapsed_us;
                     QThread::usleep(static_cast<unsigned long>(rem_us > 4000 ? 4000 : rem_us));
                     elapsed_us = pub_clock.nsecsElapsed() / 1000;
                 }
             }
+            mark("F post-pacer");
+            ds.add(ds.sleep);
+            ds.total += ds.frame.nsecsElapsed() / 1000;
+            ++ds.n;
+            ds.report(channel_);
+            mark("G tail");
+            ds.frame.restart();
+            ds.stage.restart();
 
             t.tok();
         }

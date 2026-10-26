@@ -10,6 +10,7 @@
 #include <QElapsedTimer>
 
 #include "eglimage_helper.h"
+#include "EglFramePool.h"
 
 /* 
 ====================================================
@@ -121,17 +122,17 @@ private:
 
     /* 
     ====================================================
-    双缓冲EGLImage
-    说明：使用两个纹理实现双缓冲，避免渲染撕裂
+    帧池：复用纹理对象，仅重建 EGLImage，避免逐帧 ioctl 开销
     ====================================================
     */
-    EGLImageKHR egl_images_[2] = {EGL_NO_IMAGE_KHR, EGL_NO_IMAGE_KHR};  // 两个EGL图像
-    GLuint textures_[2] = {0, 0};  // 两个纹理
-    int current_idx_ = 0;  // 当前使用的缓冲区索引
+    EglFramePool framePool_;
+    GLuint current_texture_ = 0;  // 当前渲染使用的纹理ID
+    int video_width_ = 0;         // 视频宽度（用于宽高比计算）
+    int video_height_ = 0;        // 视频高度（用于宽高比计算）
     bool frame_updated_ = false;  // 帧更新标记
 
-    RenderFrame pending_frame_;  // 待处理的帧
-    RenderFrame prev_frame_;     // 上一帧
+    RenderFrame pending_frame_;  // 待 paintGL 消费的帧（fd 由 paintGL 关闭）
+    RenderFrame prev_frame_;     // 滞留帧：paintGL 迟迟未执行时兜底关闭其 fd
 
     QMutex mutex_;  // 互斥锁，保护线程安全
     bool initialized_ = false;  // 初始化标记
@@ -145,6 +146,14 @@ private:
     QElapsedTimer fpsTimer_;  // 帧计时器
     int fpsFrameCount_ = 0;   // 帧计数
     float currentFps_ = 0.0f; // 当前帧率
+
+    QElapsedTimer paintProbe_;      // 卡顿探针计时（输出由 IDGE_PERF 控制）
+    qint64 lastPaintNs_ = 0;        // 上次 paintGL 起点，用于算间隔
+    int droppedFrames_ = 0;         // 上次 paintGL 期间到达却没被画的帧数
+    // "收帧速率 vs 上屏速率"对照探针：currentFps_ 只数 onFrameReady（收帧），
+    // 界面显示十几帧时必须知道 paintGL 到底跑了多少次才能定性是生产慢还是合成慢。
+    int paintCount_ = 0;            // paintGL 累计次数
+    qint64 lastRateNs_ = 0;         // 上一个速率窗口起点
 };
 
 #endif

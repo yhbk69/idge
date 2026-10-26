@@ -37,6 +37,7 @@
 // ============================================================================
 
 #include "alarm_manager.h"
+#include "perf_probe.h"
 #include "ConfigManager.h"
 #include "database_manager.h"
 #include "alarm_dao.h"
@@ -44,10 +45,96 @@
 #include <QDateTime>
 #include <QDate>
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QDir>
 #include <QFileInfo>
 #include <QUuid>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
+
+namespace {
+
+// ============================================================================
+// AlarmDbWriter - 报警落库后台线程
+// ============================================================================
+// 为什么需要：storeAndNotify() 原先在解码线程里同步执行 AlarmDAO::insertAlarms，
+// 实测一批 41ms（SQLite 每次提交都要 fsync，WAL 也省不掉），这 41ms 里该通道不产帧。
+// 移走它并没有消除"每秒卡一次"——板端实测剩下的间隔主要来自 4 路 17~23fps 的出帧
+// 抖动本身；但解码线程被一次数据库提交堵住这件事，无论如何不该出现在取帧链路上。
+//
+// 语义保持不变：
+//   - 只改"什么时候写"，不改"写什么"。insertAlarms 是 INSERT OR REPLACE 按 id 幂等，
+//     程序退出时 AlarmManager::syncToDatabase() 还会把内存里的全量再补一遍，
+//     所以队列即使没排干也不会丢报警。
+//   - 单线程顺序消费，同一批次内顺序与原来一致；ClipWriter 在报警 +2s 后才做
+//     attachVideoClip 的 UPDATE，队列延迟是毫秒级，不会反超。
+//   - DatabaseManager 按线程分配连接，因此本线程内 new AlarmDAO 是安全的
+//     （见 attachVideoClip 上方同样的说明）。
+// ============================================================================
+class AlarmDbWriter {
+public:
+    static AlarmDbWriter &get()
+    {
+        static AlarmDbWriter w;   // 首次提交时启动，进程内唯一
+        return w;
+    }
+
+    // 入队后返回当前积压批数，调用方只用它做诊断
+    int submit(const QVector<AlarmRecord> &batch)
+    {
+        int depth;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            q_.emplace_back(batch);
+            depth = static_cast<int>(q_.size());
+        }
+        cv_.notify_one();
+        return depth;
+    }
+
+private:
+    AlarmDbWriter() { th_ = std::thread([this] { run(); }); }
+    ~AlarmDbWriter()
+    {
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        if (th_.joinable()) th_.join();   // 退出前把已入队的都写完
+    }
+
+    void run()
+    {
+        for (;;) {
+            QVector<AlarmRecord> batch;
+            {
+                std::unique_lock<std::mutex> lk(mtx_);
+                cv_.wait(lk, [this] { return stop_ || !q_.empty(); });
+                if (q_.empty()) {
+                    if (stop_) return;
+                    continue;
+                }
+                batch = std::move(q_.front());
+                q_.pop_front();
+            }
+            AlarmDAO dao;   // 与 attachVideoClip 一致：后台线程里按次建 DAO
+            qDebug() << "AlarmManager: Inserted" << dao.insertAlarms(batch)
+                     << "alarms to database";
+        }
+    }
+
+    std::thread th_;
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    std::deque<QVector<AlarmRecord>> q_;
+    bool stop_ = false;
+};
+
+} // namespace
 
 // 获取单例实例
 // 使用静态局部变量实现线程安全的单例
@@ -313,11 +400,12 @@ void AlarmManager::storeAndNotify(const QVector<AlarmRecord> &alarms)
         }
     } // 解锁后再发信号，避免死锁
 
-    // 写入数据库
+    // 写入数据库：交给后台线程，解码线程只入队（见 AlarmDbWriter 注释）
     if (dbInitialized_ && !alarms.isEmpty()) {
-        AlarmDAO dao;
-        int64_t inserted = dao.insertAlarms(alarms);
-        qDebug() << "AlarmManager: Inserted" << inserted << "alarms to database";
+        const int depth = AlarmDbWriter::get().submit(alarms);
+        if (perfProbe() && depth > 4) {
+            qWarning() << "[PROBE] AlarmDbWriter backlog" << depth << "batches";
+        }
     } else if (!dbInitialized_) {
         qWarning() << "AlarmManager: Database not initialized, alarms not saved";
     }
@@ -391,11 +479,18 @@ bool AlarmManager::screenshotsEnabled() const
 // 获取所有报警记录
 QVector<AlarmRecord> AlarmManager::alarms() const
 {
+    QElapsedTimer probe; probe.start();
     QMutexLocker lock(&mutex_);
+    const qint64 waitMs = probe.elapsed();
     QVector<AlarmRecord> result;
     result.reserve(alarms_.size());
     for (const auto &a : alarms_) {
         result.append(a);
+    }
+    // 卡顿探针：锁等待 = 解码线程持锁写库时 GUI 线程被挡住的时长
+    if (perfProbe() && (waitMs > 10 || probe.elapsed() > 20)) {
+        qWarning() << "[PROBE] AlarmManager::alarms() lockWait" << waitMs
+                   << "ms total" << probe.elapsed() << "ms size" << result.size();
     }
     return result;
 }

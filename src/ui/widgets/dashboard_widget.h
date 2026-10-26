@@ -36,6 +36,20 @@ public:
     void refreshStats();
     void stop();
 
+protected:
+    /*
+    ====================================================
+    作用：随页面可见性开关刷新定时器
+    说明：refreshStats 一次 60~105ms（抢 AlarmManager 锁遍历全表 + 读 /proc
+          + 重建类别统计行），跑在 GUI 单线程上。它只在数据看板页有意义，
+          但原先定时器常驻不停，切到视频监控页后仍每 2s 挤走一次 paintGL。
+          用 show/hideEvent 控表而非在槽里判 isVisible()：连 2s 一次的唤醒
+          本身也省掉。
+    ====================================================
+    */
+    void showEvent(QShowEvent *event) override;
+    void hideEvent(QHideEvent *event) override;
+
 private slots:
     /* 
     ====================================================

@@ -28,6 +28,7 @@
 #include <drm_fourcc.h>      // DRM 四字符码（像素格式定义）
 #include <cstdio>
 #include <cstring>
+#include <QElapsedTimer>     // 可选耗时分段出参用
 #include <rga/RgaUtils.h>    // RGA 工具函数（get_bpp_from_format 等）
 
 class RgaConverter
@@ -101,14 +102,15 @@ public:
     //   与 nv12_to_rgba 直接填 fd 的轻量路径相比，适合同一缓冲反复使用的场景。
     // 【返回值语义（本轮已修复）】此前末尾无条件 return true，import/imcheck/
     //   转换失败全部报成功，调用方判断完全失效；现各失败路径均返回 false。
-    // 【缓冲区大小口径】get_bpp_from_format 返回的是**字节/像素**（板端实测
-    //   BGR_888→3），乘积即字节数，与 importbuffer_fd(fd, size) 约定一致，
-    //   无需任何 /8 换算（2026-09-24 曾误按"位"理解除以 8，导致导入
-    //   尺寸只剩 1/8、全部失败——注释旧说法"返回位宽"是错的）。
+    // 【t_import_ns / t_cvt_ns】可选出参，用于把"导入句柄"和"真正转换"拆开计量：
+    //   本函数每帧都 import+release，而目标缓冲其实全程只有两个、fd 不变，
+    //   所以要先知道 import 占比，才能判断缓存句柄值不值（见调用侧探针）。
     // ============================================================================
     static bool convertNV12ToRGBAbyRGA(int src_dma_fd, int dst_dma_fd, int width, int height,
                                       int src_hor_stride, int src_ver_stride,
-                                      int source_rga_format = RK_FORMAT_YCbCr_420_SP)
+                                      int source_rga_format = RK_FORMAT_YCbCr_420_SP,
+                                      long long *t_import_ns = nullptr,
+                                      long long *t_cvt_ns = nullptr)
     {
         int ret = 0;
         int src_width = width;
@@ -121,6 +123,8 @@ public:
 
         rga_buffer_t src_img, dst_img;
         rga_buffer_handle_t src_handle = 0, dst_handle = 0;
+        // 计时器声明在所有 goto 之前：goto 跳过带构造函数的对象初始化是非法的
+        QElapsedTimer impClock, cvtClock;
 
         memset(&src_img, 0, sizeof(src_img));
         memset(&dst_img, 0, sizeof(dst_img));
@@ -132,8 +136,11 @@ public:
         dst_buf_size = dst_widt * dst_height * get_bpp_from_format(dst_format);
 
         // 通过 DMA-BUF fd 导入缓冲区到 RGA
+        if (t_import_ns || t_cvt_ns) impClock.start();
         src_handle = importbuffer_fd(src_dma_fd, src_buf_size);
         dst_handle = importbuffer_fd(dst_dma_fd, dst_buf_size);
+        if (t_import_ns) *t_import_ns = impClock.nsecsElapsed();
+
 
         if (src_handle == 0 || dst_handle == 0) {
             printf("importbuffer failed\n");
@@ -159,7 +166,9 @@ public:
         }
 
         // 执行色彩转换
+        if (t_cvt_ns) cvtClock.start();
         ret = imcvtcolor(src_img, dst_img, src_format, dst_format);
+        if (t_cvt_ns) *t_cvt_ns = cvtClock.nsecsElapsed();
         if (ret != IM_STATUS_SUCCESS) {
             printf("imcvtcolor error %s\n", imStrError((IM_STATUS)ret));
             goto release_buffer;

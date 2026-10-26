@@ -19,20 +19,18 @@
 //   - OpenGL 可以直接使用 DMA-BUF（GPU→GPU），零拷贝
 //   - 对于 4K 视频，零拷贝可以节省 50%+ 的 CPU 使用率
 //
-// 【双缓冲机制】
-//   - 两个 EGLImage 交替使用
-//   - 当一个正在渲染时，另一个可以被更新
-//   - 避免画面撕裂和闪烁
+// 【帧池机制】
+//   - EglFramePool 预创建 4 个纹理，槽位复用时仅重建 EGLImage
+//   - 渲染时只持有 1 个活动槽位，拿到新帧后才 release 上一槽
+//   - 纹理 ID 稳定，避免逐帧 eglCreateImageKHR/Destroy 的驱动 ioctl
 //
 // 【fd 两级流水线与 close 时机】解码线程 dup 出 fd 随信号投递；
-//   onFrameReady 里维护 pending/prev 两个副本，close(prev) 意味着
-//   一份 fd 副本最多"多活"两帧才关闭。EGLImage 在内核层另持引用，
-//   所以即便上游 dmaBuffer 已 release 回池、fd 已 close，正在显示的
-//   旧帧仍完整可读——这是零拷贝链路里防止画面撕裂的关键引用重叠。
-//
-// ⚠【每帧 EGLImage 创建/销毁开销】paintGL 对每帧 destroy+import 一次
-//   EGLImage（走驱动 ioctl）；EglFramePool.h 是为此准备的槽位复用优化，
-//   本组件尚未接入，高帧率下是主要 CPU/GPU 驱动热点之一。
+//   onFrameReady 把旧 pending 挪进 prev_frame_ 并在下下帧 close，
+//   保证 paintGL 长时间不执行（窗口隐藏）时也不漏 fd；paintGL 消费
+//   pending_frame_ 后立即 close 原 fd，帧池另持自己的 dup 副本。
+//   EGLImage 在内核层另持引用，所以即便上游 dmaBuffer 已 release 回池、
+//   fd 已 close，正在显示的旧帧仍完整可读——这是零拷贝链路里
+//   防止画面撕裂的关键引用重叠。
 //
 // ⚠【析构与在途信号】若解码线程仍持有 frameReady 连接而 widget 先析构，
 //   队列中已投递的 RenderFrame::fd 副本无人签收 → fd 泄漏；
@@ -40,6 +38,7 @@
 // ============================================================================
 
 #include "gl_video_widget.h"
+#include "perf_probe.h"
 #include <QDebug>
 #include <QMutexLocker>
 #include <unistd.h>
@@ -110,14 +109,10 @@ GLVideoWidget::GLVideoWidget(QWidget* parent)
 
 GLVideoWidget::~GLVideoWidget()
 {
-    // 清理 EGL 资源
+    // 帧池的 EGLImage 必须显式销毁（不随 GL 上下文回收），纹理一并删除
     makeCurrent();
-    for (int i = 0; i < 2; i++) {
-        if (egl_images_[i] != EGL_NO_IMAGE_KHR)
-            egl_.destroyImage(egl_images_[i]);
-        if (textures_[i])
-            glDeleteTextures(1, &textures_[i]);
-    }
+    framePool_.shutdown();
+    current_texture_ = 0;
     // 清理 VBO/EBO
     if (vbo_) { glDeleteBuffers(1, &vbo_); vbo_ = 0; }
     if (ebo_) { glDeleteBuffers(1, &ebo_); ebo_ = 0; }
@@ -136,7 +131,7 @@ GLVideoWidget::~GLVideoWidget()
 // 初始化内容：
 //   1. 初始化 EGL DMA-BUF 导入扩展
 //   2. 编译着色器
-//   3. 创建两个纹理（双缓冲）
+//   3. 初始化帧池（预创建纹理，复用避免逐帧 ioctl）
 // ============================================================================
 void GLVideoWidget::initializeGL()
 {
@@ -153,7 +148,6 @@ void GLVideoWidget::initializeGL()
     createShaderProgram();
 
     // 创建 VBO 和 EBO（只创建一次，每帧复用）
-    // 之前每帧都 glGenBuffers + glDeleteBuffers，GPU 缓冲区频繁创建销毁开销很大
     glGenBuffers(1, &vbo_);
     glGenBuffers(1, &ebo_);
 
@@ -163,24 +157,12 @@ void GLVideoWidget::initializeGL()
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 
-    // 创建两个 OpenGL 纹理（双缓冲）
-    // 纹理本身不分配内存，只是创建一个"容器"
-    // 实际内存是 DMA-BUF，通过 EGLImage 绑定到纹理上
-    for (int i = 0; i < 2; i++) {
-        glGenTextures(1, &textures_[i]);
-        glBindTexture(GL_TEXTURE_2D, textures_[i]);
-        // 线性过滤：缩放时使用双线性插值，画面更平滑
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        // 边缘处理：重复边缘像素（避免黑边）
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glBindTexture(GL_TEXTURE_2D, 0);
-    }
+    // 初始化帧池：预创建纹理，后续仅重建 EGLImage，纹理对象复用
+    framePool_.init(egl_.getCreateImageProc(), egl_.getDestroyImageProc(), egl_.getBindTextureProc());
 
     initialized_ = true;
     fpsTimer_.start();
-    qDebug() << "GLVideoWidget initialized";
+    qDebug() << "GLVideoWidget initialized with EglFramePool";
 }
 
 void GLVideoWidget::createShaderProgram()
@@ -204,8 +186,9 @@ void GLVideoWidget::createShaderProgram()
 //
 // 注意：
 //   - 此函数在 UI 线程中执行（Qt 信号/槽机制）
-//   - pending_frame_ 的生命周期由 UI 线程管理
-//   - prev_frame_ 是上一帧，需要关闭其 fd 防止内存泄漏
+//   - pending_frame_ 的 fd 最终由 paintGL 关闭（帧池另持 dup 副本）
+//   - 若 paintGL 未及时执行而新帧又来，旧 pending 的 fd 挪进 prev_frame_，
+//     在下一次 onFrameReady 时关闭，避免覆盖泄漏
 // ============================================================================
 void GLVideoWidget::onFrameReady(RenderFrame frame)
 {
@@ -220,6 +203,9 @@ void GLVideoWidget::onFrameReady(RenderFrame frame)
     // 更新帧缓冲
     prev_frame_ = pending_frame_;
     pending_frame_ = frame;
+    // 卡顿探针：frame_updated_ 仍为 true 说明上一帧还没被 paintGL 消费就有新帧
+    // 到了 —— 解码侧产出正常、显示侧跟不上，丢帧就发生在这里
+    if (frame_updated_) droppedFrames_++;
     frame_updated_ = true;
 
     // FPS 统计
@@ -245,40 +231,72 @@ void GLVideoWidget::onFrameReady(RenderFrame frame)
 //
 // 渲染流程：
 //   1. 检查是否有新帧
-//   2. 将 DMA-BUF 导入为 EGLImage
-//   3. 将 EGLImage 绑定为 OpenGL 纹理
+//   2. 从帧池获取槽位，将 DMA-BUF 导入为 EGLImage 并绑定到纹理
+//   3. 释放上一帧的槽位
 //   4. 用着色器绘制矩形（纹理映射）
 // ============================================================================
 void GLVideoWidget::paintGL()
 {
+    // 卡顿探针（IDGE_PERF=1 才输出）：paintGL 间隔远大于 1/目标帧率，说明 GUI
+    // 事件循环被别的东西占住了。它是"画面卡但渲染本身不慢"这类问题的关键指标——
+    // 实测报警面板一次重建能把 4 个 widget 的间隔一起顶到 900ms 以上。
+    // 阈值取 200ms 而不是 60ms：4 路 17~23fps 出帧、推理串行轮询，60~110ms 的间隔
+    // 是产帧侧的正常抖动（实测这类间隔里 framesArrivedWhileStalled 几乎全为 0，
+    // 即"没有帧可画"而不是"有帧没轮到画"），只有几百毫秒级才是 GUI 线程被独占。
+    if (!paintProbe_.isValid()) paintProbe_.start();
+    const qint64 paintStartNs = paintProbe_.nsecsElapsed();
+    const qint64 gapMs = lastPaintNs_ ? (paintStartNs - lastPaintNs_) / 1000000 : 0;
+    lastPaintNs_ = paintStartNs;
+    const int arrivedWhileStalled = droppedFrames_;
+    droppedFrames_ = 0;
+    if (perfProbe() && gapMs > 200) {
+        qWarning() << "[PROBE] paintGL gap" << gapMs << "ms widget" << this
+                   << "framesArrivedWhileStalled" << arrivedWhileStalled;
+    }
+    // 速率对照：paints/s 明显低于 arrivals/s 说明帧到了但没上屏（GUI 合成受限）；
+    // 两者一致且都只有十几，则瓶颈在生产侧。
+    if (perfProbe()) {
+        ++paintCount_;
+        if (paintCount_ % 100 == 0) {
+            if (!lastRateNs_) lastRateNs_ = paintStartNs;
+            const double winS = (paintStartNs - lastRateNs_) / 1e9;
+            lastRateNs_ = paintStartNs;
+            qWarning() << "[PROBE] paint" << this << "paints/s"
+                       << (winS > 0 ? 100.0 / winS : 0.0)
+                       << "arrivals/s" << currentFps_;
+        }
+    }
+
     glClear(GL_COLOR_BUFFER_BIT);
 
     QMutexLocker lock(&mutex_);
     if (!initialized_ || pending_frame_.fd < 0) return;
 
     if (frame_updated_) {
-        int back = 1 - current_idx_;  // 双缓冲切换
+        // 保存视频尺寸（用于 drawQuad 的宽高比计算）
+        video_width_ = pending_frame_.width;
+        video_height_ = pending_frame_.height;
 
-        // 销毁旧 EGLImage（释放对旧 DMA-BUF 的引用）
-        if (egl_images_[back] != EGL_NO_IMAGE_KHR) {
-            egl_.destroyImage(egl_images_[back]);
-            egl_images_[back] = EGL_NO_IMAGE_KHR;
-        }
-
-        // ===== 关键步骤：将 DMA-BUF 导入为 EGLImage =====
-        // 这一步将 DMA-BUF fd 包装为 EGL 可操作的对象
-        // EGL 会创建一个"引用"，指向 DMA-BUF 的物理内存，不会拷贝数据
-        egl_images_[back] = egl_.importRGBA(
+        // 从帧池获取新槽位（内部 dup fd、创建 EGLImage、绑定到预创建纹理）
+        GLuint newTex = framePool_.acquire(
             pending_frame_.fd,
             pending_frame_.width,
             pending_frame_.height,
-            pending_frame_.stride);
+            pending_frame_.stride,
+            DRM_FORMAT_ABGR8888);
 
-        if (egl_images_[back] != EGL_NO_IMAGE_KHR) {
-            // 将 EGLImage 绑定为 OpenGL 纹理
-            // 之后 OpenGL 渲染这个纹理时，会直接读取 DMA-BUF 中的数据
-            egl_.bindToTexture(egl_images_[back], textures_[back]);
-            current_idx_ = back;
+        if (newTex != 0) {
+            // 释放上一帧的槽位（close dup 的 fd，标记空闲）
+            if (current_texture_ != 0) {
+                framePool_.release(current_texture_);
+            }
+            current_texture_ = newTex;
+        }
+
+        // 关闭 pending_frame_ 的 fd（帧池已 dup 副本）
+        if (pending_frame_.fd >= 0) {
+            ::close(pending_frame_.fd);
+            pending_frame_.fd = -1;
         }
 
         frame_updated_ = false;
@@ -286,6 +304,13 @@ void GLVideoWidget::paintGL()
 
     // 绘制当前帧
     drawQuad();
+
+    // 卡顿探针：paintGL 自身耗时（GL 提交 + QPainter 画 FPS 文字）。
+    // 与上面的 gap 一起看才能区分"画得慢"和"没轮到画"。
+    const qint64 paintCostMs = (paintProbe_.nsecsElapsed() - paintStartNs) / 1000000;
+    if (perfProbe() && paintCostMs > 20) {
+        qWarning() << "[PROBE] paintGL cost" << paintCostMs << "ms widget" << this;
+    }
 }
 
 // ============================================================================
@@ -304,12 +329,14 @@ void GLVideoWidget::paintGL()
 // ============================================================================
 void GLVideoWidget::drawQuad()
 {
-    if (egl_images_[current_idx_] == EGL_NO_IMAGE_KHR) return;
+    if (current_texture_ == 0) return;
 
     shader_->bind();
 
     // 计算保持宽高比的缩放系数
-    float video_aspect = (float)pending_frame_.width / pending_frame_.height;
+    float video_aspect = (video_width_ > 0 && video_height_ > 0)
+                             ? (float)video_width_ / video_height_
+                             : (float)width() / height();
     float view_aspect = (float)width() / height();
     float sx = 1.0f, sy = 1.0f;
 
@@ -340,7 +367,7 @@ void GLVideoWidget::drawQuad()
 
     // 绑定纹理并绘制
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, textures_[current_idx_]);
+    glBindTexture(GL_TEXTURE_2D, current_texture_);
     shader_->setUniformValue("tex", 0);
 
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, nullptr);
@@ -359,8 +386,6 @@ void GLVideoWidget::drawQuad()
     //   依赖 QPainter 在 GL 之后创建、且 end() 前不再发 GL 调用的顺序
     //   侥幸正确——改动本函数时勿在 painter.end() 之后再插入 GL 调用，
     //   且不同 Qt 版本下可能出现 FPS 文字丢失（升级需回归验证）。
-    // ⚠ 顶点缓冲每帧 glGenBuffers/glDeleteBuffers 一次（局部 VBO），
-    //   几何数据实际只有分辨率变化时才变，稳态下是可消除的驱动开销。
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setPen(Qt::green);

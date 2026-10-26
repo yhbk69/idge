@@ -202,15 +202,16 @@ public:
         }
     }
 
+    // 获取 EGL 扩展函数指针（供 EglFramePool 使用）
+    PFNEGLCREATEIMAGEKHRPROC getCreateImageProc() const { return eglCreateImageKHR_; }
+    PFNEGLDESTROYIMAGEKHRPROC getDestroyImageProc() const { return eglDestroyImageKHR_; }
+    PFNGLEGLIMAGETARGETTEXTURE2DOESPROC getBindTextureProc() const { return glEGLImageTargetTexture2DOES_; }
+
 private:
     EGLDisplay display_ = EGL_NO_DISPLAY;
 
     // EGL 扩展函数指针（标准 EGL 中不存在，需要动态获取）
-    typedef EGLImageKHR (*PFNEGLCREATEIMAGEKHRPROC)(
-        EGLDisplay, EGLContext, EGLenum, EGLClientBuffer, const EGLint*);
-    typedef EGLBoolean (*PFNEGLDESTROYIMAGEKHRPROC)(EGLDisplay, EGLImageKHR);
-    typedef void (*PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)(GLenum, GLeglImageOES);
-
+    // 使用 EGL 标准类型定义（与 EglFramePool 一致）
     PFNEGLCREATEIMAGEKHRPROC eglCreateImageKHR_ = nullptr;
     PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR_ = nullptr;
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES_ = nullptr;

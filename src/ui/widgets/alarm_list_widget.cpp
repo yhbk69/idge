@@ -1,4 +1,7 @@
 #include "alarm_list_widget.h"
+#include "perf_probe.h"
+#include <QElapsedTimer>
+#include <QDebug>
 #include "runtime_paths.h"
 #include "alarm_manager.h"
 #include "alarm_detail_dialog.h"
@@ -68,8 +71,12 @@ AlarmListWidget::AlarmListWidget(QWidget *parent)
 */
 void AlarmListWidget::onDebouncedRefresh()
 {
+    QElapsedTimer probe; probe.start();
     refreshTable();
     refreshFenceTable();
+    if (perfProbe() && probe.elapsed() > 5) {
+        qWarning() << "[PROBE] alarmList refreshTable" << probe.elapsed() << "ms";
+    }
 }
 
 /* 
@@ -473,6 +480,11 @@ void AlarmListWidget::onRowDoubleClicked(int row, int)
  */
 void AlarmListWidget::refreshFenceTable()
 {
+    // 与 refreshTable 不同，这里原先没有可见性门控：本页隐藏时它仍在重建最多 500 行
+    // ×5 个 QTableWidgetItem（2500 次堆分配），实测 45~61ms，且被 400ms 节流器反复触发，
+    // 是 GUI 线程除报警面板缩略图解码外的另一处主要占用。页面切回来时 showEvent 会补刷。
+    if (!isVisible()) return;
+
     AlarmManager &mgr = AlarmManager::instance();
     QVector<AlarmRecord> alarms = mgr.alarms();
 

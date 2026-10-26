@@ -2,6 +2,11 @@
 // 全部刷新由 2s QTimer 驱动，在 GUI 线程读 AlarmManager 单例（其内部
 // 有锁）并重建 QLabel 树；文件读取均为同步小 I/O，不构成卡顿源。
 #include "dashboard_widget.h"
+#include "perf_probe.h"
+#include <QElapsedTimer>
+#include <QDebug>
+#include <QShowEvent>
+#include <QHideEvent>
 #include "theme.h"
 #include "alarm_manager.h"
 #include <QGridLayout>
@@ -27,8 +32,21 @@ DashboardWidget::DashboardWidget(QWidget *parent)
     setupUi();  // 初始化UI组件
     // 连接定时器信号到刷新槽函数
     connect(&refreshTimer_, &QTimer::timeout, this, &DashboardWidget::onTimer);
-    refreshTimer_.start(2000);  // 每2秒刷新一次
-    onTimer();  // 立即执行一次刷新
+    // 定时器的启停交给 showEvent/hideEvent：构造时页面还没显示就 start 的话，
+    // 从未被切到过看板页的会话里 hideEvent 永远不会触发，表就一路常驻下去了。
+}
+
+void DashboardWidget::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    onTimer();                // 进入页面立即出数，不等第一个 2s
+    refreshTimer_.start(2000);
+}
+
+void DashboardWidget::hideEvent(QHideEvent *event)
+{
+    refreshTimer_.stop();     // 离开页面就停表，把 GUI 线程还给视频渲染
+    QWidget::hideEvent(event);
 }
 
 /* 
@@ -218,7 +236,11 @@ void DashboardWidget::setupUi()
 */
 void DashboardWidget::onTimer()
 {
+    QElapsedTimer probe; probe.start();
     refreshStats();
+    if (perfProbe() && probe.elapsed() > 5) {
+        qWarning() << "[PROBE] dashboard refreshStats" << probe.elapsed() << "ms";
+    }
 }
 
 void DashboardWidget::stop()
