@@ -4,6 +4,7 @@
 #include <QDebug>
 #include "runtime_paths.h"
 #include "alarm_manager.h"
+#include "qthelper.h"
 #include "alarm_detail_dialog.h"
 #include "fence_manager.h"
 #include "theme.h"
@@ -432,7 +433,9 @@ void AlarmListWidget::onAcknowledge()
 void AlarmListWidget::onClear()
 {
     // 弹出确认对话框
-    if (QMessageBox::question(this, "确认", "确定要清空所有报警记录吗？") == QMessageBox::Yes) {
+    if (QtHelper::askConfirm(this, QStringLiteral("清空报警记录"),
+                             QStringLiteral("确定要清空所有报警记录吗？"))
+        == QMessageBox::Ok) {
         AlarmManager::instance().clearAlarms();  // 清空告警
         refreshTable();  // 刷新表格
     }

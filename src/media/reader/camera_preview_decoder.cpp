@@ -2,9 +2,9 @@
 // camera_preview_decoder.cpp —— 摄像头预览解码/抓拍/检测实现
 // ============================================================================
 // 平台约定：
-//   - 摄像头以 v4l2 输入 MJPEG 流优先走 mjpeg_rkmpp 硬解（输出 NV12
-//     DMA-BUF，RGA 零拷贝转 RGBA），任何一环不可用都自动回退 libjpeg
-//     软解 + swscale 转 RGBA（CPU 路径，分辨率高时明显吃 CPU）。
+//   - 输入格式按节点能力协商：先 MJPEG（USB UVC，硬解 mjpeg_rkmpp 输出
+//     NV12 DMA-BUF，RGA 零拷贝转 RGBA；任何一环不可用自动回退 libjpeg 软解 +
+//     swscale），再 NV12/YUYV（RK3588 CSI 摄像头经 rkisp mainpath 只出裸格式）。
 //   - 双缓冲 DmaFrameBuffer 在栈上构造，离开 decodeLoop 时析构自动
 //     close(fd)/munmap，无需手工释放；RGA/swscale 均同步返回，
 //     缓冲切换(back_buffer=1-back_buffer)保证下一帧不会覆盖正在
@@ -243,23 +243,37 @@ void CameraPreviewDecoder::decodeLoop()
     static std::once_flag avdevice_once;
     std::call_once(avdevice_once, []() { avdevice_register_all(); });
     
-    AVFormatContext* format_context = avformat_alloc_context();
-    if (!format_context) {
-        emit error(QStringLiteral("无法分配 FFmpeg 输入上下文"));
-        emit finished();
-        return;
-    }
-    format_context->interrupt_callback.callback = &CameraPreviewDecoder::interruptCallback;
-    format_context->interrupt_callback.opaque = this;
+    AVFormatContext* format_context = nullptr;
 
-    AVDictionary* options = nullptr;
-    av_dict_set(&options, "video_size", "1920x1080", 0);
-    av_dict_set(&options, "input_format", "mjpeg", 0);
-    av_dict_set(&options, "framerate", "30", 0);
-    const AVInputFormat* v4l2 = av_find_input_format("v4l2");
+    // 输入格式按节点能力逐个试：USB UVC 摄像头给 MJPEG（可零重编码抓拍），
+    // RK3588 的 CSI 摄像头经 rkisp mainpath 只出 NV12/YUYV，写死 mjpeg 会
+    // 直接打不开（Invalid argument）。avformat_open_input 失败会吞掉
+    // format_context，所以每轮都重新分配一个。
+    static const char* const kInputFormats[] = {"mjpeg", "nv12", "yuyv"};
+    int ret = AVERROR(EIO);
     const QByteArray device_bytes = device_.toLocal8Bit();
-    int ret = avformat_open_input(&format_context, device_bytes.constData(), v4l2, &options);
-    av_dict_free(&options);
+    for (const char* input_format : kInputFormats) {
+        format_context = avformat_alloc_context();
+        if (!format_context) {
+            emit error(QStringLiteral("无法分配 FFmpeg 输入上下文"));
+            emit finished();
+            return;
+        }
+        format_context->interrupt_callback.callback = &CameraPreviewDecoder::interruptCallback;
+        format_context->interrupt_callback.opaque = this;
+
+        AVDictionary* options = nullptr;
+        av_dict_set(&options, "video_size", "1920x1080", 0);
+        av_dict_set(&options, "input_format", input_format, 0);
+        av_dict_set(&options, "framerate", "30", 0);
+        const AVInputFormat* v4l2 = av_find_input_format("v4l2");
+        ret = avformat_open_input(&format_context, device_bytes.constData(), v4l2, &options);
+        av_dict_free(&options);
+        if (ret == 0) {
+            qInfo() << "Camera opened with input_format" << input_format;
+            break;
+        }
+    }
     if (ret < 0) {
         emit error(QStringLiteral("无法打开摄像头 %1: %2").arg(device_, ffmpegError(ret)));
         avformat_close_input(&format_context);
@@ -284,20 +298,32 @@ void CameraPreviewDecoder::decodeLoop()
         return;
     }
 
-    const AVCodec* codec = avcodec_find_decoder_by_name("mjpeg_rkmpp");
-    bool hardware_decode = codec != nullptr;
+    // 解码器按实际流类型选：MJPEG 才走 rkmpp 硬解（输出 NV12 DMA-BUF），
+    // CSI/rkisp 直出的 NV12、YUYV 是 rawvideo 包，只能用软解路径（sws_scale
+    // 转 RGBA），此时 hardware_decode 必须为 false，否则下方"DRM PRIME 硬解
+    // 帧"分支会因帧不在 DMA-BUF 里而一帧都不画。
+    const AVCodecID stream_codec_id = format_context->streams[video_index]->codecpar->codec_id;
     AVBufferRef* hardware_context = nullptr;
-    if (hardware_decode) {
-        const AVHWDeviceType hardware_type = av_hwdevice_find_type_by_name("rkmpp");
-        if (hardware_type == AV_HWDEVICE_TYPE_NONE ||
-            av_hwdevice_ctx_create(&hardware_context, hardware_type, nullptr, nullptr, 0) < 0) {
-            hardware_decode = false;
-            qWarning() << "RKMPP MJPEG decoder unavailable; using software MJPEG decode";
+    const AVCodec* codec = nullptr;
+    bool hardware_decode = false;
+    if (stream_codec_id == AV_CODEC_ID_MJPEG) {
+        codec = avcodec_find_decoder_by_name("mjpeg_rkmpp");
+        hardware_decode = codec != nullptr;
+        if (hardware_decode) {
+            const AVHWDeviceType hardware_type = av_hwdevice_find_type_by_name("rkmpp");
+            if (hardware_type == AV_HWDEVICE_TYPE_NONE ||
+                av_hwdevice_ctx_create(&hardware_context, hardware_type, nullptr, nullptr, 0) < 0) {
+                hardware_decode = false;
+                qWarning() << "RKMPP MJPEG decoder unavailable; using software MJPEG decode";
+            }
         }
+        if (!hardware_decode) codec = avcodec_find_decoder(AV_CODEC_ID_MJPEG);
+    } else {
+        codec = avcodec_find_decoder(stream_codec_id);
     }
-    if (!hardware_decode) codec = avcodec_find_decoder(AV_CODEC_ID_MJPEG);
     if (!codec) {
-        emit error(QStringLiteral("FFmpeg 中没有可用的 MJPEG 解码器"));
+        emit error(QStringLiteral("摄像头流 %1 没有可用的解码器")
+                       .arg(avcodec_get_name(stream_codec_id)));
         av_buffer_unref(&hardware_context);
         avformat_close_input(&format_context);
         emit finished();
@@ -306,7 +332,7 @@ void CameraPreviewDecoder::decodeLoop()
 
     AVCodecContext* codec_context = avcodec_alloc_context3(codec);
     if (!codec_context) {
-        emit error(QStringLiteral("无法创建 MJPEG 解码器上下文"));
+        emit error(QStringLiteral("无法创建摄像头解码器上下文"));
         av_buffer_unref(&hardware_context);
         avformat_close_input(&format_context);
         emit finished();
@@ -315,7 +341,7 @@ void CameraPreviewDecoder::decodeLoop()
     ret = avcodec_parameters_to_context(codec_context,
                                         format_context->streams[video_index]->codecpar);
     if (ret < 0) {
-        emit error(QStringLiteral("无法配置 MJPEG 解码器: %1").arg(ffmpegError(ret)));
+        emit error(QStringLiteral("无法配置摄像头解码器: %1").arg(ffmpegError(ret)));
         av_buffer_unref(&hardware_context);
         avcodec_free_context(&codec_context);
         avformat_close_input(&format_context);
@@ -390,10 +416,10 @@ void CameraPreviewDecoder::decodeLoop()
         // JPEG 图片，直接缓存原始码流后，抓拍只需按原样写盘——
         //   1) 零重编码：避免"解码→RGBA→turbojpeg 再编码"的质量损失和 CPU 开销；
         //   2) 分辨率即传感器分辨率（1920x1080），比缩放后的模型输入图清晰；
-        //   3) 0xFFD8 是 JPEG SOI 魔数，用于甄别码流确为 JPEG（软解路径下
-        //      packet 可能携带别的打包形式）；非 JPEG 帧不更新缓存，
-        //      此时 capture() 会因 latest_jpeg_ 为空而静默放弃本次抓拍。
-        // 代价：落盘的抓拍图不含检测框叠加（原始流无标注）。
+        //   3) 0xFFD8 是 JPEG SOI 魔数，用于甄别码流确为 JPEG（CSI 摄像头
+        //      直出的 NV12/YUYV 裸帧不是 JPEG，缓存保持为空）。
+        // 代价：落盘的抓拍图不含检测框叠加（原始流无标注）；裸帧源没有码流
+        // 可写，改由 handleDecodedFrame() 现场编码当前帧（那张是带框的）。
         if (packet->size > 2 && packet->data[0] == 0xFF && packet->data[1] == 0xD8) {
             std::lock_guard<std::mutex> lock(capture_mutex_);
             latest_jpeg_ = QByteArray(reinterpret_cast<const char*>(packet->data), packet->size);
@@ -774,8 +800,11 @@ void CameraPreviewDecoder::handleDecodedFrame(const uint8_t* pixels, int width, 
         path = pending_capture_path_;
         jpeg = latest_jpeg_;
     }
-    
-    if (jpeg.isEmpty()) return;
+
+    // 帧快照：缩略图与"无码流可落盘"时的抓拍图共用。QImage 构造不拷贝，
+    // 故必须 copy() 使负载脱离双缓冲生命周期（下一帧 back_buffer 回绕会覆盖该内存）
+    const QImage frame_snapshot =
+        QImage(pixels, width, height, stride, QImage::Format_RGBA8888).copy();
 
     // 清除拍照请求标志
     {
@@ -785,25 +814,33 @@ void CameraPreviewDecoder::handleDecodedFrame(const uint8_t* pixels, int width, 
         }
     }
 
-    // 写入JPEG文件
-    QFile output(path);
-    if (!output.open(QIODevice::WriteOnly)) {
-        emit error(QStringLiteral("照片保存失败: 无法打开文件 %1").arg(path));
-        return;
-    }
-    
-    if (output.write(jpeg) != jpeg.size()) {
-        output.close();
-        emit error(QStringLiteral("照片保存失败: 写入失败 %1").arg(path));
-        return;
-    }
-    output.close();
+    if (jpeg.isEmpty()) {
+        // 非 MJPEG 源（CSI 摄像头经 rkisp 直出 NV12/YUYV）没有现成码流，
+        // 只能把当前帧编码成 JPEG。代价：这张抓拍图带检测框叠加，且吃一次
+        // CPU 编码；不做的后果是快门按下去毫无反应（历史上就是静默 return）
+        if (!frame_snapshot.save(path, "JPG", 95)) {
+            emit error(QStringLiteral("照片保存失败: 无法编码 %1").arg(path));
+            return;
+        }
+    } else {
+        // 写入JPEG文件
+        QFile output(path);
+        if (!output.open(QIODevice::WriteOnly)) {
+            emit error(QStringLiteral("照片保存失败: 无法打开文件 %1").arg(path));
+            return;
+        }
 
-    // 创建缩略图 (从已解码的RGBA DMA-BUF创建,无需重新解码JPEG)
-    const QImage thumbnail(pixels, width, height, stride, QImage::Format_RGBA8888);
-    
-    // 发送拍照完成信号 (copy()确保数据独立)
-    emit photoCaptured(path, thumbnail.copy());
-    
-    qDebug() << "Camera photo captured:" << path << "size:" << jpeg.size() << "bytes";
+        if (output.write(jpeg) != jpeg.size()) {
+            output.close();
+            emit error(QStringLiteral("照片保存失败: 写入失败 %1").arg(path));
+            return;
+        }
+        output.close();
+    }
+
+    // 发送拍照完成信号
+    emit photoCaptured(path, frame_snapshot);
+
+    qDebug() << "Camera photo captured:" << path
+             << "size:" << QFileInfo(path).size() << "bytes";
 }

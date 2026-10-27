@@ -1,4 +1,5 @@
 #include "alarm_detail_dialog.h"
+#include "qthelper.h"
 #include "theme.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -148,10 +149,7 @@ void AlarmDetailDialog::onMarkFalsePositive()
     QMessageBox box(QMessageBox::Question, tr("确认误报"), tr("确定将此报警标记为误报？\n标记后状态将变为误报。"),
                     QMessageBox::Ok | QMessageBox::Cancel, nullptr);
     box.setWindowFlags(box.windowFlags() | Qt::WindowStaysOnTopHint);
-    QAbstractButton *okBtn = box.button(QMessageBox::Ok);
-    if (okBtn) okBtn->setText(tr("确定"));
-    QAbstractButton *cancelBtn = box.button(QMessageBox::Cancel);
-    if (cancelBtn) cancelBtn->setText(tr("取消"));
+    QtHelper::localizeMessageBoxButtons(&box);
     box.adjustSize();
 
     if (QScreen *screen = QGuiApplication::primaryScreen()) {

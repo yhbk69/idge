@@ -5,11 +5,15 @@
 // CameraPreviewDecoder —— MIPI/USB 摄像头预览解码器（人员点名/盘点链路的前端）
 // ============================================================================
 // 职责：
-//   1. 以 v4l2 + mjpeg(硬解 mjpeg_rkmpp，失败回退软解) 打开摄像头设备，
+//   1. 以 v4l2 打开摄像头设备，输入格式按节点能力协商（依次试 mjpeg、nv12、
+//      yuyv——USB UVC 给 MJPEG，RK3588 的 CSI 摄像头经 rkisp 只出 NV12/YUYV）。
+//      MJPEG 优先走硬解 mjpeg_rkmpp（输出 NV12 DMA-BUF，失败回退软解），
+//      裸格式走软解 + swscale 转 RGBA（CPU 路径，分辨率高时明显吃 CPU）。
 //      在独立 std::thread 中循环解码 → RGA/swscale 转 RGBA 双缓冲 → 画框
 //      → emit frameReady(RenderFrame) 供 EGL/GL 上屏。
-//   2. 抓拍：直接缓存最近一个 JPEG 原始码流（见 latest_jpeg_），拍照时
-//      零重编码写盘，并用当前 RGBA DMA 帧同步生成缩略图。
+//   2. 抓拍：MJPEG 源直接缓存最近一个 JPEG 原始码流（见 latest_jpeg_），拍照时
+//      零重编码写盘；裸格式源没有码流，改为现场编码当前 RGBA 帧。
+//      两种路径都用当前 RGBA DMA 帧同步生成缩略图。
 //   3. 检测：人脸槽走同步 SCRFD（detectRgba，每 5 帧一次）；
 //      装备/衣物槽走异步 PpeTask（YOLO）+ 单一共享结果队列按 result_id 路由。
 //
@@ -60,7 +64,9 @@ public:
     explicit CameraPreviewDecoder(QObject* parent = nullptr);
     ~CameraPreviewDecoder() override;
 
-    void start(const QString& device = QStringLiteral("/dev/video41"));
+    /// 取流地址必须由调用方给出（只认 v4l2 设备节点，MJPEG@1920x1080）；
+    /// UI 侧统一传 ConfigManager::smartRecognitionCamera()，不再写死节点号
+    void start(const QString& device);
     void stop();
     void setDetectorConfigs(const std::vector<PreviewDetectorConfig>& configs);
     void capture(const QString& path);

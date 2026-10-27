@@ -563,9 +563,10 @@ void frmMain::onWsAlarmReceived(const QJsonObject &data)
 // ==========================================
 
 /**
- * @brief 初始化人员点名/设备盘点页面
- * 复用导航栏中 main 分支隐藏的两个占位按钮 btnData/btnConfig，
- * 分别承载"人员点名"（pageRoll，.ui 已有）与"设备盘点"（代码创建页面）。
+ * @brief 初始化人员点名/设备盘点模块
+ * 两个业务页不再占用顶部导航：页面装进各自的 QDialog（窗口级模态），
+ * 由智能识别页的"人员点名"/"设备盘点"卡片通过 rollCallRequested /
+ * equipmentRequested 信号拉起，入口收敛到智能识别 tab 的四张卡片。
  *
  * 初始化顺序是硬约束：
  *   1. 必须先 initRollCallService()——EquipmentInventoryService 的构造函数
@@ -573,12 +574,13 @@ void frmMain::onWsAlarmReceived(const QJsonObject &data)
  *      盘点任务也登记在该表，type="equipment_registration"）；
  *   2. 点名服务初始化失败只弹 warning、不中断启动：RollCallWidget 收到空的
  *      shared_ptr 后所有取数路径早退（service_ 判空），页面降级为空白列表，
- *      保证主监控功能不受业务模块拖累；
- *   3. 设备页需要再包一层 equipPage_ 容器：stackedWidget 以"页"为单位切换，
- *      EquipmentInventoryWidget 自身直接铺满 layout，故用代码创建 QWidget
- *      作页面壳（.ui 中没有它，索引追加在最后）。
- * lab5 为 .ui 中 pageRoll 原占位标签，挂真实页面前隐藏。
- * 按钮文本改回"人员点名/设备盘点"由 buttonClick() 按文本分发页面。
+ *      保证主监控功能不受业务模块拖累；失败同时把对应卡片置灰（构造参数
+ *      rollCallAvailable/equipmentAvailable），避免用户点进一个空弹窗；
+ *   3. 对话框用窗口级模态（WindowModal）而非 exec() 的应用级模态：点名详情
+ *      是非模态顶层窗口（RollCallWidget::showTaskDetailDialog），应用级模态
+ *      会把它一起锁死。窗口级模态只锁 frmMain，顶层详情窗照常可操作。
+ * 顶部导航的 btnData/btnConfig 是 main 分支收敛后隐藏的占位按钮，这里不再
+ * 复用（保持隐藏），.ui 中的 pageRoll 也不再挂载页面。
  */
 void frmMain::initBusinessPages()
 {
@@ -586,43 +588,69 @@ void frmMain::initBusinessPages()
     if (ws.isEmpty()) ws = QDir::currentPath();
     workspace_ = ws.toStdString();
 
-    if (!initRollCallService()) {
+    const bool rollCallOk = initRollCallService();
+    if (!rollCallOk) {
         QMessageBox::warning(this, "警告", "人员点名服务初始化失败");
     }
 
-    // 人员点名页：填充 .ui 中已有的 pageRoll
-    rollCallWidget_ = new RollCallWidget(ui->pageRoll);
+    rollCallWidget_ = new RollCallWidget();
     rollCallWidget_->setService(rollCallService_);
-    ui->lab5->hide();
-    if (!ui->pageRoll->layout()) ui->pageRoll->setLayout(new QVBoxLayout());
-    ui->pageRoll->layout()->addWidget(rollCallWidget_);
+    rollCallDialog_ = new QDialog(this);
+    rollCallDialog_->setWindowTitle(QStringLiteral("人员点名"));
+    rollCallDialog_->resize(1400, 860);
+    rollCallDialog_->setWindowModality(Qt::WindowModal);
+    rollCallDialog_->setStyleSheet(QStringLiteral("QDialog { background:%1; }").arg(theme::BG));
+    auto* rollLayout = new QVBoxLayout(rollCallDialog_);
+    rollLayout->setContentsMargins(0, 0, 0, 0);
+    rollLayout->addWidget(rollCallWidget_);
 
-    // 设备盘点页：代码创建并插入 stackedWidget（初始化失败与点名同级弹窗提示）
-    if (!initEquipmentService()) {
+    // 设备盘点（初始化失败与点名同级弹窗提示）
+    const bool equipmentOk = initEquipmentService();
+    if (!equipmentOk) {
         QMessageBox::warning(this, "警告",
                              "设备盘点服务初始化失败：模型库中未找到可用检测模型");
     }
     equipmentWidget_ = new EquipmentInventoryWidget();
     equipmentWidget_->setServices(equipmentService_, rollCallService_);
-    equipPage_ = new QWidget();
-    equipPage_->setLayout(new QVBoxLayout());
-    equipPage_->layout()->addWidget(equipmentWidget_);
-    ui->stackedWidget->addWidget(equipPage_);
+    equipmentDialog_ = new QDialog(this);
+    equipmentDialog_->setWindowTitle(QStringLiteral("设备盘点"));
+    equipmentDialog_->resize(1400, 860);
+    equipmentDialog_->setWindowModality(Qt::WindowModal);
+    equipmentDialog_->setStyleSheet(QStringLiteral("QDialog { background:%1; }").arg(theme::BG));
+    auto* equipLayout = new QVBoxLayout(equipmentDialog_);
+    equipLayout->setContentsMargins(0, 0, 0, 0);
+    equipLayout->addWidget(equipmentWidget_);
 
-    // 复用被 main 导航收敛隐藏的占位按钮
-    ui->btnData->setText("人员点名");
-    ui->btnData->setIcon(QIcon(":/image/main_person.png"));
-    ui->btnData->show();
-    ui->btnConfig->setText("设备盘点");
-    ui->btnConfig->setIcon(QIcon(":/image/main_company.png"));
-    ui->btnConfig->show();
-
-    // 智能识别页（QR + OCR）：代码创建并插入 stackedWidget
-    smartRecognitionWidget_ = new SmartRecognitionWidget(workspace_);
+    // 智能识别页（二维码 + OCR + 人员点名 + 设备盘点 四卡片）
+    // 可用性在构造时传入：服务先初始化完，卡片一出现就是终态（置灰卡片不响应点击）
+    smartRecognitionWidget_ = new SmartRecognitionWidget(workspace_, rollCallOk, equipmentOk);
+    connect(smartRecognitionWidget_, &SmartRecognitionWidget::rollCallRequested,
+            this, &frmMain::showRollCallDialog);
+    connect(smartRecognitionWidget_, &SmartRecognitionWidget::equipmentRequested,
+            this, &frmMain::showEquipmentDialog);
     smartPage_ = new QWidget();
     smartPage_->setLayout(new QVBoxLayout());
     smartPage_->layout()->addWidget(smartRecognitionWidget_);
     ui->stackedWidget->addWidget(smartPage_);
+}
+
+// 智能识别页卡片入口：每次打开前刷新列表，保证弹窗与数据库一致
+void frmMain::showRollCallDialog()
+{
+    if (!rollCallDialog_) return;
+    if (rollCallWidget_) rollCallWidget_->refreshTaskList();
+    rollCallDialog_->show();
+    rollCallDialog_->raise();
+    rollCallDialog_->activateWindow();
+}
+
+void frmMain::showEquipmentDialog()
+{
+    if (!equipmentDialog_) return;
+    if (equipmentWidget_) equipmentWidget_->refreshTaskList();
+    equipmentDialog_->show();
+    equipmentDialog_->raise();
+    equipmentDialog_->activateWindow();
 }
 
 // 点名服务资源约定（根目录 = 环境变量 IDGE_WORKSPACE，缺省回退当前工作目录）：
@@ -712,11 +740,10 @@ void frmMain::reloadEquipmentService()
  *   - "视频监控" -> pageMonitor（视频监控页）
  *   - "数据看板" -> dashboardWidget_（数据看板）
  *   - "报警数据" -> alarmListWidget_（报警数据）
- *   - "人员点名" -> pageRoll（人员点名）
- *   - "设备盘点" -> equipPage_（设备盘点）
- *   - "智能识别" -> smartPage_（二维码 + OCR）
+ *   - "智能识别" -> smartPage_（二维码 + OCR + 人员点名 + 设备盘点）
  *   - "调试设置" -> pageSettings（调试帮助页）
  *   - "退出"     -> 退出确认
+ * 人员点名/设备盘点不是导航项：它们在智能识别页里以卡片入口 + 弹窗呈现。
  */
 void frmMain::buttonClick()
 {
@@ -737,10 +764,6 @@ void frmMain::buttonClick()
         ui->stackedWidget->setCurrentWidget(dashboardWidget_);
     } else if (name == "报警数据") {
         ui->stackedWidget->setCurrentWidget(alarmListWidget_);
-    } else if (name == "人员点名") {
-        ui->stackedWidget->setCurrentWidget(ui->pageRoll);
-    } else if (name == "设备盘点") {
-        ui->stackedWidget->setCurrentWidget(equipPage_);
     } else if (name == "智能识别") {
         ui->stackedWidget->setCurrentWidget(smartPage_);
     } else if (name == "调试设置") {
@@ -835,13 +858,10 @@ void frmMain::on_btnMenu_Close_clicked()
 void frmMain::systemExit()
 {
     // 顶层无父窗口 + 置顶，避免模态框被全屏无边框主窗遮挡导致"卡死"
-    QMessageBox box(QMessageBox::Question, tr("退出系统"), tr("确认要退出系统吗?"),
+    QMessageBox box(QMessageBox::Question, tr("退出系统"), tr("确认要退出系统吗？"),
                     QMessageBox::Ok | QMessageBox::Cancel, nullptr);
     box.setWindowFlags(box.windowFlags() | Qt::WindowStaysOnTopHint);
-    QAbstractButton *okBtn = box.button(QMessageBox::Ok);
-    if (okBtn) okBtn->setText(tr("确定"));
-    QAbstractButton *cancelBtn = box.button(QMessageBox::Cancel);
-    if (cancelBtn) cancelBtn->setText(tr("取消"));
+    QtHelper::localizeMessageBoxButtons(&box);
     box.adjustSize();
 
     // 居中显示
@@ -1678,9 +1698,10 @@ void frmMain::deleteSelectedModel()
         return;
     }
     const QString id = modelLibTable_->item(row, 0)->text();
-    if (QMessageBox::question(this, "删除模型",
-            QString("确认把模型 [%1] 移出模型库？\n目录将移入 model/.trash/，可人工恢复。").arg(id))
-        != QMessageBox::Yes) {
+    if (QtHelper::askConfirm(this, QStringLiteral("删除模型"),
+                             QStringLiteral("确认把模型 [%1] 移出模型库？\n目录将移入 model/.trash/，可人工恢复。")
+                                 .arg(id))
+        != QMessageBox::Ok) {
         return;
     }
 

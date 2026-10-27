@@ -1,6 +1,7 @@
 // 文件：equipment_inventory_widget.cpp
 // 职责：设备盘点任务列表页实现（caichao 分支合入），页面风格与 RollCallWidget 保持一致
 #include "equipment_inventory_widget.h"
+#include "qthelper.h"
 #include "theme.h"
 
 #include <QAbstractItemView>
@@ -229,9 +230,10 @@ void EquipmentInventoryWidget::onCreateTask() {
     if (result == QDialog::Accepted) refreshTaskList();
     else if (result == 2) {
         equipment_service_->deleteTask(task_id);
-    } else if (QMessageBox::question(
+    } else if (QtHelper::askConfirm(
                    this, QStringLiteral("保留任务"),
-                   QStringLiteral("识别结果未确认，是否删除当前设备盘点任务？")) == QMessageBox::Yes) {
+                   QStringLiteral("识别结果未确认，是否删除当前设备盘点任务？"))
+               == QMessageBox::Ok) {
         equipment_service_->deleteTask(task_id);
     }
     refreshTaskList();
@@ -269,9 +271,10 @@ void EquipmentInventoryWidget::onCancelTask(int task_id) {
 // 无论成败都刷新列表（失败时表格保持与库一致）
 void EquipmentInventoryWidget::onDeleteTask(int task_id) {
     const Task task = equipment_service_->getTaskInfo(task_id);
-    if (QMessageBox::question(this, QStringLiteral("确认删除"),
-                              QStringLiteral("确定删除任务“%1”吗？").arg(QString::fromUtf8(task.name.c_str())))
-        != QMessageBox::Yes) return;
+    if (QtHelper::askConfirm(this, QStringLiteral("确认删除"),
+                             QStringLiteral("确定删除任务“%1”吗？")
+                                 .arg(QString::fromUtf8(task.name.c_str())))
+        != QMessageBox::Ok) return;
     if (!equipment_service_->deleteTask(task_id))
         QMessageBox::critical(this, QStringLiteral("错误"), QStringLiteral("删除任务失败"));
     refreshTaskList();

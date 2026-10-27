@@ -103,8 +103,11 @@
 #include <cstring>
 #include <cmath>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include "DmaFrameBuffer.h"
+#include "dma_alloc.h"        // dma_sync_device_to_cpu / dma_sync_cpu_to_device
+#include <libswscale/swscale.h>   // 软件帧（摄像头裸流/纯软解）→ RGBA 兜底转换
 #include "image_utils.h"
 #include "ThreadPool.hpp"
 #include "helmet_task.h"
@@ -513,9 +516,17 @@ static int decodeInterruptCallback(void *ctx)
 //   - 避免频繁 malloc/free 带来的内存碎片和性能开销
 //   - 多个通道共享同一个缓冲池，内存使用可控
 //   - 引用计数自动管理生命周期，无需手动释放
+//
+// PreviewOnly 模式两件事都不做：既不加载 RKNN 模型，也不预留 64 个
+// 640×640 DMA 缓冲（智能识别 QR/OCR 只要一帧原始画面，推理链路整条不建）。
 // ============================================================================
-FFmpegVideoDecoder::FFmpegVideoDecoder(QObject *parent) : QObject(parent) 
+FFmpegVideoDecoder::FFmpegVideoDecoder(QObject *parent, InferenceMode mode)
+    : QObject(parent)
+      , inferenceEnabled_(mode == InferenceMode::Cascade)
 {
+    if (!inferenceEnabled_)
+        return;
+
     // 创建 DMA 缓冲池：64 个 640×640 的 RGB 缓冲区
     dmaBufferPool_ = std::make_shared<DmaBufferPool>(64, 640, 640, RK_FORMAT_BGR_888, 16);
 
@@ -1246,6 +1257,12 @@ void FFmpegVideoDecoder::decodeLoop()
             << "(avg_fps=" << av_q2d(fmt_ctx->streams[vidx]->avg_frame_rate)
             << " r_fps=" << av_q2d(fmt_ctx->streams[vidx]->r_frame_rate) << ")";
 
+    // 软件帧转换上下文缓存：源格式/宽高在一路流内恒定，故只在建流后首次遇到
+    // 软件帧时建一次（见 4.5 的软件分支）。三个变量都是本线程私有的。
+    SwsContext* software_scaler = nullptr;
+    int software_scaler_src = AV_PIX_FMT_NONE;
+    int software_scaler_w = 0, software_scaler_h = 0;
+
     while (running_)
     {
         // ===== 4.1 读取一个压缩数据包 =====
@@ -1344,7 +1361,8 @@ void FFmpegVideoDecoder::decodeLoop()
                 }
             }
 
-            if (src_fd >= 0)
+            if (src_fd >= 0 || (src_fd < 0 && frame->data[0] &&
+                                frame->format != AV_PIX_FMT_DRM_PRIME))
             {
                 // ===== 4.5 RGA 色彩转换：NV12 → RGBA（零拷贝） =====
                 //
@@ -1369,15 +1387,46 @@ void FFmpegVideoDecoder::decodeLoop()
                 long long rgaImpNs = 0, rgaCvtNs = 0;
                 long long *pImp = perfProbe() ? &rgaImpNs : nullptr;
                 long long *pCvt = perfProbe() ? &rgaCvtNs : nullptr;
-                bool ok = RgaConverter::convertNV12ToRGBAbyRGA(
-                    src_fd, 
-                    dst_buf->fd(), 
-                    frame->width, 
-                    frame->height, 
-                    src_stride, 
-                    frame->height,
-                    RK_FORMAT_YCbCr_420_SP,
-                    pImp, pCvt);
+                bool ok = false;
+                if (src_fd >= 0) {
+                    ok = RgaConverter::convertNV12ToRGBAbyRGA(
+                        src_fd, 
+                        dst_buf->fd(), 
+                        frame->width, 
+                        frame->height, 
+                        src_stride, 
+                        frame->height,
+                        RK_FORMAT_YCbCr_420_SP,
+                        pImp, pCvt);
+                } else {
+                    // CPU 内存帧（v4l2 摄像头直出 NV12/YUYV 裸流、或没有硬解路径的
+                    // 软解流）：本函数原本只认 DRM_PRIME，这类帧会被整帧丢弃，表现为
+                    // "摄像头明明有流、智能识别却取不到画面"。这里用 sws 转成 RGBA 写进
+                    // 同一块 DMA 缓冲，下游画框/推理/EGL 与硬解路径共用一套代码。
+                    if (!software_scaler || software_scaler_src != frame->format ||
+                        software_scaler_w != frame->width || software_scaler_h != frame->height) {
+                        sws_freeContext(software_scaler);
+                        software_scaler = sws_getContext(
+                            frame->width, frame->height,
+                            static_cast<AVPixelFormat>(frame->format),
+                            vid_w, vid_h, AV_PIX_FMT_RGBA,
+                            SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+                        software_scaler_src = frame->format;
+                        software_scaler_w = frame->width;
+                        software_scaler_h = frame->height;
+                    }
+                    if (software_scaler) {
+                        // CPU 即将写这块 GPU 也在读的缓冲：先收回所有权，写完再交还
+                        dma_sync_device_to_cpu(dst_buf->fd());
+                        uint8_t* dst_data[4] = { dst_buf->ptr(), nullptr, nullptr, nullptr };
+                        int dst_linesize[4] = { dst_buf->stride(), 0, 0, 0 };
+                        ok = sws_scale(software_scaler, frame->data, frame->linesize, 0,
+                                       frame->height, dst_data, dst_linesize) > 0;
+                        if (ok && dma_sync_cpu_to_device(dst_buf->fd()) < 0) {
+                            msync(dst_buf->ptr(), dst_buf->size(), MS_SYNC);
+                        }
+                    }
+                }
                 ds.rgaImp += rgaImpNs / 1000;
                 ds.rgaCvt += rgaCvtNs / 1000;
                 ds.add(ds.rga1);
@@ -1393,7 +1442,7 @@ void FFmpegVideoDecoder::decodeLoop()
                     //   - 每 3 帧推理一次 = 约 8-10 fps 的检测频率
                     //   - 足够用于实时告警，同时留出算力给其他通道
                     //
-                    if (frame_count % 3==0) {
+                    if (inferenceEnabled_ && frame_count % 3==0) {
                         ds.stage.restart();
                         
                         // 从 DMA 缓冲池获取一个可用的 RGB 缓冲区（非阻塞）
@@ -1871,6 +1920,10 @@ void FFmpegVideoDecoder::decodeLoop()
     }
 
     qDebug() << "Decode finished, frames:" << frame_count;
+
+    // 软件帧转换上下文（可能从未创建——纯硬解流走不到那个分支，free 容忍 NULL）
+    sws_freeContext(software_scaler);
+    software_scaler = nullptr;
 
     emit statusChanged(channel_, 0);
 

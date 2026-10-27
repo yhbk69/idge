@@ -11,7 +11,13 @@
 - **报警查询页**：数据看板（`dashboard_widget`）与报警记录列表（`alarm_list_widget`），本目录仅负责挂载与角标/toast 联动；
 - **人员点名页**（caichao 合入）：任务列表 + 拍照选图 + 登记识别 + 注销匹配全流程；
 - **设备盘点页**（caichao 合入）：复用点名选图界面做设备检测登记/注销与详情查看；
-- **智能识别页**：二维码（ZBar）+ 铭牌文字（PP-OCRv4）两张卡片，点击各自弹出模态取流对话框，页面本身无常驻任务。
+- **智能识别页**：二维码（ZBar）/ 铭牌文字（PP-OCRv4）/ 人员点名 / 设备盘点 四张卡片。
+  前两张点击弹本文件内的模态取流对话框；后两张只 `emit rollCallRequested/equipmentRequested`，
+  由 `frmMain` 把对应业务页装进窗口级模态 `QDialog` 弹出。页面本身无常驻任务。
+  两个业务页**不再占用顶部导航**（导航 6 项）。
+  二维码/OCR 的取帧对话框用 `FFmpegVideoDecoder(nullptr, InferenceMode::PreviewOnly)`：
+  只要一帧原始画面给 ZBar / ppocr demo，不加载监控流水线那套 YOLO 级联模型（NPU 零占用，
+  预览上也因此没有检测框）。点名/盘点走 `CameraPreviewDecoder`，各自只带自己需要的模型。
 
 录像回放解码线程 `video_decoder.cpp`（FFmpeg CPU 软解）也在本目录，当前无实例化点（历史方案，实时播放走 `src/media/reader/FFmpegVideoDecoder`）。
 
@@ -29,22 +35,28 @@
 | equipment_inventory_widget.h/.cpp | 设备盘点任务列表页（双服务注入） | caichao 合入 |
 | equipment_recognition_dialog.h/.cpp | 设备识别结果对话框（Registration/Cancellation 两阶段共用） | caichao 合入 |
 | equipment_detail_dialog.h/.cpp | 设备盘点任务详情对话框（只读快照） | caichao 合入 |
-| smart_recognition_widget.h/.cpp | 智能识别页（二维码 + OCR 铭牌文字）：两卡片入口 + 各自模态对话框，含匿名 namespace 里的 QR 扫描线程、稳定性判定与 OCR 选区控件 | 新增 |
+| smart_recognition_widget.h/.cpp | 智能识别页（二维码 + OCR 铭牌文字 + 人员点名 + 设备盘点）：四卡片入口，前两张自带模态对话框，后两张只发请求信号；含匿名 namespace 里的 OCR 选区控件 | 新增 |
 | photo_selection_dialog.h | **遗留未使用**旧版选图对话框声明（仅头文件，无实现无引用，含已修正的乱码注释），与 photo_selection_widget.h 同名类互斥 | caichao 合入（废弃版本） |
 
 ## 页面与导航结构
 
 - `frmmain.ui` 里 `stackedWidget` 只有三个静态页：`pageMonitor`（视频监控，内容即 `frmVideoWindow`）、
-  `pageSettings`（调试设置）、`pageRoll`（人员点名）。早先文档写的 `page1/page2/page4` 是重组前的旧名，已不存在。
+  `pageSettings`（调试设置）、`pageRoll`（**已不再挂载**：人员点名改为智能识别页卡片 + 弹窗，
+  该页保留为占位、永不被切到）。早先文档写的 `page1/page2/page4` 是重组前的旧名，已不存在。
 - 运行期动态插页（`initNewPages()`/`initBusinessPages()`）：
   - index1 插入 `DashboardWidget`（数据看板）、index2 插入 `AlarmListWidget`（报警数据）；
-  - 末尾 `addWidget(equipPage_)`（设备盘点，代码创建的容器页）、`addWidget(smartPage_)`（智能识别，同为容器页）。
-- 顶部导航共 8 项，`buttonClick()` 按按钮文本分发：视频监控 / 数据看板 / 报警数据 / 人员点名 / 设备盘点 / 智能识别 / 调试设置 / 退出。
-  其中 **智能识别 `btnSmart` 是 `.ui` 里直接新增的按钮**（图标 `:/image/main_smart.png`），其余扩展位仍走"隐藏占位按钮改名再 show"的老机制；
+  - 末尾 `addWidget(smartPage_)`（智能识别，代码创建的容器页）。设备盘点不再有独立页，
+    `EquipmentInventoryWidget` 直接装进 `equipmentDialog_`。
+- 顶部导航共 6 项，`buttonClick()` 按按钮文本分发：视频监控 / 数据看板 / 报警数据 / 智能识别 / 调试设置 / 退出。
+  其中 **智能识别 `btnSmart` 是 `.ui` 里直接新增的按钮**（图标 `:/image/main_smart.png`）；
   导航图标在 `initNewPages()` 里与文本成对重设（`.ui` 里的原始图标语义已与现文本不符），字号统一取 `theme::FS_NAV`。
 - **切换按控件指针**（`setCurrentWidget`）而非索引，避免插页导致索引漂移；`buttonClick()` 按按钮文本分发。
-- **隐藏按钮复用机制**：导航收敛后 `btnData`/`btnConfig` 先 `hide()` 占位，`initBusinessPages()` 再把文本改为"人员点名/设备盘点"并 `show()`，用它们挂载两个业务页——`.ui` 不改动即实现了导航扩位。
+- **点名/盘点入口**：`initBusinessPages()` 把两个业务页各装进一个 `QDialog`（`rollCallDialog_`/`equipmentDialog_`，
+  窗口级模态 `Qt::WindowModal`），智能识别页卡片经信号触发 `showRollCallDialog()`/`showEquipmentDialog()`，
+  每次打开前先 `refreshTaskList()`。用 WindowModal 而非 `exec()` 是硬约束：点名详情是**非模态顶层窗口**，
+  应用级模态会把它一起锁死。`btnData`/`btnConfig` 保持 `hide()`，不再复用为业务导航。
 - 业务对话框均为**模态**（`exec()`）嵌套：点名创建 = 输入名 → PhotoSelectionDialog → RecognitionResultDialog；自定义返回码 `done(2)` 约定"用户取消且任务已删"，外层据此只提示不重复删除。
+  点名/盘点的**任务列表页**是唯一的例外：宿主 `QDialog` 用 `show()` + `Qt::WindowModal`（见上条）。
 - 任务详情页（点名）刻意用非模态 `QWidget + WA_DeleteOnClose + show()`，可与列表并行查看。
 
 ## 使用方法
@@ -61,7 +73,7 @@
 
 - `src/biz/service`：RollCallService、EquipmentInventoryService（业务数据与 NPU 识别封装）；
 - `src/ui/widgets`：PlayerWidget/GLVideoWidget/DashboardWidget/AlarmListWidget；
-- `src/media/reader`：FFmpegVideoDecoder（实时）、CameraPreviewDecoder（MJPEG 预览/拍照）；
+- `src/media/reader`：FFmpegVideoDecoder（实时）、CameraPreviewDecoder（摄像头预览/拍照，取流地址同 `smartRecognition.camera`）；
 - `src/biz/geofence`（经 `src/fence_manager.h` 等）：FenceManager、FenceOverlay、DrawMode；
 - `src/base/utils`：qt_image_utils 的 `loadPixmapSafe`（板端 Qt JPEG 插件与 libjpeg ABI 冲突的安全解码，业务页所有图片加载必须走它）；
 - `src/ui/form/smart_recognition_widget`：二维码链路依赖 `3rdparty/zbar`（编译期 `HAS_ZBAR`，见 `3rdparty/README.md`），OCR 链路用 `QProcess` 起 `3rdparty/ppocrv4/bin` 的两个 rknn_model_zoo demo（不链接，见 `3rdparty/ppocrv4/README.md`），权重在 `model/library/ppocrv4-ocr/`；取流地址读 `config.json` 的 `smartRecognition.camera`；
@@ -71,7 +83,8 @@
 ## 注意事项
 
 - **线程**：三个识别对话框的析构 `quit()+wait()` 会等待不可中断的 NPU 识别结束，关窗可能卡顿数秒（已知取舍）；`frameReady→GLVideoWidget::onFrameReady` 的 `DirectConnection` 仅在解码线程做"加锁换帧 + update()"，GL 绘制仍在 GUI 线程 paintGL；`video_decoder.cpp` 中 QImage 浅封装 FFmpeg 缓冲的覆写/悬垂风险见该文件警示注释。
-- **智能识别页的对话框延时**：`smart_recognition_widget.cpp` 里所有 `QTimer::singleShot` 都必须带 `&dialog` 作上下文对象——回调按引用捕获了 dialog 的栈上成员（`isScanning`、`scanLine` 等），缺上下文时"识别成功到弹窗之间的 500ms 内关掉对话框"会解引用野指针直接 SIGSEGV（实测复现过）。同理收尾顺序固定为"先停扫码线程 → 再 `decoder->stop()`"，反序会让工作线程摸到已释放的 DMA 缓冲。
+- **智能识别页的对话框延时**：`smart_recognition_widget.cpp` 里若用 `QTimer::singleShot` 延时弹窗，都必须带 `&dialog` 作上下文对象——回调按引用捕获了 dialog 的栈上成员，缺上下文时"识别成功到弹窗之间关掉对话框"会解引用野指针直接 SIGSEGV（实测复现过）。
+  二维码链路已改为"拍照后对单帧解码"，不再有常驻扫描线程，因此也就没有"先停线程再停解码器"的收尾顺序约束；OCR 仍走 `QProcess` 起外部 demo。
 - **MOC**：带 `Q_OBJECT` 的 Worker 类定义在 .cpp 中时，尾部 `#include "xxx.moc"` 不可删除，否则 vtable 链接失败。
 - **.ui 文件**：`frmmain.ui`/`frmvideowindow.ui` 一律不手改；布局微调全部通过代码 `addWidget/insertWidget/moveTo` 实现。
 - **遗留文件**：`photo_selection_dialog.h` 未被引用且与 `photo_selection_widget.h` 声明同名类，二者绝不可同时 include；`recognition_result_dialog` 的 `drawFaceBoxes()`（仅声明）与 `drawBoxesOnImage()`（有定义无调用）为死代码，`equipment_detail_dialog` 的 `photoCell()` 同样无调用点，均已加警示注释，清理前需再次全工程检索。

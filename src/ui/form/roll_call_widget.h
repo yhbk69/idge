@@ -5,7 +5,8 @@
  * @file roll_call_widget.h
  * @brief 人员点名（签到）任务列表页 —— caichao 分支合入的业务页面
  *
- * 职责：嵌入 frmMain 的 pageRoll，展示点名任务列表，
+ * 职责：装进 frmMain 的 rollCallDialog_（智能识别页"人员点名"卡片拉起），
+ *       展示点名任务列表，
  *       并提供 创建/查看/注销/删除/导出报告 等入口。
  *       具体的拍照（PhotoSelectionDialog）、识别结果（RecognitionResultDialog）、
  *       注销匹配（CancellationResultDialog）均由本页面按需以模态对话框拉起。

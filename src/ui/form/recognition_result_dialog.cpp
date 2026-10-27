@@ -12,6 +12,7 @@
 #include "qt_image_utils.h"
 #include "recognition_result_dialog.h"
 #include "theme.h"
+#include "qthelper.h"
 #include <QHeaderView>
 #include <QMessageBox>
 #include <QProgressDialog>
@@ -498,13 +499,9 @@ void RecognitionResultDialog::onPrevious() {
 void RecognitionResultDialog::onCancel() {
     // 取消=删任务：确认后由服务层连库带文件删除，done(2) 为自定义返回码，
     // 外层 RollCallWidget 识别到 2 只提示"任务已取消"，不再重复 deleteTask
-    auto reply = QMessageBox::question(
-        this, "确认取消",
-        "确定要取消整个任务吗？所有数据将被删除",
-        QMessageBox::Yes | QMessageBox::No
-    );
-    
-    if (reply == QMessageBox::Yes) {
+    if (QtHelper::askConfirm(this, QStringLiteral("确认取消"),
+                             QStringLiteral("确定要取消整个任务吗？所有数据将被删除。"))
+        == QMessageBox::Ok) {
         // 删除任务
         if (service_->deleteTask(task_id_)) {
             done(2);  // 自定义返回码表示取消任务

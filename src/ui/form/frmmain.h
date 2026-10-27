@@ -32,6 +32,7 @@
 
 class QAbstractButton;
 class QLineEdit;
+class QDialog;
 class frmVideoWindow;
 class DashboardWidget;
 class AlarmListWidget;
@@ -85,12 +86,15 @@ private:
     QList<QAbstractButton *> btnsMain;  ///< 主导航按钮列表
 
     // ========== 人员点名 / 设备盘点业务模块（caichao 分支合并） ==========
+    // 两个业务页不占顶部导航，装在各自的窗口级模态 QDialog 里，
+    // 由智能识别页的"人员点名"/"设备盘点"卡片拉起
     RollCallWidget *rollCallWidget_ = nullptr;
+    QDialog *rollCallDialog_ = nullptr;      ///< 点名任务页宿主弹窗
     std::shared_ptr<RollCallService> rollCallService_;
     EquipmentInventoryWidget *equipmentWidget_ = nullptr;
+    QDialog *equipmentDialog_ = nullptr;     ///< 盘点任务页宿主弹窗
     std::shared_ptr<EquipmentInventoryService> equipmentService_;
-    QWidget *equipPage_ = nullptr;   ///< 设备盘点页（代码创建，插入 stackedWidget）
-    SmartRecognitionWidget *smartRecognitionWidget_ = nullptr; ///< 智能识别页（QR + OCR）
+    SmartRecognitionWidget *smartRecognitionWidget_ = nullptr; ///< 智能识别页（QR + OCR + 点名 + 盘点）
     QWidget *smartPage_ = nullptr;   ///< 智能识别页容器
     std::string workspace_;          ///< 业务资源根目录（model/face、roll_call_data 等）
 
@@ -169,6 +173,8 @@ private slots:
     bool initEquipmentService();   ///< 初始化设备盘点服务
     std::vector<EquipmentModelConfig> equipmentModelConfigsFromLibrary(); ///< 从模型库解析盘点清单（init 与 reload 共用同一口径）
     void reloadEquipmentService(); ///< 模型库变更后热更新盘点模型（失败保持旧模型）
+    void showRollCallDialog();     ///< 智能识别页"人员点名"卡片：弹出点名任务页
+    void showEquipmentDialog();    ///< 智能识别页"设备盘点"卡片：弹出盘点任务页
 
 private:
     // ========== 级联模型配置控件（数据成员，不能放 slots 里） ==========

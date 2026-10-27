@@ -67,5 +67,8 @@
         "buffer_seconds": 5,
         "bitrate": 2000000,
         "gop_seconds": 1
+    },
+    "smartRecognition": {
+        "camera": ""
     }
 }

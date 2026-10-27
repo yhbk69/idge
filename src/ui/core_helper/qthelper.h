@@ -160,6 +160,22 @@ public:
     // 加载翻译文件(.qm)
     static void setTranslator(const QString &qmFile);
 
+    // 统一消息框标准按钮为中文。Qt 自带的 zh_CN 词典只译了 QMessageBox 上下文里的
+    // "OK"，Cancel / Yes / No / Close / Save 等都仍是英文（同一个 .qm 里只有
+    // QDialogButtonBox 上下文译全了，而 QMessageBox 取文案用的是自己的上下文），
+    // 所以凡是带这些角色的框都必须显式改写，不能指望翻译文件。
+    static void localizeMessageBoxButtons(QMessageBox *box);
+
+    // 询问框：固定"确定/取消"两个按钮，返回 QMessageBox::Ok 表示用户确认。
+    // 别用 QMessageBox::question 静态版——那会给出英文的 Yes/No。
+    static QMessageBox::StandardButton askConfirm(QWidget *parent, const QString &title,
+                                                  const QString &text);
+
+    // 挂一个全局事件过滤器：任何 QMessageBox 显示前自动走上面那个改写函数。
+    // 静态版 QMessageBox::information/warning/critical 一堆调用点没法逐个改，
+    // 靠过滤器兜底；已显式写成中文的按钮不会被覆盖。
+    static void installMessageBoxTextFilter();
+
     // ========================================================================
     // Android权限相关
     // ========================================================================

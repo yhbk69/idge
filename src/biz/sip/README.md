@@ -170,8 +170,9 @@ manager.stop();      // 析构会自动调
 - **SIP 只有一个 socket，多路流共用 localSipPort**：同一台机器上再起一个独立
   `MediaServer`/另一个 idge 实例会抢端口（`SO_REUSEADDR` 对同协议同端口不保证负载分配）。
 - **与本机其它取流方无互斥**：`type=camera` 会自己开一次 v4l2，和监控页的
-  `FFmpegVideoDecoder`、智能识别页、`CameraPreviewDecoder`（硬编码 `/dev/video41`）
-  之间没有任何设备注册表。同一设备被两处打开，后开的那个失败。
+  `FFmpegVideoDecoder`、智能识别页与点名/盘点的 `CameraPreviewDecoder`
+  （后两者统一取 `smartRecognition.camera`）之间没有任何设备注册表。
+  同一设备被两处打开，后开的那个失败。
   正式部署建议国标只推 RTSP 拉流，本机摄像头留给业务页。
 - **透传路径无视分辨率**：源是 H.264 时不重编，平台看到的就是源本身的宽高码率；
   想靠 `width/height/bitrate` 限带宽，必须让源不是 H.264（或换 `camera`/`rtmp`）。

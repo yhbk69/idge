@@ -294,6 +294,15 @@ int main(int argc, char *argv[])
     QtHelper::setFont(16);  // 统一基础字号 16px（字阶：12角标/13提示/14导航/16正文/18卡片标题/22页面标题/30大数字）
     QtHelper::setCode();
 
+    // Qt 自带控件的内置文案汉化（文件对话框的 Look in / File name / Files of type
+    // 等标签、日期编辑器的"月/年"等），这些只能靠词典，代码里逐个改不现实。
+    QtHelper::setTranslator(QStringLiteral(":/qm/qt_zh_CN.qm"));
+
+    // 但消息框的标准按钮词典管不了：那份 .qm 里 QMessageBox 上下文只有裸 "OK"，
+    // 而 Qt 源码取的是 "&OK" + 限定串 "QMessageBox"，对不上，实测装与不装按钮都是
+    // OK/Cancel。所以再挂一个全局事件过滤器集中改写（见 qthelper）。
+    QtHelper::installMessageBoxTextFilter();
+
     // 初始化数据库
     AlarmManager::instance().initDatabase(RuntimePaths::database());
     AlarmManager::instance().loadAlarmsFromDatabase();

@@ -37,7 +37,7 @@ QWidget* imageCell(const std::string& path, QWidget* parent) {
     if (!pixmap.isNull())
         label->setPixmap(pixmap.scaled(label->size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
     else
-        label->setText(path.empty() ? QStringLiteral("-") : QStringLiteral("Unable to load"));
+        label->setText(path.empty() ? QStringLiteral("-") : QStringLiteral("图片无法加载"));
     return label;
 }
 
@@ -65,7 +65,7 @@ public slots:
         } catch (const std::exception& e) {
             emit error(QString::fromUtf8(e.what()));
         } catch (...) {
-            emit error(QStringLiteral("Unknown recognition error"));
+            emit error(QStringLiteral("识别过程发生未知错误"));
         }
     }
 
@@ -82,7 +82,7 @@ private:
 
 // 构造：qRegisterMetaType 供跨线程队列连接搬运 CancellationProcessResult；
 // 界面一次性搭好（表格初始禁用、上一步/确认初始禁用），
-// singleShot(0) 延迟到事件循环后启动识别，先呈现"正在识别中"+忙碌条
+// singleShot(0) 延迟到事件循环后启动识别，先呈现"正在识别..."+忙碌条
 CancellationResultDialog::CancellationResultDialog(int id, const QStringList& paths,
                                                      std::shared_ptr<RollCallService> service,
                                                      QWidget* parent)
@@ -165,7 +165,7 @@ CancellationResultDialog::~CancellationResultDialog() {
 // thread finished 时 deleteLater worker；worker→dialog 信号跨线程自动队列连接
 void CancellationResultDialog::startRecognition() {
     if (!service_) {
-        onRecognitionError(QStringLiteral("Recognition service is not initialized"));
+        onRecognitionError(QStringLiteral("识别服务未初始化"));
         return;
     }
     recognition_thread_ = new QThread(this);

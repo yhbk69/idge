@@ -5,7 +5,8 @@
  * @file equipment_inventory_widget.h
  * @brief 设备盘点任务列表页 —— caichao 分支合入的业务页面
  *
- * 职责：嵌入 frmMain 代码创建的 equipPage_，展示设备盘点任务列表，
+ * 职责：装进 frmMain 的 equipmentDialog_（智能识别页"设备盘点"卡片拉起），
+ *       展示设备盘点任务列表，
  *       提供 创建/查看/注销/删除 入口。拍照选图界面复用点名模块的
  *       PhotoSelectionDialog，因此需要同时注入两个服务。
  */

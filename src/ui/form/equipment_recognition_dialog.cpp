@@ -2,6 +2,7 @@
 // 职责：设备盘点识别结果对话框实现（caichao 分支合入），
 //       后台 QThread + Worker(moveToThread) 执行 NPU 设备检测，结果回 GUI 线程渲染
 #include "equipment_recognition_dialog.h"
+#include "qthelper.h"
 #include "theme.h"
 
 #include <QAbstractItemView>
@@ -74,7 +75,7 @@ EquipmentRecognitionDialog::EquipmentRecognitionDialog(
     qRegisterMetaType<EquipmentTaskResult>("EquipmentTaskResult");
     setupUi();
     // 用 singleShot(0) 把识别推迟到事件循环启动后：
-    // 先让 exec() 绘制出"正在识别中"+忙碌进度条，再进入耗时流程
+    // 先让 exec() 绘制出"正在识别..."+忙碌进度条，再进入耗时流程
     QTimer::singleShot(0, this, &EquipmentRecognitionDialog::startRecognition);
 }
 
@@ -99,7 +100,7 @@ void EquipmentRecognitionDialog::setupUi() {
     root->setSpacing(16);
 
     auto* header = new QHBoxLayout;
-    status_label_ = new QLabel(QStringLiteral("正在识别中..."), this);
+    status_label_ = new QLabel(QStringLiteral("正在识别..."), this);
     status_label_->setStyleSheet(QString("color:%1; font-size:%2px; font-weight:600;")
                                      .arg(theme::ACCENT)
                                      .arg(theme::FS_CARD));
@@ -251,8 +252,9 @@ void EquipmentRecognitionDialog::onPrevious() { reject(); }  // Accepted 之外�
 void EquipmentRecognitionDialog::onCancel() {
     // done(2) 为自定义结果码（既非 Accepted 也非 Rejected）：
     // 登记流程中调用方据此把任务整体删除；注销流程仅关闭窗口
-    if (QMessageBox::question(this, QStringLiteral("确认取消"),
-                              QStringLiteral("确定取消当前设备任务吗？")) == QMessageBox::Yes)
+    if (QtHelper::askConfirm(this, QStringLiteral("确认取消"),
+                             QStringLiteral("确定取消当前设备任务吗？"))
+        == QMessageBox::Ok)
         done(2);
 }
 

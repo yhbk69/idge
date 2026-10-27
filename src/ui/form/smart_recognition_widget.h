@@ -3,11 +3,15 @@
 
 /**
  * @file smart_recognition_widget.h
- * @brief 智能识别页（二维码 + OCR 铭牌文字）对外接口
+ * @brief 智能识别页（二维码 + OCR 铭牌文字 + 人员点名 + 设备盘点）对外接口
  *
- * 页面是纯 GUI 线程控件，无后台常驻任务：两条链路都在模态对话框期间才跑，
- * 关掉对话框即释放解码器与工作线程，因此本头文件里没有信号槽、也不需要
- * 停止接口（析构即收尾，见 .cpp 的 openQrScanner/openOcrScanner 末尾）。
+ * 页面是纯 GUI 线程控件，二维码/OCR 两条链路都在模态对话框期间才跑，
+ * 关掉对话框即释放解码器，因此本头文件里除两个业务页请求信号外没有别的信号槽、
+ * 也不需要停止接口（析构即收尾，见 .cpp 的 openQrScanner/openOcrScanner 末尾）。
+ *
+ * 二维码/OCR 流程一致：打开摄像头预览 → 拍照 → 确认照片 → 识别 → 弹出结果。
+ * 人员点名/设备盘点只负责发起请求（rollCallRequested / equipmentRequested），
+ * 服务与业务页面的生命周期在 frmMain，本页面不持有。
  *
  * 实现细节、线程模型与三条前提见 smart_recognition_widget.cpp 的文件头注释。
  */
@@ -23,8 +27,17 @@ class SmartRecognitionWidget : public QWidget {
 
 public:
     /// workspace: 工作区根目录（ frmMain 传入），用于拼 model/ 与 3rdparty/ 路径
-    explicit SmartRecognitionWidget(const std::string& workspace, QWidget* parent = nullptr);
+    /// rollCallAvailable / equipmentAvailable: 两个业务服务是否初始化成功，
+    /// 决定对应卡片是可用还是置灰（frmMain 先初始化服务再构造本页）
+    explicit SmartRecognitionWidget(const std::string& workspace,
+                                    bool rollCallAvailable, bool equipmentAvailable,
+                                    QWidget* parent = nullptr);
     ~SmartRecognitionWidget() override;
+
+signals:
+    /// 点击"人员点名"/"设备盘点"卡片：由 frmMain 拉起对应业务页面的模态对话框
+    void rollCallRequested();
+    void equipmentRequested();
 
 private:
     /// 卡片按钮：accent 决定主色，enabled=false 时置灰且不响应点击（CardClickFilter）

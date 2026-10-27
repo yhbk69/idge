@@ -278,14 +278,19 @@ public:
     // ========== 智能识别配置 ==========
 
     /**
-     * @brief 智能识别页（QR + OCR）的取流地址，默认 /dev/video0
+     * @brief 智能识别页的取流地址（QR / OCR / 点名 / 盘点 共用同一键）
      *
-     * 值直接交给 FFmpegVideoDecoder::start()，经 avformat_open_input 自动探测，
-     * 因此本机设备节点、本地视频文件、RTSP 地址都可以用（后两者仅便于无摄像头
-     * 环境下自测）。设备节点依赖 main() 里 initializeMediaRuntime() 注册的
-     * libavdevice v4l2 输入源，缺那次初始化只能开文件和 RTSP。
-     * 注意本键与监控主链路的 /dev/video41、国标推流各自的取流地址互不协调，
-     * 同一设备被两处同时打开会失败。
+     * 值直接交给 FFmpegVideoDecoder::start() / CameraPreviewDecoder::start()，
+     * 经 avformat_open_input 自动探测，因此本机设备节点、本地视频文件、RTSP
+     * 地址都可以用（后两者仅便于无摄像头环境下自测；点名/盘点的预览解码器只认
+     * v4l2 设备节点，填文件或 RTSP 打不开）。设备节点依赖 main() 里
+     * initializeMediaRuntime() 注册的 libavdevice v4l2 输入源，缺那次初始化
+     * 只能开文件和 RTSP。
+     * 键缺省或为空时实探测摄像头节点：优先支持 MJPEG 的（USB UVC 摄像头），
+     * 一个都没有再退取支持 NV12/YUYV 的（RK3588 的 CSI 摄像头经 rkisp_mainpath
+     * 出流、不提供 MJPEG，本板落在 /dev/video22）；探测不到才退回 /dev/video0——
+     * 节点号会随插拔/接线/内核变化漂移，所以不再写死曾经板端使用的 /dev/video41。
+     * 注意本键与国标推流各自的取流地址互不协调，同一设备被两处同时打开会失败。
      */
     QString smartRecognitionCamera() const;
 

@@ -9,6 +9,8 @@
 ## 1. 一键运行
 
 ```bash
+/build-linux.sh -t rk3588 -b Release
+
 # 仅做两件事：cd 进 build/build_rk3588_linux，然后执行 ./idge
 ./run.sh
 ```
@@ -72,7 +74,7 @@ $IDGE_WORKSPACE/
 | `geofence` | 每路通道的电子围栏：多边形顶点（widget 像素坐标）、报警类别 `alarmClasses`、开关 |
 | `alarm` | 参与报警的类别列表 |
 | `recording` | 报警视频硬件编码录制（默认 `enabled=false`，见下） |
-| `smartRecognition` | 智能识别页取流地址（默认 `/dev/video0`，也可填 mp4/RTSP）；仅 getter，设置页不编辑 |
+| `smartRecognition` | 智能识别四张卡片（二维码/OCR/点名/盘点）共用的取流地址；键缺省时自动探测摄像头节点（MJPEG 优先，其次 CSI/rkisp 的 NV12、YUYV），探测不到退回 `/dev/video0`。仅 getter，设置页不编辑 |
 | `websocket` | Pad↔Aibox 客户端：`server_url`（空=不启用，设置页可改）+ 心跳/重连间隔（仅 JSON） |
 
 另有一整段 **`gb28181`** 不经 `ConfigManager`，由 `src/biz/sip/gb28181_config.cpp` 直接读文件
@@ -280,7 +282,8 @@ Annex-B H.265（或 h264_rkmpp → H.264）AVPacket —— **同一份包两路�
 设备盘点：拍照 → 进程内 YOLO11 识别(src/ai/yolo11，权重=model/library/yolo11n-coco)
     → 结果去重汇总 → src/biz/service/equipment_inventory_service → roll_call.db 任务/设备表
 
-智能识别：对话框打开时新建 FFmpegVideoDecoder 拉 smartRecognition.camera(默认 /dev/video0)
+智能识别：对话框打开时新建 FFmpegVideoDecoder(InferenceMode::PreviewOnly——只解码取帧，
+    不 buildCascadeTasks，一个 YOLO/RKNN 模型都不加载) 拉 smartRecognition.camera(缺省自动探测摄像头节点)
     → 二维码：captureCurrentFramePtr 取帧 → RGBA→灰度 → ZBar 扫描 → 三帧内容一致才判定
       （模态对话框期间才有工作线程，关窗即释放）
     → 铭牌 OCR：整幅拍照图 → 3rdparty/ppocrv4/bin/rknn_ppocr_det_demo 出文本框
@@ -402,8 +405,8 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
 9. **GB28181 配置写错只表现为"不启用"**：`serverHost`/`advertiseHost`/SDP `c=` 必须是 IPv4 字面量，
    `inet_pton` 失败即静默 `return` 且无日志；`platform.transport` 是假开关（值不影响发包）。
    排障先看 `data/config.json` 的 `gb28181` 段，别等错误提示
-10. **本机摄像头无互斥**：`/dev/video41`（人员登记/设备盘点硬编码）、`smartRecognition.camera`、
-    `video.channel1..4`、`gb28181.streams[].source` 四条取流路径各自 `avformat_open_input`，
+10. **本机摄像头无互斥**：`smartRecognition.camera`（二维码/OCR 拍照 + 人员点名/设备盘点预览）、
+    `video.channel1..4`、`gb28181.streams[].source` 三条取流路径各自 `avformat_open_input`，
     同一设备被两路同时打开时后开的那路失败，报错只落在各自日志里
 11. **二维码扫描无去重/冷却**：`QRScanWorker` 每 100ms 采样、连续 3 帧内容一致即判定稳定，
     结果对话框关闭后若码仍在镜头前，约 0.8 秒会再次弹出同一结果

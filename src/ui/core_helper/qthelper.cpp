@@ -1144,12 +1144,123 @@ int QtHelper::showMessageBox(const QString &text, int type, int closeSec, bool e
     return result;
 }
 
+namespace {
+
+// 文案里是否已经有中日韩文字：有则视为"调用方自己写过的"，不做覆盖
+bool containsCjk(const QString &text)
+{
+    for (const QChar &ch : text) {
+        const ushort u = ch.unicode();
+        if (u >= 0x3000) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 非原生文件对话框的按钮汉化兜底（装了 qt_zh_CN.qm 后 Qt 自己会译成"打开/保存/取消"，
+// 这里只照顾词典没覆盖到的情况）
+void localizeFileDialogLabels(QFileDialog *dialog)
+{
+    if (!containsCjk(dialog->labelText(QFileDialog::Accept))) {
+        dialog->setLabelText(QFileDialog::Accept,
+                             dialog->acceptMode() == QFileDialog::AcceptOpen
+                                 ? QStringLiteral("选择")
+                                 : QStringLiteral("保存"));
+    }
+    if (!containsCjk(dialog->labelText(QFileDialog::Reject))) {
+        dialog->setLabelText(QFileDialog::Reject, QStringLiteral("取消"));
+    }
+}
+
+// 全局事件过滤器：标准对话框显示前统一把英文默认文案改成中文。
+// 静态版 QMessageBox::information / QFileDialog::getOpenFileName 这类调用点
+// 没法逐个包一层，靠这里兜底。
+class DefaultTextFilter : public QObject
+{
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() != QEvent::Show) {
+            return false;
+        }
+        if (QMessageBox *box = qobject_cast<QMessageBox *>(watched)) {
+            QtHelper::localizeMessageBoxButtons(box);
+        } else if (QFileDialog *dialog = qobject_cast<QFileDialog *>(watched)) {
+            localizeFileDialogLabels(dialog);
+        }
+        return false;
+    }
+};
+
+} // namespace
+
+// 统一消息框标准按钮为中文（原因见头文件注释：.qm 里 QMessageBox 只译了 OK）
+void QtHelper::localizeMessageBoxButtons(QMessageBox *box)
+{
+    if (!box) {
+        return;
+    }
+
+    const QList<QAbstractButton *> buttons = box->buttons();
+    for (QAbstractButton *button : buttons) {
+        // 调用方已经自己写了中文（或任意非英文）文案就别动，只兜底 Qt 的英文默认值
+        if (containsCjk(button->text())) {
+            continue;
+        }
+
+        QString text;
+        switch (box->standardButton(button)) {
+        case QMessageBox::Ok:      text = QStringLiteral("确定"); break;
+        case QMessageBox::Cancel:  text = QStringLiteral("取消"); break;
+        case QMessageBox::Yes:     text = QStringLiteral("是"); break;
+        case QMessageBox::No:      text = QStringLiteral("否"); break;
+        case QMessageBox::YesAll:  text = QStringLiteral("全部是"); break;
+        case QMessageBox::NoAll:   text = QStringLiteral("全部否"); break;
+        case QMessageBox::Close:   text = QStringLiteral("关闭"); break;
+        case QMessageBox::Save:    text = QStringLiteral("保存"); break;
+        case QMessageBox::Discard: text = QStringLiteral("丢弃"); break;
+        case QMessageBox::Apply:   text = QStringLiteral("应用"); break;
+        case QMessageBox::Reset:   text = QStringLiteral("重置"); break;
+        case QMessageBox::Help:    text = QStringLiteral("帮助"); break;
+        default: break;   // NoButton / ActionRole 自定义按钮：文案由调用方定
+        }
+        if (!text.isEmpty()) {
+            button->setText(text);
+        }
+    }
+}
+
+// 询问框：只给"确定/取消"，返回 Ok 表示用户确认
+QMessageBox::StandardButton QtHelper::askConfirm(QWidget *parent, const QString &title,
+                                                 const QString &text)
+{
+    QMessageBox box(QMessageBox::Question, title, text,
+                    QMessageBox::Ok | QMessageBox::Cancel, parent);
+    localizeMessageBoxButtons(&box);
+    return static_cast<QMessageBox::StandardButton>(box.exec());
+}
+
+// 挂全局过滤器，进程生命周期一次
+void QtHelper::installMessageBoxTextFilter()
+{
+    static bool installed = false;
+    if (installed) {
+        return;
+    }
+    installed = true;
+    qApp->installEventFilter(new DefaultTextFilter(qApp));
+}
+
 // 显示信息提示框
 void QtHelper::showMessageBoxInfo(const QString &text, int closeSec, bool exec)
 {
     QMessageBox box(QMessageBox::Information, "提示", text);
     box.setStandardButtons(QMessageBox::Yes);
-    box.button(QMessageBox::Yes)->setText("确 定");
+    box.button(QMessageBox::Yes)->setText("确定");
     box.exec();
 }
 
@@ -1158,7 +1269,7 @@ void QtHelper::showMessageBoxError(const QString &text, int closeSec, bool exec)
 {
     QMessageBox box(QMessageBox::Critical, "错误", text);
     box.setStandardButtons(QMessageBox::Yes);
-    box.button(QMessageBox::Yes)->setText("确 定");
+    box.button(QMessageBox::Yes)->setText("确定");
     box.exec();
 }
 
@@ -1167,8 +1278,8 @@ int QtHelper::showMessageBoxQuestion(const QString &text)
 {
     QMessageBox box(QMessageBox::Question, "询问", text);
     box.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
-    box.button(QMessageBox::Yes)->setText("确 定");
-    box.button(QMessageBox::No)->setText("取 消");
+    box.button(QMessageBox::Yes)->setText("确定");
+    box.button(QMessageBox::No)->setText("取消");
     return box.exec();
 }
 
@@ -1381,7 +1492,7 @@ void QtHelper::openFile(const QString &fileName, const QString &msg)
         return;
     }
     // 确认后用系统默认程序打开
-    if (QtHelper::showMessageBoxQuestion(msg + "成功, 确定现在就打开吗?") == QMessageBox::Yes) {
+    if (QtHelper::showMessageBoxQuestion(msg + "成功，确定现在就打开吗？") == QMessageBox::Yes) {
         QString url = QString("file:///%1").arg(fileName);
         QDesktopServices::openUrl(QUrl(url, QUrl::TolerantMode));
     }

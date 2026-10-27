@@ -9,6 +9,9 @@
 //      级联推理任务(PpeTask) → 从各任务结果队列取框画到 RGBA 上 → emit frameReady。
 //   2. 持有并管理级联多模型：每个非空模型路径一个 PpeTask(独占推理线程)
 //      + 一个独立结果队列(slotQueues_)，互不干扰、按槽上色。
+//   3. 构造参数 InferenceMode=PreviewOnly 时退化为"纯取流器"：只解码 + 转 RGBA +
+//      emit frameReady/供 captureCurrentFramePtr 取帧，不加载任何 RKNN 模型、不建
+//      推理线程（智能识别 QR/OCR 只要一帧原始画面，不该占用 NPU）。
 //
 // 线程模型与所有权约定（重要）：
 //   - this 被 moveToThread(thread_)，decodeLoop 在该线程执行；
@@ -53,7 +56,17 @@ class FFmpegVideoDecoder : public QObject
 {
     Q_OBJECT
 public:
-    explicit FFmpegVideoDecoder(QObject* parent = nullptr);
+    /**
+     * @brief 是否挂载级联推理任务
+     *
+     * Cascade     —— 默认，监控流水线用：构造时 buildCascadeTasks() 加载 RKNN 模型。
+     * PreviewOnly —— 只取帧显示/抓帧（智能识别 QR、OCR）：不建 PpeTask、不分配
+     *                640×640 缓冲池、不做每 3 帧预处理，NPU 完全不参与。
+     */
+    enum class InferenceMode { Cascade, PreviewOnly };
+
+    explicit FFmpegVideoDecoder(QObject* parent = nullptr,
+                                InferenceMode mode = InferenceMode::Cascade);
     ~FFmpegVideoDecoder();
 
     void start(const QString& url);
@@ -147,12 +160,17 @@ private:
     std::shared_ptr<DmaBufferPool> dmaBufferPool_;
 
     // ===== 级联多模型：每个非空模型一个推理任务 + 一个结果队列 =====
+    // PreviewOnly 模式下这三个容器保持为空，见下方 inferenceEnabled_。
     std::vector<PpeTask*> tasks_;                  // 推理任务(每个一个线程)
     std::vector<std::shared_ptr<PriorityQueue<object_detect_result_list>>> slotQueues_; // 各任务的结果
     // 每槽位独立的类别名表：slotClassNames_[k] 对应 tasks_[k] 模型的标签文件。
     // 级联各模型类别不同（coco80 / helmet 2类 / vest 2类…），共用一张表会把
     // helmet 的 cls_id 套用 coco 类名导致报警类别错标（2026-09-24 修复）。
     std::vector<std::vector<std::string>> slotClassNames_;
+
+    // 见 InferenceMode：false 时本对象只做"解码 + 显示 + 取帧"，
+    // tasks_/slotQueues_/dmaBufferPool_ 全都不分配。
+    bool inferenceEnabled_ = true;
 
     // ===== 检测框时序平滑 =====
     // 每 3 帧才做一次推理，非推理帧直接复用上一轮结果会导致框"跳"。

@@ -15,6 +15,7 @@
 #include "photo_selection_widget.h"
 #include "recognition_result_dialog.h"
 #include "cancellation_result_dialog.h"
+#include "qthelper.h"
 #include "theme.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -357,12 +358,9 @@ void RollCallWidget::onCreateTask() {
             QMessageBox::information(this, "提示", "任务已取消");
         } else {
             // 询问是否保留
-            auto reply = QMessageBox::question(
-                this, "确认", "是否取消并删除任务？",
-                QMessageBox::Yes | QMessageBox::No
-            );
-            
-            if (reply == QMessageBox::Yes) {
+            if (QtHelper::askConfirm(this, QStringLiteral("取消并删除任务"),
+                                     QStringLiteral("是否取消并删除任务？"))
+                == QMessageBox::Ok) {
                 service_->deleteTask(task_id);
             }
         }
@@ -384,14 +382,11 @@ void RollCallWidget::onDeleteTask(int task_id) {
         return;
     }
     
-    auto reply = QMessageBox::question(
-        this, "确认删除",
-        QString("确定要删除任务 \"%1\" 吗？\n这将同时删除所有相关数据。\n此操作不可恢复！")
-            .arg(QString::fromStdString(task.name)),
-        QMessageBox::Yes | QMessageBox::No
-    );
-    
-    if (reply == QMessageBox::Yes) {
+    if (QtHelper::askConfirm(
+            this, QStringLiteral("确认删除"),
+            QStringLiteral("确定要删除任务 \"%1\" 吗？\n这将同时删除所有相关数据。\n此操作不可恢复！")
+                .arg(QString::fromStdString(task.name)))
+        == QMessageBox::Ok) {
         if (service_->deleteTask(task_id)) {
             QMessageBox::information(this, "成功", "任务已删除");
             refreshTaskList();

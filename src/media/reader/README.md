@@ -6,8 +6,8 @@
 
 视频/摄像头解码与检测调度层。包含三条链路：
 
-1. **主流水线**（`FFmpegVideoDecoder`）：RTSP/文件 → FFmpeg `h264_rkmpp` 硬解出 NV12 DMA-BUF → RGA 转 RGBA 画框 + RGA 缩放 640x640 送 PpeTask（RKNN NPU YOLO11）推理 → 结果回填后 EGL 渲染上屏；画完框的 RGBA 帧还有一路硬件消费者——`VideoRecorder` 硬编环形缓冲（报警片段）；
-2. **摄像头预览**（`CameraPreviewDecoder`）：v4l2 设备（MJPEG）→ `mjpeg_rkmpp` 硬解（失败回退 `avcodec` 软解 + sws 转 RGB）→ 同步跑 SCRFD 人脸检测 + 异步跑 PpeTask → CPU 画框 → 帧信号上屏；同时缓存 JPEG 原始码流供抓拍**零重编码**直存；
+1. **主流水线**（`FFmpegVideoDecoder`）：RTSP/文件 → FFmpeg `h264_rkmpp` 硬解出 NV12 DMA-BUF → RGA 转 RGBA 画框 + RGA 缩放 640x640 送 PpeTask（RKNN NPU YOLO11）推理 → 结果回填后 EGL 渲染上屏；画完框的 RGBA 帧还有一路硬件消费者——`VideoRecorder` 硬编环形缓冲（报警片段）。**非 DRM_PRIME 的 CPU 帧**（本机 CSI 摄像头经 v4l2 直出 NV12 裸流、或纯软解的流）走 sws_scale 转 RGBA 写进同一块 DMA 缓冲，下游画框/推理/渲染共用一套代码——早先版本只认 DRM_PRIME，这类帧会被整帧丢弃，表现为智能识别拍照时"摄像头有流但取不到画面"；
+2. **摄像头预览**（`CameraPreviewDecoder`）：v4l2 设备，输入格式按节点能力协商（依次试 MJPEG、NV12、YUYV——USB UVC 给 MJPEG，RK3588 的 CSI 摄像头经 rkisp 只出裸格式）→ MJPEG 走 `mjpeg_rkmpp` 硬解（失败回退 `avcodec` 软解 + sws 转 RGB）、裸格式走 rawvideo 软解 + sws → 同步跑 SCRFD 人脸检测 + 异步跑 PpeTask → CPU 画框 → 帧信号上屏；MJPEG 源同时缓存 JPEG 原始码流供抓拍**零重编码**直存，裸格式源没有码流可存，改为现场编码当前帧；
 3. **人脸检测器**（`ScrfdFaceDetector`）：RKNN 版 SCRFD，anchor-free 解码，输出框 + 5 关键点。
 
 ## 文件清单
@@ -16,24 +16,26 @@
 |---|---|
 | `ffmpeg_video_decoder.h/.cpp` | 主流水线解码总控：硬解、零拷贝 DMA-BUF 借还、级联多模型任务分发、结果合成画框、帧限速（截止期节拍：按流 avg_frame_rate 定间隔，落后重锚丢弃连发）、报警片段录制挂钩、**帧捕获槽**（供智能识别按需拉最新帧） |
 | `video_recorder.h/.cpp` | `VideoRecorder`：画框后的 RGBA → RGA → rkmpp 硬编（hevc/h264）→ Annex-B 环形缓冲区；报警时 dump 裸流/MP4 片段 |
-| `camera_preview_decoder.h/.cpp` | 摄像头预览解码：v4l2/MJPEG、JPEG 魔数缓存抓拍、SCRFD 同步检测、PpeTask 异步检测、CPU 画框 |
+| `camera_preview_decoder.h/.cpp` | 摄像头预览解码：v4l2 输入格式协商（MJPEG/NV12/YUYV）、JPEG 魔数缓存抓拍（裸格式回退现场编码）、SCRFD 同步检测、PpeTask 异步检测、CPU 画框 |
 | `scrfd_face_detector.h/.cpp` | SCRFD 人脸检测器（RKNN NPU）：letterbox 预处理、9 输出解码、类别内 NMS |
 
 ## 核心类与数据流
 
 ```
 FFmpegVideoDecoder（QObject，独立 QThread）
+  构造参数 InferenceMode 决定是否挂载推理：Cascade=默认，buildCascadeTasks 建
+  PpeTask；PreviewOnly=只解码+显示+取帧（智能识别 QR/OCR），下面第二条分支不存在
   av_read_frame → AVPacket(h264) → avcodec(MPP) → AVFrame(DRM_PRIME NV12, fd)
       ├─ fd → RGA: NV12→RGBA（显示缓冲，双缓冲池借出）
       └─ fd → RGA: NV12→缩放 letterbox 640x640 RGB888（image_buffer_t，
-                dmaBuffer 借自 dmaBufferPool_）
+                dmaBuffer 借自 dmaBufferPool_）   // 仅 Cascade，每 3 帧一次
                     → tasks_[k]->put(TaskData{time=epoch纳秒, image, resultQueue})
                     → PpeTask 推理 → resultQueue.push(od_results)
   解码线程 tryPop 各任务结果 → 坐标还原/画框进 RGBA → emit frameReady(RenderFrame)
   （RenderFrame 携带 dup 出的 fd：所有权移交接收方，接收方负责 close）
 
 CameraPreviewDecoder（QObject，std::thread decodeLoop）
-  v4l2 DQBUF → AVPacket(MJPEG) → 缓存 0xFFD8 起始原始码流（capture() 直存抓拍）
+  v4l2 DQBUF → AVPacket(MJPEG 或 NV12/YUYV 裸帧) → 仅 MJPEG 缓存 0xFFD8 起始原始码流（capture() 直存抓拍）
       → 硬解 NV12（vstride 由 planes[1].offset-planes[0].offset / pitch 反推）
       → 软解路径: sws 转 BGR888 / 硬解路径: RGA→CPU memcpy 得 RGBA
       → 每 5 帧: ScrfdFaceDetector::detectRgba（同步，解码线程内）
@@ -89,6 +91,12 @@ connect(decoder, &FFmpegVideoDecoder::frameReady, this, &MyView::onFrame);
 decoder->start("rtsp://192.168.1.10/stream1");
 decoder->stop();               // 置 running_=false + interrupt_callback 打断阻塞读帧
 
+// 只取帧、不推理（智能识别 QR/OCR）：构造第二个参数换掉默认模式即可
+auto* grab = new FFmpegVideoDecoder(nullptr, FFmpegVideoDecoder::InferenceMode::PreviewOnly);
+// PreviewOnly：不 buildCascadeTasks（一个 RKNN 模型都不加载）、不建 64×640×640
+// 缓冲池、跳过每 3 帧的 RGA 缩放与分发。frameReady / captureCurrentFramePtr
+// 照常工作。画面上因此没有检测框——这是刻意的，二维码/铭牌识别只要原始帧。
+
 // 帧捕获槽：智能识别页（QR/OCR）在自己的线程上"拉最新一帧"，不占队列、不拷贝
 const uint8_t* px = decoder->captureCurrentFramePtr();   // RGBA 的 DRM mmap 指针
 int w, h, stride;
@@ -101,7 +109,7 @@ if (px && decoder->getCurrentFrameInfo(w, h, stride)) {  // 无帧时 ptr=nullpt
 // 摄像头预览 + 抓拍
 CameraPreviewDecoder preview;
 preview.setDetectorConfigs({{.model_path=..., .npu_core_mask=RKNN_NPU_CORE_0, ...}});
-preview.start("/dev/video41");
+preview.start(ConfigManager::instance().smartRecognitionCamera());   // 只走 v4l2 设备节点，1920x1080，输入格式按节点能力协商
 preview.capture("/data/capture/snap_001.jpg");   // 直接落盘缓存的 JPEG 原始码流
 
 // SCRFD 人脸检测（须先 init，绑定单线程使用）

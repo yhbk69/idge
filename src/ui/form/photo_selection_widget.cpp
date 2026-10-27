@@ -1,7 +1,7 @@
 /*照片选择对话框（实现文件 photo_selection_widget.cpp，类定义见 photo_selection_widget.h）
 两种照片来源：
 拍照：
-调用 /dev/video41 摄像头，通过 CameraPreviewDecoder 解码 MJPEG 流
+调用 smartRecognition.camera 配置的摄像头，通过 CameraPreviewDecoder 预览并抓拍
 实时预览，点击圆形快门按钮拍照
 播放快门音效 + 白色闪屏动画
 照片保存到任务文件夹，左下角显示缩略图
@@ -16,6 +16,7 @@
 #include "theme.h"
 #include "qt_image_utils.h"
 #include "camera_preview_decoder.h"
+#include "ConfigManager.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFileDialog>
@@ -304,7 +305,8 @@ void PhotoSelectionDialog::setupUI() {
  *     （QMessageBox 只能在 GUI 线程创建）；回调里恢复快门按钮可用性；
  *   - photoCaptured → onPhotoCaptured：显式 Qt::QueuedConnection，
  *     落盘在解码线程完成、UI 更新回到 GUI 线程，QImage 按值拷贝跨线程安全。
- * 设备路径 /dev/video41 为板端固定 USB 摄像头节点（硬编码，换硬件需改）。
+ * 取流地址取自 smartRecognition.camera，与 QR/OCR 两张卡片同一配置项，
+ * 换摄像头/换节点号只需改配置，不必重新编译。
  */
 void PhotoSelectionDialog::startCamera() {
     camera_decoder_ = new CameraPreviewDecoder(this);
@@ -334,7 +336,7 @@ void PhotoSelectionDialog::startCamera() {
     connect(camera_decoder_, &CameraPreviewDecoder::photoCaptured, this,
             &PhotoSelectionDialog::onPhotoCaptured, Qt::QueuedConnection);
     
-    camera_decoder_->start(QStringLiteral("/dev/video41"));
+    camera_decoder_->start(ConfigManager::instance().smartRecognitionCamera());
 }
 
 // 快门动作：白色遮罩闪 110ms（singleShot 定时器，视觉上模拟单反闪屏）+
@@ -436,7 +438,7 @@ void PhotoSelectionDialog::addPhotoToList(const QString& path, const QImage& ima
     if (!pixmap.isNull()) {
         image_label->setPixmap(pixmap.scaled(280, 210, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     } else {
-        image_label->setText(QStringLiteral("无法加载"));
+        image_label->setText(QStringLiteral("图片无法加载"));
         image_label->setStyleSheet(theme::text(theme::DANGER, theme::FS_BODY));
     }
     

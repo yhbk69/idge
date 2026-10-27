@@ -46,6 +46,84 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QDebug>
+#include <QDir>
+
+#include <algorithm>
+// 摄像头节点实探测（V4L2）
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <linux/videodev2.h>
+
+namespace {
+
+/**
+ * @brief 探测可用的摄像头 /dev/videoN 节点
+ *
+ * 为什么要探测而不是写死：节点号由内核按探测顺序分配，换 USB 口、插拔、
+ * 换 ISP/CSI 接线或换内核后都会漂移（板端历史上曾稳定落在 /dev/video41，
+ * 换环境即失效），写死的路径正是"打不开摄像头"的直接原因。
+ *
+ * 两档结果（按优先级）：
+ *   - 首选 MJPEG：USB UVC 摄像头的常态，CameraPreviewDecoder 可直接零重编码
+ *     落盘原始码流抓拍；
+ *   - 次选 NV12/YUYV/UYVY：RK3588 的 CSI 摄像头（ov13855 之类）经 rkisp
+ *     mainpath 出来就是这两种裸格式，且**不提供 MJPEG**，只认 MJPEG 会把
+ *     物理摄像头整个漏掉；rkcif 那些只出 10-bit Bayer 的节点则被排除，
+ *     因为选中也会在 avformat_open_input 处失败。
+ * @return 找到 MJPEG 节点立即返回；否则返回第一个裸格式采集节点；全无返回空串
+ */
+QString probeCameraNode()
+{
+    QDir dev(QStringLiteral("/dev"));
+    const QStringList names = dev.entryList(QStringList(QStringLiteral("video*")), QDir::System);
+
+    // 按尾号数值升序（字典序会让 video10 排在 video2 前，选中"最远"的节点）
+    auto nodeNumber = [](const QString &name) {
+        int i = name.size();
+        while (i > 0 && name[i - 1].isDigit()) --i;
+        return i == name.size() ? -1 : name.mid(i).toInt();
+    };
+    QStringList sorted = names;
+    std::sort(sorted.begin(), sorted.end(), [&nodeNumber](const QString &a, const QString &b) {
+        return nodeNumber(a) < nodeNumber(b);
+    });
+
+    QString raw_format_node;  // 次选：只出裸格式的节点（CSI 走 rkisp 的摄像头）
+    for (const QString &name : sorted) {
+        const QString path = dev.absoluteFilePath(name);
+        const int fd = ::open(path.toLocal8Bit().constData(), O_RDWR | O_NONBLOCK);
+        if (fd < 0) continue;
+
+        v4l2_capability cap{};
+        const bool can_capture = ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 &&
+                                 (cap.capabilities & (V4L2_CAP_VIDEO_CAPTURE |
+                                                      V4L2_CAP_VIDEO_CAPTURE_MPLANE));
+        bool serves_mjpeg = false;
+        bool serves_raw = false;
+        if (can_capture) {
+            v4l2_fmtdesc fmt{};
+            fmt.type = (cap.capabilities & V4L2_CAP_VIDEO_CAPTURE_MPLANE)
+                           ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+                           : V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            while (ioctl(fd, VIDIOC_ENUM_FMT, &fmt) == 0) {
+                if (fmt.pixelformat == V4L2_PIX_FMT_MJPEG) { serves_mjpeg = true; break; }
+                if (fmt.pixelformat == V4L2_PIX_FMT_NV12 ||
+                    fmt.pixelformat == V4L2_PIX_FMT_YUYV ||
+                    fmt.pixelformat == V4L2_PIX_FMT_UYVY) {
+                    serves_raw = true;
+                }
+                ++fmt.index;
+            }
+        }
+        ::close(fd);
+        if (serves_mjpeg) return path;
+        if (serves_raw && raw_format_node.isEmpty()) raw_format_node = path;
+    }
+    return raw_format_node;
+}
+
+} // namespace
 
 // ============================================================================
 // 获取单例实例
@@ -924,6 +1002,20 @@ int ConfigManager::wsReconnectInterval() const
 
 QString ConfigManager::smartRecognitionCamera() const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return root_["smartRecognition"].toObject()["camera"].toString(QStringLiteral("/dev/video0"));
+    // 配置显式给出则以配置为准（可填设备节点、本地视频、RTSP，便于无摄像头自测）
+    QString configured;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        configured = root_["smartRecognition"].toObject()["camera"].toString();
+    }
+    if (!configured.isEmpty()) return configured;
+
+    // 缺省时实探测摄像头节点（MJPEG 优先，CSI/rkisp 的 NV12、YUYV 也算），
+    // 避免写死编号在换硬件/重启后失效
+    const QString probed = probeCameraNode();
+    if (!probed.isEmpty()) return probed;
+
+    qWarning() << "smartRecognition.camera is unset and no usable camera node was found;"
+                  " falling back to /dev/video0";
+    return QStringLiteral("/dev/video0");
 }

@@ -39,20 +39,27 @@
 片段**没有目录配置项**：裸流与网页副本固定落在 `RuntimePaths::alarmsDir()/yyyyMMdd`，与抓拍图
 同一棵树，好处是报警媒体只有一套按天保留 + 容量回收逻辑（见 `src/biz/alarm/README.md`）。
 
-### smartRecognition 段（智能识别页取流）
+### smartRecognition 段（智能识别取流）
 | 键 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `camera` | string | `/dev/video0` | 二维码扫描与 OCR 拍照的取流地址 |
+| `camera` | string | 探测摄像头节点（MJPEG 优先，其次 NV12/YUYV），探测不到取 `/dev/video0` | 二维码/OCR 拍照与人员点名/设备盘点预览共用的取流地址 |
 
 只有 getter（`smartRecognitionCamera()`），没有 setter：该页每次打开对话框才读一次，
-运行中改内存值没有意义。值直接交给 `FFmpegVideoDecoder::start()`，经
-`avformat_open_input` 自动探测格式，所以本机设备节点、本地视频文件、RTSP 地址都能填
-（后两种主要给没有摄像头的机器自测用）。设备节点依赖 `main()` 里
+运行中改内存值没有意义。值直接交给 `FFmpegVideoDecoder::start()` /
+`CameraPreviewDecoder::start()`，经 `avformat_open_input` 自动探测格式，所以本机设备节点、
+本地视频文件、RTSP 地址都能填（后两种主要给没有摄像头的机器自测用；点名/盘点的
+`CameraPreviewDecoder` 只走 v4l2，填文件或 RTSP 打不开）。设备节点依赖 `main()` 里
 `initializeMediaRuntime()` 注册的 libavdevice v4l2 输入源。
 
-**与其它取流地址互不相干**：监控 4 路走 `video.channel1..4`、人员登记/预览走
-`camera_preview_decoder.h` 里硬编码的 `/dev/video41`、国标推流走 `gb28181.streams[].source`。
-四处没有设备注册表，同一台设备被两处同时打开会有一方失败。
+键缺省（或填了空串）时不再退回写死的编号，而是遍历 `/dev/video*` 按编号升序实探测：
+先找支持 MJPEG 的节点（USB UVC 摄像头），一个都没有再退而取支持 NV12/YUYV 的节点
+（RK3588 的 CSI 摄像头经 `rkisp_mainpath` 出流，本板上是 `/dev/video22`，它**不提供
+MJPEG**，只认 MJPEG 会把这颗物理摄像头整个漏掉）。只出 10-bit Bayer 的 `rkcif` 节点
+两档都不命中，因此不会被选中。节点号随插拔、USB 口、ISP/CSI 接线和内核版本漂移，
+板端曾稳定落在 `/dev/video41`，换环境即打不开——这就是自动探测取代硬编码的原因。
+
+**与其它取流地址互不相干**：监控 4 路走 `video.channel1..4`、国标推流走
+`gb28181.streams[].source`。各处没有设备注册表，同一台设备被两处同时打开会有一方失败。
 
 ### websocket 段（Pad↔Aibox 客户端）
 | 键 | 类型 | 默认 | 说明 |
