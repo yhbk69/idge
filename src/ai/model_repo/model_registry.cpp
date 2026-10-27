@@ -10,7 +10,7 @@
 //     │     └── meta.json      # 元数据，缺失时扫描自动生成
 //     └── ...
 //
-// meta.json 字段（与 plan/model_management.md §2.2 对齐）：
+// meta.json 字段（与 plan/model_management.md §一"meta.json 字段"对齐）：
 //   id / display_name / family / task / num_classes / classes /
 //   input_size [w,h] / quant / version / sha256 / notes
 //

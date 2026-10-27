@@ -4,7 +4,7 @@
 
 **规划模型**: PP-LiteSeg 轻量语义分割
 
-**对应 plan**: plan/plan.md 方向5 - 增强AI能力
+**对应 plan**: plan/roadmap.md §九 L4 - 增强AI能力（分割）
 
 **状态**: 预留目录，待模型选型与转换
 
@@ -28,4 +28,4 @@ pp-liteseg-seg/
 ## 技术约束
 
 - RK3588 NPU 支持有限，需确认 PP-LiteSeg 是否可量化部署
-- 若 NPU 无法运行，考虑云端推理（plan/plan.md 方向8）
+- 若 NPU 无法运行，考虑云端推理（plan/roadmap.md §九 L6 边缘-云协同推理）

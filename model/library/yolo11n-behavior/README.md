@@ -11,7 +11,7 @@
 
 **参考架构**: MoveNet Lightning 姿态估计 + 行为规则引擎
 
-**对应 plan**: plan/plan.md 方向2 - 行为分析
+**对应 plan**: plan/roadmap.md §二 P0-3 / §九 L2 - 行为分析
 
 **状态**: 预留目录，待模型选型与训练
 

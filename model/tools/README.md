@@ -7,7 +7,7 @@
 - 安全装备检测（安全带、绝缘手套等）
 
 **对应 plan**: 
-- plan/plan.md 方向5 - 增强AI能力
+- plan/roadmap.md §二 P1-6 工器具清点 / §九 - 增强AI能力
 - src/biz/service/equipment_inventory_service.cpp（装备盘点服务）
 
 **状态**: 预留目录，待模型选型与训练

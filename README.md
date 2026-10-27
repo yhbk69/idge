@@ -388,30 +388,41 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
 
 # 八、已知问题与技术债
 
-以下问题已在源码中以注释警示（详见各目录 README 的"注意事项"）：
+> 需求缺口与实施顺序见 `plan/requirements.md` / `plan/roadmap.md`；
+> 本节只列**代码级**仍开的问题，均已（或应在）源码注释中警示，细节另见各目录 README 的"注意事项"。
 
-1. 点击关闭按钮后，解码线程和 player_widget 没有完全关闭，解码线程可能仍在运行
-2. 报警时间戳口径：生产端 `results.time` 为 epoch 纳秒（common.hpp"毫秒"注释是文档误差）；限流窗口已改用 steady_clock 单调纳秒、与墙钟解耦；detections 表写入口已统一换算为毫秒
-3. `DmaBufferPool::acquire` 返回裸指针有生命周期约束（池回收后悬垂）；`DmaFrameBuffer` 浅拷贝双释放隐患已通过 `= delete` 修复
-4. `src/base/queue/priority_queue` 的 `waitAndPop` 出队不移除元素、push 不 notify（`tryPop` 已修复为取出即删除）；`src/base/queue/frame_queue` 的 `pushAndReplace` 存在错序释放隐患
-5. `src/ui/form/photo_selection_dialog.h` 为无引用遗留文件；识别结果对话框存在未调用的画框死代码
-6. 围栏报警 `bypassThrottle` 当前所有调用方均传 false——围栏报警同样受 2 秒限流窗口约束，"围栏不限流"的设计意图尚未落地
-7. **硬解器名写死优先 `h264_rkmpp`**（`ffmpeg_video_decoder.cpp` 未按 `codecpar->codec_id` 选路）：
-   HEVC 流会带着 h264 解码器打开成功但解不出帧（表现为"无画面"）。现网 4 路投 H.264 基线，
-   H.265 源接入前必须先做这条改造（已列入 P6 RTSP 加固首项）
-8. **GB28181 MANSCDP 编码声明与实际不符**：XML 头写 `encoding="GB2312"`，实际发出的是 UTF-8 字节
+1. `DmaBufferPool::acquire` 返回裸指针，调用方须在池销毁前回借出；池析构会强制回收未归还项
+   并打印警告（悬垂风险仍在，靠约定规避）。`DmaFrameBuffer` 浅拷贝双释放已用 `= delete` 堵死
+2. `PriorityQueue::waitAndPop` 名为 Pop 实为 Top（只读堆顶不出队），且 `push` 不 notify 挂起的
+   消费者。现网只用 `tryPop`，`waitAndPop` 零调用方——列在 roadmap §六 清理项，不是待修 bug
+3. `src/ui/form/photo_selection_dialog.h`、`src/ai/task/helmet_task.*`/`base_task.*`/`task_pool.h`、
+   `src/ui/form/video_decoder.*`、`src/base/queue/frame_queue.h`、`src/media/model/ModelPool.hpp`、
+   `src/base/threadpool/ThreadPool.hpp` 都在 GLOB 里被编译但无实例化点（清单见 roadmap §六）
+4. `detect.conf_threshold` / `detect.nms_threshold` 是**假开关**：写进 JSON、设置页可改，
+   但 `ppe_task.cpp` 调 `model_->detect()` 不传参，实际生效的是编译期 `BOX_THRESH/NMS_THRESH`
+5. `YOLO11Model::output_mems[9]` 固定长度，换多于 9 个输出头的模型（分割/姿态）会越界
+6. **GB28181 MANSCDP 编码声明与实际不符**：XML 头写 `encoding="GB2312"`，实际发出的是 UTF-8 字节
    且 `Content-Length` 也按 UTF-8 长度算（`gb28181_manager.cpp` 心跳/应答处）。宽容平台无感，
    严格平台在中文 `DeviceName` 上会解析错乱。真要对接，改一处即需全模块统一口径
-9. **GB28181 配置写错只表现为"不启用"**：`serverHost`/`advertiseHost`/SDP `c=` 必须是 IPv4 字面量，
+7. **GB28181 配置写错只表现为"不启用"**：`serverHost`/`advertiseHost`/SDP `c=` 必须是 IPv4 字面量，
    `inet_pton` 失败即静默 `return` 且无日志；`platform.transport` 是假开关（值不影响发包）。
    排障先看 `data/config.json` 的 `gb28181` 段，别等错误提示
-10. **本机摄像头无互斥**：`smartRecognition.camera`（二维码/OCR 拍照 + 人员点名/设备盘点预览）、
-    `video.channel1..4`、`gb28181.streams[].source` 三条取流路径各自 `avformat_open_input`，
-    同一设备被两路同时打开时后开的那路失败，报错只落在各自日志里
-11. **二维码扫描无去重/冷却**：`QRScanWorker` 每 100ms 采样、连续 3 帧内容一致即判定稳定，
-    结果对话框关闭后若码仍在镜头前，约 0.8 秒会再次弹出同一结果
+8. **本机摄像头无互斥**：`smartRecognition.camera`（二维码/OCR 拍照 + 人员点名/设备盘点预览）、
+   `video.channel1..4`、`gb28181.streams[].source` 三条取流路径各自 `avformat_open_input`，
+   同一设备被两路同时打开时后开的那路失败，报错只落在各自日志里
+9. **二维码扫描无去重/冷却**：`QRScanWorker` 每 100ms 采样、连续 3 帧内容一致即判定稳定，
+   结果对话框关闭后若码仍在镜头前，约 0.8 秒会再次弹出同一结果
+10. **换模型/改级联仍需重启**：`FFmpegVideoDecoder::reloadAllModels()` 已实现但无调用方；
+    模型测试按钮会短时独占一次 NPU 上下文（GUI 阻塞秒级）
+11. **`wss://` 放弃证书校验**：`WsClient::onSslErrors` 无条件 `ignoreSslErrors()`，只适合内网调试；
+    WS 发送也不排队，断线期间的 `ack` 直接丢弃（详见 `plan/websocket.md`）
 
-**已修复批次（2026-09-24，明细见 `plan/update_log.md`）**：DmaBufferPool fd 缺省 0→-1（close(0) 误关 stdin）、free 顺序致 DMA 泄漏、dma_alloc 失败路径 fd 泄漏、rga_converter 恒真返回值/错误路径句柄泄漏/letterbox 未填灰边、shell 命令注入（face_recognizer 改 fork+execv、roll_call 回退改 QProcess）、detections 表 ns 存值 vs ms 清理失配（含存量数据一次性迁移）、报警限流墙钟回拨致抑制数天（改 steady_clock）。注：批内曾按"get_bpp_from_format 返回位宽"结论做 /8 缓冲换算，板端实测证伪（该函数返回**字节**/像素）并已回退，详见 update_log 回归实录。
+> 已闭环、不再在此罗列的历史项：解码线程与 `player_widget` 关闭（现 `closeEvent` 两阶段并行停 4 路）、
+> 硬解按 `codecpar->codec_id` 选 `h264_rkmpp`/`hevc_rkmpp`、围栏报警已传 `bypassThrottle=true`、
+> 时间戳量纲注释已统一为 epoch 纳秒、`FrameQueue::pushAndReplace` 顺序、`dma_mutex` 跨 TU 单例、
+> `QSqlDatabase` 每线程独立连接、NPU 核掩码位标志修正、级联每槽位独立标签与类别数。
+> DMA/RGA/命令注入/ns-ms 口径等 2026-09-24 批次的修复明细原载 `plan/update_log.md`（已删，
+> 结论都沉淀在上文源码注释与各目录 README 里）。
 
 # 九、文档
 

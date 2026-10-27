@@ -6,7 +6,7 @@
 - 明火检测 (fire detection)
 - 烟雾检测 (smoke detection)
 
-**对应 plan**: plan/plan.md 方向5 - 增强AI能力
+**对应 plan**: plan/roadmap.md §二 P0-3 / §九 - 增强AI能力
 
 **状态**: 预留目录，待模型选型与训练
 

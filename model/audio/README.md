@@ -8,7 +8,7 @@
 - 爆炸声检测
 - 语音播报 (TTS)
 
-**对应 plan**: plan/plan.md 方向7 - 音频能力
+**对应 plan**: plan/roadmap.md §九 L5 - 音频能力
 
 **状态**: 预留目录，待模型选型
 
