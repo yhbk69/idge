@@ -22,7 +22,7 @@ model/
 │   ├── yolo11n-behavior/         # [预留] 行为分析检测（跌倒/吸烟/打电话/入侵）
 │   ├── yolo11n-fire/             # [预留] 明火/烟雾检测
 │   ├── pp-liteseg-seg/           # [预留] 语义分割（区域入侵精确判定）
-│   └── ppocrv4-ocr/              # [预留] OCR文字识别（车牌/安全标识）
+│   └── ppocrv4-ocr/              # [已部署] OCR文字识别（det.rknn+rec.rknn+labels.txt，不走 model.rknn 约定；执行体在 3rdparty/ppocrv4）
 ├── face/                         # 人脸相关模型（照片处理，非实时）
 │   ├── detection/                # SCRFD 人脸检测
 │   │   ├── model.rknn
@@ -51,7 +51,7 @@ model/
 | `library/yolo11n-behavior/` | 行为分析（跌倒/吸烟/打电话） | 方向2 - 行为分析 | 待模型选型 |
 | `library/yolo11n-fire/` | 明火/烟雾检测 | 方向5 - 增强AI | 待模型训练 |
 | `library/pp-liteseg-seg/` | 语义分割（区域入侵精确判定） | 方向5 - 增强AI | 待模型转换 |
-| `library/ppocrv4-ocr/` | OCR文字识别（车牌/安全标识） | 方向5 - 增强AI | 待模型选型 |
+| `library/ppocrv4-ocr/` | OCR文字识别（车牌/安全标识） | 方向5 - 增强AI | 已部署（两阶段模型，`SmartRecognitionWidget` 经 `3rdparty/ppocrv4/bin` 的外部可执行调用，不被 ModelRegistry 收录） |
 | `tools/` | 工器具检测（照片处理） | 方向5 - 增强AI | 待模型训练 |
 | `audio/` | 音频检测（声音事件） | 方向7 - 音频能力 | 待模型选型 |
 

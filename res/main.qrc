@@ -8,6 +8,7 @@
         <file>image/main_help.png</file>
         <file>image/main_main.png</file>
         <file>image/main_person.png</file>
+        <file>image/main_smart.png</file>
         <file>font/iconfont.ttf</file>
         <file>font/fontawesome-webfont.ttf</file>
         <file>gl/fragment.fsh</file>

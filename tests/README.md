@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-C++ 测试源码目录。含三个测试程序：
+C++ 测试源码目录。含四个测试程序：
 
 - `test_database.cpp`：针对 `src/biz/db/` 的检测记录 DAO / 报警记录 DAO /
   DatabaseManager 做初始化、插入、批量插入、条件查询、统计、状态更新与维护
@@ -16,6 +16,10 @@ C++ 测试源码目录。含三个测试程序：
   一致、按 IoU 同名配对后特征余弦 > 0.99——SCRFD/ArcFace 移植语义不变性守门），
   再走业务链：注册 processPhotos+saveTaskResult → 回读一致性 → 双图全局去重 →
   matchCancellation 一对一全命中 → confirmCancellation 落库回读。
+- `test_latest_frame_slot.cpp`：`src/base/queue/latest_frame_slot.h` 的四条契约自检——
+  代感知跳帧（慢消费者一次拿到最新帧、不重复消费同一代）、被持有输入不被提前回收、
+  `close()` 能唤醒阻塞中的等待者并让它返回空、`reset()` 后不留旧游标残留。
+  纯 STL + std::async，不依赖 Qt 与硬件，可在任意机器上跑。
 
 ## 文件/子目录清单
 
@@ -24,26 +28,29 @@ C++ 测试源码目录。含三个测试程序：
 | `test_database.cpp` | 数据库模块测试（4 组用例：初始化/检测/报警/维护），基于 Qt Core + 宏 `TEST_ASSERT` |
 | `test_equipment.cpp` | 设备盘点全链离线自测（模型加载→检测计数→画框→落库→回读→热更新原子性），逐项 `[ok]/[FAIL]` |
 | `test_rollcall.cpp` | 人员点名全链离线自测（exe 对照回归 + 注册/去重/注销匹配/落库回读），逐项 `[ok]/[FAIL]` |
+| `test_latest_frame_slot.cpp` | LatestFrameSlot 单槽广播契约自检（跳帧/生命周期/close 唤醒/reset），末行打印一行 PASS 说明 |
 
 ## 使用方法
 
-已接入根 `CMakeLists.txt`（`add_executable(test_database ...)` /
-`add_executable(test_equipment ...)` / `add_executable(test_rollcall ...)`，
-随主程序一并构建）：
+四个测试都已接入根 `CMakeLists.txt`（各自一个 `add_executable`，随主程序一并构建）：
 
 ```bash
 ./build-linux.sh -t rk3588 -b Release
 ./build/build_rk3588_linux/test_database    # 退出码：失败数>0 时为 1，否则 0
+./build/build_rk3588_linux/test_latest_frame_slot   # 同上；纯 CPU，不依赖板子外设
 
 # 盘点/点名自测必须在仓库根运行（依赖 assets/test/ + model/library/yolo11n-coco +
 # model/face/ 两件套权重；点名对照还需 model/face/face_recognition）；
 # 直接跑主程序同目录产物即可（test_equipment 内部已 qputenv offscreen）
-cd /home/ztl/dltt/code/idge-main
-LD_LIBRARY_PATH="/usr/local/Qt-5.15.18/lib:$LD_LIBRARY_PATH" \
-    ./build/build_rk3588_linux/test_equipment   # 末行 PASS + rc=0 / FAIL + rc=1
-LD_LIBRARY_PATH="/usr/local/Qt-5.15.18/lib:$LD_LIBRARY_PATH" \
-    ./build/build_rk3588_linux/test_rollcall    # 同上
+cd "$(git rev-parse --show-toplevel)"
+./build/build_rk3588_linux/test_equipment   # 末行 PASS + rc=0 / FAIL + rc=1
+./build/build_rk3588_linux/test_rollcall    # 同上
 ```
+
+主程序用 `./run.sh` 启动（它会 `cd` 进构建目录，所以"启动目录=工作区根"；构建目录下
+的 `model`、`3rdparty` 两个软链由 CMake 在 configure 时创建，测试也按同样方式跑）。
+若 Qt 装在非系统路径，需要自行 `export LD_LIBRARY_PATH=<Qt>/lib:$LD_LIBRARY_PATH`
+——本仓库不再假设某个固定版本号或某台机器的绝对路径。
 
 `test_database` 使用内存数据库（`DatabaseManager::instance().initialize(":memory:")`），不会写磁盘文件；
 `test_equipment` 的 db 与任务目录全部落在 `/tmp/equip_check_<pid>/`、`test_rollcall` 落在
@@ -59,9 +66,13 @@ LD_LIBRARY_PATH="/usr/local/Qt-5.15.18/lib:$LD_LIBRARY_PATH" \
   阻止静态 turbojpeg 的 `jpeg_*` 符号劫持系统 OpenCV imgcodecs 的 libjpeg ABI）
 - `test_rollcall` 另链：点名服务 + 两套识别器（`face_recognizer` 对照用 exe 链路与
   结构体、`in_process_face_recognizer` 被测），其余同 `test_equipment`
+- `test_latest_frame_slot` 只链 `Threads::Threads`，include 路径仅 `src/base/queue`
 
 ## 注意事项
 
+- **新增测试源必须同时在 `.gitignore` 加 `!tests/xxx.cpp`**：根 `.gitignore` 里有
+  `test_*.cpp` 这条"临时验证文件"规则，会把正式测试源一并挡掉，而根 CMakeLists 已经
+  引用它 —— 结果是本地能编、别人克隆后 `No such file` 编不过。四个测试目前都已放行。
 - 断言基于 `src/biz/db/` 接口行为（如"批量插入10条"后 `queryByTimeRange` 期望 ≥11 条），
   改动 DAO 语义时需同步核对用例假设。
 - 测试进程为单线程顺序执行，`testsPassed/testsFailed` 为全局计数，多线程化时需加锁。

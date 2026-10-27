@@ -29,6 +29,12 @@ install/
 3rdparty/jpeg_turbo/Android/
 3rdparty/jpeg_turbo/iOS/
 3rdparty/jpeg_turbo/Windows/
+# PP-OCRv4 外部可执行与 NPU 运行时：由 rknn_model_zoo 源码构建，产物随环境提供
+# （构建步骤见 3rdparty/ppocrv4/README.md），只把 README 与头文件入库
+3rdparty/ppocrv4/bin/
+3rdparty/ppocrv4/lib/
+# 只挡二进制，zbar.pc 与头文件入库（否则新克隆连 pkg-config 入口都没有）
+3rdparty/zbar/lib/libzbar.*
 .DS_Store
 *.log
 gmon.out
@@ -39,9 +45,14 @@ config.json
 # Test
 test_database
 test_*.cpp
-# 点名/盘点离线全链自检（正式测试源，须入库，豁免上面的临时文件规则）
+# 正式测试源，须入库，豁免上面的临时文件规则：
+#   test_database                 —— 检测/报警库黑盒断言（根 CMakeLists 有同名 target）
+#   test_equipment / test_rollcall —— 点名、盘点离线全链自检
+#   test_latest_frame_slot        —— 帧广播槽的跳帧/生命周期自检（根 CMakeLists 有同名 target）
+!tests/test_database.cpp
 !tests/test_equipment.cpp
 !tests/test_rollcall.cpp
+!tests/test_latest_frame_slot.cpp
 
 # 测试素材（*.jpg/*.mp4 全局忽略，此处显式放行；*_faces.json 等为运行产物不放行）
 !assets/test/1.mp4
@@ -49,6 +60,10 @@ test_*.cpp
 !assets/test/test.jpg
 # 同名运行产物（*_result.jpg 已被全局 *.jpg 挡住，faces.json 需显式忽略）
 assets/test/*_faces.json
+
+# 导航图标：res/main.qrc 注册了 image/*.png，rcc 遇到缺失文件直接 Error 退出，
+# 不放行则新克隆 `cmake --build` 卡在 autorcc 编不过——必须入库（共 9 个，约 500KB）。
+!res/image/*.png
 
 *.db-shm
 *.db-wal

@@ -88,6 +88,29 @@ public:
     std::shared_ptr<VideoRecorder> videoRecorder() const { return videoRecorder_; }
 
     /**
+     * @brief 读当前捕获帧的几何信息（供智能识别 QR/OCR 使用）
+     * @return 宽高都>0 时 true；尚未产出任何帧时 false（此时 stride 不可用）
+     *
+     * stride 是 dst_buf 的行字节跨度，**不等于** width*4，按它逐行拷才正确。
+     */
+    bool getCurrentFrameInfo(int &width, int &height, int &stride) const;
+
+    /**
+     * @brief 获取当前帧的 CPU 可读指针（供智能识别 QR/OCR 使用）
+     * @return 指向 RGBA 像素数据的指针；尚未产出帧时返回 nullptr
+     *
+     * 指针来自 DmaFrameBuffer 的 DRM mmap，CPU 可直接读，无需再拷贝到堆。
+     * 配合 getCurrentFrameInfo() 取宽高与 stride。
+     *
+     * 两条使用约束（本接口是"看一眼最新帧"，不是帧交付）：
+     *   1. 解码器只有双缓冲（dst_bufs[2]），本帧指针在约 2 帧后就会被下一帧覆盖，
+     *      拿到后要立刻读完/拷走，不能存起来晚点用。
+     *   2. stop() 会把指针置空并随后释放 DmaFrameBuffer；跨线程调用方必须在
+     *      stop() 之前停止取帧（智能识别页即按"先停扫描线程、再停解码器"收尾）。
+     */
+    const uint8_t* captureCurrentFramePtr() const;
+
+    /**
      * @brief 配置报警视频录制（须在 start() 前调用）
      * @param cfg: 录制参数（来自 config.json 的 recording 段）
      *
@@ -152,6 +175,16 @@ private:
     // 任务各持一份引用，因此本对象析构不会让后台线程摸到已释放的编码器。
     std::shared_ptr<VideoRecorder> videoRecorder_;
     RecorderConfig recordingCfg_;                  // 录制参数（start() 前注入）
+
+    // ===== 帧捕获（供智能识别 QR/OCR 按需取帧）=====
+    // 解码线程每帧在 emit frameReady 之后更新，消费者只读、不入队、不复制。
+    // ptr 指向 dst_bufs[back_buf] 的 DRM mmap 区域：仅解码线程写，且只有双缓冲，
+    // 所以一次取用必须在接下来约两帧内读完（约束写在 captureCurrentFramePtr 上）。
+    // stop() 里统一置空，避免解码线程退出后消费者摸到已释放的缓冲区。
+    mutable std::atomic<int> captureW_{0};
+    mutable std::atomic<int> captureH_{0};
+    mutable std::atomic<int> captureStride_{0};
+    mutable std::atomic<const uint8_t*> capturePtr_{nullptr};
 };
 
 #endif

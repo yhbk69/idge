@@ -919,3 +919,11 @@ int ConfigManager::wsReconnectInterval() const
     std::lock_guard<std::mutex> lock(mutex_);
     return root_["websocket"].toObject()["reconnect_interval"].toInt(5);
 }
+
+// ========== 智能识别配置 ==========
+
+QString ConfigManager::smartRecognitionCamera() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return root_["smartRecognition"].toObject()["camera"].toString(QStringLiteral("/dev/video0"));
+}

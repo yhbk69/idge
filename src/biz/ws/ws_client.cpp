@@ -1,5 +1,20 @@
+// ============================================================================
+// ws_client.cpp — Pad↔Aibox WebSocket 客户端实现
+// ----------------------------------------------------------------------------
+// 协议：应用层 JSON 文本帧，收发都靠 "type" 字段分发
+//   发：ping / ack / sync_request / get_streams / set_fence
+//   收：alarm（记 lastAlarmId_ 后原样转发 data）、pong（忽略）、streams_list，
+//       其余只记一条"未知消息类型"日志，不报错、不断连。
+// 心跳与重连都是 QTimer 驱动的**应用层**行为：连上才起心跳，断开才起单次重连
+// 定时器，间隔取自 websocket.heartbeat_interval / reconnect_interval（秒）。
+// 未配置 server_url 时 start() 只打 warning 并返回——程序照常跑，这条链路整个缺席。
+// 消息不做排队：未连接时 sendJson 直接丢弃并记 warning。
+// ============================================================================
+
 #include "ws_client.h"
-#include "src/base/config/ConfigManager.h"
+// 平铺 include（仓库约定，见 src/README.md）：路径由根 CMakeLists 的
+// include_directories 解析，不写 src/ 前缀。
+#include "ConfigManager.h"
 
 WsClient &WsClient::instance()
 {
@@ -46,6 +61,8 @@ void WsClient::start()
 
 void WsClient::stop()
 {
+    // 先置 stopping_ 再 close：onDisconnected 靠它区分"主动停"与"链路掉"，
+    // 反过来写会让每次主动退出都排一次重连定时器。
     stopping_ = true;
     heartbeatTimer_->stop();
     reconnectTimer_->stop();
@@ -199,6 +216,9 @@ void WsClient::onError(QAbstractSocket::SocketError error)
 void WsClient::onSslErrors(const QList<QSslError> &errors)
 {
     Q_UNUSED(errors);
+    // ⚠ 无条件放行所有证书错误（自签/过期/域名不符都连），wss:// 下等于放弃证书校验，
+    // 只适合内网调试。对接公网 Aibox 前应改为按指纹白名单或干脆拒绝。
+    // 注：地址填 ws:// 时走明文，本回调不会被触发。
     socket_->ignoreSslErrors();
 }
 

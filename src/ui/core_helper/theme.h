@@ -46,6 +46,7 @@ constexpr const char *SUCCESS_HOVER       = "#34D399";  ///< 成功按钮悬停�
 // ========== 字阶（px，ARM 上 QtHelper 不再强制放大） ==========
 constexpr int FS_BADGE = 12;  ///< 角标
 constexpr int FS_HINT  = 13;  ///< 提示文字
+constexpr int FS_NAV   = 14;  ///< 顶部/左侧导航按钮标题
 constexpr int FS_BODY  = 16;  ///< 正文基础
 constexpr int FS_CARD  = 18;  ///< 卡片/分组标题
 constexpr int FS_PAGE  = 22;  ///< 页面标题

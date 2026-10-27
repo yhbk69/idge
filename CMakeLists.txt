@@ -125,6 +125,36 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(EGL REQUIRED egl)
 pkg_check_modules(GLES2 REQUIRED glesv2)
 
+# ZBar 查找（可选，用于 QR 码扫描 - 智能识别页）
+# 板端发行版只有运行时包 libzbar0t64、没有 dev 包，故 3rdparty/zbar 随仓带
+# 头文件与可重定位的 zbar.pc；libzbar.so/.a 属预编译二进制，被 .gitignore 挡住，
+# 需按 3rdparty/README.md 的流程在联网机器上 apt-get download 后放回 lib/。
+# 这里找不到（新克隆未补库）时 ZBAR_FOUND 为假、HAS_ZBAR 不定义，
+# 智能识别页的二维码卡片自动降级为不可用，OCR 卡片不受影响。
+set(ENV{PKG_CONFIG_PATH} "${CMAKE_SOURCE_DIR}/3rdparty/zbar/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+pkg_check_modules(ZBAR zbar)
+if(ZBAR_FOUND)
+    message(STATUS "ZBar found: QR code scanning enabled")
+    add_compile_definitions(HAS_ZBAR)
+    include_directories(${ZBAR_INCLUDE_DIRS})
+    link_directories(${ZBAR_LIBRARY_DIRS})
+else()
+    message(STATUS "ZBar not found: QR code scanning disabled")
+endif()
+
+# 运行期资源入口链接（configure 时生成，幂等）
+# 程序按"启动目录即工作区根"解析资源（run.sh 会 cd 到构建目录后运行 ./idge），
+# 而模型在 model/、OCR 外部可执行在 3rdparty/ppocrv4/bin/，都在源码根下，
+# 故在构建目录里挂两个软链指过去，省掉每次部署再拷一遍大文件。
+# 已存在则跳过，不覆盖手工放置的目录或链接。
+foreach(_res model 3rdparty)
+    if(NOT EXISTS "${CMAKE_BINARY_DIR}/${_res}")
+        execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
+                        "${CMAKE_SOURCE_DIR}/${_res}" "${CMAKE_BINARY_DIR}/${_res}")
+        message(STATUS "link ${_res} -> ${CMAKE_SOURCE_DIR}/${_res}")
+    endif()
+endforeach()
+
 # ============================================================================
 # 头文件搜索路径
 # ============================================================================
@@ -195,6 +225,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/base/utils              # 工具函数（文件、图像、路径）
 
     # --- media 视频管线域 ---
+    ${CMAKE_SOURCE_DIR}/src/media                 # 媒体运行时初始化
     ${CMAKE_SOURCE_DIR}/src/media/model             # 模型管理（RKNN 帧模型池 ModelPool）
     ${CMAKE_SOURCE_DIR}/src/media/reader            # 视频读取（FFmpeg 硬解/MPP 解码/录像）
     ${CMAKE_SOURCE_DIR}/src/media/rga               # RGA 色彩转换
@@ -210,6 +241,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/biz/db                  # 数据持久层（业务 sqlite3 + 报警 QtSQL 两套）
     ${CMAKE_SOURCE_DIR}/src/biz/geofence            # 电子围栏（形状、检测、覆盖层）
     ${CMAKE_SOURCE_DIR}/src/biz/service             # 点名/盘点业务服务
+    ${CMAKE_SOURCE_DIR}/src/biz/sip                 # GB28181 国标视频推流（SIP/RTP/PS）
     ${CMAKE_SOURCE_DIR}/src/biz/ws                  # WebSocket 客户端（Pad↔Aibox 通信）
 
     # --- ui 界面域 ---
@@ -408,6 +440,9 @@ target_link_libraries(${PROJECT_NAME}
     # ==================== 音频库 ====================
     ${SDL2_LIBRARIES}           # SDL2（音频播放，可选）
 
+    # ==================== QR 码扫描（可选）====================
+    ${ZBAR_LIBRARIES}           # ZBar（QR 码识别，智能识别模块）
+
     # ==================== 线程库 ====================
     Threads::Threads            # POSIX 线程（跨平台封装）
 
@@ -565,4 +600,21 @@ target_link_libraries(face_recognition
 
 set_target_properties(face_recognition PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/model/face
+)
+
+# ============================================================================
+# LatestFrameSlot 单元测试（header-only 广播邮箱，无第三方依赖）
+# 覆盖四条契约：代感知跳帧、被持有输入不被回收、close 唤醒等待者、reset 后重启
+# 仓库根运行：./build/build_rk3588_linux/test_latest_frame_slot，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_latest_frame_slot
+    tests/test_latest_frame_slot.cpp
+)
+
+target_include_directories(test_latest_frame_slot PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/base/queue
+)
+
+target_link_libraries(test_latest_frame_slot
+    Threads::Threads
 )

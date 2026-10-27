@@ -41,6 +41,7 @@ class QTimer;
 class QWidget;
 class RollCallWidget;
 class EquipmentInventoryWidget;
+class SmartRecognitionWidget;
 class RollCallService;
 class EquipmentInventoryService;
 struct EquipmentModelConfig;   // 完整定义见 equipment_inventory_service.h（仅 .cpp 用到）
@@ -89,6 +90,8 @@ private:
     EquipmentInventoryWidget *equipmentWidget_ = nullptr;
     std::shared_ptr<EquipmentInventoryService> equipmentService_;
     QWidget *equipPage_ = nullptr;   ///< 设备盘点页（代码创建，插入 stackedWidget）
+    SmartRecognitionWidget *smartRecognitionWidget_ = nullptr; ///< 智能识别页（QR + OCR）
+    QWidget *smartPage_ = nullptr;   ///< 智能识别页容器
     std::string workspace_;          ///< 业务资源根目录（model/face、roll_call_data 等）
 
 private:

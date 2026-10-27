@@ -18,7 +18,8 @@
 ## 核心类与数据流
 - **ConfigManager**（单例）：`load()` 读入 `QJsonObject root_`；各 setter 只改内存，
   `save()` 才整体序列化写回文件。配置节：`video` / `model` / `cascade` / `detect` /
-  `alarm` / `geofence` / `recording`。文件不存在时写入内置默认并 `save()`；JSON 解析失败置空 `root_`，
+  `alarm` / `geofence` / `recording` / `websocket` / `smartRecognition`（另有一整段 `gb28181`
+  由国标模块自己读，见下）。文件不存在时写入内置默认并 `save()`；JSON 解析失败置空 `root_`，
   getter 回退默认值（0.25 / 0.45 / 80 / 3 / "inside_alarm" …）。
 - **一次性迁移**：`load()` 末尾按 `migrateModelPaths()` / `migrateRecordingDefaults()` 的范式
   补齐老配置缺失的段（只在整段不存在时写默认值，已有段一律不动，返回 true 才 `saveUnsafe()` 落盘）。
@@ -37,6 +38,37 @@
 
 片段**没有目录配置项**：裸流与网页副本固定落在 `RuntimePaths::alarmsDir()/yyyyMMdd`，与抓拍图
 同一棵树，好处是报警媒体只有一套按天保留 + 容量回收逻辑（见 `src/biz/alarm/README.md`）。
+
+### smartRecognition 段（智能识别页取流）
+| 键 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `camera` | string | `/dev/video0` | 二维码扫描与 OCR 拍照的取流地址 |
+
+只有 getter（`smartRecognitionCamera()`），没有 setter：该页每次打开对话框才读一次，
+运行中改内存值没有意义。值直接交给 `FFmpegVideoDecoder::start()`，经
+`avformat_open_input` 自动探测格式，所以本机设备节点、本地视频文件、RTSP 地址都能填
+（后两种主要给没有摄像头的机器自测用）。设备节点依赖 `main()` 里
+`initializeMediaRuntime()` 注册的 libavdevice v4l2 输入源。
+
+**与其它取流地址互不相干**：监控 4 路走 `video.channel1..4`、人员登记/预览走
+`camera_preview_decoder.h` 里硬编码的 `/dev/video41`、国标推流走 `gb28181.streams[].source`。
+四处没有设备注册表，同一台设备被两处同时打开会有一方失败。
+
+### websocket 段（Pad↔Aibox 客户端）
+| 键 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `server_url` | string | 空 | `ws://`/`wss://` 地址；空 = 整条链路不启动。**有 setter**（`setWsServerUrl`），调试设置页的 WebSocket 分组可直接编辑 |
+| `heartbeat_interval` | int（秒） | 30 | 应用层 `{"type":"ping"}` 周期；界面无控件，只能改 JSON |
+| `reconnect_interval` | int（秒） | 5 | 非主动断开后的重连延时；界面无控件，只能改 JSON |
+
+### 不由 ConfigManager 管的段
+`data/config.json` 里还有段落是模块自己直接读文件的，`ConfigManager` 不提供 getter/setter，
+`save()` 也不会替它们兜底——但 **`save()` 是整文件截断覆写 `root_`**，而 `root_` 是载入时的
+整份 JSON，所以只要进程没在别处删键，这些段会被原样写回：
+
+| 段 | 读取方 | 说明 |
+| --- | --- | --- |
+| `gb28181` | `src/biz/sip/gb28181_config.cpp` 自己 `QJsonDocument::fromJson` | 国标推流的平台参数与通道列表，见 `src/biz/sip/README.md`；`main()` 用它做"要不要启动 manager"的判据 |
 
 数据流：
 ```

@@ -68,6 +68,8 @@
 #include "yolo11_model.hpp"
 #include "alarm_manager.h"
 #include "database_manager.h"
+#include "media_runtime.h"
+#include "gb28181_manager.h"
 
 //std::shared_ptr<dpool::ThreadPool> detectPool;
 
@@ -289,12 +291,36 @@ int main(int argc, char *argv[])
     AppInit::Instance()->start();
 
     // 设置字体和编码
-    QtHelper::setFont(16);  // 统一基础字号 16px（字阶：13提示/16正文/18卡片标题/22页面标题/30大数字）
+    QtHelper::setFont(16);  // 统一基础字号 16px（字阶：12角标/13提示/14导航/16正文/18卡片标题/22页面标题/30大数字）
     QtHelper::setCode();
 
     // 初始化数据库
     AlarmManager::instance().initDatabase(RuntimePaths::database());
     AlarmManager::instance().loadAlarmsFromDatabase();
+
+    // 注册 FFmpeg 设备与网络组件（进程级一次）。智能识别页要开 /dev/videoN、
+    // 国标推流要走 RTSP，都依赖 libavdevice/libavformat 的这一步注册。
+    initializeMediaRuntime();
+
+    // GB28181 国标推流：按需启动，判据是 Gb28181Config::load() 能否从配置里
+    // 凑出可用的 platform + streams（gb28181 段和顶层 platform/streams 都认），
+    // 而非"有没有 gb28181 键"。没有配置段就是正常态，load 返回 false 后静默跳过
+    // （想确认是否启用可查 data/config.json 的 gb28181 段）；
+    // 配置写错（serverHost 缺失、地址不是 IPv4 等）同样只是不启用，不影响主程序。
+    // probe 只用于判据，真正的配置由 start() 自己再读一次。
+    std::unique_ptr<Gb28181Manager> gb28181;
+    {
+        const QString configPath = RuntimePaths::configFile();
+        Gb28181Config probe;
+        QString probeError;
+        if (Gb28181Config::load(configPath, &probe, &probeError)) {
+            gb28181 = std::make_unique<Gb28181Manager>();
+            if (!gb28181->start(configPath)) {
+                qWarning() << "GB28181 manager failed to start";
+                gb28181.reset();
+            }
+        }
+    }
 
     // 注册信号处理（优雅关闭）
     signal(SIGTERM, signalHandler);  // kill 命令
@@ -346,6 +372,7 @@ int main(int argc, char *argv[])
 
     // 程序退出前清理和同步
     qInfo() << "Shutting down, cleaning up...";
+    if (gb28181) gb28181->stop();
     AlarmManager::instance().syncToDatabase();
     AlarmManager::instance().cleanOldData(30);
 

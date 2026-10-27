@@ -9,11 +9,29 @@
 | 文件/目录 | 资源路径 | 说明 |
 |-----------|----------|------|
 | `main.qrc` | — | 资源清单，注册下列全部文件（prefix=`/`） |
-| `image/main_main.png` 等 8 个 `main_*.png` | `:/image/main_*.png` | 顶部导航按钮图标（视频监控/人员/单位/数据/设置/退出/关于/帮助），被 `src/ui/form/frmmain.ui` 的 iconset 引用 |
-| `image/1.png` | `:/image/1.png` | 已注册但当前 src 内未发现引用（备用/历史素材） |
+| `image/main_*.png`（9 个） | `:/image/main_*.png` | 顶部导航按钮图标。**文件名是模板遗留语义，与当前标签不一一对应**，实际配对见下表 |
+| `image/1.png` | `:/image/1.png` | 已注册但当前 src 内未发现引用（备用/历史素材，390KB 全在可执行文件里） |
 | `font/iconfont.ttf` | `:/font/iconfont.ttf` | 阿里巴巴图标字体（IconHelper 使用） |
 | `font/fontawesome-webfont.ttf` | `:/font/fontawesome-webfont.ttf` | FontAwesome 图标字体（IconHelper 使用） |
-| `gl/vertex.vsh`、`gl/fragment.fsh` | `:/gl/...` | **参考副本**：`#version 300 es` 的 YUV 三采样器（tex_y/tex_u/tex_v）着色器。运行时 `src/ui/widgets/gl_video_widget.cpp:162-163` 实际编译的是同文件 55/78 行的**内联字符串** `VS_SRC/FS_SRC`（GL ES 2.0 风格、单 sampler2D 直接采样 DMA-BUF 导入纹理），并不读取该资源路径，两套代码内容也不同 |
+| `gl/vertex.vsh`、`gl/fragment.fsh` | `:/gl/...` | **参考副本**：`#version 300 es` 的 YUV 三采样器（tex_y/tex_u/tex_v）着色器。运行时 `src/ui/widgets/gl_video_widget.cpp` 内联的 `VS_SRC/FS_SRC`（GL ES 2.0 风格、单 sampler2D 直接采样 DMA-BUF 导入纹理）才是真正编译的那份，两套代码内容也不同 |
+
+### 导航图标实际配对（`frmmain.cpp` 运行时 `setIcon` + `.ui` 的 btnSmart）
+
+| 资源 | 图形 | 按钮 | 标签 |
+| --- | --- | --- | --- |
+| `main_main.png` | 盾牌 | `btnMain` | 视频监控 |
+| `main_help.png` | 分栏面板 | `btnRoll` | 数据看板 |
+| `main_data.png` | 放大镜 | `btnEquipCheck` | 报警数据 |
+| `main_person.png` | 人形 | `btnData` | 人员点名 |
+| `main_company.png` | 楼宇 | `btnConfig` | 设备盘点 |
+| `main_smart.png` | 扫码框 | `btnSmart`（`.ui` 直接引用） | 智能识别 |
+| `main_config.png` | 齿轮 | `btnHelp` | 调试设置 |
+| `main_exit.png` | 出口 | `btnExit` | 退出 |
+| `main_about.png` | — | 未使用（模板遗留） | — |
+
+`btnData`/`btnConfig` 在 `initNewPages()` 里先 `hide()`（收敛占位按钮），再由
+`initBusinessPages()` 换标签换图标 `show()` 回来——改导航时两处都要看，只改一处会出现
+"图标对不上标签"或按钮消失。
 
 ## 使用方法
 
@@ -32,6 +50,10 @@ UI 中的引用写法（已核实示例）：`frmmain.ui` iconset 使用 `:/imag
 
 ## 注意事项
 
+- **`image/*.png` 必须在库里**：根 `.gitignore` 全局忽略 `*.png`，`res/image/*.png` 是显式
+  豁免（`!res/image/*.png`）。删掉这条豁免或漏提交任一图标，`rcc` 会以
+  `RCC: Error in 'main.qrc': Cannot find file 'image/xxx.png'` **直接退出**，新克隆构建即失败
+  （不是"图标显示不出来"这种软失败）。新增导航图标时同步确认这条规则仍然覆盖到它。
 - **字体别名重复注册**：`:/font/iconfont.ttf` 与 `:/font/fontawesome-webfont.ttf` 同时存在于 `res/main.qrc` 和 `src/ui/core_helper/qrc/font.qrc`，Qt 资源系统对重复 alias 只保留先注册者（rcc 阶段可能出 duplicate 提示）。更新字体时**两处必须同步替换**，否则可能加载到旧副本。
 - 修改 `main.qrc` 后若 IDE 未感知，需重新 configure（GLOB 带 CONFIGURE_DEPENDS，通常自动重跑；qmake 场景无此保证）。
 - `res/gl/*.vsh/.fsh` 改动**不影响渲染**（运行时从不按路径加载它们）；调整渲染逻辑请直接改 `gl_video_widget.cpp` 内联 `VS_SRC/FS_SRC`，改完可顺手同步留档副本。

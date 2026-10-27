@@ -195,6 +195,26 @@
                                         </widget>
                                     </item>
                                     <item>
+                                        <widget class="QToolButton" name="btnSmart">
+                                            <property name="sizePolicy">
+                                                <sizepolicy hsizetype="Fixed" vsizetype="Expanding">
+                                                    <horstretch>0</horstretch>
+                                                    <verstretch>0</verstretch>
+                                                </sizepolicy>
+                                            </property>
+                                            <property name="text">
+                                                <string>智能识别</string>
+                                            </property>
+                                            <property name="icon">
+                                                <iconset resource="../../res/main.qrc">
+                                                    <normaloff>:/image/main_smart.png</normaloff>:/image/main_smart.png</iconset>
+                                            </property>
+                                            <property name="toolButtonStyle">
+                                                <enum>Qt::ToolButtonIconOnly</enum>
+                                            </property>
+                                        </widget>
+                                    </item>
+                                    <item>
                                         <widget class="QToolButton" name="btnHelp">
                                             <property name="sizePolicy">
                                                 <sizepolicy hsizetype="Fixed" vsizetype="Expanding">

@@ -275,6 +275,20 @@ public:
     /** @brief 断线重连间隔（秒，默认 5） */
     int wsReconnectInterval() const;
 
+    // ========== 智能识别配置 ==========
+
+    /**
+     * @brief 智能识别页（QR + OCR）的取流地址，默认 /dev/video0
+     *
+     * 值直接交给 FFmpegVideoDecoder::start()，经 avformat_open_input 自动探测，
+     * 因此本机设备节点、本地视频文件、RTSP 地址都可以用（后两者仅便于无摄像头
+     * 环境下自测）。设备节点依赖 main() 里 initializeMediaRuntime() 注册的
+     * libavdevice v4l2 输入源，缺那次初始化只能开文件和 RTSP。
+     * 注意本键与监控主链路的 /dev/video41、国标推流各自的取流地址互不协调，
+     * 同一设备被两处同时打开会失败。
+     */
+    QString smartRecognitionCamera() const;
+
 private:
     /**
      * @brief 私有构造函数（单例模式）

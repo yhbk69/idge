@@ -76,6 +76,9 @@
 //     比较——三者必须统一口径，否则限流窗口失真（详见 common.hpp 警示注释）。
 //   - 双缓冲切换仅在 RGA 转换成功路径发生（back_buf = 1 - back_buf），失败帧
 //     复用同一缓冲不会造成读写竞争（该帧根本没有输出）。
+//   - 帧捕获槽（capturePtr_/captureW_/…）是给智能识别页的"拉最新一帧"接口，
+//     不是帧交付队列：只有双缓冲，指针约两帧后被覆盖，取到必须立刻读完；
+//     stop() 会先把它置空再释放 dst_bufs。因此不要在解码线程之外长期持有该指针。
 //
 // ============================================================================
 
@@ -703,6 +706,10 @@ void FFmpegVideoDecoder::stop()
 {
     running_ = false;
 
+    // 帧捕获槽先置空：消费者（智能识别页）此后取到 nullptr 即停手，
+    // 不会再摸到下面即将释放的 dst_bufs。
+    capturePtr_.store(nullptr, std::memory_order_release);
+
     // 1) 先请求所有推理任务退出（关队列唤醒，不阻塞）
     for (PpeTask *task : tasks_) {
         task->requestStop();
@@ -854,6 +861,21 @@ void FFmpegVideoDecoder::setRecordingConfig(const RecorderConfig &cfg)
                    << "< clip window" << (kClipPreMs + kClipPostMs) / 1000
                    << "s — 报警片段前向会被截断";
     }
+}
+
+bool FFmpegVideoDecoder::getCurrentFrameInfo(int &width, int &height, int &stride) const
+{
+    // 三个值分三次 relaxed 读，理论上不原子；但 dst_bufs 的尺寸在整个流生命周期内
+    // 固定（vid_w/vid_h 打开流时定死），所以不会出现"新宽配旧 stride"的组合。
+    width = captureW_.load(std::memory_order_relaxed);
+    height = captureH_.load(std::memory_order_relaxed);
+    stride = captureStride_.load(std::memory_order_relaxed);
+    return width > 0 && height > 0;
+}
+
+const uint8_t* FFmpegVideoDecoder::captureCurrentFramePtr() const
+{
+    return capturePtr_.load(std::memory_order_acquire);
 }
 
 // ============================================================================
@@ -1786,6 +1808,16 @@ void FFmpegVideoDecoder::decodeLoop()
                     }
 
                     emit frameReady(rf);
+                    // 更新帧捕获槽（供智能识别 QR/OCR 按需取帧）
+                    // 开销：三次 relaxed store + 一次 release store，无拷贝、无系统调用。
+                    // 放在 emit 之后，保证 GUI 侧先拿到本帧渲染、再让取帧者看到同一帧。
+                    // 尺寸对整个流恒定，故每帧重复 store 只是为了让首个消费者尽早拿到几何值。
+                    {
+                        captureW_.store(vid_w, std::memory_order_relaxed);
+                        captureH_.store(vid_h, std::memory_order_relaxed);
+                        captureStride_.store(dst_buf->stride(), std::memory_order_relaxed);
+                        capturePtr_.store(dst_buf->ptr(), std::memory_order_release);
+                    }
                     ds.add(ds.em);
                     ds.stage.restart();
                     mark("E emit");

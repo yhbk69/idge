@@ -8,7 +8,7 @@ src/
 ├── base/     基础设施域       # buffer queue threadpool config utils runtime_paths.h
 ├── media/    视频管线域       # reader(FFmpeg硬解/硬编环形录像) rga model(ModelPool)
 ├── ai/       推理与模型应用域  # yolo11 model_repo recognition task
-├── biz/      业务域           # alarm geofence service db(报警库+业务库)
+├── biz/      业务域           # alarm geofence service db(报警库+业务库) sip(GB28181) ws(Pad↔Aibox)
 └── ui/       界面域           # form widgets(原src/ui) core_helper core_qss
 ```
 
@@ -21,7 +21,8 @@ base ← media ← ai ← biz ← ui
 - **base**：零业务依赖。队列/DMA 缓冲/线程池/配置解析/通用工具/运行时路径。
 - **media**：解码、色彩转换、帧模型池、硬件编码环形录像。产出帧与检测结果，不含业务判定。
 - **ai**：RKNN 推理、模型库注册、检测任务、人脸桥接（调 `tools/face_recognition` 产物）。
-- **biz**：报警/围栏/点名/盘点业务逻辑与两套持久层（QtSQL `data/idge.db` + sqlite3 `roll_call.db`）。
+- **biz**：报警/围栏/点名/盘点业务逻辑、两套持久层（QtSQL `data/idge.db` + sqlite3 `roll_call.db`）、
+  GB28181 设备侧推流（`sip/`，纯 UDP/TCP socket + FFmpeg 复用/打包）、Pad↔Aibox WebSocket 客户端（`ws/`）。
 - **ui**：窗口、控件、渲染。仅被 main.cpp 装配。
 
 同域内模块互引允许；跨域只允许右侧引左侧。
@@ -34,6 +35,9 @@ base ← media ← ai ← biz ← ui
 ## 运行时数据
 
 所有运行时产物路径的唯一事实源是 `base/runtime_paths.h`（`data/` 约定 + 旧布局自动迁移），
-业务代码不得写路径字面量。模型仓库 `model/` 遵循外部约定，不在 data/ 内。
+业务代码不得写路径字面量。⚠ `data/` 是**相对当前工作目录**的：`run.sh` 会先 `cd` 进
+`build/build_rk3588_linux`，所以经它启动时真正读写的是构建目录下的那份 `data/`，
+不是源码根的 `data/`（`model/`、`3rdparty/` 由 CMake 在构建目录挂了软链回源码根，不受影响）。
+模型仓库 `model/` 遵循外部约定，不在 data/ 内。
 
 各模块细节见各级 `README.md`；根 [README](../README.md) 第四节有全量索引。

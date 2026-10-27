@@ -14,7 +14,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `ffmpeg_video_decoder.h/.cpp` | 主流水线解码总控：硬解、零拷贝 DMA-BUF 借还、级联多模型任务分发、结果合成画框、帧限速（截止期节拍：按流 avg_frame_rate 定间隔，落后重锚丢弃连发）、报警片段录制挂钩 |
+| `ffmpeg_video_decoder.h/.cpp` | 主流水线解码总控：硬解、零拷贝 DMA-BUF 借还、级联多模型任务分发、结果合成画框、帧限速（截止期节拍：按流 avg_frame_rate 定间隔，落后重锚丢弃连发）、报警片段录制挂钩、**帧捕获槽**（供智能识别按需拉最新帧） |
 | `video_recorder.h/.cpp` | `VideoRecorder`：画框后的 RGBA → RGA → rkmpp 硬编（hevc/h264）→ Annex-B 环形缓冲区；报警时 dump 裸流/MP4 片段 |
 | `camera_preview_decoder.h/.cpp` | 摄像头预览解码：v4l2/MJPEG、JPEG 魔数缓存抓拍、SCRFD 同步检测、PpeTask 异步检测、CPU 画框 |
 | `scrfd_face_detector.h/.cpp` | SCRFD 人脸检测器（RKNN NPU）：letterbox 预处理、9 输出解码、类别内 NMS |
@@ -89,6 +89,15 @@ connect(decoder, &FFmpegVideoDecoder::frameReady, this, &MyView::onFrame);
 decoder->start("rtsp://192.168.1.10/stream1");
 decoder->stop();               // 置 running_=false + interrupt_callback 打断阻塞读帧
 
+// 帧捕获槽：智能识别页（QR/OCR）在自己的线程上"拉最新一帧"，不占队列、不拷贝
+const uint8_t* px = decoder->captureCurrentFramePtr();   // RGBA 的 DRM mmap 指针
+int w, h, stride;
+if (px && decoder->getCurrentFrameInfo(w, h, stride)) {  // 无帧时 ptr=nullptr、返回 false
+    // 立刻读完/拷走：只有双缓冲，约 2 帧后这块就被下一帧覆盖
+    for (int y = 0; y < h; ++y) memcpy(dst + y * w * 4, px + (size_t)y * stride, (size_t)w * 4);
+}
+// stride 是**字节**跨度（≠ w*4，RGA 会按对齐放大），QImage 构造要按它逐行拷
+
 // 摄像头预览 + 抓拍
 CameraPreviewDecoder preview;
 preview.setDetectorConfigs({{.model_path=..., .npu_core_mask=RKNN_NPU_CORE_0, ...}});
@@ -119,6 +128,10 @@ det.detectRgba(rgbaPixels, width, height, stride /*>=width*4*/,
   入口另有 `wstride` 合理性检查（`<w` 或 `>2w` 直接判为误传并丢帧）。
 - **模型输入约定**：PpeTask 收到的是 RGA letterbox 后的 640x640 RGB888 DMA-BUF，坐标还原靠 `letterbox_t{x_pad,y_pad,scale}`；SCRFD 是左上对齐黑边填充，逆变换只除 scale。
 - **fd 所有权**：`RenderFrame` 的 fd 为 `dup()` 产物，接收方必须 `close()`；AVFrame DRM fd 归 ffmpeg，禁止关闭；`pHWDeviceCtx` 存在 1 个 buffer 引用泄漏（已登记）。
+- **帧捕获槽是"看一眼"，不是帧交付**：`captureCurrentFramePtr()` 返回的是解码线程正在轮流写的双缓冲之一，
+  指针本身在解码器运行期间一直有效，但**内容约 2 帧后就被覆盖**，取到必须当场读完；调用方（智能识别页）
+  负责"先停自己的取帧线程、再 `decoder->stop()`"，`stop()` 会把指针置 nullptr 作为兜底。
+  需要跨线程安全交付帧请走 `frameReady` 信号（自带 dup fd）或 `src/base/queue/latest_frame_slot.h`，别拿这个接口当队列用。
 - **线程约束**：ScrfdFaceDetector 的 `rknn_context` 非线程安全，仅在解码线程内使用；`stop()` 后 `tasks_` 故意不 delete（detach 线程可能仍在回调，防 UAF）；`dmaBufferPool_` 借用遵循"最后一个引用释放自动归还"，新增提前 return 必须保证归还。
 - **已知隐患**（详见各文件头注释）：
   - `image_buffer_t::time`/`TaskData::time` 实际为 **epoch 纳秒**，而 `common.hpp` 文档写毫秒、`src/biz/alarm` 限流常量按纳秒比较——单位三方不一致，勿随手"换算"；

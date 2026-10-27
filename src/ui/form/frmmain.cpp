@@ -35,6 +35,7 @@
 #include "ws_client.h"
 #include "roll_call_widget.h"
 #include "equipment_inventory_widget.h"
+#include "smart_recognition_widget.h"
 #include "roll_call_service.h"
 #include "equipment_inventory_service.h"
 #include "model_registry.h"
@@ -59,6 +60,7 @@
 #include <QFileDialog>
 #include <QApplication>
 #include <QHeaderView>
+#include <QIcon>
 #include <QInputDialog>
 #include <QScrollArea>
 #include <QTableWidget>
@@ -279,7 +281,7 @@ void frmMain::initForm()
             tbtn->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
             tbtn->setMinimumHeight(58);
             QFont bf = tbtn->font();
-            bf.setPixelSize(14);
+            bf.setPixelSize(theme::FS_NAV);
             tbtn->setFont(bf);
         }
         connect(btn, SIGNAL(clicked()), this, SLOT(buttonClick()));
@@ -348,13 +350,22 @@ void frmMain::initNewPages()
     qRegisterMetaType<object_detect_result_list>("object_detect_result_list");
     qRegisterMetaType<AlarmRecord>("AlarmRecord");
 
-    // ===== 顶部导航收敛为 5 项 =====
+    // ===== 顶部导航：视频监控 / 数据看板 / 报警数据 / 调试设置 / 退出 =====
+    // （人员点名、设备盘点、智能识别三项在下方及 initBusinessPages() 补齐，共 8 项）
+    // .ui 里的图标是模板遗留的原始语义（人员/单位/查询/设置），运行时标签已改，
+    // 因此图标与标签成对在此重设，避免"数据看板配人形图标"这类错位。
     ui->btnMain->setText("视频监控");
+    ui->btnMain->setIcon(QIcon(":/image/main_main.png"));    // 盾牌：监控
     ui->btnRoll->setText("数据看板");
+    ui->btnRoll->setIcon(QIcon(":/image/main_help.png"));    // 分栏面板：看板
     ui->btnEquipCheck->setText("报警数据");
+    ui->btnEquipCheck->setIcon(QIcon(":/image/main_data.png"));  // 放大镜：检索
     ui->btnHelp->setText("调试设置");
+    ui->btnHelp->setIcon(QIcon(":/image/main_config.png"));  // 齿轮：设置
     ui->btnExit->setText("退出");
+    ui->btnExit->setIcon(QIcon(":/image/main_exit.png"));
     // 隐藏多余的占位按钮（人员点名/设备盘点原义、报警查询、系统设置）
+    // btnSmart（智能识别）由 .ui 直接提供标签与图标，无需在此处理
     ui->btnData->hide();
     ui->btnConfig->hide();
 
@@ -600,9 +611,18 @@ void frmMain::initBusinessPages()
 
     // 复用被 main 导航收敛隐藏的占位按钮
     ui->btnData->setText("人员点名");
+    ui->btnData->setIcon(QIcon(":/image/main_person.png"));
     ui->btnData->show();
     ui->btnConfig->setText("设备盘点");
+    ui->btnConfig->setIcon(QIcon(":/image/main_company.png"));
     ui->btnConfig->show();
+
+    // 智能识别页（QR + OCR）：代码创建并插入 stackedWidget
+    smartRecognitionWidget_ = new SmartRecognitionWidget(workspace_);
+    smartPage_ = new QWidget();
+    smartPage_->setLayout(new QVBoxLayout());
+    smartPage_->layout()->addWidget(smartRecognitionWidget_);
+    ui->stackedWidget->addWidget(smartPage_);
 }
 
 // 点名服务资源约定（根目录 = 环境变量 IDGE_WORKSPACE，缺省回退当前工作目录）：
@@ -692,6 +712,9 @@ void frmMain::reloadEquipmentService()
  *   - "视频监控" -> pageMonitor（视频监控页）
  *   - "数据看板" -> dashboardWidget_（数据看板）
  *   - "报警数据" -> alarmListWidget_（报警数据）
+ *   - "人员点名" -> pageRoll（人员点名）
+ *   - "设备盘点" -> equipPage_（设备盘点）
+ *   - "智能识别" -> smartPage_（二维码 + OCR）
  *   - "调试设置" -> pageSettings（调试帮助页）
  *   - "退出"     -> 退出确认
  */
@@ -718,6 +741,8 @@ void frmMain::buttonClick()
         ui->stackedWidget->setCurrentWidget(ui->pageRoll);
     } else if (name == "设备盘点") {
         ui->stackedWidget->setCurrentWidget(equipPage_);
+    } else if (name == "智能识别") {
+        ui->stackedWidget->setCurrentWidget(smartPage_);
     } else if (name == "调试设置") {
         ui->stackedWidget->setCurrentWidget(ui->pageSettings);
     } else if (name == "退出") {
