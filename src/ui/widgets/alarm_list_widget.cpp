@@ -312,9 +312,13 @@ void AlarmListWidget::refreshTable()
     }
 
     // 获取所有告警记录，过滤掉误报
+    // 围栏事件不进这个表：本页是"类别报警"，围栏另有"电子围栏"Tab（refreshFenceTable）。
+    // 不区分会让 COCO 的 person 围栏侵入显示成"person 检测到报警"，
+    // 而该模型的 alarm_class 明明是空（只画框不报警）。
     QVector<AlarmRecord> alarms = mgr.alarms();
     QVector<AlarmRecord> filtered;
     for (const auto &a : alarms) {
+        if (a.isFenceAlarm) continue;
         if (a.status == "false_alarm") continue;
         if (filterChannel_ >= 0 && a.channel != filterChannel_) continue;
         if (!filterClass_.isEmpty() && a.className != filterClass_) continue;

@@ -496,9 +496,13 @@ void frmMain::showAlarmToast(const AlarmRecord &alarm)
     if (!alarmToast_) return;
 
     QDateTime dt = QDateTime::fromString(alarm.alarmTime, Qt::ISODate);
-    alarmToast_->setText(QString("⚠ 通道%1 检测到 %2 (%3%%)  %4")
-        .arg(alarm.channel + 1)
-        .arg(alarm.className)
+    // 围栏事件与类别事件分开措辞：都写成"检测到 person"会让人以为围栏通道上的
+    // COCO 在按类别报警，而那个模型的 alarm_class 明明为空（只画框不报警）。
+    const QString head = alarm.isFenceAlarm
+        ? QString("⚠ 通道%1 围栏侵入 %2").arg(alarm.channel + 1).arg(alarm.className)
+        : QString("⚠ 通道%1 检测到 %2").arg(alarm.channel + 1).arg(alarm.className);
+    alarmToast_->setText(QString("%1 (%2%%)  %3")
+        .arg(head)
         .arg(alarm.confidence * 100, 0, 'f', 1)
         .arg(dt.toString("HH:mm:ss")));
     alarmToast_->adjustSize();
@@ -935,7 +939,7 @@ static int configuredTaskCount()
  *   - 视频通道：每路的 源地址 / 备注 / 启用 / 级联模型列表（可勾选可排序）
  *   - 模型参数：一行一个模型库 id，报警类别与备注写在这里
  *   - 模型库管理：库内模型的 类别数 / 输入尺寸 / 被引用通道
- *   - 电子围栏：围栏类别（单值，默认 person）+ 报警节流秒数
+ *   - 电子围栏：围栏类别（单值，默认 person）+ 报警最小间隔秒数
  *   - 检测配置：置信度阈值、NMS 阈值（当前未接入推理，见 README 已知问题）
  *
  * 同时输出初始日志到运行日志面板
@@ -1020,10 +1024,17 @@ void frmMain::initDebugPage()
         QGridLayout *gl = ui->gridLayout_model;   // 现有通道所在的分组框网格
         for (int i = 0; i < 4; ++i) {
             QLineEdit *chEdit = channelSourceEdit(i);
-            // 地址输入框改动即落盘（浏览按钮也会写，这里补上手输的情况）
+            // 地址输入框改动即落盘（浏览按钮也会写，这里补上手输的情况）。
+            // 失焦也会触发 editingFinished，值没变就不落盘、不刷日志。
             connect(chEdit, &QLineEdit::editingFinished, this, [this, i, chEdit]() {
-                ConfigManager::instance().setChannelSource(i, chEdit->text().trimmed());
-                ConfigManager::instance().save();
+                ConfigManager &c = ConfigManager::instance();
+                const QString v = chEdit->text().trimmed();
+                if (c.channelSource(i) == v)
+                    return;
+                c.setChannelSource(i, v);
+                c.save();
+                log("system", QStringLiteral("通道%1 视频源已保存: %2（点『浏览』可立即重开本路，否则重启后生效）")
+                                .arg(i + 1).arg(v.isEmpty() ? QStringLiteral("(空)") : v));
             });
 
             // 备注输入框（编辑完自动保存）
@@ -1217,7 +1228,7 @@ void frmMain::initDebugPage()
     // 围栏配置信息
     {
         auto &fm = geofence::FenceManager::instance();
-        log("fence", QString("围栏配置: 启用=%1, 模式=%2, 围栏类别=%3, 节流=%4秒")
+        log("fence", QString("围栏配置: 启用=%1, 模式=%2, 围栏类别=%3, 最小间隔=%4秒")
             .arg(fm.enabled() ? "是" : "否")
             .arg(fm.mode())
             .arg(cfg.geofenceAlarmClass())
@@ -1369,7 +1380,7 @@ void frmMain::refreshModelParamsTable()
                     const QString cls = clsCombo->currentData().toString();
                     c.setModelAlarmClass(id, cls);
                     c.save();
-                    log("system", QString("模型 %1 报警类别: %2")
+                    log("system", QString("模型 %1 报警类别: %2（重启后生效，运行中的通道仍按旧类别判定）")
                             .arg(id, cls.isEmpty() ? QStringLiteral("(不报警)") : cls));
                 });
         modelParamTable_->setCellWidget(r, 1, clsCombo);
@@ -1523,7 +1534,7 @@ void frmMain::openChannelModelsDialog(int channel)
 // ============================================================
 // initGeofenceUi: 围栏配置区（独立于级联模型）
 //   围栏不属于 ppe/coco 这些级联槽位：它复用本通道已有的检测结果，只做几何
-//   判定，所以类别是**单值**（默认 person），另加一个节流窗口。
+//   判定，所以类别是**单值**（默认 person），另加一个报警最小间隔（进入沿才是主判据）。
 // ============================================================
 void frmMain::initGeofenceUi()
 {
@@ -1562,7 +1573,7 @@ void frmMain::initGeofenceUi()
     clsCombo->setCurrentText(curCls);
     gl->addWidget(clsCombo, 0, 1);
 
-    QLabel *labThrottle = new QLabel(QStringLiteral("围栏报警节流(秒):"));
+    QLabel *labThrottle = new QLabel(QStringLiteral("围栏报警最小间隔(秒):"));
     labThrottle->setMinimumWidth(120);
     gl->addWidget(labThrottle, 1, 0);
 
@@ -1574,7 +1585,9 @@ void frmMain::initGeofenceUi()
 
     QLabel *hint = new QLabel(QStringLiteral(
         "围栏报警复用本通道已有的检测结果，不额外占用 NPU：只有当该通道的模型能产出"
-        "上述类别时围栏才会触发（启动日志会检查并告警）。每通道每类别在节流窗口内只报一条。"
+        "上述类别时围栏才会触发（启动日志会检查并告警）。"
+        "报警按【进入】触发：走进围栏报一条，站在里面不动不再报，离开约 1.5 秒后再进来算新的一条。"
+        "上面的秒数是同通道同类别两次报警的最小间隔，用于兜住框抖动与多人同时进入。"
         "围栏形状仍在『视频监控』页绘制。"));
     hint->setWordWrap(true);
     hint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
@@ -1591,7 +1604,7 @@ void frmMain::initGeofenceUi()
         ConfigManager &c = ConfigManager::instance();
         c.setGeofenceThrottleSeconds(seconds);
         c.save();
-        log("fence", QStringLiteral("围栏报警节流: %1 秒").arg(seconds));
+        log("fence", QStringLiteral("围栏报警最小间隔: %1 秒").arg(seconds));
     });
 
     contentLayout->insertWidget(contentLayout->count() - 1, group);
@@ -1950,11 +1963,13 @@ void frmMain::openVideoToChannel(int channel, const QString &path)
 {
     if (!videoWindow) return;
 
-    PlayerWidget *player = videoWindow->playerWidget(channel);
-    if (player && !path.isEmpty()) {
-        player->open(path.toStdString());
-        log("system", QString("通道%1 视频源已加载: %2").arg(channel + 1).arg(path));
-    }
+    // 走 frmVideoWindow::openVideo 这一条口径：它会带上通道号。
+    // 直接调 PlayerWidget::open(path) 会用默认参数 channel=0，把这一路的
+    // decoder 通道号改成 0——槽位解析、报警键、围栏全部按通道 0 走。
+    videoWindow->openVideo(channel, path);
+    if (!path.isEmpty())
+        log("system", QString("通道%1 视频源已加载: %2（模型列表沿用启动时的配置，改模型/报警类别需重启程序）")
+                        .arg(channel + 1).arg(path));
 }
 
 // ==========================================

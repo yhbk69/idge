@@ -192,7 +192,8 @@ public:
     QString geofenceAlarmClass() const;
     void setGeofenceAlarmClass(const QString &cls);
 
-    /** @brief 围栏报警节流窗口（秒，默认 10）——每通道每类别窗口内只出一条 */
+    /** @brief 围栏报警节流下限（秒，默认 10）——每通道每类别窗口内只出一条；
+     *         "站着不动只报一次"由解码器的进入沿事件表保证，本窗口只兜沿抖动 */
     int geofenceThrottleSeconds() const;
     void setGeofenceThrottleSeconds(int seconds);
 

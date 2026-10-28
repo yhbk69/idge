@@ -51,6 +51,10 @@ ModelRegistry::instance().findIdByModelFile(p); // 模型文件反查库内 id�
 ## 注意事项
 
 - `rescan()` 会清空重建索引；`ensureScanned()` 只保证首次自动扫描，改库后需显式 `rescan()`。
+  每次扫描打一行 `已收录 N 个模型: <id 列表>`（现场问"现在有几个模型"就看这行）。
+- **只登记存在 `model.rknn` 的目录，且文件名必须一字不差**：把转换产物命名成 `cigarette.rknn`
+  这类目录会被忽略。现在会额外打 `qWarning` 点名（判据收窄到"有 labels.txt 且恰好一个 .rknn"，
+  所以 `ppocrv4-ocr` 那种 det/rec 多权重目录不会天天报假警告）。
 - `meta.json` 缺失时按目录名 + `labels.txt` 合成并回写；`classes` 以库内 `labels.txt` 实际内容为准。
 - 线程安全：`entries_` 由内部 `std::mutex` 保护；`rescan` 期间并发查询只可能读到新旧混合快照，
   约定在启动与配置页操作时调用，避免与高频推理路径同瞬时重建。

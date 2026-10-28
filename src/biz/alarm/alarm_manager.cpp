@@ -330,13 +330,15 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
 // ============================================================================
 // ingestFenceAlarm: 电子围栏侵入报警
 // ============================================================================
-// 由解码线程的"通道级合并围栏判定"对每个几何命中的目标调用。与 ingest 不同：
-//   - 类别不做匹配（能调到这里，说明调用方已按 geofence.alarmClass 选好类别
-//     并确认目标在围栏内），本函数只负责限流与建记录；
+// 由解码线程的"通道级合并围栏判定"对每个**新进入**围栏的目标调用。与 ingest 不同：
+//   - 类别不做匹配（能调到这里，说明调用方已按 geofence.alarmClass 选好类别、
+//     确认目标在围栏内，并且已用 IoU 事件表判定这不是"同一个人还在栏内"），
+//     本函数只负责限流与建记录；
 //   - 限流走独立窗口 geofence.throttleSeconds（默认 10 秒），键
 //     "通道:fence:类别名"。用类名而非 "槽位:cls_id"，配置重排槽位后仍稳定。
-//   语义即"每通道每类别 10 秒一次入侵事件"。此前围栏报警按每帧一条入库
-//   （bypassThrottle=true），40 秒能出三百多条，已不可用。
+//     "一个人站进去只报一次"由调用方的进入沿判定保证，这个窗口是它之下的兜底：
+//     框抖碎成多个事件、或两个人几乎同时进入时，最多 10 秒出一条。
+//   历史：再之前是按每帧一条入库（bypassThrottle=true），40 秒出三百多条，已不可用。
 //
 // 统计（totalDetections_/classCount_）不在这里累加：同一批检测结果已经由
 // 该槽位的 ingest 计过一次，围栏路径只补报警记录。
@@ -353,7 +355,7 @@ QVector<AlarmRecord> AlarmManager::ingestFenceAlarm(int channel, const object_de
         QMutexLocker lock(&mutex_);
         const QString key = QString("%1:fence:%2").arg(channel).arg(className);
         if (steadyNow - lastAlarmTime_.value(key, 0) < windowNs)
-            return newAlarms;          // 围栏窗口内，视为同一次入侵事件
+            return newAlarms;          // 节流窗口内：进入沿抖动或多人几乎同时进入，只留第一条
         lastAlarmTime_[key] = steadyNow;
 
         AlarmRecord alarm = makeAlarmRecord(channel, det, className, timeNs,

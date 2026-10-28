@@ -9,6 +9,9 @@ install/
 *.jpg
 *.png
 *.rknn
+# 训练/转换中间产物同样不进 git（分发靠整库 zip 或设置页「导入模型」，见 model/train/README.md）
+*.pt
+*.onnx
 *.bin
 3rdparty/ffmpeg/lib/
 3rdparty/ffmpeg/bin/

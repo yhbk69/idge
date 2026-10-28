@@ -39,7 +39,8 @@ FFmpegVideoDecoder（QObject，独立 QThread）
                     → PpeTask 推理 → resultQueue.push(od_results)
   解码线程 tryPop 各任务结果 → 坐标还原/画框进 RGBA
       → 逐槽 AlarmManager::ingest(ch, od, SlotContext) + 收集围栏候选（通道级）
-      → 槽循环结束后一次合并围栏判定 → ingestFenceAlarm（10 秒独立窗口）
+      → 槽循环结束后一次合并围栏判定 → 进入沿匹配（fenceTracks_，IoU 0.3 / 保活 1.5 秒）
+        → 只有"新进入"才 ingestFenceAlarm（throttleSeconds 只作节流下限）
       → emit frameReady(RenderFrame)
   （RenderFrame 携带 dup 出的 fd：所有权移交接收方，接收方负责 close）
 
@@ -146,6 +147,10 @@ det.detectRgba(rgbaPixels, width, height, stride /*>=width*4*/,
 - **每槽循环不能合并**：`BoxSmoother` 按**单一标签空间**做 IoU 匹配，把多个槽的框合成一份列表会让
   不同模型的同类号互相认错、画框抖动。所以画框与 `ingest` 都保持逐槽进行；只有**围栏**是通道级判定，
   在槽循环结束后用本帧收集的候选跑一次（`dislayImage` 还是带框的本帧缓冲，快照/片段才带得出框）。
+- **围栏是"进入沿"事件，不是电平**：`fenceTracks_`（每解码器一份，只被本通道解码线程访问，
+  与 `boxSmoother_` 同口径、无需加锁）把同一目标的连续命中归并成一次入侵事件——匹配上只续期不报警，
+  匹配不上才算新进入并报警，离开超过 1.5 秒事件结束、再进来算新事件。
+  `decodeLoop()` 开头与 `boxSmoother_` 一起清空（重开流即新的一段监控）。
 - **改模型列表要重启**：`buildCascadeTasks()` 只在首次 `start()` 生效（`tasks_` 非空即返回），
   换模型/改级联不会热更新；`PpeTask::reloadModel()` 是这条能力唯一安全的实现，当前无调用方
   （详见 `plan/roadmap.md` P1-2）。

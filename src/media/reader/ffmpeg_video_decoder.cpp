@@ -103,6 +103,7 @@
 #include <vector>
 #include <cstring>
 #include <cmath>
+#include <algorithm>   // std::remove_if：围栏事件表淘汰
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -290,6 +291,14 @@ private:
 // 片段窗口：D4 决策"前 3 秒 + 后 2 秒"，与 recording.buffer_seconds 之和等量
 static constexpr qint64 kClipPreMs = 3000;
 static constexpr qint64 kClipPostMs = 2000;
+
+// 围栏"进入沿触发"阈值（见 FFmpegVideoDecoder::FenceInsideTrack）：
+//   IoU 0.3 比 BoxSmoother 绘图用的 0.2 严——这里误匹配会把两次独立入侵并成一个事件，
+//   代价是漏报警；绘图误匹配只是框抖一下，容忍度不同。
+//   保活 1.5 秒：推理约 10Hz（每 3 帧一次），够跨过偶发漏检与短暂遮挡，
+//   又短到"走出去再回来"能被认成新事件。
+static constexpr float kFenceTrackIouThr = 0.3f;
+static constexpr long long kFenceTrackKeepNs = 1500LL * 1000000LL;
 
 struct ClipJob {
     std::shared_ptr<VideoRecorder> recorder;   // 持有引用计数：解码器已停止也不会悬垂
@@ -1175,6 +1184,7 @@ void FFmpegVideoDecoder::decodeLoop()
     }
     int frame_count = 0;
     boxSmoother_.clear();
+    fenceTracks_.clear();   // 重开流即新的一段监控，围栏事件不跨重启延续
 
     TIMER t;
 
@@ -1744,59 +1754,119 @@ void FFmpegVideoDecoder::decodeLoop()
                         ds.add(ds.sAlarm);
                     }
 
-                    // ===== 4.10b 电子围栏：通道级合并判定 + 报警 =====
+                    // ===== 4.10b 电子围栏：通道级合并判定 + 进入沿触发报警 =====
                     //
                     // 判定放在这里（槽位循环之后、emit frameReady 之前）：
                     //   - 候选已跨槽位收齐，挂 PPE 还是挂 COCO 都能检出 person；
                     //   - 围栏坐标是 overlay 像素空间，需与本帧 dislayImage 尺寸同口径；
                     //   - 截图要用同一帧带框画面，deliverAlarms 才能拍到越界目标。
-                    if (fenceScan && !fenceCandidates.empty()) {
-                        const geofence::ChannelFence cf = fenceMgr.channelFence(channel_);
-                        const bool alarmInside = (fenceMgr.mode() == "inside_alarm");
-                        int oW = 0, oH = 0;
-                        fenceMgr.overlaySize(channel_, oW, oH);
+                    //
+                    // 语义是"进入沿触发"而非"电平触发"：一个人站在围栏里只报一次，
+                    // 不是每 10 秒报一次。靠 fenceTracks_ 把连续命中同一个目标的若干帧
+                    // 归并成"同一次入侵事件"；离开超过 kFenceTrackKeepNs 后事件结束，
+                    // 再进来算新事件。（此前每命中一帧就调一次报警，40 秒能出三百多条。）
+                    if (fenceScan) {
+                        const long long steadyNow =
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch()).count();
 
-                        QVector<AlarmRecord> fenceAlarms;
-                        int insideCount = 0;
-                        for (const FenceCandidate &c : fenceCandidates) {
-                            // 脚点（框底边中点）落在围栏多边形内算命中；
-                            // alarmInside=false 时语义反过来（越界即围栏外报警）
-                            const bool inside = geofence::FenceChecker::checkDetection(
-                                    c.det,
-                                    dislayImage.width, dislayImage.height,
-                                    640, 640, oW, oH,
-                                    cf, alarmInside);
-                            if (!inside)
-                                continue;
-                            insideCount++;
-                            // 每通道每类别在 geofence.throttleSeconds 窗口内只出一条
-                            fenceAlarms += AlarmManager::instance().ingestFenceAlarm(
-                                    channel_, c.det, slotCtxs[c.slot], c.timeNs);
+                        // 淘汰"人已经离开"的旧事件。本轮没有候选（非推理帧、或人全走了）
+                        // 也要执行，否则离开者的 track 会一直挂着、回来时不再报警。
+                        fenceTracks_.erase(
+                            std::remove_if(fenceTracks_.begin(), fenceTracks_.end(),
+                                           [steadyNow](const FenceInsideTrack &t) {
+                                               return steadyNow - t.lastHitNs > kFenceTrackKeepNs;
+                                           }),
+                            fenceTracks_.end());
+
+                        if (!fenceCandidates.empty()) {
+                            const geofence::ChannelFence cf = fenceMgr.channelFence(channel_);
+                            // alarmInside=false(outside_alarm) 时"命中"=在围栏外，
+                            // 下面逻辑于是变成"越界沿触发"，语义同样成立
+                            const bool alarmInside = (fenceMgr.mode() == "inside_alarm");
+                            int oW = 0, oH = 0;
+                            fenceMgr.overlaySize(channel_, oW, oH);
+
+                            QVector<AlarmRecord> fenceAlarms;
+                            int insideCount = 0;   // 命中围栏的目标数（含同一次入侵的续期）
+                            int entryCount = 0;    // 其中判定为"新进入"的次数 = 建事件数
+                            for (const FenceCandidate &c : fenceCandidates) {
+                                // 脚点（框底边中点）是否落在围栏多边形内
+                                const bool inside = geofence::FenceChecker::checkDetection(
+                                        c.det,
+                                        dislayImage.width, dislayImage.height,
+                                        640, 640, oW, oH,
+                                        cf, alarmInside);
+                                if (!inside)
+                                    continue;
+                                insideCount++;
+
+                                const float nx = (float)c.det.box.left;
+                                const float ny = (float)c.det.box.top;
+                                const float nw = (float)(c.det.box.right - c.det.box.left);
+                                const float nh = (float)(c.det.box.bottom - c.det.box.top);
+
+                                // 与进行中的入侵事件做 IoU 匹配：匹配上 = 同一个人还在栏内，
+                                // 只把框与时刻刷成新值（事件续期），不报警
+                                int bestIdx = -1;
+                                float bestIou = kFenceTrackIouThr;
+                                for (size_t t = 0; t < fenceTracks_.size(); ++t) {
+                                    const auto &tr = fenceTracks_[t];
+                                    const float ix1 = std::max(tr.x, nx);
+                                    const float iy1 = std::max(tr.y, ny);
+                                    const float ix2 = std::min(tr.x + tr.w, nx + nw);
+                                    const float iy2 = std::min(tr.y + tr.h, ny + nh);
+                                    const float inter =
+                                        std::max(0.0f, ix2 - ix1) * std::max(0.0f, iy2 - iy1);
+                                    const float iou =
+                                        inter / (tr.w * tr.h + nw * nh - inter + 1e-6f);
+                                    if (iou > bestIou) { bestIou = iou; bestIdx = (int)t; }
+                                }
+                                if (bestIdx >= 0) {
+                                    auto &tr = fenceTracks_[bestIdx];
+                                    tr.x = nx; tr.y = ny; tr.w = nw; tr.h = nh;
+                                    tr.lastHitNs = steadyNow;
+                                    continue;
+                                }
+
+                                // 匹配不上 = 进入沿：报一次警，并建立事件
+                                entryCount++;
+                                fenceAlarms += AlarmManager::instance().ingestFenceAlarm(
+                                        channel_, c.det, slotCtxs[c.slot], c.timeNs);
+                                FenceInsideTrack tr;
+                                tr.x = nx; tr.y = ny; tr.w = nw; tr.h = nh;
+                                tr.lastHitNs = steadyNow;
+                                fenceTracks_.push_back(tr);
+                            }
+
+                            QStringList alarmClassDesc;
+                            for (size_t k = 0; k < slotCtxs.size(); ++k)
+                                alarmClassDesc << QString("M%1=%2").arg(k + 1)
+                                        .arg(slotCtxs[k].alarmClass.isEmpty()
+                                                 ? QStringLiteral("(不报警)")
+                                                 : slotCtxs[k].alarmClass);
+                            // 报警条数可能少于"新进入"数：同一通道同一类别被
+                            // geofence.throttleSeconds 兜住了（进入沿抖动/两人几乎同时进入），
+                            // 这两个数并排打出来就是为了能看出来被兜住了。
+                            fenceMgr.postLog("fence",
+                                QString("[通道%1] 围栏: 模式=%2, 围栏类别=%3, 围栏=%4个, "
+                                        "本通道报警类=[%5] | 候选%6个, 栏内%7个, 新进入%8个, "
+                                        "报警%9条(最小间隔%10秒)")
+                                    .arg(channel_ + 1).arg(fenceMgr.mode()).arg(fenceCls)
+                                    .arg(cf.shapes.size()).arg(alarmClassDesc.join(", "))
+                                    .arg((int)fenceCandidates.size()).arg(insideCount)
+                                    .arg(entryCount).arg(fenceAlarms.size())
+                                    .arg(ConfigManager::instance().geofenceThrottleSeconds()));
+
+                            if (!fenceAlarms.isEmpty()) {
+                                fenceMgr.postLog("alarm",
+                                    QString("  [通道%1] ★ 围栏侵入报警: %2 (置信度 %3%)")
+                                        .arg(channel_ + 1)
+                                        .arg(fenceAlarms.front().className)
+                                        .arg(fenceAlarms.front().confidence * 100, 0, 'f', 1));
+                            }
+                            deliverAlarms(channel_, fenceAlarms, dislayImage, videoRecorder_);
                         }
-
-                        QStringList alarmClassDesc;
-                        for (size_t k = 0; k < slotCtxs.size(); ++k)
-                            alarmClassDesc << QString("M%1=%2").arg(k + 1)
-                                    .arg(slotCtxs[k].alarmClass.isEmpty()
-                                             ? QStringLiteral("(不报警)")
-                                             : slotCtxs[k].alarmClass);
-                        fenceMgr.postLog("fence",
-                            QString("[通道%1] 围栏: 模式=%2, 围栏类别=%3, 围栏=%4个, "
-                                    "本通道报警类=[%5] | 候选%6个, 围栏内%7个, 报警%8条(节流%9秒)")
-                                .arg(channel_ + 1).arg(fenceMgr.mode()).arg(fenceCls)
-                                .arg(cf.shapes.size()).arg(alarmClassDesc.join(", "))
-                                .arg((int)fenceCandidates.size()).arg(insideCount)
-                                .arg(fenceAlarms.size())
-                                .arg(ConfigManager::instance().geofenceThrottleSeconds()));
-
-                        if (!fenceAlarms.isEmpty()) {
-                            fenceMgr.postLog("alarm",
-                                QString("  [通道%1] ★ 围栏报警触发: %2 (置信度 %3%)")
-                                    .arg(channel_ + 1)
-                                    .arg(fenceAlarms.front().className)
-                                    .arg(fenceAlarms.front().confidence * 100, 0, 'f', 1));
-                        }
-                        deliverAlarms(channel_, fenceAlarms, dislayImage, videoRecorder_);
                     }
 
                     

@@ -77,7 +77,7 @@ $IDGE_WORKSPACE/
 | `video.channels` | 数组，**下标即通道号（0-based）**，条目里的 `channel` 字段只给人看。每路 = `source`/`note`/`enabled`/`models`。`models` 的顺序就是级联槽位顺序（画面上 `M1/M2/…` 前缀、报警 `result_id`），重排会改号；`enabled=false` 只决定启动时是否开这一路（改完需重启） |
 | `detect` | 检测参数。⚠ 整节当前都不生效：`conf_threshold`/`nms_threshold` 是**假开关**（推理侧不传参，实际用 `common.hpp` 的编译期 `BOX_THRESH`/`NMS_THRESH`）；`class_num`/`threads` 已连 getter 一起删掉（类别数属于每个模型，推理线程数 = 各通道模型数之和，设置页显示的是真实值），老配置里残留的这两个键程序不再读取 |
 | （无 `video.render`） | 推理间隔是编译期的 `frame_count % 3`（`ffmpeg_video_decoder.cpp` 的 4.6 节），**没有配置键**，别在 JSON 里加 `render.sampleInterval`——它只会变成一个改了不生效的假开关 |
-| `geofence` | 围栏**不属于级联**：复用该通道已有的检测结果、只做几何判定，不额外占用 NPU。`enabled` 总开关、`mode`（`inside_alarm`/`outside_alarm`）、`alarmClass` **单值触发类别**（默认 `person`，必须是该通道某个模型 `labels.txt` 里的叫法）、`throttleSeconds` 报警节流窗口（默认 10 秒，每通道每类别一条）、`channels` 每路的矩形/多边形顶点（overlay 像素坐标，随存 `overlay_w`/`overlay_h`，改窗口布局会偏移） |
+| `geofence` | 围栏**不属于级联**：复用该通道已有的检测结果、只做几何判定，不额外占用 NPU。`enabled` 总开关、`mode`（`inside_alarm`/`outside_alarm`）、`alarmClass` **单值触发类别**（默认 `person`，必须是该通道某个模型 `labels.txt` 里的叫法）、`throttleSeconds` 报警**节流下限**（默认 10 秒，每通道每类别窗口内只留一条）、`channels` 每路的矩形/多边形顶点（overlay 像素坐标，随存 `overlay_w`/`overlay_h`，改窗口布局会偏移）。报警语义是**进入沿**：人走进围栏报 1 条，站在里面不动不再报，离开 1.5 秒后再进来才算新事件（事件表在解码器 `fenceTracks_`，见 `src/biz/geofence/README.md`） |
 | `database` | `storeDetections`（报警相关检测明细是否入 `detections` 表）与 `detectionRetentionDays`（保留天数）；写成 `null` 等于吃默认值 true/30 |
 | `recording` | 报警视频硬件编码录制（默认 `enabled=false`，见下）；`buffer_seconds` 需 ≥ 片段窗口 3+2 秒 |
 | `smartRecognition` | 智能识别四张卡片（二维码/OCR/点名/盘点）共用的取流地址；键缺省时自动探测摄像头节点（MJPEG 优先，其次 CSI/rkisp 的 NV12、YUYV），探测不到退回 `/dev/video0`。仅 getter，设置页不编辑 |
@@ -200,8 +200,9 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
 - **RGA 硬件加速预处理**：色彩转换和图像缩放由 RGA 引擎完成，释放 CPU
 - **报警视频硬件编码**：带检测框的 RGBA → RGA → `hevc_rkmpp` 零拷贝硬编 + 环形缓冲，报警时切出"前 3 秒 + 后 2 秒"裸流片段（CPU 软编 x264 已彻底移出链路）
 - **电子围栏**：多边形/矩形围栏绘制，inside/outside 两种侵入判定模式；围栏**独立于级联**——
-  复用该通道已有模型的检测结果做几何判定，触发类别是 `geofence.alarmClass` 单值（默认 `person`），
-  按 `geofence.throttleSeconds`（默认 10 秒）每通道每类别节流
+  复用该通道已有模型的检测结果做几何判定，触发类别是 `geofence.alarmClass` 单值（默认 `person`）；
+  报警按**进入沿**触发（进去报一条、站着不动不报、离开再回来算新的一条），
+  `geofence.throttleSeconds`（默认 10 秒）只作每通道每类别的节流下限
 - **报警管理**：限流去重、抓拍落盘、SQLite 持久化、GUI 悬浮提示与历史查询
 - **人员点名**：SCRFD 人脸检测 + 特征比对（进程内 RKNN 常驻推理），注册 / 点名 / 注销三阶段，余弦相似度 + 贪心一对一匹配
 - **设备盘点**：复用 YOLO11 RKNN 模型做设备识别与盘点任务管理
@@ -353,9 +354,9 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
 | `src/base/threadpool/` | 通用线程池 | [README](src/base/threadpool/README.md) |
 | `src/base/utils/` | 图像/绘制/路径/日志等通用工具 | [README](src/base/utils/README.md) |
 | `tools/face_recognition/` | 人脸识别命令行工具（CLI 验证/点名对照回归基准，产物输出 model/face/） | [README](tools/face_recognition/README.md) |
-| `model/` | 模型库 `library/<id>/`（yolo11n/s/m、ppocrv4-ocr 收编）+ 专项标签 | [README](model/README.md) |
+| `model/` | 模型库 `library/<id>/`（yolo11n/s/m-coco、ppe、ocr 等，一个模型一个目录）+ `train/`（训练侧 .pt/yaml/校准清单，程序不读） | [README](model/README.md) |
 | `data/` | 运行时数据（config/idge.db/alarms/backups/roll_call_data，内容不入库） | — |
-| `python/` | ONNX→RKNN 转换与验证脚本 | [README](python/README.md) |
+| `python/` | 模型转换与验证脚本：`.pt → onnx → rknn`（`pt2rknn.sh`）、ONNX→RKNN（`convert.py`）、推理/mAP 验证（`yolo11.py`） | [README](python/README.md) |
 | `tests/` | 测试程序（test_database 数据库层；test_equipment 设备盘点、test_rollcall 人员点名全链离线自测；test_latest_frame_slot 帧广播槽跳帧/生命周期，均随主构建生成） | [README](tests/README.md) |
 | `docs/` | 技术知识库 | [README](docs/README.md) |
 | `include/` | nlohmann/json 单头文件 | [README](include/README.md) |
@@ -427,7 +428,16 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
 11. **换模型/改通道模型仍需重启**：推理任务（`PpeTask` + 结果队列 + 类名表 + 报警类别）只在解码器
     首次 `start()` 时按 `video.channels[ch].models` 建立，此后配置改动不影响在跑的任务；
     `PpeTask::reloadModel()` 保留了唯一安全的换模型实现但全工程无调用方（roadmap P1-2）；
-    模型测试按钮会短时独占一次 NPU 上下文（GUI 阻塞秒级）
+    模型测试按钮会短时独占一次 NPU 上下文（GUI 阻塞秒级）。
+    **设置页各改动的生效时机**（"改了没反应"先对这段口径）：
+    即时生效——围栏形状（`FenceManager` 内存态，解码线程每帧现取）、围栏类别、围栏报警最小间隔、
+    WebSocket 地址（重连）、通道备注/模型备注、模型库导入与删除（盘点服务 `reloadEquipmentService()` 热更）；
+    重启后生效——通道 `models`、通道 `enabled`、模型 `alarm_class`（三者都被 `buildCascadeTasks()` 的
+    一次性 guard 冻结，报警判定沿用建任务时的快照）；`geofence.enabled`/`mode` 设置页里没有，
+    手改 config 后要么重启、要么在页面上动一次「围栏类别」触发 `loadFromConfig()` 顺带重载；
+    手输的视频源地址只落盘，要点「浏览」按钮才重开本路（重开后**模型列表仍是旧的**）；
+    `detect.conf_threshold`/`nms_threshold` 是假开关，改到重启都不生效（见 `src/base/config/README.md`）。
+    UI 上凡是重启后才生效的项，日志都会明写"（重启后生效）"。
 12. **`wss://` 放弃证书校验**：`WsClient::onSslErrors` 无条件 `ignoreSslErrors()`，只适合内网调试；
     WS 发送也不排队，断线期间的 `ack` 直接丢弃（详见 `plan/websocket.md`）
 13. **NPU 负载按"各通道模型数之和"计**：4 路 × 每路 3 个模型 = 12 个推理任务打在 3 个核上，
@@ -437,7 +447,8 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
 > 已闭环、不再在此罗列的历史项：解码线程与 `player_widget` 关闭（现 `closeEvent` 两阶段并行停 4 路）、
 > 硬解按 `codecpar->codec_id` 选 `h264_rkmpp`/`hevc_rkmpp`、
 > 围栏报警改为独立通道级判定 + `geofence.throttleSeconds` 节流（原先传 `bypassThrottle=true` 每帧一条，
-> 40 秒能出三百多条，并把同通道的普通检测报警整个吞掉）、
+> 40 秒能出三百多条，并把同通道的普通检测报警整个吞掉；后来进一步改成**进入沿触发**，
+> 站着不动不再每 10 秒重复报）、
 > 围栏触发类别改为 `geofence.alarmClass` 单值（V1 的 `alarmClasses` 列表已废弃）、
 > 报警类别从槽位属性迁到模型属性、配置里不再出现模型/标签路径（绝对↔相对路径拉锯问题连根消失）、
 > 时间戳量纲注释已统一为 epoch 纳秒、`FrameQueue::pushAndReplace` 顺序、`dma_mutex` 跨 TU 单例、

@@ -491,7 +491,7 @@ bool ConfigManager::migrateSchemaV2()
         gf["alarmClass"] = pick;
         gf.remove(QStringLiteral("alarmClasses"));
         if (!gf.contains(QStringLiteral("throttleSeconds")))
-            gf["throttleSeconds"] = 10;  // 围栏报警从此有自己的节流窗口（V1 是每帧一条）
+            gf["throttleSeconds"] = 10;  // 围栏报警从此有自己的节流下限（V1 是每帧一条）
         root_["geofence"] = gf;
     }
 
@@ -894,7 +894,9 @@ void ConfigManager::setNmsThreshold(double val)
 //     },
 //     "alarmClass": "person",             // 触发围栏报警的检测类别（单值；围栏不属于
 //                                         // 级联模型，判定只看"这一路里是不是人"）
-//     "throttleSeconds": 10               // 围栏报警节流：每通道每类别窗口内只出一条
+//     "throttleSeconds": 10               // 围栏报警节流下限：每通道每类别窗口内只出一条。
+//                                         // "一个人站进去只报一次"是解码器的进入沿事件表决定的，
+//                                         // 这个窗口只兜住沿抖动/遮挡重匹配/多人同时进入
 //   }
 // }
 //

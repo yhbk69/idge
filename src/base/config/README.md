@@ -59,7 +59,7 @@
 | `enabled` | bool | `true` | 总开关；有围栏数据时 `FenceManager::loadFromConfig` 会自动置 true |
 | `mode` | string | `inside_alarm` | `inside_alarm` / `outside_alarm` |
 | `alarmClass` | string | `person` | 触发围栏报警的**单一类别**（旧列表 `alarmClasses` 已废弃） |
-| `throttleSeconds` | int | `10` | 每通道每类别的入侵事件节流窗口，由 `AlarmManager::ingestFenceAlarm` 执行 |
+| `throttleSeconds` | int | `10` | 围栏报警**节流下限**：每通道每类别窗口内只出一条，由 `AlarmManager::ingestFenceAlarm` 执行。"同一个人站进去只报一次"不靠它，靠解码器的进入沿事件表（见 `src/biz/geofence/README.md`） |
 | `channels.<ch>` | object | — | 围栏形状 + `overlay_w/h`（顶点是 overlay 像素坐标） |
 
 围栏不占推理任务：它复用该通道已有模型产出的检测结果，只做几何判定。若某通道挂了围栏却

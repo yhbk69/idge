@@ -37,8 +37,23 @@ inside/outside 报警模式，并判断目标是否侵入/离开围栏。
 判定：解码线程（每帧，槽循环结束后一次，通道级而非槽位级）
       → 收集类别 == alarmClass 的检测候选
       → FenceManager::channelFence(ch)(快照) → FenceChecker::checkDetection
-      → AlarmManager::ingestFenceAlarm()（独立限流窗口 geofence.throttleSeconds）
+      → 进入沿判定（IoU 事件表，在解码器里，不在本模块）
+      → AlarmManager::ingestFenceAlarm()（节流下限 geofence.throttleSeconds）
 ```
+
+## 报警语义：进入沿，不是电平
+
+**一个人走进围栏 → 报 1 条；站在里面不动 → 不再报；走出去 1.5 秒后再进来 → 再报 1 条。**
+事件状态由 `FFmpegVideoDecoder::fenceTracks_` 维护（每通道一份、只被该通道解码线程访问）：
+命中围栏的目标与进行中的事件做 IoU 匹配（阈值 0.3，比绘图平滑的 0.2 严——这里误匹配会把
+两次独立入侵并成一条报警），匹配上只续期不报警；匹配不上即"新进入"，报警并建事件；
+连续 1.5 秒没被命中就认为人已离开、事件结束。
+
+`geofence.throttleSeconds`（默认 10 秒）退到事件之下做**兜底下限**：进入沿抖动、短暂遮挡后
+重匹配、或两个人几乎同时进入时，每通道每类别窗口内只留第一条。想"每次进入都单独留档"就把它调小。
+调试页那行围栏日志会把"栏内 N 个 / 新进入 M 个 / 报警 K 条"并排打出来，K<M 就说明被下限兜住了。
+
+本模块只提供几何判定与形状/开关/模式/类别，**不参与事件跟踪**。
 
 ## 使用方法
 ```cpp
@@ -68,6 +83,7 @@ bool alarm = FenceChecker::checkDetection(det, srcW, srcH, modelW, modelH,
 - **围栏静默不触发的最常见原因**：该通道挂的模型产不出 `alarmClass`（例如只挂了 PPE 模型，
   标签里没有 `person`）。`FFmpegVideoDecoder::buildCascadeTasks()` 在启动时会打一条
   `[geofence] 通道N 无模型产出类别 person，围栏不会触发`，先看日志别改几何。
-- **围栏报警限流不在本模块**：`geofence.throttleSeconds`（默认 10 秒）由
-  `AlarmManager::ingestFenceAlarm()` 读取并执行，FenceManager 只管形状、开关、模式与类别。
-  旧实现借用级联报警路径且无限流（每帧一条），现已独立。
+- **围栏报警的限流与事件跟踪都不在本模块**：`geofence.throttleSeconds`（默认 10 秒）由
+  `AlarmManager::ingestFenceAlarm()` 读取执行，"同一个人只报一次"由解码器的进入沿事件表决定；
+  FenceManager 只管形状、开关、模式与类别。
+  旧实现借用级联报警路径且无限流（每帧一条），后来加了节流但仍是电平语义（人不动就一直报），现已改为进入沿。

@@ -140,14 +140,31 @@ int ModelRegistry::rescan(const QString &libraryDir)
     if (lib.exists()) {
         const QFileInfoList dirs = lib.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
         for (const QFileInfo &d : dirs) {
-            if (QFile::exists(d.absoluteFilePath() + "/" + kModelFile))
-                loadEntryDir(d.absoluteFilePath());
+            const QString dirPath = d.absoluteFilePath();
+            if (QFile::exists(dirPath + "/" + kModelFile)) {
+                loadEntryDir(dirPath);
+                continue;
+            }
+            // "权重放进库目录却看不见"的头号原因是文件名没按约定写成 model.rknn，以前静默跳过。
+            // 判定收窄到"有 labels.txt 且恰好一个 .rknn"：这样 ppocrv4-ocr 那种多权重目录
+            // （det.rknn + rec.rknn，本就不走单模型约定）不会天天报假警告。
+            const QStringList stray = QDir(dirPath).entryList({QStringLiteral("*.rknn")}, QDir::Files);
+            if (stray.size() == 1 && stray.first() != QString(QLatin1String(kModelFile))
+                && QFile::exists(dirPath + "/" + kLabelFile)) {
+                qWarning() << "[ModelRegistry] 未收录" << d.fileName() << ": 目录里的权重叫"
+                           << stray.first() << "，单模型库约定文件名固定为" << kModelFile
+                           << "，请改名后重启（否则该模型不会出现在模型列表里）";
+            }
         }
     } else {
         qInfo() << "[ModelRegistry] 模型库目录不存在:" << libraryDir;
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
+    QStringList ids;
+    for (auto it = entries_.constBegin(); it != entries_.constEnd(); ++it)
+        ids.append(it.key());
+    qInfo() << "[ModelRegistry] 已收录" << entries_.size() << "个模型:" << ids.join(", ");
     return entries_.size();
 }
 

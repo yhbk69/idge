@@ -41,6 +41,8 @@
 #include <iostream>
 #include <QTimer>
 #include <QDateTime>
+#include <QFileInfo>
+#include <QDir>
 
 // RGA (Rocket Graphics Acceleration) 头文件
 // 用于硬件加速的图像色彩转换和缩放
@@ -140,13 +142,20 @@ static int runCli(int argc, char *argv[])
         parser.printConfig(config);
     }
 
-    const std::string labelsPath = "model/coco_80_labels_list.txt";
+    // 类别表口径与模型库结构一致：优先取**模型同目录**的 labels.txt
+    //（约定 model/library/<id>/{model.rknn,labels.txt}，与 camera_preview_decoder 同一规则）。
+    // 原来这里固定读 model/coco_80_labels_list.txt，而那个文件在模型库改造时已删除，
+    // 结果 CLI 模式所有类别名都是空的；不在库里的散装 .rknn 才退回 COCO 库表。
+    const QFileInfo modelInfo(QString::fromStdString(config.model_path));
+    QString labelsPath = modelInfo.dir().filePath(QStringLiteral("labels.txt"));
+    if (!QFileInfo::exists(labelsPath))
+        labelsPath = QStringLiteral("model/library/yolo11n-coco/labels.txt");
 
     // 加载 RKNN 模型
     printf("[CLI] Loading model: %s\n", config.model_path.c_str());
     auto model = std::make_shared<YOLO11Model>(
         config.model_path,
-        labelsPath,
+        labelsPath.toStdString(),
         RKNN_NPU_CORE_0);  // 使用 NPU 核心 0
     printf("[CLI] Model loaded.\n");
 

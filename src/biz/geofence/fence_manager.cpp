@@ -38,7 +38,7 @@ FenceManager &FenceManager::instance()
 //         }
 //       },
 //       "alarmClass": "person",                 // 触发围栏报警的类别，缺失时默认 person
-//       "throttleSeconds": 10                   // 每通道每类别的围栏报警节流窗口
+//       "throttleSeconds": 10                   // 围栏报警节流下限（主判据是"进入沿"，见 README）
 //     }
 //   }
 // ============================================================================

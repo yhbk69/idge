@@ -185,6 +185,19 @@ private:
     };
     std::vector<BoxSmoother> boxSmoother_;
 
+    // ===== 围栏侵入事件表（进入沿触发）=====
+    // 每个元素 = 一次进行中的"入侵事件"，记最近一次命中时的框与时刻。
+    //   框用模型 640 空间（与围栏候选的 det.box 同口径，跨帧可直接算 IoU），
+    //   时刻用 steady_clock 纳秒（只与自身做差，不与报警里的 epoch 时间混用）。
+    // 命中已有事件 → 只续期，不再报警；匹配不上 → 视为"刚进入"，报警并新建事件；
+    // 连续 kFenceTrackKeepNs 没被命中 → 认为人已离开，事件结束，再进围栏算新事件。
+    // 只被本通道解码线程访问，无需加锁（与 boxSmoother_ 同一口径）。
+    struct FenceInsideTrack {
+        float x, y, w, h;
+        long long lastHitNs = 0;
+    };
+    std::vector<FenceInsideTrack> fenceTracks_;
+
     // ===== 视频录制 =====
     // 硬件编码环形缓冲区录制器：用 shared_ptr 持有，ClipWriter 的延迟 dump
     // 任务各持一份引用，因此本对象析构不会让后台线程摸到已释放的编码器。

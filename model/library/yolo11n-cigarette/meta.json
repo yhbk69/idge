@@ -1,0 +1,18 @@
+{
+    "classes": [
+        "cigarette"
+    ],
+    "display_name": "yolo11n-cigarette",
+    "family": "yolo11n",
+    "id": "yolo11n-cigarette",
+    "input_size": [
+        640,
+        640
+    ],
+    "notes": "吸烟（手持烟支）检测。训练源材料见 model/train/cigarette/；model.rknn 已于 2026-10-28 在 x86 PC 由 python/pt2rknn.sh 转换入库（rk3588 / i8），CLI 冒烟通过。尚未挂进 config 的任何通道。",
+    "num_classes": 1,
+    "quant": "i8",
+    "sha256": "de47af5f89a07c155d279709f14827406f93719ecfb5250f44f2cc34797af698",
+    "task": "cigarette",
+    "version": "2026-10-28"
+}
