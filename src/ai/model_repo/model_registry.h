@@ -14,13 +14,18 @@
  * 职责：
  *   1. rescan()：扫描库目录，解析/补写 meta.json，计算 sha256
  *   2. id → 模型路径/标签路径/显示名/类别数 查询
- *   3. findIdByModelFile()：按模型文件反查库内 id（供旧配置迁移与标签解析）
+ *   3. findIdByModelFile()：按模型文件反查库内 id（供旧配置兼容与排查）
  *   4. importModel()：外部 rknn+labels 入库，sha256 相同则去重返回既有 id
- *   5. resolveCascadeSlots()：级联 5 槽位的"模型+标签"单一事实源，
- *      标签优先级 = 槽位显式 label > 库内 labels.txt > 全局 label
+ *   5. resolveChannelSlots()：**单通道**级联槽位的"模型+标签+报警类别"单一事实源，
+ *      config 里通道只写库 id 列表，路径与类别名一律从这里取；
+ *      标签优先级 = video.models[<id>].label（逃生口）> 库内 labels.txt
+ *   6. referenceCount()：被多少通道的模型列表引用（删除守卫与"被引用数"列）
  *
  * 线程约定：rescan/import 仅在启动与配置页操作时调用；
- * resolveCascadeSlots/getters 只读哈希，重建期间通过内部互斥保护。
+ * resolveChannelSlots/getters 只读哈希，重建期间通过内部互斥保护。
+ * ⚠ 本类会取 ConfigManager 的锁（channelModelIds/modelParam/modelParamUsers），
+ *   所以 ConfigManager 内部（load 的迁移流程）**不得**回调本类：
+ *   std::mutex 不可重入，回头取锁就是启动死锁。
  */
 
 #include <QString>
@@ -30,14 +35,16 @@
 #include <mutex>
 
 /**
- * @brief 一个级联槽位解析后的模型描述
- * modelPath 为空表示该槽位未启用
+ * @brief 某通道一个级联槽位解析后的模型描述（由 channelModelIds 逐项展开）
+ *
+ * 只描述**可用**槽位：库里找不到的 id 会被跳过并打告警，不占下标。
  */
-struct SlotModel
+struct ResolvedSlot
 {
-    QString modelPath;   ///< .rknn 文件路径（相对或绝对，保持配置原样）
-    QString labelPath;   ///< 该槽位专属标签文件路径
-    QString modelId;     ///< 命中的库内 id，未收编时为空
+    QString modelPath;   ///< model.rknn 绝对路径（给加载器）
+    QString labelPath;   ///< 该模型的 labels.txt（参数表覆盖 > 库内默认）
+    QString libId;       ///< 模型库目录名，config 里就是这个键
+    QString alarmClass;  ///< 该模型的报警类别（video.models[<id>].alarm_class），空=不报警
 };
 
 /**
@@ -84,8 +91,8 @@ public:
     /// id → 完整信息，不存在返回空 ModelMeta（id 字段为空即无效）
     ModelMeta meta(const QString &id) const;
 
-    QString modelPath(const QString &id) const;    ///< id → model.rknn 路径
-    QString labelPath(const QString &id) const;    ///< id → labels.txt 路径
+    QString modelPath(const QString &id) const;    ///< id → model.rknn 绝对路径（加载器用）
+    QString labelPath(const QString &id) const;    ///< id → labels.txt 绝对路径（加载器用）
     QString displayName(const QString &id) const;  ///< id → 显示名（无则回落 id）
 
     /**
@@ -106,13 +113,13 @@ public:
     bool importModel(const QString &srcRknnPath, const QString &srcLabelPath,
                      const QString &id, QString &errorMsg);
 
-    /// id 被级联槽位（模型1~5，含全局 model.path）引用的次数
+    /// id 被多少个通道的模型列表引用（删除守卫 + 表格"被引用数"列）
     int referenceCount(const QString &id) const;
 
     /**
      * @brief 从库中移除模型
      *
-     * 有槽位引用时拒绝删除；否则把模型目录移入 model/.trash/
+     * 被任一通道的模型列表引用时拒绝删除；否则把模型目录移入 model/.trash/
      * （带时间戳后缀，可人工恢复，不做物理删除），并同步注册表。
      *
      * @return true=已移除，false=被引用/目录移动失败（errorMsg 给原因）
@@ -120,15 +127,16 @@ public:
     bool deleteModel(const QString &id, QString &errorMsg);
 
     /**
-     * @brief 解析级联 5 槽位的模型与标签（decoder/UI 的单一事实源）
+     * @brief 解析某一通道的级联槽位（decoder/UI 的单一事实源）
      *
-     * 槽位 1 取全局 model.path，槽位 2~5 取 cascade.models[idx]。
-     * 每槽标签解析优先级：
-     *   cascadeModelLabel(idx) 显式配置 > 模型文件命中库内条目的 labels.txt > 全局 model.label
+     * 输入通道号（0-based，与 video.channels 下标同口径），取其有序模型列表，
+     * 逐项展开成模型路径 + 标签 + 该模型的报警类别。
+     * 标签优先级：video.models[<id>].label（库外标签的逃生口）> 库内 labels.txt
      *
-     * @return 固定 5 项，未启用槽位的 modelPath 为空
+     * @return 只含可用槽位的有序列表，下标即紧凑槽位号（= result_id）；
+     *         库里不存在的 id 被跳过并打告警，不占下标
      */
-    static QList<SlotModel> resolveCascadeSlots();
+    static QList<ResolvedSlot> resolveChannelSlots(int ch);
 
 private:
     ModelRegistry() {}

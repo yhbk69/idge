@@ -14,8 +14,8 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `alarm_manager.h` | `AlarmRecord` 结构体 + `AlarmManager` 单例声明、限流常量 |
-| `alarm_manager.cpp` | `ingest()` 判定/限流、`storeAndNotify()` 存储与发信号、`attachVideoClip()` 片段回填、`cleanOldData()` 数据与媒体清理 |
+| `alarm_manager.h` | `AlarmRecord` 结构体 + `AlarmManager` 单例声明、限流常量、`SlotContext` |
+| `alarm_manager.cpp` | `ingest()`/`ingestFenceAlarm()` 判定与限流、`storeAndNotify()` 存储与发信号、`attachVideoClip()` 片段回填、`cleanOldData()` 数据与媒体清理 |
 
 ## 核心类与数据流
 - **AlarmManager**（`QObject` 单例）：全局唯一。
@@ -23,34 +23,51 @@
 
 数据流：
 ```
-解码线程 → ingest(channel, results) → 生成 newAlarms(未存/未截图)
-         → storeAndNotify(newAlarms) → 存入内存环形列表(≤1000) + AlarmDAO::insertAlarms 落库
-         → emit alarmGenerated / statsUpdated → UI 更新
-         → (解码侧另投 ClipWriter 任务)
+解码线程（每帧 × 每个级联槽位）
+  → ingest(channel, od, SlotContext{alarmClass, classNames})   ← 上下文由解码器按通道局部组装，栈上传入
+  → 生成 newAlarms(未存/未截图)
+  → 收集本帧围栏候选（类别 == geofence.alarmClass 的目标）
+  → 槽循环结束后一次通道级合并判定：ingestFenceAlarm(channel, det, ctx, timeNs)
+  → storeAndNotify(newAlarms) → 存入内存环形列表(≤1000) + AlarmDAO::insertAlarms 落库
+  → emit alarmGenerated / statsUpdated → UI 更新
+  → (解码侧另投 ClipWriter 任务)
 
 ClipWriter 后台线程(报警 +2s 到点) → dump 裸流/MP4 → attachVideoClip(ids, 裸流路径)
          → 改内存 alarms_ 中同批记录的 videoPath + AlarmDAO::updateVideoPath 落库
          （不发信号：详情对话框打开时读 alarms() 自然拿到最新路径）
 ```
-去重限流键：`"通道号:槽位:类别ID"`（如 `"0:1:0"` = 通道 0、级联第 2 槽的 cls_0），
-不同级联槽恰好同类号不再互相压制。
-`bypassThrottle` 形参**当前所有调用方都传 `false`**，围栏报警同样受 2 秒窗口限流；
-若要围栏豁免需调用方显式传 `true`。
+两条判定路径的限流键与窗口**互相独立**：
+
+| 路径 | 键 | 窗口 |
+| --- | --- | --- |
+| 普通报警 `ingest` | `"通道:槽下标:cls_id"`（如 `"0:1:0"`） | `kAlarmThrottleNs` = 2 秒 |
+| 围栏报警 `ingestFenceAlarm` | `"通道:fence:类别名"`（如 `"0:fence:person"`） | `geofence.throttleSeconds`，默认 10 秒 |
+
+普通报警键里带槽下标，不同级联槽恰好同类号不再互相压制；围栏键刻意**用类名而不是槽号**，
+配置重排槽位顺序后限流窗口依然稳定。围栏语义是"每通道每类别 10 秒一次入侵事件"
+（早期实现寄生在级联里且无限流，实测 40 秒能出 200~340 条）。
+`bypassThrottle` 形参已删除，不存在"豁免限流"的调用路径。
 
 ## 使用方法
 ```cpp
-// 解码线程中
-QVector<AlarmRecord> news = AlarmManager::instance().ingest(ch, results);
+// 解码线程中：上下文每帧按通道局部组装一次，槽循环内逐槽传入
+AlarmManager::SlotContext ctx;                 // alarmClass 空 = 该模型只画框不报警
+ctx.alarmClass = slotAlarmClasses_[k];
+for (const auto &n : slotClassNames_[k]) ctx.classNames << QString::fromStdString(n);
+
+QVector<AlarmRecord> news = AlarmManager::instance().ingest(ch, od, ctx);
 if (!news.isEmpty()) {
     AlarmManager::instance().storeAndNotify(news);
     // 片段在报警后 2 秒才生成，路径由 ClipWriter 落盘后回填，此处不要读 videoPath
 }
 
+// 围栏判定（通道级，槽循环结束后一次；几何命中才调）
+alarms += AlarmManager::instance().ingestFenceAlarm(ch, det, ctx, timeNs);
+
 // ClipWriter 后台线程（片段写完后）
 AlarmManager::instance().attachVideoClip(ids, rawClipPath);
 
 // UI 侧
-AlarmManager::instance().setAlarmClasses({"person", "helmet"});
 int unread = AlarmManager::instance().unacknowledgedCount();
 AlarmManager::instance().acknowledgeAll();
 connect(&AlarmManager::instance(), &AlarmManager::alarmGenerated, ...);
@@ -61,7 +78,8 @@ AlarmManager::instance().cleanOldData(30);
 
 ## 依赖关系
 - `src/ai/yolo11/common.hpp`：`object_detect_result(_list)` 检测结果类型、时间戳字段。
-- `src/base/config/ConfigManager.h`：构造时读取 `alarm.classes` 缺省报警类别。
+- `src/base/config/ConfigManager.h`：`ingestFenceAlarm` 读 `geofence.throttleSeconds`
+  （本模块已不持有任何类别名表，也不再读旧的 `alarm.classes`）。
 - `src/biz/db/alarm_dao.h`：`insertAlarms` / `updateVideoPath` / `cleanOldAlarms`（本模块唯一的写库出口）。
 - `src/base/runtime_paths.h`：`alarmsDir()` —— 抓拍图与视频片段共用的媒体根目录。
 - Qt：`QMutex`/`QVector`/`QMap`/信号槽；`AlarmRecord` 经 `qRegisterMetaType` 支持跨线程。
@@ -81,3 +99,10 @@ AlarmManager::instance().cleanOldData(30);
 - 线程安全：内部用 `QMutex` 保护；截图开关用 `std::atomic<bool>`。`attachVideoClip` 先解锁
   再写库；`DatabaseManager` 每线程独立连接，故后台线程 `new AlarmDAO` 安全。
 - `acknowledged`/`videoPath` 为内存态，重启后以 DB 为准；截图 `imgPath` 由外部异步回填，可能短暂为空。
+- **`SlotContext` 没有拥有权也不共享**：由解码器每帧在栈上构造、按槽传入，`AlarmManager` 只在调用期间
+  读取，不缓存。因此 4 个解码器并发报警不会互相覆盖类别名表（旧实现把全局槽表写进单例，
+  按通道配置后通道 3 会覆盖通道 0 的表，报警判定串频道）。
+- `detections.frame_id` 存的是**产出该目标的槽下标**；围栏报警走 `ingestFenceAlarm`，
+  该列固定为 `-1`（围栏是通道级判定，不属于任何槽位）。
+- `ingestFenceAlarm` **不重复累计**统计（`totalDetections_`/`classCount_` 已由同帧的 `ingest` 记过），
+  它只出记录与明细。

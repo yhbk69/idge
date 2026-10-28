@@ -64,16 +64,22 @@ $IDGE_WORKSPACE/
 
 ## 3. 主检测配置（config.json）
 
-程序启动时读取 **当前工作目录**下的 `data/config.json`（首次可从 `config_example.json` 复制：`mkdir -p data && cp config_example.json data/config.json`；旧版根目录 config.json 启动时自动迁移），在 **调试设置页** 修改后自动回写。⚠ `./run.sh` 会先 `cd` 进 `build/build_rk3588_linux`，于是它读的是 `build/build_rk3588_linux/data/config.json`，与源码根的 `data/` 是两份互不相干的副本——"改了配置没生效"先确认改的是哪一份。关键配置：
+程序启动时读取 **当前工作目录**下的 `data/config.json`（首次可从 `config_example.json` 复制：`mkdir -p data && cp config_example.json data/config.json`；旧版根目录 config.json 启动时自动迁移），在 **设置页** 修改后自动回写。⚠ `./run.sh` 会先 `cd` 进 `build/build_rk3588_linux`，于是它读的是 `build/build_rk3588_linux/data/config.json`，与源码根的 `data/` 是两份互不相干的副本——"改了配置没生效"先确认改的是哪一份。
+
+**schema V2（按通道 + 按模型）**：配置里不再出现任何 `.rknn`/`labels.txt` 路径，模型的唯一事实源是
+`model/library/<库id>/{model.rknn,labels.txt,meta.json}`，配置只用**库目录名**引用它。
+老结构（`model.path` + `cascade.models[5]` + `alarm.classes` + `video.channel1..4`/`notes`）由
+`ConfigManager::migrateSchemaV2()` 在首次启动时一次性改写并落盘，之后不再触发。关键配置：
 
 | 配置节 | 说明 |
 |--------|------|
-| `detect` | 检测阈值：`conf_threshold` / `nms_threshold` / `threads`（NPU 并行数，RK3588 建议 3）。⚠ 前两项是**假开关**——阈值实际来自模型自带的 `labels.txt`/后处理常量，改配置不生效 |
-| `video` | 4 路通道视频源（本地 mp4 或 RTSP 地址）与备注 |
-| `cascade` | 级联模型列表（最多 5 组 path + label，多模型串行检测） |
-| `geofence` | 每路通道的电子围栏：多边形顶点（widget 像素坐标）、报警类别 `alarmClasses`、开关 |
-| `alarm` | 参与报警的类别列表 |
-| `recording` | 报警视频硬件编码录制（默认 `enabled=false`，见下） |
+| `video.models` | 模型参数表，**以库目录名为键**：`{"yolo11n-ppe": {"alarm_class": "un_helmet", "note": "…"}}`。`alarm_class` 是**这个模型的参数**（不是槽位、不是通道），留空 = 只画框不报警；设置页"模型参数"表按行编辑 |
+| `video.channels` | 数组，**下标即通道号（0-based）**，条目里的 `channel` 字段只给人看。每路 = `source`/`note`/`enabled`/`models`。`models` 的顺序就是级联槽位顺序（画面上 `M1/M2/…` 前缀、报警 `result_id`），重排会改号；`enabled=false` 只决定启动时是否开这一路（改完需重启） |
+| `detect` | 检测参数。⚠ 整节当前都不生效：`conf_threshold`/`nms_threshold` 是**假开关**（推理侧不传参，实际用 `common.hpp` 的编译期 `BOX_THRESH`/`NMS_THRESH`）；`class_num`/`threads` 已连 getter 一起删掉（类别数属于每个模型，推理线程数 = 各通道模型数之和，设置页显示的是真实值），老配置里残留的这两个键程序不再读取 |
+| （无 `video.render`） | 推理间隔是编译期的 `frame_count % 3`（`ffmpeg_video_decoder.cpp` 的 4.6 节），**没有配置键**，别在 JSON 里加 `render.sampleInterval`——它只会变成一个改了不生效的假开关 |
+| `geofence` | 围栏**不属于级联**：复用该通道已有的检测结果、只做几何判定，不额外占用 NPU。`enabled` 总开关、`mode`（`inside_alarm`/`outside_alarm`）、`alarmClass` **单值触发类别**（默认 `person`，必须是该通道某个模型 `labels.txt` 里的叫法）、`throttleSeconds` 报警节流窗口（默认 10 秒，每通道每类别一条）、`channels` 每路的矩形/多边形顶点（overlay 像素坐标，随存 `overlay_w`/`overlay_h`，改窗口布局会偏移） |
+| `database` | `storeDetections`（报警相关检测明细是否入 `detections` 表）与 `detectionRetentionDays`（保留天数）；写成 `null` 等于吃默认值 true/30 |
+| `recording` | 报警视频硬件编码录制（默认 `enabled=false`，见下）；`buffer_seconds` 需 ≥ 片段窗口 3+2 秒 |
 | `smartRecognition` | 智能识别四张卡片（二维码/OCR/点名/盘点）共用的取流地址；键缺省时自动探测摄像头节点（MJPEG 优先，其次 CSI/rkisp 的 NV12、YUYV），探测不到退回 `/dev/video0`。仅 getter，设置页不编辑 |
 | `websocket` | Pad↔Aibox 客户端：`server_url`（空=不启用，设置页可改）+ 心跳/重连间隔（仅 JSON） |
 
@@ -193,7 +199,9 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
 - **3 NPU 核心并行推理**：充分利用 RK3588 的 3 个 NPU 核心，实现高吞吐量检测
 - **RGA 硬件加速预处理**：色彩转换和图像缩放由 RGA 引擎完成，释放 CPU
 - **报警视频硬件编码**：带检测框的 RGBA → RGA → `hevc_rkmpp` 零拷贝硬编 + 环形缓冲，报警时切出"前 3 秒 + 后 2 秒"裸流片段（CPU 软编 x264 已彻底移出链路）
-- **电子围栏**：多边形围栏绘制，inside/outside 两种侵入判定模式，按类别过滤报警
+- **电子围栏**：多边形/矩形围栏绘制，inside/outside 两种侵入判定模式；围栏**独立于级联**——
+  复用该通道已有模型的检测结果做几何判定，触发类别是 `geofence.alarmClass` 单值（默认 `person`），
+  按 `geofence.throttleSeconds`（默认 10 秒）每通道每类别节流
 - **报警管理**：限流去重、抓拍落盘、SQLite 持久化、GUI 悬浮提示与历史查询
 - **人员点名**：SCRFD 人脸检测 + 特征比对（进程内 RKNN 常驻推理），注册 / 点名 / 注销三阶段，余弦相似度 + 贪心一对一匹配
 - **设备盘点**：复用 YOLO11 RKNN 模型做设备识别与盘点任务管理
@@ -393,32 +401,45 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
 
 1. `DmaBufferPool::acquire` 返回裸指针，调用方须在池销毁前回借出；池析构会强制回收未归还项
    并打印警告（悬垂风险仍在，靠约定规避）。`DmaFrameBuffer` 浅拷贝双释放已用 `= delete` 堵死
-2. `PriorityQueue::waitAndPop` 名为 Pop 实为 Top（只读堆顶不出队），且 `push` 不 notify 挂起的
+2. **JSON 不能加注释**：`QJsonDocument::fromJson` 遇到 `//` 直接返回 null，而解析失败走的是
+   "warning + 全默认值"分支——写注释不是启动报错，而是**静默丢掉整份现场配置**。且 `save()`
+   是整文件重写、按键名字母序输出，任何排版都留不住。要放说明只能用数据键
+   （`config_example.json` 里的 `_readme` 字符串数组即可原样往返）
+3. `PriorityQueue::waitAndPop` 名为 Pop 实为 Top（只读堆顶不出队），且 `push` 不 notify 挂起的
    消费者。现网只用 `tryPop`，`waitAndPop` 零调用方——列在 roadmap §六 清理项，不是待修 bug
-3. `src/ui/form/photo_selection_dialog.h`、`src/ai/task/helmet_task.*`/`base_task.*`/`task_pool.h`、
+4. `src/ui/form/photo_selection_dialog.h`、`src/ai/task/helmet_task.*`/`base_task.*`/`task_pool.h`、
    `src/ui/form/video_decoder.*`、`src/base/queue/frame_queue.h`、`src/media/model/ModelPool.hpp`、
    `src/base/threadpool/ThreadPool.hpp` 都在 GLOB 里被编译但无实例化点（清单见 roadmap §六）
-4. `detect.conf_threshold` / `detect.nms_threshold` 是**假开关**：写进 JSON、设置页可改，
+5. `detect.conf_threshold` / `detect.nms_threshold` 是**假开关**：写进 JSON、设置页可改，
    但 `ppe_task.cpp` 调 `model_->detect()` 不传参，实际生效的是编译期 `BOX_THRESH/NMS_THRESH`
-5. `YOLO11Model::output_mems[9]` 固定长度，换多于 9 个输出头的模型（分割/姿态）会越界
-6. **GB28181 MANSCDP 编码声明与实际不符**：XML 头写 `encoding="GB2312"`，实际发出的是 UTF-8 字节
+6. `YOLO11Model::output_mems[9]` 固定长度，换多于 9 个输出头的模型（分割/姿态）会越界
+7. **GB28181 MANSCDP 编码声明与实际不符**：XML 头写 `encoding="GB2312"`，实际发出的是 UTF-8 字节
    且 `Content-Length` 也按 UTF-8 长度算（`gb28181_manager.cpp` 心跳/应答处）。宽容平台无感，
    严格平台在中文 `DeviceName` 上会解析错乱。真要对接，改一处即需全模块统一口径
-7. **GB28181 配置写错只表现为"不启用"**：`serverHost`/`advertiseHost`/SDP `c=` 必须是 IPv4 字面量，
+8. **GB28181 配置写错只表现为"不启用"**：`serverHost`/`advertiseHost`/SDP `c=` 必须是 IPv4 字面量，
    `inet_pton` 失败即静默 `return` 且无日志；`platform.transport` 是假开关（值不影响发包）。
    排障先看 `data/config.json` 的 `gb28181` 段，别等错误提示
-8. **本机摄像头无互斥**：`smartRecognition.camera`（二维码/OCR 拍照 + 人员点名/设备盘点预览）、
-   `video.channel1..4`、`gb28181.streams[].source` 三条取流路径各自 `avformat_open_input`，
+9. **本机摄像头无互斥**：`smartRecognition.camera`（二维码/OCR 拍照 + 人员点名/设备盘点预览）、
+   `video.channels[].source`、`gb28181.streams[].source` 三条取流路径各自 `avformat_open_input`，
    同一设备被两路同时打开时后开的那路失败，报错只落在各自日志里
-9. **二维码扫描无去重/冷却**：`QRScanWorker` 每 100ms 采样、连续 3 帧内容一致即判定稳定，
-   结果对话框关闭后若码仍在镜头前，约 0.8 秒会再次弹出同一结果
-10. **换模型/改级联仍需重启**：`FFmpegVideoDecoder::reloadAllModels()` 已实现但无调用方；
+10. **二维码扫描无去重/冷却**：`QRScanWorker` 每 100ms 采样、连续 3 帧内容一致即判定稳定，
+    结果对话框关闭后若码仍在镜头前，约 0.8 秒会再次弹出同一结果
+11. **换模型/改通道模型仍需重启**：推理任务（`PpeTask` + 结果队列 + 类名表 + 报警类别）只在解码器
+    首次 `start()` 时按 `video.channels[ch].models` 建立，此后配置改动不影响在跑的任务；
+    `PpeTask::reloadModel()` 保留了唯一安全的换模型实现但全工程无调用方（roadmap P1-2）；
     模型测试按钮会短时独占一次 NPU 上下文（GUI 阻塞秒级）
-11. **`wss://` 放弃证书校验**：`WsClient::onSslErrors` 无条件 `ignoreSslErrors()`，只适合内网调试；
+12. **`wss://` 放弃证书校验**：`WsClient::onSslErrors` 无条件 `ignoreSslErrors()`，只适合内网调试；
     WS 发送也不排队，断线期间的 `ack` 直接丢弃（详见 `plan/websocket.md`）
+13. **NPU 负载按"各通道模型数之和"计**：4 路 × 每路 3 个模型 = 12 个推理任务打在 3 个核上，
+    配置不做硬拦截；任务数超过 6 时启动日志打软告警，核掩码按进程级轮转分配（跨通道共享一份
+    模型上下文服务多路，仍是未做的优化）
 
 > 已闭环、不再在此罗列的历史项：解码线程与 `player_widget` 关闭（现 `closeEvent` 两阶段并行停 4 路）、
-> 硬解按 `codecpar->codec_id` 选 `h264_rkmpp`/`hevc_rkmpp`、围栏报警已传 `bypassThrottle=true`、
+> 硬解按 `codecpar->codec_id` 选 `h264_rkmpp`/`hevc_rkmpp`、
+> 围栏报警改为独立通道级判定 + `geofence.throttleSeconds` 节流（原先传 `bypassThrottle=true` 每帧一条，
+> 40 秒能出三百多条，并把同通道的普通检测报警整个吞掉）、
+> 围栏触发类别改为 `geofence.alarmClass` 单值（V1 的 `alarmClasses` 列表已废弃）、
+> 报警类别从槽位属性迁到模型属性、配置里不再出现模型/标签路径（绝对↔相对路径拉锯问题连根消失）、
 > 时间戳量纲注释已统一为 epoch 纳秒、`FrameQueue::pushAndReplace` 顺序、`dma_mutex` 跨 TU 单例、
 > `QSqlDatabase` 每线程独立连接、NPU 核掩码位标志修正、级联每槽位独立标签与类别数。
 > DMA/RGA/命令注入/ns-ms 口径等 2026-09-24 批次的修复明细原载 `plan/update_log.md`（已删，

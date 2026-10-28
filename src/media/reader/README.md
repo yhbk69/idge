@@ -14,7 +14,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `ffmpeg_video_decoder.h/.cpp` | 主流水线解码总控：硬解、零拷贝 DMA-BUF 借还、级联多模型任务分发、结果合成画框、帧限速（截止期节拍：按流 avg_frame_rate 定间隔，落后重锚丢弃连发）、报警片段录制挂钩、**帧捕获槽**（供智能识别按需拉最新帧） |
+| `ffmpeg_video_decoder.h/.cpp` | 主流水线解码总控：硬解、零拷贝 DMA-BUF 借还、**按通道**级联多模型任务分发、结果合成画框、帧限速（截止期节拍：按流 avg_frame_rate 定间隔，落后重锚丢弃连发）、通道级围栏判定挂钩、报警片段录制挂钩、**帧捕获槽**（供智能识别按需拉最新帧） |
 | `video_recorder.h/.cpp` | `VideoRecorder`：画框后的 RGBA → RGA → rkmpp 硬编（hevc/h264）→ Annex-B 环形缓冲区；报警时 dump 裸流/MP4 片段 |
 | `camera_preview_decoder.h/.cpp` | 摄像头预览解码：v4l2 输入格式协商（MJPEG/NV12/YUYV）、JPEG 魔数缓存抓拍（裸格式回退现场编码）、SCRFD 同步检测、PpeTask 异步检测、CPU 画框 |
 | `scrfd_face_detector.h/.cpp` | SCRFD 人脸检测器（RKNN NPU）：letterbox 预处理、9 输出解码、类别内 NMS |
@@ -23,15 +23,24 @@
 
 ```
 FFmpegVideoDecoder（QObject，独立 QThread）
-  构造参数 InferenceMode 决定是否挂载推理：Cascade=默认，buildCascadeTasks 建
-  PpeTask；PreviewOnly=只解码+显示+取帧（智能识别 QR/OCR），下面第二条分支不存在
+  构造参数 InferenceMode 决定是否挂载推理：Cascade=默认，PreviewOnly=只解码+显示+取帧
+  （智能识别 QR/OCR），下面第二条分支不存在
+  buildCascadeTasks 在 **start()** 里执行（不是构造期）：4 个 PlayerWidget 是 .ui 提升控件、
+  构造时拿不到通道号，而 open() 是 setChannel(ch) 紧接 start(url)，只有在 start() 才
+  能按 channel_ 解析本通道的槽位。入口有 `if (!tasks_.empty()) return;` 守卫，
+  保持"任务与模型只加载一次、改配置需重启"的既有语义
+  ModelRegistry::resolveChannelSlots(channel_) → 每槽一个 PpeTask（核掩码进程级轮转，
+  不是每通道各自 slotIdx%3）；槽的类别名/报警类留在解码器（slotClassNames_/slotAlarmClasses_）
   av_read_frame → AVPacket(h264) → avcodec(MPP) → AVFrame(DRM_PRIME NV12, fd)
       ├─ fd → RGA: NV12→RGBA（显示缓冲，双缓冲池借出）
       └─ fd → RGA: NV12→缩放 letterbox 640x640 RGB888（image_buffer_t，
                 dmaBuffer 借自 dmaBufferPool_）   // 仅 Cascade，每 3 帧一次
                     → tasks_[k]->put(TaskData{time=epoch纳秒, image, resultQueue})
                     → PpeTask 推理 → resultQueue.push(od_results)
-  解码线程 tryPop 各任务结果 → 坐标还原/画框进 RGBA → emit frameReady(RenderFrame)
+  解码线程 tryPop 各任务结果 → 坐标还原/画框进 RGBA
+      → 逐槽 AlarmManager::ingest(ch, od, SlotContext) + 收集围栏候选（通道级）
+      → 槽循环结束后一次合并围栏判定 → ingestFenceAlarm（10 秒独立窗口）
+      → emit frameReady(RenderFrame)
   （RenderFrame 携带 dup 出的 fd：所有权移交接收方，接收方负责 close）
 
 CameraPreviewDecoder（QObject，std::thread decodeLoop）
@@ -84,9 +93,9 @@ decodeLoop 打开流后：用 dec_ctx 的实际宽高 + 流的 avg_frame_rate(�
 ## 使用方法
 
 ```cpp
-// 主流水线（config 指向含模型路径的 config.json，内部 buildCascadeTasks）
+// 主流水线（通道与模型由 config.json 的 video.channels[] 决定，start() 内按通道解析）
 auto* decoder = new FFmpegVideoDecoder(this);
-decoder->setChannel(0);
+decoder->setChannel(0);          // 必须先于 start()：buildCascadeTasks 用 channel_ 取本通道模型
 connect(decoder, &FFmpegVideoDecoder::frameReady, this, &MyView::onFrame);
 decoder->start("rtsp://192.168.1.10/stream1");
 decoder->stop();               // 置 running_=false + interrupt_callback 打断阻塞读帧
@@ -134,7 +143,16 @@ det.detectRgba(rgbaPixels, width, height, stride /*>=width*4*/,
   `wstride/hstride` 单位是像素/行（详见 `src/media/rga/README.md`），RGBA 要 `/4`。
   传错时内核会报 "required ... byte but only got ..."，`VideoRecorder::encodeFrame()`
   入口另有 `wstride` 合理性检查（`<w` 或 `>2w` 直接判为误传并丢帧）。
+- **每槽循环不能合并**：`BoxSmoother` 按**单一标签空间**做 IoU 匹配，把多个槽的框合成一份列表会让
+  不同模型的同类号互相认错、画框抖动。所以画框与 `ingest` 都保持逐槽进行；只有**围栏**是通道级判定，
+  在槽循环结束后用本帧收集的候选跑一次（`dislayImage` 还是带框的本帧缓冲，快照/片段才带得出框）。
+- **改模型列表要重启**：`buildCascadeTasks()` 只在首次 `start()` 生效（`tasks_` 非空即返回），
+  换模型/改级联不会热更新；`PpeTask::reloadModel()` 是这条能力唯一安全的实现，当前无调用方
+  （详见 `plan/roadmap.md` P1-2）。
+- **NPU 负载 = Σ各通道模型数**：4 通道 × 3 模型 = 12 路推理任务会打爆 3 个核。任务创建时按进程级
+  轮转分配核，总数 > 6 只打软告警、不拦截；跨通道共享一份模型上下文是尚未做的优化。
 - **模型输入约定**：PpeTask 收到的是 RGA letterbox 后的 640x640 RGB888 DMA-BUF，坐标还原靠 `letterbox_t{x_pad,y_pad,scale}`；SCRFD 是左上对齐黑边填充，逆变换只除 scale。
+
 - **fd 所有权**：`RenderFrame` 的 fd 为 `dup()` 产物，接收方必须 `close()`；AVFrame DRM fd 归 ffmpeg，禁止关闭；`pHWDeviceCtx` 存在 1 个 buffer 引用泄漏（已登记）。
 - **帧捕获槽是"看一眼"，不是帧交付**：`captureCurrentFramePtr()` 返回的是解码线程正在轮流写的双缓冲之一，
   指针本身在解码器运行期间一直有效，但**内容约 2 帧后就被覆盖**，取到必须当场读完；调用方（智能识别页）

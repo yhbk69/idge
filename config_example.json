@@ -1,61 +1,136 @@
 {
+    "_readme": [
+        "本文件是出厂配置模板；程序实际读取的是 工作目录/data/config.json（run.sh 会先 cd 进构建目录，",
+        "所以生效的那份在 build/<目标>/data/config.json，不是仓库根的 data/config.json）。",
+        "config.json 由 QJsonDocument 解析：不接受 // 注释，键顺序每次保存都会按字母序重排，",
+        "任何手写排版都留不住——要写说明只能像本文件这样放进 _readme 字符串数组（未知键会原样保留）。",
+        "【schema V2】配置里不再出现任何模型/标签路径：model/library/<库id>/{model.rknn,labels.txt,meta.json}",
+        "  是唯一事实源，配置只用【库目录名】引用模型。老配置（model.path + cascade.models + alarm.classes）",
+        "  由 ConfigManager::migrateSchemaV2() 在首次启动时一次性改写并落盘，之后不再触发。",
+        "video.channels 是数组，【下标即通道号】（0-based），条目里的 channel 字段只给人看、不参与解析；",
+        "  models 数组的顺序就是级联槽位顺序，也就是画面上 M1/M2/… 的前缀与报警 result_id，重排会改号。",
+        "  enabled=false 只影响启动时是否打开这一路（改完需重启，不做运行期起停）。",
+        "报警类别是【模型的参数】（video.models[<库id>].alarm_class）：留空=这个模型只画框不报警。",
+        "  它不属于通道也不属于槽位，同一个模型挂在哪一路触发的都是同一个类别。",
+        "围栏不属于级联：它复用该通道已有的检测结果、只做几何判定，类别是 geofence.alarmClass 单值（默认 person），",
+        "  报警按 geofence.throttleSeconds 节流（每通道每类别窗口内一条）。若某通道挂了围栏但没有任何模型能产出",
+        "  该类别，启动日志会告警 [geofence] 通道N 无模型产出类别 person，围栏不会触发。",
+        "以下键当前【不生效】，改前先看 plan/roadmap.md §六：",
+        "  detect.conf_threshold / detect.nms_threshold —— 推理侧不传参，实际用编译期 BOX_THRESH/NMS_THRESH；",
+        "  老配置里可能残留 detect.class_num / detect.threads —— 已无任何 getter，程序不再读取；",
+        "  推理间隔是编译期的 frame_count % 3（无配置键），检测频率请改代码不要改 JSON。",
+        "  各通道的模型数之和超过 6 路会打软告警（3 个 NPU 核，不是硬限制）。",
+        "gb28181 段由 Gb28181Config::load 独立读取（程序不会写回它），平台地址/本机地址/SDP c= 必须是 IPv4 字面量，",
+        "inet_pton 失败即静默不启用国标链路且无日志；platform.transport 当前不影响发包。",
+        "websocket 段留空即整条链路不启动；本程序是 WS 客户端，不监听端口（详见 plan/websocket.md）。",
+        "geofence.channels 的坐标是 overlay 像素空间，附带 overlay_w/h；改窗口布局或分屏方式后旧围栏会偏移。"
+    ],
     "video": {
-        "channel1": "192.mp4",
-        "channel2": "192.mp4",
-        "channel3": "192.mp4",
-        "channel4": "192.mp4",
-        "notes": [
-            "",
-            "",
-            "",
-            ""
-        ]
-    },
-    "model": {
-        "input_size": "640x640",
-        "type": "YOLO11"
-    },
-    "cascade": {
-        "models": [
+        "models": {
+            "yolo11n-ppe": {
+                "alarm_class": "un_helmet",
+                "note": "PPE安全装备检测：un_helmet/helmet/people/vest/workWear"
+            },
+            "yolo11n-coco": {
+                "alarm_class": "",
+                "note": "COCO通用检测：留空=只画框不报警；填 person 则满画面人身告警"
+            }
+        },
+        "channels": [
             {
-                "path": "model/person.rknn",
-                "label": "model/person_labels.txt",
-                "note": "行人检测"
+                "channel": 0,
+                "source": "192.mp4",
+                "note": "东门",
+                "enabled": true,
+                "models": [
+                    "yolo11n-ppe",
+                    "yolo11n-coco"
+                ]
             },
             {
-                "path": "model/helmet.rknn",
-                "label": "model/helmet_labels.txt",
-                "note": "安全帽检测"
+                "channel": 1,
+                "source": "192.mp4",
+                "note": "",
+                "enabled": true,
+                "models": [
+                    "yolo11n-ppe",
+                    "yolo11n-coco"
+                ]
             },
             {
-                "path": "model/vest.rknn",
-                "label": "model/vest_labels.txt",
-                "note": "反光背心检测"
+                "channel": 2,
+                "source": "192.mp4",
+                "note": "",
+                "enabled": true,
+                "models": [
+                    "yolo11n-ppe",
+                    "yolo11n-coco"
+                ]
             },
             {
-                "path": "",
-                "label": "",
-                "note": ""
-            },
-            {
-                "path": "",
-                "label": "",
-                "note": ""
+                "channel": 3,
+                "source": "192.mp4",
+                "note": "",
+                "enabled": true,
+                "models": [
+                    "yolo11n-ppe",
+                    "yolo11n-coco"
+                ]
             }
         ]
     },
     "detect": {
         "conf_threshold": 0.25,
-        "nms_threshold": 0.45,
-        "class_num": 80,
-        "threads": 3
+        "nms_threshold": 0.45
     },
-    "alarm": {
-        "classes": [
-            "person",
-            "helmet",
-            "vest"
-        ]
+    "geofence": {
+        "enabled": true,
+        "mode": "inside_alarm",
+        "alarmClass": "person",
+        "throttleSeconds": 10,
+        "channels": {
+            "0": {
+                "enabled": true,
+                "overlay_w": 786,
+                "overlay_h": 521,
+                "shapes": [
+                    {
+                        "type": "rectangle",
+                        "points": [
+                            [
+                                421,
+                                320
+                            ],
+                            [
+                                1240,
+                                709
+                            ]
+                        ]
+                    },
+                    {
+                        "type": "polygon",
+                        "points": [
+                            [
+                                239,
+                                131
+                            ],
+                            [
+                                561,
+                                154
+                            ],
+                            [
+                                524,
+                                338
+                            ],
+                            [
+                                248,
+                                315
+                            ]
+                        ]
+                    }
+                ]
+            }
+        }
     },
     "database": {
         "storeDetections": true,
@@ -70,5 +145,57 @@
     },
     "smartRecognition": {
         "camera": ""
+    },
+    "websocket": {
+        "server_url": "",
+        "heartbeat_interval": 30,
+        "reconnect_interval": 5
+    },
+    "gb28181": {
+        "platform": {
+            "localHost": "192.168.2.210",
+            "localSipPort": 5060,
+            "advertiseHost": "192.168.2.210",
+            "advertiseSipPort": 5060,
+            "serverHost": "192.168.2.210",
+            "serverPort": 8116,
+            "serverCode": "41010500002000000001",
+            "serverDomain": "4101050000",
+            "password": "12345678",
+            "transport": "udp",
+            "registerExpires": 3600,
+            "heartbeatInterval": 30,
+            "userAgent": "idge/GB28181"
+        },
+        "streams": [
+            {
+                "type": "camera",
+                "source": "/dev/video22",
+                "deviceCode": "34020000001320000001",
+                "channelCode": "34020000001320000001",
+                "deviceName": "idge-camera-01",
+                "serialNumber": "idge-camera-01",
+                "width": 1920,
+                "height": 1080,
+                "fps": 25,
+                "bitrate": 2000000,
+                "enabled": true,
+                "loop": true
+            },
+            {
+                "type": "rtsp",
+                "source": "rtsp://192.168.2.60:554/live/1",
+                "deviceCode": "34020000001320000002",
+                "channelCode": "34020000001320000002",
+                "deviceName": "idge-rtsp-01",
+                "serialNumber": "idge-rtsp-01",
+                "width": 1920,
+                "height": 1080,
+                "fps": 25,
+                "bitrate": 2000000,
+                "enabled": false,
+                "loop": true
+            }
+        ]
     }
 }

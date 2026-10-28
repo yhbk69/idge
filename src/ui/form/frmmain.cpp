@@ -63,6 +63,10 @@
 #include <QIcon>
 #include <QInputDialog>
 #include <QScrollArea>
+#include <QCheckBox>
+#include <QListWidget>
+#include <QDialogButtonBox>
+#include <QSpinBox>
 #include <QTableWidget>
 #include <QProcess>
 
@@ -297,25 +301,28 @@ void frmMain::initForm()
     // 8. 获取视频监控窗口指针（用于后续打开视频）
     videoWindow = ui->lab1;
 
-    // 9. 加载配置文件
+    // 9. 加载配置文件（内部会把老 schema 一次性迁移到按通道配置）
     ConfigManager::instance().load(RuntimePaths::configFile());
-    AlarmManager::instance().setAlarmClasses(ConfigManager::instance().alarmClasses());
 
-    // 10. 从配置加载视频到4个通道（必须在 config 加载之后）
-    ConfigManager &cfg = ConfigManager::instance();
-    videoWindow->openVideo(0, cfg.videoChannel(1));
-    videoWindow->openVideo(1, cfg.videoChannel(2));
-    videoWindow->openVideo(2, cfg.videoChannel(3));
-    videoWindow->openVideo(3, cfg.videoChannel(4));
-
-    // 10.1 设置各通道围栏覆盖层的通道号
+    // 10. 设置各通道围栏覆盖层的通道号 + 加载围栏配置
+    //     必须在开流之前：解码器建推理任务时要检查"本通道有没有模型能产出围栏类别"，
+    //     晚加载会让这条告警静默跳过（围栏本身在 decodeLoop 里逐帧读，不受时序影响）。
     for (int i = 0; i < 4; ++i) {
         PlayerWidget *pw = videoWindow->playerWidget(i);
         if (pw) pw->setChannel(i);
     }
     geofence::FenceManager::instance().loadFromConfig();
 
-    // 11. 初始化调试帮助页（从 config 读取配置填充 UI）
+    // 11. 按通道配置打开四路视频（必须在 config 加载之后）
+    //     enabled=false 的通道留空，四宫格显示"未开流"；改这个开关需要重启才生效
+    //     （解码器的推理任务只在首次 start() 时建立，见 buildCascadeTasks）。
+    ConfigManager &cfg = ConfigManager::instance();
+    for (int ch = 0; ch < cfg.channelCount(); ++ch) {
+        if (cfg.channelEnabled(ch))
+            videoWindow->openVideo(ch, cfg.channelSource(ch));
+    }
+
+    // 12. 初始化调试帮助页（从 config 读取配置填充 UI）
     initDebugPage();
 }
 
@@ -478,17 +485,8 @@ void frmMain::initNewPages()
             this, [this]() { log("system", "WebSocket 已连接到 Aibox"); });
     WsClient::instance().start();
 
-    // 设置类名到 AlarmManager（从模型加载）
-    QStringList classNames;
-    QFile labelFile(ConfigManager::instance().labelPath());
-    if (labelFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        while (!labelFile.atEnd()) {
-            QString line = QString::fromUtf8(labelFile.readLine()).trimmed();
-            if (!line.isEmpty()) classNames.append(line);
-        }
-        labelFile.close();
-    }
-    AlarmManager::instance().setClassNames(classNames);
+    // 类别名表由解码器按通道槽位建立（见 FFmpegVideoDecoder::buildCascadeTasks），
+    // 这里不再从全局标签文件填 AlarmManager。
 
     updateAlarmBadge();
 }
@@ -917,14 +915,28 @@ void frmMain::on_pageRoll_customContextMenuRequested(const QPoint &pos)
 // 调试帮助页初始化
 // ==========================================
 
+// 当前配置解析出的推理任务总数 = 各通道实际用到的模型数之和。
+// 一个任务一个 PpeTask 线程，所以这个数字就是"推理线程数"的真实值；
+// config 的 detect.threads 从来没人读，别再拿它当答案。
+static int configuredTaskCount()
+{
+    ConfigManager &cfg = ConfigManager::instance();
+    int n = 0;
+    for (int ch = 0; ch < cfg.channelCount(); ++ch)
+        n += (int)ModelRegistry::instance().resolveChannelSlots(ch).size();
+    return n;
+}
+
 /**
- * @brief 初始化调试帮助页
+ * @brief 初始化设置页
  *
- * 从 config.json 读取所有配置并填充到 UI 控件：
+ * 从 config.json 读取配置并填充 UI（schema V2：一切按通道 + 按模型）：
  *   - 系统信息：平台、NPU核心数、视频接入方式、最大通道数
- *   - 视频通道：4路视频源路径（lineEditCh1~4）
- *   - 模型配置：模型路径、标签路径、输入尺寸、模型类型
- *   - 检测配置：置信度阈值、NMS阈值、类别数、线程数
+ *   - 视频通道：每路的 源地址 / 备注 / 启用 / 级联模型列表（可勾选可排序）
+ *   - 模型参数：一行一个模型库 id，报警类别与备注写在这里
+ *   - 模型库管理：库内模型的 类别数 / 输入尺寸 / 被引用通道
+ *   - 电子围栏：围栏类别（单值，默认 person）+ 报警节流秒数
+ *   - 检测配置：置信度阈值、NMS 阈值（当前未接入推理，见 README 已知问题）
  *
  * 同时输出初始日志到运行日志面板
  */
@@ -970,66 +982,109 @@ void frmMain::initDebugPage()
         }
     }
 
-    // ========== 视频通道（从 config.json 读取） ==========
-    ui->lineEditCh1->setText(cfg.videoChannel(1));
-    ui->lineEditCh2->setText(cfg.videoChannel(2));
-    ui->lineEditCh3->setText(cfg.videoChannel(3));
-    ui->lineEditCh4->setText(cfg.videoChannel(4));
-
-    // ========== 模型配置（从 config.json 读取） ==========
-    ui->lineEditModelPath->setText(cfg.modelPath());
-    ui->lineEditLabelPath->setText(cfg.labelPath());
-    ui->labInputSizeVal->setText(cfg.inputSize());
-    ui->labModelTypeVal->setText(cfg.modelType());
+    // ========== 视频通道（config 的 video.channels，下标即通道号） ==========
+    // 模型路径/标签文件/输入尺寸/模型类型四行在本轮 schema 里失去意义：
+    // config 只写模型库目录名，路径与标签由 model/library 解析，所以整行隐藏。
+    for (int i = 0; i < 4; ++i) {
+        QLineEdit *chEdit = channelSourceEdit(i);
+        chEdit->setText(cfg.channelSource(i));
+    }
+    for (QWidget *w : {static_cast<QWidget *>(ui->labModelPath),
+                       static_cast<QWidget *>(ui->lineEditModelPath),
+                       static_cast<QWidget *>(ui->btnBrowseModel),
+                       static_cast<QWidget *>(ui->labLabelPath),
+                       static_cast<QWidget *>(ui->lineEditLabelPath),
+                       static_cast<QWidget *>(ui->btnBrowseLabel),
+                       static_cast<QWidget *>(ui->labInputSize),
+                       static_cast<QWidget *>(ui->labInputSizeVal),
+                       static_cast<QWidget *>(ui->labModelType),
+                       static_cast<QWidget *>(ui->labModelTypeVal),
+                       static_cast<QWidget *>(ui->labClassNum),
+                       static_cast<QWidget *>(ui->labClassNumVal)}) {
+        w->setVisible(false);
+    }
+    if (QGroupBox *grp = qobject_cast<QGroupBox *>(ui->gridLayout_model->parentWidget()))
+        grp->setTitle("视频通道（源 / 备注 / 启用 / 级联模型）");
 
     // ========== 检测配置（从 config.json 读取） ==========
     ui->spinBoxConfThresh->setValue(cfg.confThreshold());
     ui->spinBoxNmsThresh->setValue(cfg.nmsThreshold());
-    ui->labClassNumVal->setText(QString::number(cfg.classNum()));
-    ui->labThreadsVal->setText(QString::number(cfg.threads()));
+    // 类别数量 / 输入尺寸 / 模型类型不再显示：V2 里这些都是每个模型库条目的属性
+    // （见"模型库管理"表的 类别数/输入 两列），全局值会误导。
+    // 推理线程数同理不是配置项：一个槽位一个 PpeTask 线程，
+    // 实际路数 = 各通道解析出的模型数之和，这里显示真实值而不是 config 里的占位 3。
+    ui->labThreadsVal->setText(QString("%1 路（Σ各通道模型）").arg(configuredTaskCount()));
 
-    // ========== 通道备注 + 每路"清空"（追加到"模型配置"分组框内每路末尾） ==========
+    // ========== 每路：备注 + 启用开关 + 级联模型 + 清空 ==========
     {
         QGridLayout *gl = ui->gridLayout_model;   // 现有通道所在的分组框网格
-        QLineEdit *chEdit[4] = {ui->lineEditCh1, ui->lineEditCh2,
-                                ui->lineEditCh3, ui->lineEditCh4};
         for (int i = 0; i < 4; ++i) {
+            QLineEdit *chEdit = channelSourceEdit(i);
+            // 地址输入框改动即落盘（浏览按钮也会写，这里补上手输的情况）
+            connect(chEdit, &QLineEdit::editingFinished, this, [this, i, chEdit]() {
+                ConfigManager::instance().setChannelSource(i, chEdit->text().trimmed());
+                ConfigManager::instance().save();
+            });
+
             // 备注输入框（编辑完自动保存）
-            chNoteEdit_[i] = new QLineEdit(cfg.channelNote(i + 1));
+            chNoteEdit_[i] = new QLineEdit(cfg.channelNote(i));
             chNoteEdit_[i]->setPlaceholderText("备注");
             chNoteEdit_[i]->setMaximumWidth(180);
             chNoteEdit_[i]->setStyleSheet(theme::field(theme::BORDER));
             connect(chNoteEdit_[i], &QLineEdit::editingFinished, this, [this, i]() {
-                ConfigManager::instance().setChannelNote(i + 1, chNoteEdit_[i]->text().trimmed());
+                ConfigManager::instance().setChannelNote(i, chNoteEdit_[i]->text().trimmed());
                 ConfigManager::instance().save();
             });
             gl->addWidget(chNoteEdit_[i], i, 3);
+
+            // 启用开关：只决定启动时是否打开这一路（改完需重启生效）
+            QCheckBox *enableBox = new QCheckBox("启用");
+            enableBox->setChecked(cfg.channelEnabled(i));
+            enableBox->setStyleSheet(theme::text(theme::TEXT, theme::FS_BODY));
+            connect(enableBox, &QCheckBox::toggled, this, [this, i](bool on) {
+                ConfigManager &c = ConfigManager::instance();
+                c.setChannelEnabled(i, on);
+                c.save();
+                log("system", QString("通道%1 已%2（重启后生效）")
+                        .arg(i + 1).arg(on ? "启用" : "停用"));
+            });
+            gl->addWidget(enableBox, i, 4);
+
+            // 级联模型：勾选 + 排序，行序即槽位顺序（= result_id）
+            QPushButton *modelBtn = new QPushButton("模型…");
+            modelBtn->setMaximumWidth(64);
+            modelBtn->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
+            connect(modelBtn, &QPushButton::clicked, this,
+                    [this, i]() { openChannelModelsDialog(i); });
+            gl->addWidget(modelBtn, i, 5);
 
             // 清空按钮：清掉该路的视频路径 + 备注
             QPushButton *clearBtn = new QPushButton("清空");
             clearBtn->setMaximumWidth(64);
             clearBtn->setStyleSheet(theme::miniButton(theme::DANGER));
             connect(clearBtn, &QPushButton::clicked, this, [this, i, chEdit]() {
-                chEdit[i]->clear();
+                chEdit->clear();
                 chNoteEdit_[i]->clear();
                 ConfigManager &c = ConfigManager::instance();
-                c.setVideoChannel(i + 1, "");
-                c.setChannelNote(i + 1, "");
+                c.setChannelSource(i, "");
+                c.setChannelNote(i, "");
                 c.save();
                 log("system", QString("通道%1 视频源与备注已清空").arg(i + 1));
             });
-            gl->addWidget(clearBtn, i, 4);
+            gl->addWidget(clearBtn, i, 6);
         }
     }
 
-    // ========== 级联模型配置区（5个槽位 + 备注 + 清空） ==========
-    initCascadeUi();
-
-    // ========== 模型库管理区（列表 + 导入/删除） ==========
+    // ========== 模型库管理区 + 模型参数表 ==========
+    // 两者都插在"视频通道"分组框之后，所以先插库、后插参数表，
+    // 页面上的先后顺序才是 通道 → 模型参数 → 模型库。
     initModelLibraryUi();
+    initModelParamsUi();
 
-    // ========== 报警配置已改为每个模型独立配置（见 initCascadeUi 中的报警类别下拉） ==========
-    // 隐藏 .ui 文件中的全局报警类别控件
+    // ========== 围栏配置区（独立于级联） ==========
+    initGeofenceUi();
+
+    // ========== 报警类别已按模型配置（见"模型参数"表），隐藏旧的全局报警控件 ==========
     if (ui->editAlarmClasses) ui->editAlarmClasses->setVisible(false);
     if (ui->btnSaveAlarmClasses) ui->btnSaveAlarmClasses->setVisible(false);
     if (ui->labAlarmHint) ui->labAlarmHint->setVisible(false);
@@ -1148,305 +1203,398 @@ void frmMain::initDebugPage()
     // ========== 初始日志（带颜色） ==========
     log("system", "系统启动");
     log("system", "平台: RK3588, NPU核心数: " + QString::number(NPU_CORE_NUM));
-    log("info", "模型加载: " + cfg.modelPath());
-    log("info", "标签加载: " + cfg.labelPath());
     log("system", "视频解码器初始化完成");
-    log("system", "推理线程池启动, 线程数: " + QString::number(cfg.threads()));
+    log("system", QString("推理任务: %1 路（每个模型一个线程）").arg(configuredTaskCount()));
+
+    // 各通道级联模型（路径由 model/library 解析，这里只列库 id 便于现场核对）
+    for (int ch = 0; ch < cfg.channelCount(); ++ch) {
+        const QStringList ids = cfg.channelModelIds(ch);
+        log("info", QString("通道%1 模型: %2")
+                .arg(ch + 1)
+                .arg(ids.isEmpty() ? "(未配置，回退库内默认模型)" : ids.join(" → ")));
+    }
 
     // 围栏配置信息
     {
         auto &fm = geofence::FenceManager::instance();
-        log("fence", QString("围栏配置: 启用=%1, 模式=%2, 报警类别=%3")
+        log("fence", QString("围栏配置: 启用=%1, 模式=%2, 围栏类别=%3, 节流=%4秒")
             .arg(fm.enabled() ? "是" : "否")
             .arg(fm.mode())
-            .arg(fm.alarmClasses().join(",")));
+            .arg(cfg.geofenceAlarmClass())
+            .arg(cfg.geofenceThrottleSeconds()));
     }
 }
 
 // ============================================================
-// 模型路径区（就是 5 个"模型路径"，级联模式，不单独分组）
-// 布局（都在"模型配置"grpModelInfo 分组框内）：
-//   模型路径1: 复用原有单行(原"模型路径")，另加 备注|清空
-//   模型路径2~5: 新增，每行 = 路径 | 浏览 | 备注 | 清空
-//   之后再把"标签文件""输入尺寸/类型"两行顺延到最下面
-// 约定：模型路径1 = 全局 model.path；2~5 存 cascade.models 的 2~5
+// channelSourceEdit: 通道号（0-based）→ "视频通道"分组框里的源地址输入框
+//   .ui 里四行控件叫 lineEditCh1~4（1 基命名），程序内部一律 0 基，
+//   换算只留这一处。
 // ============================================================
-void frmMain::initCascadeUi()
+QLineEdit *frmMain::channelSourceEdit(int channel) const
 {
+    switch (channel) {
+    case 0: return ui->lineEditCh1;
+    case 1: return ui->lineEditCh2;
+    case 2: return ui->lineEditCh3;
+    case 3: return ui->lineEditCh4;
+    default: return nullptr;
+    }
+}
+
+// ============================================================
+// settingsContentLayout: 设置页滚动区的内容布局
+//   initDebugPage 开头把 pageSettings 的原控件整体包进了 QScrollArea，
+//   它是 pageSettings 布局的第 0 项；要往页尾加分组框就往这里插。
+// ============================================================
+static QVBoxLayout *settingsContentLayout(QWidget *page)
+{
+    QVBoxLayout *pageLayout = qobject_cast<QVBoxLayout *>(page->layout());
+    QLayoutItem *first = pageLayout ? pageLayout->itemAt(0) : nullptr;
+    QScrollArea *sa = first ? qobject_cast<QScrollArea *>(first->widget()) : nullptr;
+    return sa ? qobject_cast<QVBoxLayout *>(sa->widget()->layout()) : nullptr;
+}
+
+// ============================================================
+// initModelParamsUi: "模型参数"分组框（一行一个模型库 id）
+//   报警类别是**模型的参数**而不是槽位的参数：同一个模型不管挂在哪个通道、
+//   哪个槽位，触发的都是同一个类别。旧 schema 把它写在 cascade.models[i] 上，
+//   换个槽位就换行为，语义不成立。
+//   备注只写在这里（video.models[<id>].note），路径/标签一律不出现——
+//   那些是 model/library 的事。
+// ============================================================
+void frmMain::initModelParamsUi()
+{
+    QVBoxLayout *contentLayout = settingsContentLayout(ui->pageSettings);
+    QWidget *modelGroup = ui->gridLayout_model->parentWidget();
+    if (!contentLayout || !modelGroup) {
+        qWarning() << "initModelParamsUi: settings scroll layout not found";
+        return;
+    }
+    int insertAt = -1;
+    for (int i = 0; i < contentLayout->count(); ++i) {
+        if (contentLayout->itemAt(i)->widget() == modelGroup) {
+            insertAt = i + 1;
+            break;
+        }
+    }
+    if (insertAt < 0) return;
+
+    QGroupBox *group = new QGroupBox("模型参数（报警类别按模型配置）");
+    group->setStyleSheet(theme::field(theme::PANEL));
+    QVBoxLayout *v = new QVBoxLayout(group);
+
+    QLabel *hint = new QLabel(
+        "报警类别留空 = 这个模型只画框不报警；改完需重启（推理任务只在启动时建立）");
+    hint->setWordWrap(true);
+    hint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
+    v->addWidget(hint);
+
+    modelParamTable_ = new QTableWidget(0, 5);
+    modelParamTable_->setHorizontalHeaderLabels(
+        {"模型库id", "报警类别", "备注", "被引用通道", "操作"});
+    modelParamTable_->verticalHeader()->setVisible(false);
+    modelParamTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+    modelParamTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    modelParamTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    modelParamTable_->setShowGrid(false);
+    modelParamTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    modelParamTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    modelParamTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    modelParamTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    modelParamTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    modelParamTable_->setMaximumHeight(260);
+    modelParamTable_->setStyleSheet(QString(
+        "QTableWidget { background: %1; border: 1px solid %2; color: %3; font-size: %4px; }"
+        "QTableWidget::item { padding: 4px 8px; border-bottom: 1px solid %2; }"
+        "QTableWidget::item:selected { background: %5; }"
+        "QHeaderView::section { background: %2; color: %3; padding: 4px 8px; border: none; }")
+        .arg(theme::FIELD, theme::BORDER, theme::TEXT)
+        .arg(theme::FS_BODY)
+        .arg(theme::HOVER));
+    v->addWidget(modelParamTable_);
+
+    contentLayout->insertWidget(insertAt, group);
+    refreshModelParamsTable();
+}
+
+// ============================================================
+// refreshModelParamsTable: 重建模型参数表
+//   行 = 库内模型 ∪ 配置里残留的键。后者标红提示"参数表指向的模型已不在库中"，
+//   否则现场会出现"config 里有、界面上看不到"的幽灵条目。
+// ============================================================
+void frmMain::refreshModelParamsTable()
+{
+    if (!modelParamTable_) return;
     ConfigManager &cfg = ConfigManager::instance();
-    QGridLayout *gl = ui->gridLayout_model;
+    ModelRegistry &reg = ModelRegistry::instance();
+    reg.rescan();   // 库目录可能被外部改动（与"模型库管理"区同一口径）
 
-    // 把一个控件从原行列挪到新行列（不删除，只是重新排布）
-    auto moveTo = [gl](QWidget *w, int r, int c) {
-        if (!w) return;
-        gl->removeWidget(w);
-        gl->addWidget(w, r, c);
-    };
+    QStringList rows = reg.ids();
+    const QStringList keys = cfg.modelParamKeys();
+    for (const QString &k : keys)
+        if (!rows.contains(k)) rows << k;
 
-    // 先把"标签文件"(row5)和"输入尺寸/类型"(row6)两行挪到临时行 20，
-    // 腾出 row5~8 给模型路径2~5，稍后再挪到最下方
-    moveTo(ui->labLabelPath,    20, 0);
-    moveTo(ui->lineEditLabelPath, 20, 1);
-    moveTo(ui->btnBrowseLabel,  20, 2);
-    moveTo(ui->labInputSize,    20, 0);
-    moveTo(ui->labInputSizeVal, 20, 1);
-    moveTo(ui->labModelType,    20, 2);
-    moveTo(ui->labModelTypeVal, 20, 3);
+    modelParamTable_->setRowCount(0);
+    for (const QString &id : rows) {
+        const int r = modelParamTable_->rowCount();
+        modelParamTable_->insertRow(r);
+        const bool inLib = reg.contains(id);
 
-    // ===== 模型路径1：复用原来的"模型路径"行，路径框换为模型库下拉 =====
-    // 布局: Col0=标签, Col1=模型下拉, Col2=(空), Col3=报警类别, Col4=备注, Col5=清空
-    ui->labModelPath->setText("模型路径1:");
-    gl->removeWidget(ui->lineEditModelPath);
-    ui->lineEditModelPath->setVisible(false);
-    cascadeModelCombo_[0] = new QComboBox;
-    cascadeModelCombo_[0]->setStyleSheet(theme::field(theme::PANEL));
-    connect(cascadeModelCombo_[0], QOverload<int>::of(&QComboBox::activated),
-            this, [this](int) { applyCascadeCombo(0); });
-    gl->addWidget(cascadeModelCombo_[0], 4, 1);
+        // --- 列 0：库 id（只读） ---
+        QTableWidgetItem *idItem = new QTableWidgetItem(id);
+        idItem->setFlags(idItem->flags() & ~Qt::ItemIsEditable);
+        if (!inLib) {
+            idItem->setForeground(QColor(theme::DANGER));
+            idItem->setToolTip(QStringLiteral("模型不在 model/library 中，导入或删除该条目后即可消除"));
+        }
+        modelParamTable_->setItem(r, 0, idItem);
 
-    // 报警类别下拉（模型路径1）
-    cascadeAlarmClassCombo_[0] = new QComboBox;
-    cascadeAlarmClassCombo_[0]->setStyleSheet(theme::field(theme::PANEL));
-    connect(cascadeAlarmClassCombo_[0], QOverload<int>::of(&QComboBox::activated),
-            this, [this](int) { applyCascadeAlarmClass(0); });
-    gl->addWidget(cascadeAlarmClassCombo_[0], 4, 3);
-
-    // 模型路径1 的备注（存 cascade idx1 的 note）
-    cascadeNoteEdit_[0] = new QLineEdit(cfg.cascadeModelNote(1));
-    cascadeNoteEdit_[0]->setPlaceholderText("备注");
-    cascadeNoteEdit_[0]->setMaximumWidth(180);
-    cascadeNoteEdit_[0]->setStyleSheet(theme::field(theme::PANEL));
-    connect(cascadeNoteEdit_[0], &QLineEdit::editingFinished, this, [this]() {
-        ConfigManager &c = ConfigManager::instance();
-        c.setCascadeModelNote(1, cascadeNoteEdit_[0]->text().trimmed());
-        c.save();
-    });
-    gl->addWidget(cascadeNoteEdit_[0], 4, 4);
-    QPushButton *clear1 = new QPushButton("清空");
-    clear1->setMaximumWidth(64);
-    clear1->setStyleSheet(theme::miniButton(theme::DANGER));
-    connect(clear1, &QPushButton::clicked, this, [this]() {
-        cascadeNoteEdit_[0]->clear();
-        ConfigManager &c = ConfigManager::instance();
-        c.setModelPath("");
-        c.setCascadeModelNote(1, "");
-        c.setCascadeModelAlarmClass(1, "");
-        c.save();
-        if (cascadeAlarmClassCombo_[0]) cascadeAlarmClassCombo_[0]->setCurrentIndex(0);
-        refreshCascadeModelCombos();
-        log("system", "模型路径1 已清空");
-    });
-    gl->addWidget(clear1, 4, 5);
-
-    // ===== 模型路径2~5：新行，占 row5~8 =====
-    // 布局: Col0=标签, Col1=模型下拉, Col2=浏览, Col3=报警类别, Col4=备注, Col5=清空
-    // 说明：空路径 = 该路模型不用（级联只跑非空的行）
-    for (int i = 1; i < 5; ++i) {          // i = 数组下标(1..4)，对应界面模型2~5
-        int row = 4 + i;                   // 模型2在row5 ... 模型5在row8
-
-        QLabel *lbl = new QLabel(QString("模型路径%1:").arg(i + 1));
-        lbl->setStyleSheet(theme::text(theme::TEXT, theme::FS_BODY));
-        gl->addWidget(lbl, row, 0);
-
-        cascadeModelCombo_[i] = new QComboBox;
-        cascadeModelCombo_[i]->setStyleSheet(theme::field(theme::PANEL));
-        connect(cascadeModelCombo_[i], QOverload<int>::of(&QComboBox::activated),
-                this, [this, i](int) { applyCascadeCombo(i); });
-        gl->addWidget(cascadeModelCombo_[i], row, 1);
-
-        QPushButton *browse = new QPushButton("浏览...");
-        browse->setMaximumWidth(80);
-        browse->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
-        connect(browse, &QPushButton::clicked, this, [this, i]() {
-            QString f = QFileDialog::getOpenFileName(
-                this, QString("选择模型路径%1").arg(i + 1), "model", "RKNN 模型 (*.rknn)");
-            if (!f.isEmpty()) {
-                ConfigManager &c = ConfigManager::instance();
-                c.setCascadeModelPath(i + 1, f);
-                c.save();
-                refreshCascadeModelCombos();
-                log("system", QString("模型路径%1 已设置: %2").arg(i + 1).arg(f));
-            }
-        });
-        gl->addWidget(browse, row, 2);
-
-        // 报警类别下拉
-        cascadeAlarmClassCombo_[i] = new QComboBox;
-        cascadeAlarmClassCombo_[i]->setStyleSheet(theme::field(theme::PANEL));
-        connect(cascadeAlarmClassCombo_[i], QOverload<int>::of(&QComboBox::activated),
-                this, [this, i](int) { applyCascadeAlarmClass(i); });
-        gl->addWidget(cascadeAlarmClassCombo_[i], row, 3);
-
-        cascadeNoteEdit_[i] = new QLineEdit(cfg.cascadeModelNote(i + 1));
-        cascadeNoteEdit_[i]->setPlaceholderText("备注");
-        cascadeNoteEdit_[i]->setMaximumWidth(180);
-        cascadeNoteEdit_[i]->setStyleSheet(theme::field(theme::PANEL));
-        connect(cascadeNoteEdit_[i], &QLineEdit::editingFinished,
-                this, [this, i]() {
+        // --- 列 1：报警类别 ---
+        QComboBox *clsCombo = new QComboBox;
+        clsCombo->addItem(QStringLiteral("(不报警)"), QString());
+        const QStringList classes = inLib ? reg.meta(id).classes : QStringList{};
+        for (const QString &c : classes)
+            clsCombo->addItem(c, c);
+        const QString cur = cfg.modelAlarmClass(id);
+        int idx = clsCombo->findData(cur);
+        if (idx < 0 && !cur.isEmpty()) {
+            // 老配置里的类别可能不在换过的新模型标签里，仍显示出来（不改写配置）
+            clsCombo->addItem(cur + QStringLiteral(" (不在标签)"), cur);
+            idx = clsCombo->count() - 1;
+        }
+        clsCombo->setCurrentIndex(qMax(0, idx));
+        connect(clsCombo, QOverload<int>::of(&QComboBox::activated), this,
+                [this, id, clsCombo](int) {
                     ConfigManager &c = ConfigManager::instance();
-                    c.setCascadeModelNote(i + 1, cascadeNoteEdit_[i]->text().trimmed());
+                    const QString cls = clsCombo->currentData().toString();
+                    c.setModelAlarmClass(id, cls);
                     c.save();
+                    log("system", QString("模型 %1 报警类别: %2")
+                            .arg(id, cls.isEmpty() ? QStringLiteral("(不报警)") : cls));
                 });
-        gl->addWidget(cascadeNoteEdit_[i], row, 4);
+        modelParamTable_->setCellWidget(r, 1, clsCombo);
 
-        QPushButton *clearBtn = new QPushButton("清空");
-        clearBtn->setMaximumWidth(64);
-        clearBtn->setStyleSheet(theme::miniButton(theme::DANGER));
-        connect(clearBtn, &QPushButton::clicked, this, [this, i]() {
-            cascadeNoteEdit_[i]->clear();
+        // --- 列 2：备注 ---
+        QLineEdit *noteEdit = new QLineEdit(cfg.modelParam(id).note);
+        noteEdit->setPlaceholderText(QStringLiteral("备注"));
+        noteEdit->setStyleSheet(theme::field(theme::PANEL));
+        connect(noteEdit, &QLineEdit::editingFinished, this, [this, id, noteEdit]() {
             ConfigManager &c = ConfigManager::instance();
-            c.setCascadeModelPath(i + 1, "");
-            c.setCascadeModelNote(i + 1, "");
-            c.setCascadeModelAlarmClass(i + 1, "");
+            c.setModelNote(id, noteEdit->text().trimmed());
             c.save();
-            if (cascadeAlarmClassCombo_[i]) cascadeAlarmClassCombo_[i]->setCurrentIndex(0);
-            refreshCascadeModelCombos();
-            log("system", QString("模型路径%1 已清空").arg(i + 1));
         });
-        gl->addWidget(clearBtn, row, 5);
+        modelParamTable_->setCellWidget(r, 2, noteEdit);
+
+        // --- 列 3：被引用通道（显示 1~4，内部 0-based） ---
+        QStringList chs;
+        const QList<int> users = cfg.modelParamUsers(id);
+        for (int ch : users) chs << QString::number(ch + 1);
+        QTableWidgetItem *refItem =
+            new QTableWidgetItem(chs.isEmpty() ? QStringLiteral("-") : chs.join(QStringLiteral(",")));
+        refItem->setFlags(refItem->flags() & ~Qt::ItemIsEditable);
+        refItem->setToolTip(QStringLiteral("该模型被这些通道的级联列表引用；无引用时才可删除模型"));
+        modelParamTable_->setItem(r, 3, refItem);
+
+        // --- 列 4：移除该模型的配置 ---
+        QPushButton *removeBtn = new QPushButton(QStringLiteral("移除"));
+        removeBtn->setMaximumWidth(56);
+        removeBtn->setStyleSheet(theme::miniButton(theme::DANGER));
+        connect(removeBtn, &QPushButton::clicked, this, [this, id]() {
+            if (QtHelper::askConfirm(
+                    this, QStringLiteral("移除模型配置"),
+                    QStringLiteral("确认从模型参数表移除 %1，并从所有通道的级联列表里剔除它？\n"
+                                   "（不会删除 model/library 里的模型文件）").arg(id))
+                != QMessageBox::Ok)
+                return;
+            ConfigManager &c = ConfigManager::instance();
+            c.removeModelParam(id);
+            c.save();
+            refreshModelParamsTable();
+            refreshModelLibraryTable();
+            log("system", QStringLiteral("模型 %1 的配置条目已移除").arg(id));
+        });
+        modelParamTable_->setCellWidget(r, 4, removeBtn);
     }
-
-    // ===== 把"标签文件"(原row5)挪到 row9，输入尺寸/类型(原row6)挪到 row10 =====
-    moveTo(ui->labLabelPath,      9, 0);
-    moveTo(ui->lineEditLabelPath, 9, 1);
-    moveTo(ui->btnBrowseLabel,    9, 2);
-    moveTo(ui->labInputSize,      10, 0);
-    moveTo(ui->labInputSizeVal,   10, 1);
-    moveTo(ui->labModelType,      10, 2);
-    moveTo(ui->labModelTypeVal,   10, 3);
-
-    refreshCascadeModelCombos();
-
-    log("system", "模型路径配置加载完成（下拉选项来自 model/library 模型库）");
 }
 
 // ============================================================
-// applyCascadeCombo: 把某槽位下拉的当前选项写回 config
-//   slotIdx = 数组下标 0..4，对应界面模型1..5
-//   写入的仍是路径（config schema 不变），下拉显示名经反查映射
+// openChannelModelsDialog: 某一通的级联模型编辑器（勾选 + 排序）
+//   列表行序 = 槽位顺序 = TaskConfig.result_id = 画面上的 M1/M2/…，
+//   所以这里必须能上下移动，而不是只勾不排序。
 // ============================================================
-void frmMain::applyCascadeCombo(int slotIdx)
-{
-    QComboBox *cb = cascadeModelCombo_[slotIdx];
-    if (!cb) return;
-    QString path = cb->currentData().toString();
-    ConfigManager &c = ConfigManager::instance();
-    if (slotIdx == 0) {
-        c.setModelPath(path);
-    } else {
-        c.setCascadeModelPath(slotIdx + 1, path);
-    }
-    c.save();
-    log("system", QString("模型路径%1 已设置: %2")
-            .arg(slotIdx + 1)
-            .arg(path.isEmpty() ? "(不用)" : path));
-}
-
-// ============================================================
-// refreshCascadeModelCombos: 重建 5 个下拉并同步 config 选中项
-//   选项 = "(不用)" + 库内全部模型 + (config 路径未收编时)"(自定义)"
-//   保留旧便利默认：模型路径2 为空时回退显示全局模型（仅显示，不写回）
-// ============================================================
-void frmMain::refreshCascadeModelCombos()
+void frmMain::openChannelModelsDialog(int channel)
 {
     ConfigManager &cfg = ConfigManager::instance();
     ModelRegistry &reg = ModelRegistry::instance();
-    reg.rescan();  // 库目录可能刚被导入/删除，刷新条目
-    for (int i = 0; i < 5; ++i) {
-        QComboBox *cb = cascadeModelCombo_[i];
-        if (!cb) continue;
-        QString path = (i == 0) ? cfg.modelPath() : cfg.cascadeModelPath(i + 1);
-        if (i == 1 && path.isEmpty()) {
-            path = cfg.modelPath();
-        }
-        cb->blockSignals(true);
-        cb->clear();
-        cb->addItem("(不用)", QString(""));
-        const QStringList ids = reg.ids();
-        for (const QString &id : ids) {
-            cb->addItem(reg.displayName(id), reg.modelPath(id));
-        }
-        // config 里的路径可能是相对写法，先经注册表反查归一化再比对
-        int idx = -1;
-        QString hitId = path.isEmpty() ? QString() : reg.findIdByModelFile(path);
-        if (!hitId.isEmpty()) {
-            idx = cb->findData(reg.modelPath(hitId));
-        } else if (!path.isEmpty()) {
-            idx = cb->findData(path);
-        }
-        if (idx < 0 && !path.isEmpty()) {
-            cb->addItem(QString("(自定义) ") + QFileInfo(path).fileName(), path);
-            idx = cb->count() - 1;
-        }
-        cb->setCurrentIndex(qMax(0, idx));
-        cb->blockSignals(false);
+    reg.rescan();
+    const QStringList libIds = reg.ids();
+    if (libIds.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("通道级联模型"),
+                             QStringLiteral("模型库为空，请先在『模型库管理』导入模型"));
+        return;
     }
-    // 模型变更后，同步刷新报警类别下拉（labels.txt 可能不同）
-    refreshCascadeAlarmClassCombos();
-}
 
-// ============================================================
-// refreshCascadeAlarmClassCombos: 重建 5 个报警类别下拉
-//   选项 = "(不报警)" + 该槽位 labels.txt 中的类别列表
-// ============================================================
-void frmMain::refreshCascadeAlarmClassCombos()
-{
-    auto slotList = ModelRegistry::resolveCascadeSlots();
-    ConfigManager &cfg = ConfigManager::instance();
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("通道%1 级联模型").arg(channel + 1));
+    dlg.resize(520, 420);
+    QVBoxLayout *v = new QVBoxLayout(&dlg);
 
-    for (int i = 0; i < 5; ++i) {
-        QComboBox *cb = cascadeAlarmClassCombo_[i];
-        if (!cb) continue;
+    QLabel *tip = new QLabel(QStringLiteral(
+        "勾选该通道要跑的模型；列表顺序即级联槽位顺序（画面左上角 M1/M2… 与报警 result_id 同序），"
+        "用『上移/下移』调整。改完重启生效。"));
+    tip->setWordWrap(true);
+    tip->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
+    v->addWidget(tip);
 
-        cb->blockSignals(true);
-        cb->clear();
-
-        // 读取该槽位 labels.txt 的类别列表
-        QStringList classes;
-        if (i < slotList.size()) {
-            QString labelPath = slotList[i].labelPath;
-            if (!labelPath.isEmpty() && QFile::exists(labelPath)) {
-                QFile f(labelPath);
-                if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
-                    QTextStream ts(&f);
-                    while (!ts.atEnd()) {
-                        QString line = ts.readLine().trimmed();
-                        if (!line.isEmpty()) classes.append(line);
-                    }
-                }
-            }
-        }
-
-        cb->addItem("(不报警)", QString(""));
-        for (const QString &cls : classes) {
-            cb->addItem(cls, cls);
-        }
-
-        // 设置当前值
-        QString current = cfg.cascadeModelAlarmClass(i + 1);
-        int idx = cb->findText(current);
-        cb->setCurrentIndex(idx >= 0 ? idx : 0);
-        cb->blockSignals(false);
+    QListWidget *list = new QListWidget;
+    list->setStyleSheet(theme::field(theme::PANEL));
+    // 已配置的排在最前（保持原顺序），其余库内模型跟在后面且未勾选
+    const QStringList current = cfg.channelModelIds(channel);
+    QStringList ordered;
+    for (const QString &id : current)
+        if (libIds.contains(id)) ordered << id;
+    for (const QString &id : libIds)
+        if (!ordered.contains(id)) ordered << id;
+    for (const QString &id : ordered) {
+        QListWidgetItem *item = new QListWidgetItem(list);
+        const QString alarm = cfg.modelAlarmClass(id);
+        item->setText(QStringLiteral("%1  ·  %2  ·  报警:%3")
+                          .arg(id,
+                               reg.displayName(id),
+                               alarm.isEmpty() ? QStringLiteral("(无)") : alarm));
+        item->setData(Qt::UserRole, id);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(current.contains(id) ? Qt::Checked : Qt::Unchecked);
     }
-}
+    v->addWidget(list);
 
-// ============================================================
-// applyCascadeAlarmClass: 报警类别下拉写回 config 并热更新
-// ============================================================
-void frmMain::applyCascadeAlarmClass(int slotIdx)
-{
-    QComboBox *cb = cascadeAlarmClassCombo_[slotIdx];
-    if (!cb) return;
-    QString className = cb->currentText();
-    if (className == "(不报警)") className = "";
+    QHBoxLayout *order = new QHBoxLayout;
+    QPushButton *upBtn = new QPushButton(QStringLiteral("上移"));
+    QPushButton *downBtn = new QPushButton(QStringLiteral("下移"));
+    upBtn->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
+    downBtn->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
+    connect(upBtn, &QPushButton::clicked, this, [list]() {
+        const int r = list->currentRow();
+        if (r > 0) {
+            list->insertItem(r - 1, list->takeItem(r));
+            list->setCurrentRow(r - 1);
+        }
+    });
+    connect(downBtn, &QPushButton::clicked, this, [list]() {
+        const int r = list->currentRow();
+        if (r >= 0 && r < list->count() - 1) {
+            list->insertItem(r + 1, list->takeItem(r));
+            list->setCurrentRow(r + 1);
+        }
+    });
+    order->addWidget(upBtn);
+    order->addWidget(downBtn);
+    order->addStretch();
+    v->addLayout(order);
 
+    QDialogButtonBox *box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    // 按钮文案显式中文，与 QtHelper::localizeMessageBoxButtons 那套口径一致
+    box->button(QDialogButtonBox::Ok)->setText(QStringLiteral("确定"));
+    box->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
+    connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    v->addWidget(box);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    QStringList picked;
+    for (int i = 0; i < list->count(); ++i) {
+        QListWidgetItem *item = list->item(i);
+        if (item->checkState() == Qt::Checked)
+            picked << item->data(Qt::UserRole).toString();
+    }
     ConfigManager &c = ConfigManager::instance();
-    c.setCascadeModelAlarmClass(slotIdx + 1, className);
+    c.setChannelModelIds(channel, picked);
     c.save();
-    AlarmManager::instance().setSlotAlarmClass(slotIdx, className);
+    refreshModelParamsTable();
+    refreshModelLibraryTable();
+    log("system", QStringLiteral("通道%1 级联模型: %2（重启后生效）")
+                    .arg(channel + 1)
+                    .arg(picked.isEmpty() ? QStringLiteral("(空，将回退库内默认模型)")
+                                          : picked.join(QStringLiteral(" → "))));
+}
 
-    log("system", QString("模型%1 报警类别: %2")
-            .arg(slotIdx + 1).arg(className.isEmpty() ? "(不报警)" : className));
+// ============================================================
+// initGeofenceUi: 围栏配置区（独立于级联模型）
+//   围栏不属于 ppe/coco 这些级联槽位：它复用本通道已有的检测结果，只做几何
+//   判定，所以类别是**单值**（默认 person），另加一个节流窗口。
+// ============================================================
+void frmMain::initGeofenceUi()
+{
+    ConfigManager &cfg = ConfigManager::instance();
+    QVBoxLayout *contentLayout = settingsContentLayout(ui->pageSettings);
+    if (!contentLayout) {
+        qWarning() << "initGeofenceUi: settings scroll layout not found";
+        return;
+    }
+
+    QGroupBox *group = new QGroupBox("电子围栏（独立于级联模型）");
+    group->setStyleSheet(theme::field(theme::PANEL));
+    QGridLayout *gl = new QGridLayout(group);
+    gl->setHorizontalSpacing(10);
+    gl->setVerticalSpacing(6);
+
+    QLabel *labCls = new QLabel(QStringLiteral("围栏类别:"));
+    labCls->setMinimumWidth(120);
+    gl->addWidget(labCls, 0, 0);
+
+    QComboBox *clsCombo = new QComboBox;
+    clsCombo->setStyleSheet(theme::field(theme::PANEL));
+    // 候选 = 四个通道用到的模型类名并集（围栏只看这一路能不能产出该类别）
+    QStringList candidates;
+    for (int ch = 0; ch < cfg.channelCount(); ++ch) {
+        const QStringList ids = cfg.channelModelIds(ch);
+        for (const QString &id : ids) {
+            const ModelMeta m = ModelRegistry::instance().meta(id);
+            for (const QString &c : m.classes)
+                if (!candidates.contains(c)) candidates << c;
+        }
+    }
+    const QString curCls = cfg.geofenceAlarmClass();
+    if (!candidates.contains(curCls)) candidates.prepend(curCls);
+    clsCombo->addItems(candidates);
+    clsCombo->setCurrentText(curCls);
+    gl->addWidget(clsCombo, 0, 1);
+
+    QLabel *labThrottle = new QLabel(QStringLiteral("围栏报警节流(秒):"));
+    labThrottle->setMinimumWidth(120);
+    gl->addWidget(labThrottle, 1, 0);
+
+    QSpinBox *throttleSpin = new QSpinBox;
+    throttleSpin->setRange(1, 600);
+    throttleSpin->setValue(cfg.geofenceThrottleSeconds());
+    throttleSpin->setStyleSheet(theme::field(theme::PANEL));
+    gl->addWidget(throttleSpin, 1, 1);
+
+    QLabel *hint = new QLabel(QStringLiteral(
+        "围栏报警复用本通道已有的检测结果，不额外占用 NPU：只有当该通道的模型能产出"
+        "上述类别时围栏才会触发（启动日志会检查并告警）。每通道每类别在节流窗口内只报一条。"
+        "围栏形状仍在『视频监控』页绘制。"));
+    hint->setWordWrap(true);
+    hint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
+    gl->addWidget(hint, 2, 0, 1, 2);
+
+    connect(clsCombo, &QComboBox::currentTextChanged, this, [this](const QString &cls) {
+        ConfigManager &c = ConfigManager::instance();
+        c.setGeofenceAlarmClass(cls.trimmed());
+        c.save();
+        geofence::FenceManager::instance().loadFromConfig();
+        log("fence", QStringLiteral("围栏类别: %1").arg(cls.trimmed()));
+    });
+    connect(throttleSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int seconds) {
+        ConfigManager &c = ConfigManager::instance();
+        c.setGeofenceThrottleSeconds(seconds);
+        c.save();
+        log("fence", QStringLiteral("围栏报警节流: %1 秒").arg(seconds));
+    });
+
+    contentLayout->insertWidget(contentLayout->count() - 1, group);
 }
 
 // ============================================================
@@ -1456,12 +1604,7 @@ void frmMain::applyCascadeAlarmClass(int slotIdx)
 // ============================================================
 void frmMain::initModelLibraryUi()
 {
-    // 找到设置页滚动内容布局（initDebugPage 开头把原控件整体包进 QScrollArea，
-    // 它是 pageSettings 布局的第 0 项）
-    QVBoxLayout *pageLayout = qobject_cast<QVBoxLayout *>(ui->pageSettings->layout());
-    QLayoutItem *first = pageLayout ? pageLayout->itemAt(0) : nullptr;
-    QScrollArea *sa = first ? qobject_cast<QScrollArea *>(first->widget()) : nullptr;
-    QVBoxLayout *contentLayout = sa ? qobject_cast<QVBoxLayout *>(sa->widget()->layout()) : nullptr;
+    QVBoxLayout *contentLayout = settingsContentLayout(ui->pageSettings);
     QWidget *modelGroup = ui->gridLayout_model->parentWidget();
     if (!contentLayout || !modelGroup) {
         qWarning() << "initModelLibraryUi: settings scroll layout not found";
@@ -1525,7 +1668,7 @@ void frmMain::initModelLibraryUi()
 
     connect(btnRefresh, &QPushButton::clicked, this, [this]() {
         refreshModelLibraryTable();
-        refreshCascadeModelCombos();
+        refreshModelParamsTable();
         reloadEquipmentService();   // 手工刷库也可能对应外部已拷入的模型目录
     });
     connect(btnImport, &QPushButton::clicked, this, &frmMain::importModelViaDialog);
@@ -1590,7 +1733,7 @@ void frmMain::importModelViaDialog()
     QString err;
     if (ModelRegistry::instance().importModel(rknn, labels, id, err)) {
         refreshModelLibraryTable();
-        refreshCascadeModelCombos();
+        refreshModelParamsTable();
         reloadEquipmentService();
         QMessageBox::information(this, "导入成功",
             err.isEmpty() ? QString("已导入模型: %1").arg(id) : err);
@@ -1671,7 +1814,7 @@ void frmMain::importModelZip()
     }
     QDir(tmp).removeRecursively();
     refreshModelLibraryTable();
-    refreshCascadeModelCombos();
+    refreshModelParamsTable();
     reloadEquipmentService();
 
     QString summary = QString("共 %1 个模型目录\n新导入: %2\n跳过(重复): %3")
@@ -1708,7 +1851,7 @@ void frmMain::deleteSelectedModel()
     QString err;
     if (ModelRegistry::instance().deleteModel(id, err)) {
         refreshModelLibraryTable();
-        refreshCascadeModelCombos();
+        refreshModelParamsTable();
         reloadEquipmentService();
         log("model", QString("模型库移除: %1").arg(id));
     } else {
@@ -1819,141 +1962,37 @@ void frmMain::openVideoToChannel(int channel, const QString &path)
 // ==========================================
 
 /**
- * @brief 通道1 视频浏览
- * 打开文件选择对话框，选择视频文件后：
- *   1. 更新 lineEditCh1 显示路径
- *   2. 保存到 config.json
- *   3. 加载视频到 videoWindow1
+ * @brief 浏览某一路的视频源并立即打开
+ * @param channel 通道号（0-based，与 config 的 video.channels 下标同口径）
+ * @param edit    该通道源地址所在的 QLineEdit
+ *
+ * 选中文件后：更新输入框 → 写 config 并落盘 → openVideoToChannel 重开这一路。
  */
-void frmMain::on_btnBrowseCh1_clicked()
+void frmMain::browseChannelSource(int channel, QLineEdit *edit)
 {
-    QString currentPath = ui->lineEditCh1->text().isEmpty()
+    if (!edit) return;
+    const QString currentPath = edit->text().isEmpty()
         ? QDir::homePath()
-        : QFileInfo(ui->lineEditCh1->text()).path();
+        : QFileInfo(edit->text()).path();
 
-    QFileDialog dialog(this, "选择通道1视频文件");
+    QFileDialog dialog(this, QString("选择通道%1视频文件").arg(channel + 1));
     dialog.setFileMode(QFileDialog::ExistingFile);
     dialog.setDirectory(currentPath);
     dialog.setNameFilter("视频文件 (*.mp4 *.avi *.mkv *.mov *.flv *.ts *.webm);;所有文件 (*)");
 
     if (dialog.exec() == QDialog::Accepted && !dialog.selectedFiles().isEmpty()) {
-        QString file = dialog.selectedFiles().first();
-        ui->lineEditCh1->setText(file);
-        ConfigManager::instance().setVideoChannel(1, file);
+        const QString file = dialog.selectedFiles().first();
+        edit->setText(file);
+        ConfigManager::instance().setChannelSource(channel, file);
         ConfigManager::instance().save();
-        openVideoToChannel(0, file);
+        openVideoToChannel(channel, file);
     }
 }
 
-void frmMain::on_btnBrowseCh2_clicked()
-{
-    QString currentPath = ui->lineEditCh2->text().isEmpty()
-        ? QDir::homePath()
-        : QFileInfo(ui->lineEditCh2->text()).path();
-
-    QFileDialog dialog(this, "选择通道2视频文件");
-    dialog.setFileMode(QFileDialog::ExistingFile);
-    dialog.setDirectory(currentPath);
-    dialog.setNameFilter("视频文件 (*.mp4 *.avi *.mkv *.mov *.flv *.ts *.webm);;所有文件 (*)");
-
-    if (dialog.exec() == QDialog::Accepted && !dialog.selectedFiles().isEmpty()) {
-        QString file = dialog.selectedFiles().first();
-        ui->lineEditCh2->setText(file);
-        ConfigManager::instance().setVideoChannel(2, file);
-        ConfigManager::instance().save();
-        openVideoToChannel(1, file);
-    }
-}
-
-void frmMain::on_btnBrowseCh3_clicked()
-{
-    QString currentPath = ui->lineEditCh3->text().isEmpty()
-        ? QDir::homePath()
-        : QFileInfo(ui->lineEditCh3->text()).path();
-
-    QFileDialog dialog(this, "选择通道3视频文件");
-    dialog.setFileMode(QFileDialog::ExistingFile);
-    dialog.setDirectory(currentPath);
-    dialog.setNameFilter("视频文件 (*.mp4 *.avi *.mkv *.mov *.flv *.ts *.webm);;所有文件 (*)");
-
-    if (dialog.exec() == QDialog::Accepted && !dialog.selectedFiles().isEmpty()) {
-        QString file = dialog.selectedFiles().first();
-        ui->lineEditCh3->setText(file);
-        ConfigManager::instance().setVideoChannel(3, file);
-        ConfigManager::instance().save();
-        openVideoToChannel(2, file);
-    }
-}
-
-void frmMain::on_btnBrowseCh4_clicked()
-{
-    QString currentPath = ui->lineEditCh4->text().isEmpty()
-        ? QDir::homePath()
-        : QFileInfo(ui->lineEditCh4->text()).path();
-
-    QFileDialog dialog(this, "选择通道4视频文件");
-    dialog.setFileMode(QFileDialog::ExistingFile);
-    dialog.setDirectory(currentPath);
-    dialog.setNameFilter("视频文件 (*.mp4 *.avi *.mkv *.mov *.flv *.ts *.webm);;所有文件 (*)");
-
-    if (dialog.exec() == QDialog::Accepted && !dialog.selectedFiles().isEmpty()) {
-        QString file = dialog.selectedFiles().first();
-        ui->lineEditCh4->setText(file);
-        ConfigManager::instance().setVideoChannel(4, file);
-        ConfigManager::instance().save();
-        openVideoToChannel(3, file);
-    }
-}
-
-// ==========================================
-// 模型和标签浏览按钮
-// ==========================================
-
-/**
- * @brief 模型文件浏览
- * 支持格式: .rknn (RKNN模型), .onnx (ONNX模型)
- * 选择后保存到 config.json 并输出日志（含文件大小）
- */
-void frmMain::on_btnBrowseModel_clicked()
-{
-    const QString cur = ConfigManager::instance().modelPath();
-    QString currentPath = cur.isEmpty()
-        ? QDir::currentPath()
-        : QFileInfo(cur).path();
-
-    QString file = QFileDialog::getOpenFileName(this, "选择模型文件", currentPath,
-        "RKNN模型 (*.rknn);;ONNX模型 (*.onnx);;所有文件 (*)");
-    if (!file.isEmpty()) {
-        ConfigManager::instance().setModelPath(file);
-        ConfigManager::instance().save();
-        refreshCascadeModelCombos();
-        QFileInfo fi(file);
-        log("model", QString("已选择模型: %1 (%2 MB)")
-            .arg(fi.fileName())
-            .arg(fi.size() / (1024.0 * 1024.0), 0, 'f', 2));
-    }
-}
-
-/**
- * @brief 标签文件浏览
- * 支持格式: .txt
- * 选择后保存到 config.json 并输出日志
- */
-void frmMain::on_btnBrowseLabel_clicked()
-{
-    QString currentPath = ui->lineEditLabelPath->text().isEmpty()
-        ? QDir::currentPath()
-        : QFileInfo(ui->lineEditLabelPath->text()).path();
-
-    QString file = QFileDialog::getOpenFileName(this, "选择标签文件", currentPath,
-        "文本文件 (*.txt);;所有文件 (*)");
-    if (!file.isEmpty()) {
-        ui->lineEditLabelPath->setText(file);
-        ConfigManager::instance().setLabelPath(file);
-        ConfigManager::instance().save();
-        log("info", QString("已选择标签文件: %1").arg(QFileInfo(file).fileName()));
-    }
-}
+void frmMain::on_btnBrowseCh1_clicked() { browseChannelSource(0, ui->lineEditCh1); }
+void frmMain::on_btnBrowseCh2_clicked() { browseChannelSource(1, ui->lineEditCh2); }
+void frmMain::on_btnBrowseCh3_clicked() { browseChannelSource(2, ui->lineEditCh3); }
+void frmMain::on_btnBrowseCh4_clicked() { browseChannelSource(3, ui->lineEditCh4); }
 
 // ==========================================
 // 阈值变化 -> 保存配置 + 日志

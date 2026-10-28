@@ -78,20 +78,6 @@ public:
     void setChannel(int ch) { channel_ = ch; }
 
     /**
-     * @brief 热更新所有模型
-     *
-     * 在不停止解码的情况下替换所有推理模型。
-     * 用于生产环境中更换检测模型（如从安全帽检测切换到反光背心检测）。
-     *
-     * @param modelPaths: 新模型路径列表（空字符串表示跳过该模型）
-     * @param labelPaths: 新标签文件路径列表
-     * @return: 成功替换的模型数量
-     *
-     * @note 会短暂暂停推理（~100ms），解码线程不受影响
-     */
-    int reloadAllModels(const QStringList &modelPaths, const QStringList &labelPaths);
-
-    /**
      * @brief 报警片段录制器（硬件编码环形缓冲区）
      * @return: 未启用录制时为空 shared_ptr
      *
@@ -141,7 +127,14 @@ signals:
 
 private:
     void decodeLoop();
-    // 从 config.json 读取"模型路径1 + 级联模型2~5"，为每个非空模型建一个推理任务
+    /**
+     * @brief 为本通道构建级联推理任务（首次 start() 时调用，幂等）
+     *
+     * 槽位来自 ModelRegistry::resolveChannelSlots(channel_)：通道在 config 里
+     * 只写模型库 id 列表，路径/标签/报警类别由模型库与参数表解析。
+     * 必须在 setChannel() 之后调用，否则 channel_ 还是默认的 0，四路会共用
+     * 通道 0 的模型列表。
+     */
     void buildCascadeTasks();
 
     QString url_;
@@ -167,6 +160,10 @@ private:
     // 级联各模型类别不同（coco80 / helmet 2类 / vest 2类…），共用一张表会把
     // helmet 的 cls_id 套用 coco 类名导致报警类别错标（2026-09-24 修复）。
     std::vector<std::vector<std::string>> slotClassNames_;
+    // 每槽位模型的报警类别（config 的 video.models[<id>].alarm_class），空=只画框不报警。
+    // 与 slotClassNames_ 同下标；随结果一起传进 AlarmManager::ingest 的 SlotContext，
+    // 不再写进 AlarmManager 单例的全局槽表（按通道配置后那张表会被别的通道覆盖）。
+    std::vector<QString> slotAlarmClasses_;
 
     // 见 InferenceMode：false 时本对象只做"解码 + 显示 + 取帧"，
     // tasks_/slotQueues_/dmaBufferPool_ 全都不分配。

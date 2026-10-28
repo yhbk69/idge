@@ -36,7 +36,9 @@ FenceManager &FenceManager::instance()
 //             { "type": "polygon", "points": [[10,10],[200,10],[100,150]] }
 //           ]
 //         }
-//       }
+//       },
+//       "alarmClass": "person",                 // 触发围栏报警的类别，缺失时默认 person
+//       "throttleSeconds": 10                   // 每通道每类别的围栏报警节流窗口
 //     }
 //   }
 // ============================================================================
@@ -46,7 +48,11 @@ void FenceManager::loadFromConfig()
     ConfigManager &cfg = ConfigManager::instance();
     enabled_ = cfg.geofenceEnabled();
     mode_ = cfg.geofenceMode();
-    alarmClasses_ = QStringList{"person"};  // 围栏报警类别硬编码为 person
+    // 围栏触发类别必须由配置决定，不能写死：级联槽位挂 PPE 模型时类名是
+    // un_helmet/helmet/people/vest/workWear，硬编码的 "person" 一个都匹配不上。
+    // V2 里它是单值（围栏判定只看"这一路里是不是人"），老配置的列表由
+    // migrateSchemaV2() 折叠成一个；geofenceAlarmClass() 缺键时回落 "person"。
+    alarmClass_ = cfg.geofenceAlarmClass();
 
     fences_.clear();
     overlaySizes_.clear();
@@ -142,7 +148,7 @@ void FenceManager::saveToConfig()
     // 写入 ConfigManager 并保存文件
     ConfigManager::instance().setGeofenceEnabled(enabled_);
     ConfigManager::instance().setGeofenceMode(mode_);
-    ConfigManager::instance().setGeofenceAlarmClasses(alarmClasses_);
+    ConfigManager::instance().setGeofenceAlarmClass(alarmClass_);
     ConfigManager::instance().setGeofenceChannels(channels);
     ConfigManager::instance().save();
 }
@@ -161,14 +167,7 @@ void FenceManager::setMode(const QString &mode) { QMutexLocker locker(&mutex_); 
 // ============================================================================
 // 围栏报警类别
 // ============================================================================
-QStringList FenceManager::alarmClasses() const { QMutexLocker locker(&mutex_); return alarmClasses_; }
-
-void FenceManager::setAlarmClasses(const QStringList &classes)
-{
-    Q_UNUSED(classes);
-    QMutexLocker locker(&mutex_);
-    alarmClasses_ = QStringList{"person"};  // 围栏报警类别硬编码为 person
-}
+QString FenceManager::alarmClass() const { QMutexLocker locker(&mutex_); return alarmClass_; }
 
 // ============================================================================
 // 通道围栏操作

@@ -164,7 +164,6 @@ private slots:
     void leftMainClick();          ///< 视频监控页左侧按钮点击
     void systemExit();             ///< 系统退出确认
     void initDebugPage();          ///< 初始化调试帮助页（从 config.json 读取配置）
-    void initCascadeUi();          ///< 初始化级联模型配置区（5个槽位+备注+清空）
     void appendLog(const QString &msg);  ///< 追加日志到文本框
 
     // ========== 人员点名 / 设备盘点业务模块 ==========
@@ -177,18 +176,19 @@ private slots:
     void showEquipmentDialog();    ///< 智能识别页"设备盘点"卡片：弹出盘点任务页
 
 private:
-    // ========== 级联模型配置控件（数据成员，不能放 slots 里） ==========
-    // P2：路径输入框升级为"模型库下拉框"（数据源 ModelRegistry），
-    // custom 路径仍经各行"浏览"按钮进入，以下拉为唯一显示/写入口
-    QComboBox *cascadeModelCombo_[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
-    QLineEdit *cascadeNoteEdit_[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
-    QComboBox *cascadeAlarmClassCombo_[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+    // ========== 视频通道配置控件（源/备注/启用/级联模型，通道号一律 0-based） ==========
     QLineEdit *chNoteEdit_[4] = {nullptr, nullptr, nullptr, nullptr};  // 每路通道备注
+    QLineEdit *channelSourceEdit(int channel) const;    ///< 通道号(0..3) → 源地址输入框
+    void browseChannelSource(int channel, QLineEdit *edit);  ///< 浏览并打开某路视频源
 
-    void applyCascadeCombo(int slotIdx);     ///< 下拉当前选项写回 config（槽位0..4）
-    void refreshCascadeModelCombos();        ///< 重建 5 个下拉并同步 config 选中项
-    void refreshCascadeAlarmClassCombos();   ///< 重建 5 个报警类别下拉（从 labels.txt 读取）
-    void applyCascadeAlarmClass(int slotIdx); ///< 报警类别下拉写回 config 并热更新
+    // ========== 模型参数表（报警类别是"模型的参数"，键 = 模型库目录名） ==========
+    QTableWidget *modelParamTable_ = nullptr;
+    void initModelParamsUi();       ///< 在通道分组框后插入"模型参数"表格区
+    void refreshModelParamsTable(); ///< 重建表格行（库内模型 + config 里残留的键）
+    void openChannelModelsDialog(int channel); ///< 勾选并排序该通道的级联模型列表
+
+    // ========== 围栏（独立于级联：类别单值 + 节流窗口） ==========
+    void initGeofenceUi();
 
     // ========== WebSocket 配置控件 ==========
     QLineEdit *wsUrlEdit_ = nullptr;         ///< 服务器地址输入框
@@ -210,10 +210,6 @@ private slots:
     void on_btnBrowseCh2_clicked();  ///< 通道2 视频浏览
     void on_btnBrowseCh3_clicked();  ///< 通道3 视频浏览
     void on_btnBrowseCh4_clicked();  ///< 通道4 视频浏览
-
-    // ========== 模型/标签浏览按钮 ==========
-    void on_btnBrowseModel_clicked(); ///< 模型文件浏览
-    void on_btnBrowseLabel_clicked(); ///< 标签文件浏览
 
     // ========== 阈值变化槽 ==========
     void on_spinBoxConfThresh_valueChanged(double value);  ///< 置信度阈值变化

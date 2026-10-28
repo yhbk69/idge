@@ -55,22 +55,27 @@ model/
 | `tools/` | 工器具检测（照片处理） | 方向5 - 增强AI | 待模型训练 |
 | `audio/` | 音频检测（声音事件） | 方向7 - 音频能力 | 待模型选型 |
 
-**使用方式**：模型文件放入对应目录后，重启应用即可被 `ModelRegistry` 自动识别。
-视频级联模型还需在 `config.json` 的 `cascade.models[]` 中配置槽位。
+**使用方式**：模型文件放入对应目录后，重启应用即可被 `ModelRegistry` 自动识别；
+再在 `config.json` 的 `video.channels[i].models` 里按顺序写上**库目录名**，该模型才会真正参与推理。
 
 ## 配置引用
 
-`config.json` 的 `model.path` / `cascade.models[].path` 填**仓库相对路径**：
+config.json（schema V2）里**不出现任何模型/标签路径**，只按**库目录名**引用：
 
 ```json
-"model": { "path": "model/library/yolo11n-coco/model.rknn",
-           "label": "model/library/yolo11n-coco/labels.txt", ... }
+"video": {
+  "models":   { "yolo11n-coco": { "alarm_class": "", "note": "COCO通用检测" } },
+  "channels": [ { "channel": 0, "source": "192.mp4", "models": ["yolo11n-ppe", "yolo11n-coco"] } ]
+}
 ```
 
-- 级联每槽位标签独立解析：`cascade.models[].label` 显式值 > 库内 `labels.txt` > 全局 `model.label`
-  （`ModelRegistry::resolveCascadeSlots()` 单一事实源）。
-- 旧配置（绝对路径、平铺 `model/yolo11n.rknn`）在 `ConfigManager::load()` 时一次性自动迁移并落盘。
-- 未收编的外部模型（如 `/opt/xxx.rknn` 绝对路径）仍可直填，只是标签需显式配置或走全局兜底。
+- 槽位解析单一出口 `ModelRegistry::resolveChannelSlots(ch)`：路径固定取
+  `library/<id>/model.rknn`，标签优先级 = `video.models[<id>].label`（逃生口，一般留空）
+  \> 库内 `labels.txt`；报警类取 `video.models[<id>].alarm_class`。
+- 目录名即 id，**改名等于换模型**（config 里的引用会一起断掉，启动打告警并跳过该槽位）。
+- 老配置（`model.path` + 全局 5 槽 `cascade.models[]`，含绝对路径与平铺 `model/yolo11n.rknn`）
+  在 `ConfigManager::load()` 时一次性自动迁移并落盘；未收编的外部模型路径由迁移反查库 id，
+  反查不到会 `qWarning` 打印原始路径，需要人工把它收编进 `library/`。
 
 ## 代码引用但仓库中不存在的子目录（需部署时补建）
 

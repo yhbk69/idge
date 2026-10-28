@@ -47,7 +47,10 @@ python3 yolo11.py --model_path ../model/yolo11n.rknn --target rk3588 --coco_map_
 
 - 上游产物：Ultralytics 导出 `yolo export model=yolo11n.pt format=onnx`；
 - `convert.py` → rknn-toolkit2（仅 PC 用，板端不需要）；
-- 转换输出放入根目录 `model/`，由 `config.json` 的 `model.path` / `cascade.models[].path` 引用（默认 `model/yolo11n.rknn` + `model/coco_80_labels_list.txt`）；
+- 转换产物（`.rknn` + 类别表）**收编进 `model/library/<库id>/`**（文件名固定 `model.rknn` / `labels.txt`），
+  config.json 只在 `video.channels[].models` 里按**库目录名**引用它，不写路径（schema V2）；
+  也可走设置页「模型管理 → 导入模型」。平铺在 `model/` 根的老文件（如
+  `model/yolo11n.rknn` + `model/coco_80_labels_list.txt`）启动时会被自动迁移归位；
 - 量化校准数据集与 COCO 标注均指向 rknn_model_zoo 的 `../../../datasets/COCO/` 相对路径。
 
 ## 注意事项

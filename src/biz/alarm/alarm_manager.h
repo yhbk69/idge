@@ -16,8 +16,9 @@
 //   4. 通过 Qt 信号通知界面更新
 //
 // 使用方式：
-//   // 在解码线程中调用
-//   QVector<AlarmRecord> newAlarms = AlarmManager::instance().ingest(channel, results);
+//   // 在解码线程中调用（ctx 为该槽位的类名表 + 报警类别，见 SlotContext）
+//   QVector<AlarmRecord> newAlarms =
+//       AlarmManager::instance().ingest(channel, results, ctx);
 //   if (!newAlarms.isEmpty()) {
 //       AlarmManager::instance().storeAndNotify(newAlarms);
 //   }
@@ -54,7 +55,8 @@ class QSqlDatabase;
 //   - imgPath: 报警抓拍图路径（可为空）——本管理器只负责判定与产出记录，
 //              截图落盘由 SnapWriter 后台线程异步完成并回填，与 SQLite 落库解耦：
 //              一条报警 = 一行 DB 记录 + 一张 data/alarms/日期/ 下的抓拍图，二者非同一生命周期
-//   - isFenceAlarm: 是否为电子围栏侵入报警（区别于安全帽/PPE 类报警，通常限流被绕过）
+//   - isFenceAlarm: 是否为电子围栏侵入报警（区别于按模型报警类别判定的检测报警，
+//                   走 geofence.throttleSeconds 独立限流窗口）
 //
 // ============================================================================
 struct AlarmRecord {
@@ -110,44 +112,23 @@ public:
     //   该"单位隐患"系文档误差，量纲本就一致）。现改用 steady_clock
     //   单调纳秒参与窗口比较，lastAlarmTime_ 存 steady 纳秒，
     //   与本常量量纲一致且不受墙钟跳变影响。
-    // bypassThrottle=true 时跳过此窗口检查（围栏报警使用）。
+    // 围栏报警不走这里，它按 geofence.throttleSeconds 配置的独立窗口限流
+    // （见 ingestFenceAlarm）。
     static const long kAlarmThrottleNs = 2000LL * 1000000LL;
 
-    // 设置类别名称列表（用于将 cls_id 转换为类别名称）
-    void setClassNames(const QStringList &names);
-
-    // 获取类别名称列表
-    const QStringList &classNames() const { return classNames_; }
-
     /**
-     * @brief 设置某个级联槽位的专属类别名列表
-     * @param slot  槽位索引（= TaskConfig.result_id = object_detect_result_list.id，0 基）
-     * @param names 该槽位模型标签文件读出的类别名，行序 = cls_id
+     * @brief 接收检测结果并判定报警时，该槽位所需的上下文
      *
-     * 级联各模型类别不同（coco80 / helmet 2 类 / vest 2 类…），
-     * ingest 按 results.id 选表，避免 helmet 的 cls_id 被套用 coco 类名。
+     * 由解码器在自己的槽位循环里就地构造（栈上对象，不跨线程共享）。
+     * 为什么不放在 AlarmManager 里按槽位下标存表：配置改成按通道之后，
+     * 通道 0 的槽位 1 与通道 2 的槽位 1 是两个不同的模型，单例里的同一张表
+     * 会被后建任务的通道覆盖，报警类别与类名都会串频道。
      */
-    void setSlotClassNames(int slot, const QStringList &names);
-
-    /**
-     * @brief 按槽位解析类别名
-     * @param slot  槽位索引（results.id），越界或未设置时回退全局 classNames_
-     * @param clsId 模型输出的类别 ID
-     * @return 类别名；两处表都命中不了时返回 "cls_N"
-     */
-    QString resolveClassName(int slot, int clsId) const;
-
-    /**
-     * @brief 设置某个级联槽位的报警类别
-     * @param slot  槽位索引（results.id，0 基）
-     * @param className 该槽位触发报警的类别名（如 "person"），空串=不报警
-     */
-    void setSlotAlarmClass(int slot, const QString &className);
-
-    /**
-     * @brief 获取某个级联槽位的报警类别
-     */
-    QString slotAlarmClass(int slot) const;
+    struct SlotContext
+    {
+        QString     alarmClass;   ///< 该槽位模型的报警类别；空 = 只画框不报警
+        QStringList classNames;   ///< 该槽位模型的类别名（labels.txt 行序 = cls_id）
+    };
 
     // ============================================================================
     // ingest: 接收检测结果，判断是否需要生成报警
@@ -158,12 +139,32 @@ public:
     // 参数：
     //   - channel: 视频通道编号
     //   - results: 检测结果列表
-    //   - bypassThrottle: 是否跳过去重限流（围栏报警不限流）
+    //   - ctx:     该槽位的类别名表 + 报警类别（见 SlotContext）
     //
     // 返回：新生成的报警列表
+    //
+    // 只处理"该槽位模型的报警类别"这一种普通检测报警；围栏报警走
+    // ingestFenceAlarm（围栏是通道级判定，不属于任何槽位）。
     // ============================================================================
     QVector<AlarmRecord> ingest(int channel, const object_detect_result_list &results,
-                                bool bypassThrottle = false);
+                                const SlotContext &ctx);
+
+    // ============================================================================
+    // ingestFenceAlarm: 电子围栏侵入报警
+    // ============================================================================
+    // 由解码线程在"通道级合并围栏判定"里对每个几何命中的目标调用一次。
+    // 与 ingest 的区别：
+    //   - 不做类别匹配判断——能调到这里说明调用方已经判定"该目标在围栏内"，
+    //     围栏类别由 geofence.alarmClass 单值决定，与槽位的 alarm_class 无关；
+    //   - 不用 2 秒检测限流窗口，用自己的围栏窗口 geofence.throttleSeconds
+    //     （默认 10 秒），限流键 "通道:fence:类别名"（用类名而非槽位，
+    //     配置重排后仍稳定）。
+    // 语义："每通道每类别每 10 秒一次入侵事件"。
+    //
+    // 参数 ctx 取检出该目标的槽位，仅用于把 cls_id 翻成类别名（含 detections 明细）。
+    // ============================================================================
+    QVector<AlarmRecord> ingestFenceAlarm(int channel, const object_detect_result &det,
+                                          const SlotContext &ctx, long timeNs);
 
     // ============================================================================
     // storeAndNotify: 存储新报警并发出信号
@@ -225,15 +226,6 @@ public:
     void resetDailyStats();
 
     // ============================================================================
-    // 报警类别配置
-    // ============================================================================
-    // 只有在报警类别列表中的类别才会触发报警
-    // 例如：配置为 ["person", "helmet"]，则只有检测到人或安全帽时才报警
-    // ============================================================================
-    void setAlarmClasses(const QStringList &classes);
-    QStringList alarmClasses() const;
-
-    // ============================================================================
     // 通道在线状态
     // ============================================================================
     // 跟踪哪些通道在线，用于界面显示通道状态
@@ -284,10 +276,6 @@ private:
     mutable QMutex mutex_;                     // 互斥锁（保护并发访问）
     int totalDetections_ = 0;                  // 总检测次数
     QMap<QString, int> classCount_;            // 各类别检测次数
-    QStringList classNames_;                   // 类别名称列表（全局兜底）
-    QVector<QStringList> slotClassNames_;      // 按级联槽位存的类别名表，下标=results.id
-    QVector<QString> slotAlarmClasses_;        // 按级联槽位存的报警类别，下标=results.id
-    QStringList alarmClasses_;                 // 报警类别列表（已废弃，改用 slotAlarmClasses_）
     QMap<QString, long> lastAlarmTime_;        // 上次报警时间（steady 单调纳秒，仅内存态，用于去重限流）
                                                // key: "通道号:类别ID" -> 上次报警时间(ns)
     QSet<int> onlineChannels_;                 // 当前在线通道集合

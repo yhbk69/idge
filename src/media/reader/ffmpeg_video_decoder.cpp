@@ -92,6 +92,7 @@
 #include <QDebug>
 #include <QElapsedTimer>
 #include <QDateTime>
+#include <QFile>
 #include <cerrno>
 #include <queue>
 #include <deque>
@@ -452,6 +453,44 @@ static QString submitAlarmSnapshot(int channel, const QString &className,
 }
 
 // ============================================================================
+// 报警出口：截图 → 入库并通知界面 → 提交视频片段
+// ============================================================================
+// 普通检测报警与围栏报警共用同一段收尾逻辑（此前只在槽位循环里内联写了一份，
+// 围栏判定挪到通道级之后就有两个调用点了）。
+//
+// 一批报警只出一张截图、一个片段：同通道同瞬间的多类别报警共享同一帧带框画面，
+// 命名取 front().className。
+//
+// 顺序要求：先 storeAndNotify 再 submitAlarmClip——attachVideoClip 的 UPDATE
+// 必须能命中已存在的行（片段队列一空就可能立刻执行）。
+// ============================================================================
+static void deliverAlarms(int channel, QVector<AlarmRecord> &alarms,
+                          const image_buffer_t &frame,
+                          const std::shared_ptr<VideoRecorder> &recorder)
+{
+    if (alarms.isEmpty())
+        return;
+
+    if (AlarmManager::instance().screenshotsEnabled()) {
+        const QString snap = submitAlarmSnapshot(
+            channel, alarms.front().className, frame.width, frame.height,
+            (const unsigned char *)frame.virt_addr);
+        // 只在截图成功时设置路径
+        for (auto &a : alarms) a.imagePath = snap;
+    }
+
+    AlarmManager::instance().storeAndNotify(alarms);
+
+    if (recorder) {
+        QStringList alarmIds;
+        alarmIds.reserve(alarms.size());
+        for (const auto &a : alarms) alarmIds << a.id;
+        submitAlarmClip(recorder, channel, alarms.front().className, alarmIds,
+                        QDateTime::currentMSecsSinceEpoch());
+    }
+}
+
+// ============================================================================
 // 硬件像素格式回调函数
 // ============================================================================
 // FFmpeg 解码器初始化时会询问："你支持什么输出格式？"
@@ -519,6 +558,10 @@ static int decodeInterruptCallback(void *ctx)
 //
 // PreviewOnly 模式两件事都不做：既不加载 RKNN 模型，也不预留 64 个
 // 640×640 DMA 缓冲（智能识别 QR/OCR 只要一帧原始画面，推理链路整条不建）。
+//
+// 推理任务不在这里建：四路 PlayerWidget 是 .ui 提升控件，构造时拿不到通道号，
+// 而按通道配置的槽位必须知道 channel_ 才能解析，所以挪到 start()
+// （PlayerWidget::open() 是 setChannel(ch) 紧接 start(url)，此时 channel_ 已就位）。
 // ============================================================================
 FFmpegVideoDecoder::FFmpegVideoDecoder(QObject *parent, InferenceMode mode)
     : QObject(parent)
@@ -529,20 +572,17 @@ FFmpegVideoDecoder::FFmpegVideoDecoder(QObject *parent, InferenceMode mode)
 
     // 创建 DMA 缓冲池：64 个 640×640 的 RGB 缓冲区
     dmaBufferPool_ = std::make_shared<DmaBufferPool>(64, 640, 640, RK_FORMAT_BGR_888, 16);
-
-    // 从 config.json 读取模型路径，构建级联推理任务列表
-    // 每个模型会创建一个独立的 PpeTask（推理线程）
-    buildCascadeTasks();
 }
 
 // ============================================================
-// 级联任务构建：
-//   由 ModelRegistry::resolveCascadeSlots() 解析 5 个槽位
-//   （槽位 1 = 全局 model.path，2~5 = cascade.models；每槽自带标签）。
-//   每个启用槽位建一个 PpeTask（独立推理线程）+ 一个结果队列，
-//   NPU 核心 0/1/2 轮流分配；taskConfig.result_id = 紧凑任务下标，
-//   推理结果经 od.id 路由到 AlarmManager 的按槽类名表。
-//   空路径 = 不启用该槽（界面里空着即可）。
+// 级联任务构建（按通道）：
+//   由 ModelRegistry::resolveChannelSlots(channel_) 展开本通道配置的模型库 id
+//   列表（路径/标签/报警类别都从模型库+参数表取，config 里没有路径字符串）。
+//   每个可用槽位建一个 PpeTask（独立推理线程）+ 一个结果队列；
+//   taskConfig.result_id = 紧凑槽位下标，即通道 models[] 里生效项的顺序。
+//   NPU 核用进程级轮转计数器分配：四路解码器各自 slotIdx%3 会让每个通道都
+//   从 core0 开始，3 核被前两个通道占满后其余通道只能挤同一核。
+//   模型列表为空 = 这一路不推理（画面照常显示），只会打一条告警。
 // ============================================================
 static std::vector<std::string> readLabelNames(const QString &labelPath)
 {
@@ -558,92 +598,110 @@ static std::vector<std::string> readLabelNames(const QString &labelPath)
 
 void FFmpegVideoDecoder::buildCascadeTasks()
 {
+    if (!tasks_.empty())
+        return;  // stop()→start() 重启路径：任务与模型只在首次建立（改配置需重启）
+
     ConfigManager &cfg = ConfigManager::instance();
-    // 解码器构造比主窗口 ConfigManager::load() 早，这里确保配置已读入
-    if (cfg.modelPath().isEmpty() && cfg.labelPath().isEmpty()) {
+    // 正常启动时 frmmain 早已 load()；这里只兜"直接 new 解码器"这种用法下配置还没读进来。
+    // 判据用 V2 的必有键：模型参数表与通道模型列表同时为空即视为未加载。
+    if (cfg.modelParamKeys().isEmpty() && cfg.channelModelIds(channel_).isEmpty())
         cfg.load(RuntimePaths::configFile());
-    }
 
-    // 槽位解析：模型路径 + 每槽专属标签（库内 labels.txt 优先于全局 label）
-    QList<SlotModel> slotList = ModelRegistry::resolveCascadeSlots();
-    bool anyEnabled = false;
-    for (const SlotModel &s : slotList) {
-        if (!s.modelPath.trimmed().isEmpty()) { anyEnabled = true; break; }
-    }
-    if (!anyEnabled) {
-        // 兜底：什么也没配就用模型库默认模型
-        SlotModel fb;
-        fb.modelPath = "model/library/yolo11n-coco/model.rknn";
-        fb.labelPath = cfg.labelPath().isEmpty()
-                           ? QStringLiteral("model/library/yolo11n-coco/labels.txt")
-                           : cfg.labelPath();
-        slotList.clear();
-        slotList.append(fb);
-    }
-
-    // 每个启用槽位一个推理任务 + 一个结果队列 + 一份类名表
-    for (int cfgIdx = 0; cfgIdx < slotList.size(); ++cfgIdx) {
-        const SlotModel &s = slotList[cfgIdx];
-        QString mp = s.modelPath.trimmed();
-        if (mp.isEmpty())
-            continue;
-        QString lp = s.labelPath.trimmed();
-        // 未指定标签路径时，自动使用模型同目录下的 labels.txt
-        if (lp.isEmpty()) {
-            QFileInfo modelInfo(mp);
-            lp = modelInfo.dir().filePath("labels.txt");
+    // 本通道的槽位：模型路径 + 标签 + 报警类别（缺失项已被跳过并告警）
+    QList<ResolvedSlot> resolved = ModelRegistry::resolveChannelSlots(channel_);
+    if (resolved.isEmpty()) {
+        // 兜底：这一路没配模型（或配的全不在库中），回退库内默认模型，
+        // 保证画面仍有检测框，而不是整路不建推理任务。
+        const QString fbId = QStringLiteral("yolo11n-coco");
+        const QString fbModel = ModelRegistry::instance().modelPath(fbId);
+        if (fbModel.isEmpty() || !QFile::exists(fbModel)) {
+            qWarning() << "[decoder] 通道" << channel_
+                       << "无可用模型，库内默认模型也缺失，本路不建推理任务";
+            return;
         }
+        ResolvedSlot fb;
+        fb.libId = fbId;
+        fb.modelPath = fbModel;
+        fb.labelPath = ModelRegistry::instance().labelPath(fbId);
+        fb.alarmClass = cfg.modelAlarmClass(fbId);
+        qWarning() << "[decoder] 通道" << channel_ << "未配置可用模型，回退库内默认:" << fbId;
+        resolved.append(fb);
+    }
 
+    // 进程级轮转：核掩码是位标志（CORE_0=1/CORE_1=2/CORE_2=4），
+    // 四路解码器共享一个计数器才能让三个核真的被轮流用上。
+    static std::atomic<unsigned> nextCore{0};
+    static std::atomic<int> totalTasks{0};
+    static constexpr rknn_core_mask kCoreMasks[] = {
+        RKNN_NPU_CORE_0, RKNN_NPU_CORE_1, RKNN_NPU_CORE_2
+    };
+
+    // 每个可用槽位一个推理任务 + 一个结果队列 + 一份类名表
+    for (const ResolvedSlot &s : resolved) {
+        const QString mp = s.modelPath;
+        const QString lp = s.labelPath;
         const int slotIdx = (int)tasks_.size();  // 紧凑下标，即 result_id
 
         TaskConfig taskConfig;
-        // 核掩码是位标志而非连续枚举：CORE_0=1、CORE_1=2、CORE_2=4。
-        // 老写法 RKNN_NPU_CORE_0 + (slotIdx % 3) 得到 1/2/3，第三档落到
-        // CORE_0_1（双核掩码）且 core2 永远轮不到——NPU 三个核只用两个。
-        static constexpr rknn_core_mask kCoreMasks[] = {
-            RKNN_NPU_CORE_0, RKNN_NPU_CORE_1, RKNN_NPU_CORE_2
-        };
-        taskConfig.core_mask = kCoreMasks[slotIdx % 3];
+        taskConfig.core_mask = kCoreMasks[nextCore.fetch_add(1) % 3];
         taskConfig.modelPath = mp.toStdString();
         taskConfig.labelPath = lp.toStdString();
         taskConfig.result_id = slotIdx;
-        
-        // 从模型注册表获取类别数
-        QString modelId = ModelRegistry::instance().findIdByModelFile(mp);
-        if (!modelId.isEmpty()) {
-            ModelMeta meta = ModelRegistry::instance().meta(modelId);
-            taskConfig.numClasses = meta.numClasses;
-        } else {
-            // 未入库的模型，按标签文件行数估算
-            std::vector<std::string> labels = readLabelNames(lp);
-            taskConfig.numClasses = labels.size();
-        }
+
+        // 类别数：优先取模型库元数据，库外模型按标签行数估算
+        const ModelMeta meta = ModelRegistry::instance().meta(s.libId);
+        taskConfig.numClasses = meta.numClasses > 0
+                                    ? meta.numClasses
+                                    : (int)readLabelNames(lp).size();
 
         PpeTask *task = new PpeTask(taskConfig);
         tasks_.push_back(task);
-        // 每路 12 个上下文、启动一次，打印绑定核便于现场核对 NPU 三核是否真的都在用
-        // （debugfs 的 per-core load 需要 root，板端一般读不到）。
-        qInfo() << "cascade slot" << slotIdx << "npu_core_mask" << (int)taskConfig.core_mask
-                << mp;
+        // 每路 12 个上下文、启动一次，打印通道/槽位/绑定核，便于现场核对
+        // NPU 三核是否真的都在用（debugfs 的 per-core load 需要 root，板端一般读不到）。
+        const int created = totalTasks.fetch_add(1) + 1;
+        qInfo() << "cascade slot ch" << channel_ << "slot" << slotIdx
+                << "npu_core_mask" << (int)taskConfig.core_mask << mp;
+        if (created > 6)
+            qWarning() << "[decoder] 全进程推理任务已达" << created
+                          << "个（3 个 NPU 核），建议减少部分通道的模型数量";
 
         // 每个任务一个独立结果队列（容量 8，满了丢旧保新）
         slotQueues_.push_back(std::make_shared<PriorityQueue<object_detect_result_list>>(8));
 
         // 类名表：画框用 std 版，报警侧用 QString 版（同一数据源，同下标）
         slotClassNames_.push_back(readLabelNames(lp));
-        QStringList qnames;
-        for (const auto &n : slotClassNames_.back()) qnames << QString::fromStdString(n);
-        AlarmManager::instance().setSlotClassNames(slotIdx, qnames);
 
-        // 加载该槽位的报警类别（cfgIdx+1 是 config 数组的 1-based 下标）
-        QString alarmClass = ConfigManager::instance().cascadeModelAlarmClass(cfgIdx + 1);
-        AlarmManager::instance().setSlotAlarmClass(slotIdx, alarmClass);
+        // 报警类别是"模型的参数"（video.models[<id>].alarm_class），空 = 只画框不报警。
+        // 存在本解码器里而非 AlarmManager 单例：按通道配置后，通道 0 的槽位 1 与
+        // 通道 2 的槽位 1 是两个不同模型，写进同一张全局表会互相覆盖。
+        slotAlarmClasses_.push_back(s.alarmClass);
     }
 
-    qDebug() << "Cascade tasks:" << tasks_.size();
+    qDebug() << "Cascade tasks channel" << channel_ << ":" << tasks_.size();
     for (size_t k = 0; k < tasks_.size(); ++k) {
-        qDebug() << "  slot" << k + 1 << "->" << QString::fromStdString(tasks_[k]->getModelPath())
-                 << "labels:" << (int)slotClassNames_[k].size();
+        qDebug() << "  slot" << k << "->" << QString::fromStdString(tasks_[k]->getModelPath())
+                 << "labels:" << (int)slotClassNames_[k].size()
+                 << "alarm_class:" << slotAlarmClasses_[k];
+    }
+
+    // 围栏前置条件：围栏是通道级判定，需要本通道至少有一个模型能产出围栏类别。
+    // 挂了 PPE（只有 helmet/vest/un_helmet/…）却没挂 person 的通道，围栏永远不会触发——
+    // 这种配置错误过去完全静默，这里显式说一声。
+    {
+        auto &fenceMgr = geofence::FenceManager::instance();
+        if (fenceMgr.enabled() && fenceMgr.hasFence(channel_)) {
+            const QString fenceCls = fenceMgr.alarmClass();
+            bool producible = false;
+            for (const auto &names : slotClassNames_) {
+                for (const auto &n : names) {
+                    if (QString::fromStdString(n) == fenceCls) { producible = true; break; }
+                }
+                if (producible) break;
+            }
+            if (!producible)
+                qWarning() << "[geofence] 通道" << channel_ + 1 << "无模型产出类别"
+                           << fenceCls << "，围栏不会触发；请给该通道加上含该类别的模型";
+        }
     }
 }
 
@@ -654,8 +712,13 @@ FFmpegVideoDecoder::~FFmpegVideoDecoder() { stop(); }
 // ============================================================================
 // 启动流程：
 //   1. 停止之前的解码线程（如果正在运行）
-//   2. 启动所有级联推理任务（每个模型一个线程）
-//   3. 创建新的 Qt 线程运行 decodeLoop()
+//   2. 按本通道配置构建级联推理任务（每个模型一个线程），首次才建
+//   3. 启动所有级联推理任务
+//   4. 创建新的 Qt 线程运行 decodeLoop()
+//
+// 为什么建任务放在这里而不是构造函数：四路 PlayerWidget 是 frmvideowindow.ui 的
+// 提升控件，构造时拿不到通道号；PlayerWidget::open() 是 setChannel(ch) 紧接
+// start(url)，走到这里 channel_ 已经就位，才能按通道解析槽位。
 //
 // 为什么用 Qt 线程？：
 //   - decodeLoop() 需要 emit frameReady() 信号
@@ -679,6 +742,11 @@ void FFmpegVideoDecoder::start(const QString &url)
 
     url_ = url;
     running_ = true;
+
+    // 按本通道配置建立推理任务（PreviewOnly 模式整条推理链路不建；
+    // 已有任务时是空操作，即"改配置需重启"）
+    if (inferenceEnabled_)
+        buildCascadeTasks();
 
     // 启动所有级联推理任务（每个模型一个线程）
     for (PpeTask *task : tasks_) {
@@ -793,68 +861,6 @@ void FFmpegVideoDecoder::waitForStop()
     for (PpeTask *task : tasks_) {
         task->stopBestEffort(1500);
     }
-}
-
-// ============================================================================
-// reloadAllModels: 热更新所有模型
-// ============================================================================
-// 在不停止解码的情况下替换所有推理模型。
-// 用于生产环境中更换检测模型（如从安全帽检测切换到反光背心检测）。
-//
-// 流程：
-//   1. 逐个调用 PpeTask::reloadModel() 替换模型
-//   2. 更新类别名称列表
-//   3. 返回成功替换的数量
-//
-// 注意：
-//   - 解码线程继续运行，但推理会短暂暂停（~100ms/模型）
-//   - 新模型加载失败：旧模型原样重启，保持不变
-//   - 推理线程未在时限内退出：放弃该槽位热更新（旧线程随后自行停止，
-//     可稍后再次触发重试；期间该槽位不产结果但不崩溃、不丢 NPU 上下文）
-// ============================================================================
-int FFmpegVideoDecoder::reloadAllModels(const QStringList &modelPaths, const QStringList &labelPaths)
-{
-    int successCount = 0;
-    int taskIndex = 0;
-
-    for (int i = 0; i < modelPaths.size() && taskIndex < tasks_.size(); i++) {
-        QString path = modelPaths[i];
-        if (path.isEmpty()) {
-            continue;  // 跳过空路径
-        }
-
-        QString labelPath = (i < labelPaths.size()) ? labelPaths[i] : labelPaths[0];
-
-        PpeTask *task = tasks_[taskIndex];
-        // 热更新只换模型、不改核分配：沿用 buildCascadeTasks 为该槽位定的核掩码
-        bool ok = task->reloadModel(
-            path.toStdString(),
-            labelPath.toStdString(),
-            task->currentCoreMask());
-
-        if (ok) {
-            successCount++;
-            qInfo() << "Model" << i << "reloaded:" << path;
-
-            // 同步该槽位的类名表（画框 + 报警侧都要换成新模型的标签）
-            if (taskIndex < (int)slotClassNames_.size()) {
-                slotClassNames_[taskIndex] = readLabelNames(labelPath);
-                QStringList qnames;
-                for (const auto &n : slotClassNames_[taskIndex])
-                    qnames << QString::fromStdString(n);
-                AlarmManager::instance().setSlotClassNames(taskIndex, qnames);
-                // 同步更新该槽位的报警类别（i 是 config 数组下标）
-                QString alarmClass = ConfigManager::instance().cascadeModelAlarmClass(i + 1);
-                AlarmManager::instance().setSlotAlarmClass(taskIndex, alarmClass);
-            }
-        } else {
-            qWarning() << "Model" << i << "reload failed:" << path;
-        }
-
-        taskIndex++;
-    }
-
-    return successCount;
 }
 
 // ============================================================================
@@ -1545,6 +1551,41 @@ void FFmpegVideoDecoder::decodeLoop()
                     dislayImage.width = dst_buf->width();
                     dislayImage.height = dst_buf->height();
 
+                    // ===== 4.9b 报警上下文与围栏候选（本帧一次） =====
+                    //
+                    // 每槽位的报警上下文：该模型的类名表 + 报警类别（"模型的参数"，
+                    // 来自 config 的 video.models[<库id>].alarm_class）。
+                    // 由解码器构造、随结果传进 AlarmManager，单例里不再存全局槽表——
+                    // 按通道配置之后，通道 0 的槽位 1 与通道 2 的槽位 1 是两个不同模型。
+                    std::vector<AlarmManager::SlotContext> slotCtxs(slotQueues_.size());
+                    for (size_t k = 0; k < slotQueues_.size(); ++k) {
+                        slotCtxs[k].alarmClass = slotAlarmClasses_[k];
+                        slotCtxs[k].classNames.reserve((int)slotClassNames_[k].size());
+                        for (const auto &n : slotClassNames_[k])
+                            slotCtxs[k].classNames << QString::fromStdString(n);
+                    }
+
+                    // cls_id → 类别名，与 AlarmManager::ingest 内部同口径（越界记 cls_N）
+                    auto slotClassNameAt = [](const QStringList &names, int clsId) {
+                        return (clsId >= 0 && clsId < names.size())
+                                   ? names[clsId]
+                                   : QString("cls_%1").arg(clsId);
+                    };
+
+                    // 围栏只按"通道"配置：类别是 geofence.alarmClass 单值（默认 person），
+                    // 与本通道挂了几个模型、每个模型的报警类别都无关。
+                    auto &fenceMgr = geofence::FenceManager::instance();
+                    const bool fenceScan = fenceMgr.enabled() && fenceMgr.hasFence(channel_);
+                    const QString fenceCls = fenceMgr.alarmClass();
+
+                    struct FenceCandidate {
+                        object_detect_result det;
+                        size_t slot = 0;      // 检出它的槽位，用于取回该类名表与节流口径
+                        QString className;
+                        long timeNs = 0;      // 该结果的采集时刻（epoch 纳秒）
+                    };
+                    std::vector<FenceCandidate> fenceCandidates;
+
                     for (size_t k = 0; k < slotQueues_.size(); ++k) {
                         ds.stage.restart();
                         // 从该模型的结果队列中取最新一次检测结果
@@ -1673,156 +1714,89 @@ void FFmpegVideoDecoder::decodeLoop()
                         }
 
                         ds.add(ds.sDraw); ds.stage.restart();
-                        // ===== 4.10 电子围栏判断 + 告警 =====
+                        // ===== 4.10 本槽位的普通检测报警 =====
                         // 仅在有新检测结果时执行（非推理帧跳过，避免空结果误触发报警）
-                        if (!hasNewResult || od.count <= 0) { ds.add(ds.sAlarm); continue; }
-                        // 流程：
-                        //   1. 检查围栏是否启用且该通道有围栏
-                        //   2. 如果有围栏：过滤出在围栏内的目标，再判断是否触发报警
-                        //   3. 如果没有围栏：直接使用全部检测结果判断报警
-                        //   4. 围栏模式下，只统计在围栏内的目标（inside_alarm模式）
-                        auto &fenceMgr = geofence::FenceManager::instance();
-                        bool fenceEnabled = fenceMgr.enabled();
-                        bool hasFence = fenceEnabled && fenceMgr.hasFence(channel_);
-                        bool alarmInside = (fenceMgr.mode() == "inside_alarm");
+                        if (hasNewResult && od.count > 0) {
+                            QVector<AlarmRecord> newAlarms = AlarmManager::instance()
+                                    .ingest(channel_, od, slotCtxs[k]);
+                            // 收尾（截图 → 入库通知 → 片段）见 deliverAlarms
+                            deliverAlarms(channel_, newAlarms, dislayImage, videoRecorder_);
 
-                        QVector<AlarmRecord> newAlarms;
-                        if (hasFence) {
-                            // 围栏模式：需要先过滤出在围栏内的目标
-                            const geofence::ChannelFence &cf = fenceMgr.channelFence(channel_);
-                            const QStringList &fenceClasses = fenceMgr.alarmClasses();
-                            int oW = 0, oH = 0;
-                            fenceMgr.overlaySize(channel_, oW, oH);
-
-                            // 汇总信息：输出围栏检测的配置参数
-                            const QStringList &alarmCls = AlarmManager::instance().alarmClasses();
-                            fenceMgr.postLog("fence",
-                                QString("[通道%1] 围栏检测: %2个目标, 模式=%3, 围栏类别=%4, 报警类别=%5, 围栏=%6个")
-                                    .arg(channel_ + 1).arg(od.count).arg(fenceMgr.mode())
-                                    .arg(fenceClasses.isEmpty() ? "person" : fenceClasses.join(","))
-                                    .arg(alarmCls.isEmpty() ? "(空)" : alarmCls.join(","))
-                                    .arg(cf.shapes.size()));
-
-                            object_detect_result_list filteredOd;
-                            filteredOd.id = od.id;
-                            filteredOd.time = od.time;
-                            filteredOd.count = 0;
-                            for (int i = 0; i < od.count; i++) {
-                                const auto &d = od.results[i];
-                                // 按该结果所属槽位取类名（与报警侧同口径）
-                                QString clsName = AlarmManager::instance()
-                                                      .resolveClassName(od.id, d.cls_id);
-
-                                // 类别检查：只处理围栏类别中定义的目标
-                                bool classMatch = fenceClasses.isEmpty() ||
-                                                  fenceClasses.contains(clsName);
-                                if (!classMatch) {
-                                    fenceMgr.postLog("fence",
-                                        QString("  [通道%1] 目标%2: %3 不在围栏类别中，跳过")
-                                            .arg(channel_ + 1).arg(i).arg(clsName));
-                                    continue;
+                            // 围栏候选：围栏是"通道"级判定，不属于任何槽位。
+                            // 这里只按类别名把候选收齐，几何判定与报警留到循环之后合并做一次，
+                            // 于是围栏通道里的 un_helmet 之类普通报警不再被围栏分支吞掉。
+                            if (fenceScan) {
+                                for (int i = 0; i < od.count; i++) {
+                                    const auto &d = od.results[i];
+                                    const QString clsName =
+                                        slotClassNameAt(slotCtxs[k].classNames, d.cls_id);
+                                    if (clsName != fenceCls)
+                                        continue;
+                                    FenceCandidate c;
+                                    c.det = d;
+                                    c.slot = k;
+                                    c.className = clsName;
+                                    c.timeNs = od.time;
+                                    fenceCandidates.push_back(c);
                                 }
-
-                                // 围栏判定：检查目标中心点是否在围栏区域内
-                                // alarmInside=true：目标在围栏内报警；false：目标在围栏外报警
-                                bool inside = geofence::FenceChecker::checkDetection(
-                                        d,
-                                        dislayImage.width, dislayImage.height,
-                                        640, 640, oW, oH,
-                                        cf, alarmInside);
-
-                                int footX = (d.box.left + d.box.right) / 2;
-                                int footY = d.box.bottom;
-                                fenceMgr.postLog("fence",
-                                    QString("  [通道%1] 目标%2: %3  foot=(%4,%5) %6")
-                                        .arg(channel_ + 1).arg(i).arg(clsName)
-                                        .arg(footX).arg(footY)
-                                        .arg(inside ? "→ 在围栏内 ✓" : "→ 在围栏外"));
-
-                                // 只保留在围栏内的目标
-                                if (inside) {
-                                    if (filteredOd.count < OBJ_NUMB_MAX_SIZE) {
-                                        filteredOd.results[filteredOd.count++] = d;
-                                    }
-                                }
-                            }
-
-                            // 过滤汇总：输出围栏内目标数量
-                            fenceMgr.postLog("fence",
-                                QString("  [通道%1] 过滤结果: %2/%3 个目标在围栏内")
-                                    .arg(channel_ + 1).arg(filteredOd.count).arg(od.count));
-
-                            // 围栏报警绕过限流：每次检测到围栏内目标立即报警
-                            // bypassThrottle=true：围栏报警不受2秒限流窗口约束
-                            newAlarms = AlarmManager::instance().ingest(channel_, filteredOd, true);
-                            for (auto &a : newAlarms) a.isFenceAlarm = true;
-
-                            // 报警结果：输出围栏报警触发信息
-                            if (!newAlarms.isEmpty()) {
-                                fenceMgr.postLog("alarm",
-                                    QString("  [通道%1] ★ 围栏报警触发: %2 (置信度 %3%)")
-                                        .arg(channel_ + 1)
-                                        .arg(newAlarms.front().className)
-                                        .arg(newAlarms.front().confidence * 100, 0, 'f', 1));
-                            } else if (filteredOd.count > 0) {
-                                // ingest 返回空，说明类别不在 alarmClasses 中
-                                fenceMgr.postLog("warning",
-                                    QString("  [通道%1] ⚠ 有%2个目标在围栏内但未生成报警 - "
-                                            "请检查'报警类别'是否包含围栏检测的目标类别")
-                                        .arg(channel_ + 1).arg(filteredOd.count));
-                            }
-                        } else {
-                            // 无围栏模式：直接使用全部检测结果判断报警
-                            // bypassThrottle=false：普通检测报警也受2秒限流
-                            newAlarms = AlarmManager::instance().ingest(channel_, od);
-                        }
-                        //
-                        // AlarmManager::ingest() 处理流程：
-                        //   1. 统计各类别检测次数
-                        //   2. 检查类别是否在报警类别列表中
-                        //   3. 去重限流：同通道同类别 2 秒只报 1 次（bypassThrottle=true 时跳过限流）
-                        //   4. 创建 AlarmRecord 并返回
-                        //
-                        // 截图机制：
-                        //   - 解码线程只负责拷贝像素 + 提交（不阻塞）
-                        //   - PNG/JPEG 编码在独立后台线程完成
-                        //   - 避免编码耗时拖低帧率
-                        //
-                        // 片段机制（与截图同理，但多一层"等后 2 秒"的延迟）：
-                        //   - 一批 newAlarms 只出一个片段：同通道同瞬间的多类别报警
-                        //     共享同一段带框画面，命名取 front().className
-                        //   - videoPath 不在这里填（文件还没生成），
-                        //     由 ClipWriter 落盘后调 attachVideoClip() 回填内存 + DB
-                        if (!newAlarms.isEmpty()) {
-                            QString snap;
-                            if (AlarmManager::instance().screenshotsEnabled()) {
-                                // 提交截图任务（异步，不等待）
-                                snap = submitAlarmSnapshot(
-                                    channel_, newAlarms.front().className,
-                                    dislayImage.width, dislayImage.height,
-                                    (const unsigned char *)dislayImage.virt_addr);
-                                // 只在截图成功时设置路径
-                                for (auto &a : newAlarms) a.imagePath = snap;
-                            }
-                            // 入库并通知界面（弹 toast / 报警列表新增）
-                            // storeAndNotify 流程：
-                            //   1. 将报警添加到内存列表（最多保留1000条）
-                            //   2. 写入 SQLite 数据库
-                            //   3. 发送 alarmGenerated 信号通知界面刷新
-                            AlarmManager::instance().storeAndNotify(newAlarms);
-
-                            // 先入库再提交 dump：attachVideoClip 的 UPDATE 必须
-                            // 能命中已存在的行（队列一空就可能立刻执行）
-                            if (videoRecorder_) {
-                                QStringList alarmIds;
-                                alarmIds.reserve(newAlarms.size());
-                                for (const auto &a : newAlarms) alarmIds << a.id;
-                                submitAlarmClip(videoRecorder_, channel_,
-                                                newAlarms.front().className, alarmIds,
-                                                QDateTime::currentMSecsSinceEpoch());
                             }
                         }
                         ds.add(ds.sAlarm);
+                    }
+
+                    // ===== 4.10b 电子围栏：通道级合并判定 + 报警 =====
+                    //
+                    // 判定放在这里（槽位循环之后、emit frameReady 之前）：
+                    //   - 候选已跨槽位收齐，挂 PPE 还是挂 COCO 都能检出 person；
+                    //   - 围栏坐标是 overlay 像素空间，需与本帧 dislayImage 尺寸同口径；
+                    //   - 截图要用同一帧带框画面，deliverAlarms 才能拍到越界目标。
+                    if (fenceScan && !fenceCandidates.empty()) {
+                        const geofence::ChannelFence cf = fenceMgr.channelFence(channel_);
+                        const bool alarmInside = (fenceMgr.mode() == "inside_alarm");
+                        int oW = 0, oH = 0;
+                        fenceMgr.overlaySize(channel_, oW, oH);
+
+                        QVector<AlarmRecord> fenceAlarms;
+                        int insideCount = 0;
+                        for (const FenceCandidate &c : fenceCandidates) {
+                            // 脚点（框底边中点）落在围栏多边形内算命中；
+                            // alarmInside=false 时语义反过来（越界即围栏外报警）
+                            const bool inside = geofence::FenceChecker::checkDetection(
+                                    c.det,
+                                    dislayImage.width, dislayImage.height,
+                                    640, 640, oW, oH,
+                                    cf, alarmInside);
+                            if (!inside)
+                                continue;
+                            insideCount++;
+                            // 每通道每类别在 geofence.throttleSeconds 窗口内只出一条
+                            fenceAlarms += AlarmManager::instance().ingestFenceAlarm(
+                                    channel_, c.det, slotCtxs[c.slot], c.timeNs);
+                        }
+
+                        QStringList alarmClassDesc;
+                        for (size_t k = 0; k < slotCtxs.size(); ++k)
+                            alarmClassDesc << QString("M%1=%2").arg(k + 1)
+                                    .arg(slotCtxs[k].alarmClass.isEmpty()
+                                             ? QStringLiteral("(不报警)")
+                                             : slotCtxs[k].alarmClass);
+                        fenceMgr.postLog("fence",
+                            QString("[通道%1] 围栏: 模式=%2, 围栏类别=%3, 围栏=%4个, "
+                                    "本通道报警类=[%5] | 候选%6个, 围栏内%7个, 报警%8条(节流%9秒)")
+                                .arg(channel_ + 1).arg(fenceMgr.mode()).arg(fenceCls)
+                                .arg(cf.shapes.size()).arg(alarmClassDesc.join(", "))
+                                .arg((int)fenceCandidates.size()).arg(insideCount)
+                                .arg(fenceAlarms.size())
+                                .arg(ConfigManager::instance().geofenceThrottleSeconds()));
+
+                        if (!fenceAlarms.isEmpty()) {
+                            fenceMgr.postLog("alarm",
+                                QString("  [通道%1] ★ 围栏报警触发: %2 (置信度 %3%)")
+                                    .arg(channel_ + 1)
+                                    .arg(fenceAlarms.front().className)
+                                    .arg(fenceAlarms.front().confidence * 100, 0, 'f', 1));
+                        }
+                        deliverAlarms(channel_, fenceAlarms, dislayImage, videoRecorder_);
                     }
 
                     

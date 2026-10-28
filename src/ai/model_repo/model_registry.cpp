@@ -346,21 +346,14 @@ bool ModelRegistry::importModel(const QString &srcRknnPath, const QString &srcLa
 }
 
 // ============================================================================
-// 槽位引用计数：模型1~5 的 config 路径中反查命中 id 的个数
+// 引用计数：有多少通道的模型列表用到了这个库模型
+// ============================================================================
+// V2 里配置不再存路径，通道直接按库目录名引用模型，所以计数是一次列表匹配，
+// 不需要 findIdByModelFile 反查（那个函数仍保留给迁移与旧数据兼容用）。
 // ============================================================================
 int ModelRegistry::referenceCount(const QString &id) const
 {
-    auto &cfg = ConfigManager::instance();
-    QStringList slotPaths;
-    slotPaths << cfg.modelPath();                    // 模型1 = 全局 model.path
-    for (int idx = 2; idx <= 5; ++idx)
-        slotPaths << cfg.cascadeModelPath(idx);
-    int n = 0;
-    for (const QString &p : slotPaths) {
-        if (!p.trimmed().isEmpty() && findIdByModelFile(p) == id)
-            ++n;
-    }
-    return n;
+    return ConfigManager::instance().modelParamUsers(id).size();
 }
 
 // ============================================================================
@@ -373,8 +366,19 @@ bool ModelRegistry::deleteModel(const QString &id, QString &errorMsg)
         errorMsg = QStringLiteral("模型不存在: %1").arg(id);
         return false;
     }
-    if (const int refs = referenceCount(id)) {
-        errorMsg = QStringLiteral("模型被 %1 个槽位引用，请先在模型路径1~5 中切换").arg(refs);
+    // 被通道引用 → 拒绝。报错里直接列出通道号（UI 显示 1~4，内部 0-based），
+    // 省得现场再去设置页一个个翻。
+    const QList<int> users = ConfigManager::instance().modelParamUsers(id);
+    if (!users.isEmpty()) {
+        QStringList chs;
+        for (int ch : users) chs.append(QString::number(ch + 1));
+        errorMsg = QStringLiteral("模型被通道 %1 引用，请先在对应通道的模型列表中解除引用")
+                       .arg(chs.join(QStringLiteral("/")));
+        return false;
+    }
+    // 只在参数表里挂着、没有任何通道引用，也拒绝：悬空定义会让人以为这模型还在用。
+    if (ConfigManager::instance().modelParamKeys().contains(id)) {
+        errorMsg = QStringLiteral("模型仍在模型参数表中定义，请先删除该条目");
         return false;
     }
 
@@ -413,29 +417,37 @@ void ModelRegistry::ensureScanned()
 }
 
 // ============================================================================
-// 级联 5 槽位解析（decoder/UI 共用）
+// 单通道级联槽位解析（decoder/UI 共用）
 // ============================================================================
-QList<SlotModel> ModelRegistry::resolveCascadeSlots()
+// 返回**只含可用槽位**的有序列表，下标即紧凑槽位号 = TaskConfig.result_id
+// = 画框上的 M{n+1} = 报警限流键里的槽位段。
+// 悬空引用（通道写了库里没有的模型）不占位：若占位，通道列表中间删掉一个模型
+// 会让后面所有槽位的 result_id 集体挪号，现场看到的 M2/M3 标号跟着抖。
+QList<ResolvedSlot> ModelRegistry::resolveChannelSlots(int ch)
 {
     instance().ensureScanned();
-    auto &cfg = ConfigManager::instance();
-    QList<SlotModel> slotList;
-    for (int idx = 1; idx <= 5; ++idx) {
-        SlotModel s;
-        s.modelPath = (idx == 1) ? cfg.modelPath() : cfg.cascadeModelPath(idx);
-        if (s.modelPath.trimmed().isEmpty()) {
-            slotList.append(s);  // 未启用槽位
+    ConfigManager &cfg = ConfigManager::instance();
+
+    QList<ResolvedSlot> resolved;
+    const QStringList ids = cfg.channelModelIds(ch);
+    for (const QString &libId : ids) {
+        if (!instance().contains(libId)) {
+            qWarning() << "[ModelRegistry] 通道" << ch << "引用的模型不在库中，该槽位跳过:"
+                       << libId << QStringLiteral("（请在『模型管理』页导入 model/library/%1/model.rknn）").arg(libId);
             continue;
         }
-        s.modelId = instance().findIdByModelFile(s.modelPath);
-
-        // 标签优先级：槽位显式 label > 库内 labels.txt > 全局 label
-        s.labelPath = cfg.cascadeModelLabel(idx);
-        if (s.labelPath.trimmed().isEmpty() && !s.modelId.isEmpty())
-            s.labelPath = instance().labelPath(s.modelId);
-        if (s.labelPath.trimmed().isEmpty())
-            s.labelPath = cfg.labelPath();
-        slotList.append(s);
+        ResolvedSlot s;
+        s.libId = libId;
+        s.modelPath = instance().modelPath(libId);  // 绝对路径，给加载器用
+        const VideoModelParam param = cfg.modelParam(libId);
+        s.alarmClass = param.alarmClass;            // 空 = 这个模型只画框不报警
+        // 标签优先级：参数表显式 label（库外标签文件的逃生口）> 库内 labels.txt
+        s.labelPath = param.label.isEmpty() ? instance().labelPath(libId) : param.label;
+        if (!QFile::exists(s.labelPath)) {
+            qWarning() << "[ModelRegistry] 通道" << ch << "标签文件读不到，回落库内默认:" << s.labelPath;
+            s.labelPath = instance().labelPath(libId);
+        }
+        resolved.append(s);
     }
-    return slotList;
+    return resolved;
 }

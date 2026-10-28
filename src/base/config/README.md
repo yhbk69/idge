@@ -17,15 +17,53 @@
 
 ## 核心类与数据流
 - **ConfigManager**（单例）：`load()` 读入 `QJsonObject root_`；各 setter 只改内存，
-  `save()` 才整体序列化写回文件。配置节：`video` / `model` / `cascade` / `detect` /
-  `alarm` / `geofence` / `recording` / `websocket` / `smartRecognition`（另有一整段 `gb28181`
-  由国标模块自己读，见下）。文件不存在时写入内置默认并 `save()`；JSON 解析失败置空 `root_`，
-  getter 回退默认值（0.25 / 0.45 / 80 / 3 / "inside_alarm" …）。
-- **一次性迁移**：`load()` 末尾按 `migrateModelPaths()` / `migrateRecordingDefaults()` 的范式
-  补齐老配置缺失的段（只在整段不存在时写默认值，已有段一律不动，返回 true 才 `saveUnsafe()` 落盘）。
-  目的是让新开关在文件里可见可改，程序本身仍靠 getter 兜底。
+  `save()` 才整体序列化写回文件。配置节：`video`（含 `models` 参数表与 `channels` 列表）/
+  `detect` / `geofence` / `recording` / `database` / `websocket` / `smartRecognition`
+  （另有一整段 `gb28181` 由国标模块自己读，见下）。文件不存在时按 **schema V2** 写入内置默认并
+  `save()`；JSON 解析失败置空 `root_`，getter 回退默认值（0.25 / 0.45 / "inside_alarm" / "person" / 10 …）。
+- **一次性迁移**：两类，都在 `load()` 内、有变化才 `saveUnsafe()` 落盘：
+  1. `migrateModelPaths()` / `migrateRecordingDefaults()` 等段级补齐——只在整段不存在时写默认值，
+     目的是让新开关在文件里可见可改，程序本身仍靠 getter 兜底；
+  2. `migrateSchemaV2()`——把老 V1 结构（`model.path` + 全局 5 槽 `cascade.models[]` +
+     `alarm.classes` + `video.channel1..4`/`notes`）一次性改写成 V2，键名与语义见根 README §3。
+     守卫是 `video.channels` 是否存在：迁移后旧键全部 `remove`，第二次启动即永久跳过
+     （用 `md5sum` 对比可验证幂等）。它跑在 `migrateModelPaths()` **之后**——必须先归一化老路径
+     才能反查库 id；且**只允许用纯字符串**的 `pathToLibraryId()` 反查，不得回调 `ModelRegistry`
+     （`mutex_` 不可重入，回调即启动死锁）。
 - **ConfigParser**（CLI 用）：解析 `-m/-i/-a/-t/-c/-d/-r/-s/-p/-v/-h` 等选项填充 `AppConfig`，
   缺 `-m`/`-i` 或文件不存在即报错 `exit`。
+
+### video 段（schema V2：按通道级联 + 模型参数）
+
+| 键 | 类型 | 说明 |
+| --- | --- | --- |
+| `models.<库目录名>.alarm_class` | string | **模型的参数**：该模型检出这一类才出报警；空 = 只画框不报警。不是通道或槽位属性，同一个模型挂在哪一路触发的都是同一个类别 |
+| `models.<库目录名>.label` | string | 标签文件覆盖，库外标签的逃生口；留空用库内 `labels.txt`（优先级：此值 > 库内） |
+| `models.<库目录名>.note` | string | 备注，仅供设置页展示 |
+| `channels[i]` | object | **数组下标即通道号（0-based）**；条目里的 `channel` 字段只给人看、不参与解析 |
+| `channels[i].source` | string | 本地文件 / `/dev/videoN` / RTSP，交给 `avformat_open_input` |
+| `channels[i].enabled` | bool | 只影响启动时是否打开这一路（改完需重启，不做运行期起停） |
+| `channels[i].models` | array | 有序库 id 列表，**顺序即级联槽位顺序**（画面上 M1/M2/… 前缀与报警 `result_id`），重排会改号 |
+
+对应 API：`channelSource/Note/Enabled/ModelIds(int ch)`（一律 0-based）+
+`modelParam/libId` 系列 + `modelParamUsers(id)`（供删除守卫统计引用）。
+**段里不出现任何模型/标签路径**，`model/library/<id>/{model.rknn,labels.txt,meta.json}` 是唯一事实源，
+解析出口只有 `ModelRegistry::resolveChannelSlots(ch)`。
+**推理间隔没有配置键**：`ffmpeg_video_decoder.cpp` 的 4.6 节写死 `frame_count % 3`，
+别在 `video` 下加 `render.sampleInterval` 之类的键——那只会造出一个改了不生效的假开关。
+
+### geofence 段（通道级、独立于级联）
+
+| 键 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | 总开关；有围栏数据时 `FenceManager::loadFromConfig` 会自动置 true |
+| `mode` | string | `inside_alarm` | `inside_alarm` / `outside_alarm` |
+| `alarmClass` | string | `person` | 触发围栏报警的**单一类别**（旧列表 `alarmClasses` 已废弃） |
+| `throttleSeconds` | int | `10` | 每通道每类别的入侵事件节流窗口，由 `AlarmManager::ingestFenceAlarm` 执行 |
+| `channels.<ch>` | object | — | 围栏形状 + `overlay_w/h`（顶点是 overlay 像素坐标） |
+
+围栏不占推理任务：它复用该通道已有模型产出的检测结果，只做几何判定。若某通道挂了围栏却
+没有任何模型能产出 `alarmClass`，启动日志打 `[geofence] 通道N 无模型产出类别 person，围栏不会触发`。
 
 ### recording 段（报警视频硬件编码录制）
 | 键 | 类型 | 默认 | 说明 |
@@ -58,7 +96,7 @@ MJPEG**，只认 MJPEG 会把这颗物理摄像头整个漏掉）。只出 10-bi
 两档都不命中，因此不会被选中。节点号随插拔、USB 口、ISP/CSI 接线和内核版本漂移，
 板端曾稳定落在 `/dev/video41`，换环境即打不开——这就是自动探测取代硬编码的原因。
 
-**与其它取流地址互不相干**：监控 4 路走 `video.channel1..4`、国标推流走
+**与其它取流地址互不相干**：监控 4 路走 `video.channels[].source`、国标推流走
 `gb28181.streams[].source`。各处没有设备注册表，同一台设备被两处同时打开会有一方失败。
 
 ### websocket 段（Pad↔Aibox 客户端）
@@ -93,6 +131,12 @@ ConfigManager::instance().save();                          // 显式落盘
 
 // 围栏整段由 geofence::FenceManager 经 setGeofenceChannels()+save() 落盘
 
+// schema V2：按通道 + 按模型（ch 一律 0-based；改完需重启才生效）
+ConfigManager::instance().setChannelSource(0, "rtsp://192.168.1.10/stream1");
+ConfigManager::instance().setChannelModelIds(0, {"yolo11n-ppe", "yolo11n-coco"}); // 顺序即槽位
+ConfigManager::instance().setModelAlarmClass("yolo11n-ppe", "un_helmet");         // 模型参数
+QString cls = ConfigManager::instance().modelAlarmClass("yolo11n-coco");           // 无条目返回 ""
+
 // 报警录制：只有 getter（见下方"无 setter"说明）
 RecorderConfig rc;
 rc.enabled = ConfigManager::instance().recordingEnabled();
@@ -114,9 +158,18 @@ CLI：`./app -m model/yolo11n.rknn -i video.mp4 -t 3 -c true`
   内部路径复用，外部直接调用会与 `save()` 双重加锁死锁（std::mutex 不可重入）。
 - **缺省值兜底**：getter 用带默认值的 `toXxx(default)`，缺键不崩、返回兜底；文件损坏时
   `root_` 置空后全走默认，会静默丢弃用户原有配置。
-- **通道号约定差异**：ConfigManager 视频通道是 1-based（channel1..4，notes 补齐到 4），
-  而报警/围栏侧的 channel 多为 0-based，跨模块传值时注意换算。
-- `threads` 默认 3 对应 RK3588 的 3 个 NPU 核心（`NPU_CORE_NUM`）。
+- **通道号统一 0-based**：`video.channels` 的数组下标、`channelSource/ch` 系列形参、
+  `geofence.channels` 的键、解码器 `channel_`、UI `openVideo(0..3)` 全是同一个口径。
+  1-based 的遗留键 `video.channel1..4` / `video.notes[N-1]` 由 `migrateSchemaV2()` 消掉，
+  跨模块传值不再需要换算。
+- **假开关要写清楚**：类别数属于**每个模型**（`labels.txt` 行数），推理线程数 = 各通道模型数之和
+  （一个模型一个任务线程），所以 `detect.class_num`/`detect.threads` 的 getter 已删除、
+  默认配置块也不再写入；老配置里残留的这两个键程序根本不读（`migrateSchemaV2` 只删
+  `model`/`cascade`/`alarm`/`video.channelN`/`video.notes`，不清理 `detect` 段内的多余键）。
+  `detect.conf_threshold`/`nms_threshold` 仍有 getter/setter，但是**假开关**：写进 JSON、
+  设置页可改，推理侧不传参，实际用编译期 `BOX_THRESH`/`NMS_THRESH`。
+  同理 `video.render.sampleInterval` **不存在**，推理间隔是 `ffmpeg_video_decoder.cpp` 里
+  写死的 `frame_count % 3`。
 - **recording 段刻意只有 getter、没有 setter**：编码器在解码线程打开流时
   按参数一次性创建，运行期改值不会重建它，提供 setter 只会造出
   "改了不生效"的假接口；要换参数请改文件后重启。

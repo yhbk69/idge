@@ -6,15 +6,15 @@
  * @brief 统一配置管理器 - 单例模式
  *
  * 所有配置集中在 config.json 中管理，包括：
- *   - 视频通道路径（4路）+ 通道备注
- *   - 级联模型路径/标签/备注（最多 5 个，主模型占用第 1 槽）
- *   - 模型路径、标签路径、输入尺寸、模型类型
+ *   - 每个视频通道一段（源 + 备注 + 是否启用 + 有序模型列表）
+ *   - 模型参数表（按模型库目录名索引：报警类别、标签覆盖、备注）
  *   - 检测参数（置信度阈值、NMS阈值、类别数、线程数）
- *   - 报警类别、电子围栏整段（geofence）
+ *   - 电子围栏整段（geofence：触发类别、节流窗口、各通道形状）
+ *   - 报警视频录制、数据库、WebSocket、国标
  *
  * 使用方式：
  *   ConfigManager::instance().load(RuntimePaths::configFile());   // 启动时加载
- *   ConfigManager::instance().setVideoChannel(1, path); // 修改配置
+ *   ConfigManager::instance().setChannelSource(0, path); // 修改配置
  *   ConfigManager::instance().save();                 // 保存到文件
  *
  * 【使用约定·重要】
@@ -26,9 +26,15 @@
  *      可跨线程调用；但 saveUnsafe() 是"已持有锁时的内部复用版"，外部直接调用
  *      会与 save() 的加锁路径冲突（std::mutex 不可重入，直接调用将死锁），
  *      仅供本类已持锁的成员函数使用。
+ *      ⚠ 同理，load() 内部的迁移函数**不得**回调 ModelRegistry——它的
+ *      referenceCount()/resolveChannelSlots() 会回头取本类锁，直接死锁。
+ *      迁移只做纯字符串换算（见 pathToLibraryId）。
  *   3. 缺省值兜底：getter 多用 toDouble(0.25)/toInt(80)/toString("inside_alarm") 等
  *      带默认值的形式，缺键时返回兜底值而非崩溃；但 save() 打开文件失败会被静默忽略
  *      （仅 load 时 qWarning），落盘结果需自行保证可写路径。
+ *   4. 通道号一律 0-based：video.channels 是数组，**下标即通道号**（0~3），
+ *      与解码器 channel_、geofence.channels 的键、openVideo(0..3) 同口径。
+ *      条目里的 "channel" 字段只是给人看的，程序不读它。
  */
 
 #include <QString>
@@ -36,6 +42,33 @@
 #include "runtime_paths.h"
 #include <QJsonObject>
 #include <mutex>
+
+/**
+ * @brief 一个模型的配置参数（config.json 的 video.models[<模型库目录名>]）
+ *
+ * 报警类别属于"模型的参数"而非"槽位的参数"：同一个模型在任何通道的
+ * 任何槽位上，触发的都是同一个类别，换槽位不换行为。
+ * 路径不在这里配——模型库 model/library/<id>/{model.rknn,labels.txt} 是
+ * 唯一事实源，config 里不出现 .rknn/labels.txt 字符串（配置里写死路径
+ * 会让仓库搬迁、模型换库都要重配，且与启动迁移互相拉锯）。
+ */
+struct VideoModelParam
+{
+    QString alarmClass;  ///< 触发报警的类别名；空 = 只画框不报警
+    QString label;       ///< 标签文件覆盖（一般留空，用库内 labels.txt）
+    QString note;        ///< 备注
+};
+
+/**
+ * @brief 一个视频通道的配置（config.json 的 video.channels[下标=通道号]）
+ */
+struct VideoChannelCfg
+{
+    QString source;      ///< 视频源：本地文件 / 设备节点 / RTSP
+    QString note;        ///< 通道备注（四宫格 OSD 用）
+    bool enabled = true; ///< false = 启动时不打开这一路
+    QStringList modelIds;///< 有序模型库 id 列表，顺序即级联槽位顺序（= result_id）
+};
 
 class ConfigManager
 {
@@ -56,108 +89,60 @@ public:
      */
     void save();
 
-    // ========== 视频通道配置 ==========
+    // ========== 通道配置（video.channels，下标即通道号 0..3）==========
 
-    /**
-     * @brief 获取指定通道的视频路径
-     * @param ch 通道号（1-4）
-     */
-    QString videoChannel(int ch) const;
+    /** @brief 通道数（固定 4 路，与 frmVideoWindow 的四宫格一致） */
+    int channelCount() const { return 4; }
 
-    /**
-     * @brief 设置指定通道的视频路径
-     * @param ch   通道号（1-4）
-     * @param path 视频文件路径或RTSP地址
-     */
-    void setVideoChannel(int ch, const QString &path);
+    /** @brief 通道完整配置（缺键字段取 VideoChannelCfg 的默认值） */
+    VideoChannelCfg channelCfg(int ch) const;
 
-    // ========== 视频通道备注 ==========
+    /** @brief 通道视频源（本地文件/设备节点/RTSP），通道号非法返回空串 */
+    QString channelSource(int ch) const;
+    void setChannelSource(int ch, const QString &source);
 
-    /**
-     * @brief 获取指定通道的备注文字
-     * @param ch 通道号（1-4），无备注返回空
-     */
+    /** @brief 通道备注（四宫格 OSD），通道号非法返回空串 */
     QString channelNote(int ch) const;
-
-    /**
-     * @brief 设置指定通道的备注文字
-     */
     void setChannelNote(int ch, const QString &note);
 
-    // ========== 级联模型配置 ==========
+    /** @brief 该通道是否打开（缺省 true；false 只影响启动时是否 openVideo） */
+    bool channelEnabled(int ch) const;
+    void setChannelEnabled(int ch, bool enabled);
+
+    /** @brief 该通道的有序模型库 id 列表（列表顺序 = 级联槽位顺序 = result_id） */
+    QStringList channelModelIds(int ch) const;
+    void setChannelModelIds(int ch, const QStringList &ids);
+
+    // ========== 模型参数（video.models，键 = 模型库目录名）==========
+
+    /** @brief 参数表里出现过的库 id（QJsonObject 按键升序） */
+    QStringList modelParamKeys() const;
+
+    /** @brief 某库 id 的参数；无条目时 alarmClass/label/note 均为空 */
+    VideoModelParam modelParam(const QString &libId) const;
+
+    /** @brief 该模型的报警类别；"" = 只画框不报警（无条目也是 ""） */
+    QString modelAlarmClass(const QString &libId) const;
+    void setModelAlarmClass(const QString &libId, const QString &className);
+
+    /** @brief 该模型的标签文件覆盖（空 = 用库内 labels.txt） */
+    void setModelLabel(const QString &libId, const QString &label);
+
+    /** @brief 该模型的备注 */
+    void setModelNote(const QString &libId, const QString &note);
 
     /**
-     * @brief 获取第 idx 个级联模型的路径（1~5），无则返回空串（表示不用）
+     * @brief 从参数表删除某模型的条目，并从所有通道的模型列表里一并剔除
+     * @note 参数表条目 = 这个模型"要不要出现在配置里"，通道列表 = "哪几路在用"，
+     *       两处分开改会让人留下悬空引用，所以这里一次做干净。
      */
-    QString cascadeModelPath(int idx) const;
+    void removeModelParam(const QString &libId);
 
     /**
-     * @brief 设置第 idx 个级联模型的路径
+     * @brief 哪些通道的模型列表引用了该库 id（供 UI 显示"被引用通道"与删除守卫）
+     * @return 通道号列表（0-based），无人引用返回空
      */
-    void setCascadeModelPath(int idx, const QString &path);
-
-    /**
-     * @brief 获取第 idx 个级联模型的备注
-     */
-    QString cascadeModelNote(int idx) const;
-
-    /**
-     * @brief 设置第 idx 个级联模型的备注
-     */
-    void setCascadeModelNote(int idx, const QString &note);
-
-    /**
-     * @brief 获取第 idx 个级联模型的标签文件路径（1~5）
-     */
-    QString cascadeModelLabel(int idx) const;
-
-    /**
-     * @brief 设置第 idx 个级联模型的标签文件路径
-     */
-    void setCascadeModelLabel(int idx, const QString &label);
-
-    /**
-     * @brief 获取第 idx 个级联模型的报警类别（1~5）
-     * @return 类别名（如 "person"），空串表示该槽位不报警
-     */
-    QString cascadeModelAlarmClass(int idx) const;
-
-    /**
-     * @brief 设置第 idx 个级联模型的报警类别
-     */
-    void setCascadeModelAlarmClass(int idx, const QString &className);
-
-    // ========== 模型配置 ==========
-
-    /**
-     * @brief 获取 RKNN 模型文件路径
-     */
-    QString modelPath() const;
-
-    /**
-     * @brief 设置 RKNN 模型文件路径
-     */
-    void setModelPath(const QString &path);
-
-    /**
-     * @brief 获取标签文件路径
-     */
-    QString labelPath() const;
-
-    /**
-     * @brief 设置标签文件路径
-     */
-    void setLabelPath(const QString &path);
-
-    /**
-     * @brief 获取模型输入尺寸（如 "640x640"）
-     */
-    QString inputSize() const;
-
-    /**
-     * @brief 获取模型类型（如 "YOLO11"）
-     */
-    QString modelType() const;
+    QList<int> modelParamUsers(const QString &libId) const;
 
     // ========== 检测参数配置 ==========
 
@@ -181,27 +166,9 @@ public:
      */
     void setNmsThreshold(double val);
 
-    /**
-     * @brief 获取检测类别数量
-     */
-    int classNum() const;
-
-    /**
-     * @brief 获取推理线程数
-     */
-    int threads() const;
-
-    // ========== 报警配置 ==========
-
-    /**
-     * @brief 获取触发报警的类别列表
-     */
-    QStringList alarmClasses() const;
-
-    /**
-     * @brief 设置触发报警的类别列表
-     */
-    void setAlarmClasses(const QStringList &classes);
+    // 注：detect.class_num 与 detect.threads 两个键没有任何消费者，
+    // 对应的 getter 已删除——类别数由每个模型的标签决定，
+    // 推理线程数 = 各通道模型数之和（一个模型一个 PpeTask 线程）。
 
     // ========== 电子围栏配置 ==========
 
@@ -214,8 +181,20 @@ public:
     QJsonObject geofenceChannels() const;
     void setGeofenceChannels(const QJsonObject &channels);
 
-    QStringList geofenceAlarmClasses() const;
-    void setGeofenceAlarmClasses(const QStringList &classes);
+    /**
+     * @brief 围栏触发类别（单值，默认 "person"）
+     *
+     * 围栏报警不属于级联模型的任何槽位，判定只看"这一路里是不是人"，
+     * 所以这里是一个类别名而不是列表，也不参与 video.models[].alarm_class
+     * 那套报警门限（详见 plan/roadmap.md 的围栏条目）。
+     * 老配置里的 geofence.alarmClasses 列表由 migrateSchemaV2() 折叠成单值。
+     */
+    QString geofenceAlarmClass() const;
+    void setGeofenceAlarmClass(const QString &cls);
+
+    /** @brief 围栏报警节流窗口（秒，默认 10）——每通道每类别窗口内只出一条 */
+    int geofenceThrottleSeconds() const;
+    void setGeofenceThrottleSeconds(int seconds);
 
     // ========== 数据库配置 ==========
 
@@ -314,6 +293,28 @@ private:
     bool migrateModelPaths();
 
     /**
+     * @brief schema V1（全局 5 槽 cascade）→ V2（按通道 + 模型参数表）一次性迁移
+     *
+     * 照搬 V1 的**有效语义**而不是字段名：槽 i 的路径来自
+     * i==0 ? model.path : cascade.models[i].path，而报警类/标签/备注一律取
+     * cascade.models[i]（当年 buildCascadeTasks 用 cfgIdx+1 反查报警类就是这个配对，
+     * 迁移时顺手"改正"它会让现场报警行为无声变化）。
+     * 迁移结果：非空槽归并成 video.models 参数表（同库多槽报警类不同则取非空者并打日志），
+     * video.channel1..4 + video.notes 变成 4 个 channels 条目，模型列表**广播到每个通道**
+     * （V1 本就是四路共用一套，等价），geofence.alarmClasses 折叠成单值 alarmClass，
+     * 旧键（model/cascade/alarm/video.channelN/video.notes）整段删除。
+     * @return true=root_ 有改动（调用方负责 saveUnsafe 落盘）
+     * @note 内部只做纯字符串换算，**不得**回调 ModelRegistry（它会回头取本类锁 → 死锁）。
+     */
+    bool migrateSchemaV2();
+
+    /**
+     * @brief root_ 是否已是 V2 schema（video.channels 存在）
+     * @note 迁移完会删掉全部 V1 键，所以这个判断一旦为真就永久为真（幂等）。
+     */
+    static bool hasSchemaV2(const QJsonObject &root);
+
+    /**
      * @brief 老配置缺少 recording 段时补齐默认值（load 内持锁调用，勿单独使用）
      *
      * 只为让开关在 config.json 里可见可改，程序本身靠 getter 的默认值兜底；
@@ -329,8 +330,6 @@ private:
     // 缓存的高频访问值（避免每次 getter 都反序列化 JSON）
     double confThreshold_ = 0.25;      ///< 置信度阈值缓存
     double nmsThreshold_ = 0.45;       ///< NMS 阈值缓存
-    int classNum_ = 80;                ///< 类别数缓存
-    int threads_ = 3;                  ///< 推理线程数缓存
     bool storeDetections_ = true;      ///< 检测数据存储开关缓存
     int detectionRetentionDays_ = 30;  ///< 检测数据保留天数缓存
 };
