@@ -19,6 +19,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QButtonGroup>
+#include <QAbstractButton>
 #include <QFrame>
 #include "player_widget.h"
 #include "fence_overlay.h"
@@ -266,6 +267,43 @@ void frmVideoWindow::setupFenceToolbar()
     lay->addWidget(new QLabel("|", toolbar)); // 添加竖线分隔符
 
     // ========================================================================
+    // 第四点五步：选择角色（下一个画出来的形状触发哪种报警）
+    // ========================================================================
+    // 与"矩形/多边形/删除"是正交的两件事：工具决定怎么画，角色决定画出来的
+    // 形状是"禁区（进去就报）"还是"岗区域（在外面就报）"。因此单独成组，
+    // 默认选禁区 —— 与围栏机制早期"只有一种模式"的默认行为一致。
+    lay->addWidget(new QLabel("角色:", toolbar));
+
+    QPushButton *forbiddenBtn = new QPushButton("禁区", toolbar);
+    forbiddenBtn->setObjectName("fenceRoleForbidden");
+    forbiddenBtn->setCheckable(true);
+    forbiddenBtn->setFixedSize(44, 24);
+    forbiddenBtn->setToolTip(QStringLiteral("画出的形状是禁区：目标进入即报警（红）"));
+    lay->addWidget(forbiddenBtn);
+
+    QPushButton *workzoneBtn = new QPushButton("岗区域", toolbar);
+    workzoneBtn->setObjectName("fenceRoleWorkzone");
+    workzoneBtn->setCheckable(true);
+    workzoneBtn->setFixedSize(56, 24);
+    workzoneBtn->setToolTip(QStringLiteral(
+        "画出的形状是岗区域：目标出现在所有岗区域之外即报警（绿）。\n"
+        "注意报的是\"人跑到区域外\"，不是\"区域里没人\"。"));
+    lay->addWidget(workzoneBtn);
+
+    // 角色按钮组（互斥，与绘制工具组分开；默认禁区）
+    fenceRoleGroup_ = new QButtonGroup(this);
+    fenceRoleGroup_->setExclusive(true);
+    fenceRoleGroup_->addButton(forbiddenBtn, 0);
+    fenceRoleGroup_->addButton(workzoneBtn, 1);
+    forbiddenBtn->setChecked(true);
+
+    connect(fenceRoleGroup_, QOverload<QAbstractButton *>::of(&QButtonGroup::buttonClicked),
+            this, [this](QAbstractButton *) { applyFenceRole(currentFenceChannel_); });
+
+    lay->addSpacing(10);
+    lay->addWidget(new QLabel("|", toolbar));
+
+    // ========================================================================
     // 第五步：创建绘制工具按钮（矩形、多边形、删除）
     // ========================================================================
     // 矩形绘制按钮
@@ -329,6 +367,18 @@ void frmVideoWindow::setupFenceToolbar()
     ui->gridLayout->addItem(spacer, 2, 1, 1, 1);  // 弹簧占第1列
 }
 
+void frmVideoWindow::applyFenceRole(int channel)
+{
+    if (!fenceRoleGroup_) return;
+    PlayerWidget *pw = playerWidget(channel);
+    if (!pw || !pw->fenceOverlay()) return;
+
+    // 未选中（理论上不会发生：互斥组默认选了一个）按禁区处理，与 FenceOverlay 的默认值一致
+    const bool workzone = fenceRoleGroup_->checkedId() == 1;
+    pw->fenceOverlay()->setRole(workzone ? geofence::FenceRole::Workzone
+                                         : geofence::FenceRole::Forbidden);
+}
+
 void frmVideoWindow::onFenceToolClicked(int id)
 {
     DrawMode mode = DrawMode::NoMode;
@@ -362,6 +412,10 @@ void frmVideoWindow::onFenceChannelClicked(int ch)
         // 重新应用当前工具到新通道
         onFenceToolClicked(fenceDrawGroup_->id(checkedDrawBtn));
     }
+
+    // 角色同理要跟着通道走：overlay 是每个通道各自的，不推过去的话
+    // 新通道的 overlay 还停在它上一次的默认禁区，用户以为选的是岗区域。
+    applyFenceRole(ch);
 
     // 加载新通道的围栏数据并刷新显示
     PlayerWidget *pw = playerWidget(ch);

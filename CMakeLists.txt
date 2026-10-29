@@ -654,6 +654,30 @@ target_link_libraries(test_alarm_uplink
 )
 
 # ============================================================================
+# 电子围栏"每形状角色"判定离线自检（禁区/岗区域的归并与角色字符串回落）
+# 只编 fence_checker.cpp：它只用 object_detect_result 的三个整数字段，不调任何
+# OpenCV/RKNN 符号，因此本目标不链 GUI、不链 AlarmManager，也不需要 config.json。
+# 为什么值得单独钉：禁区与岗区域的违规条件不是互补关系，归并写反会静默产出
+# "纯禁区通道把每个人每帧判成离岗"这类板端肉眼看不出来的行为（契约 2）。
+# 契约清单见 tests/test_geofence_role.cpp 文件头
+# 仓库根运行：./build/build_rk3588_linux/test_geofence_role，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_geofence_role
+    tests/test_geofence_role.cpp
+    src/biz/geofence/fence_checker.cpp
+)
+
+target_include_directories(test_geofence_role PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/biz/geofence
+)
+
+target_link_libraries(test_geofence_role
+    Qt5::Core
+)
+
+target_compile_definitions(test_geofence_role PRIVATE ZERO_COPY)
+
+# ============================================================================
 # 报警上行接收端（人工对拍，不是自检）
 # QWebSocketServer 收 text + binary：ws_binary 档按 media_id 拼成文件落 outdir 并比 sha256；
 # url 档只打印 media_begin 里的地址与 sha256，一个字节都不落盘（对拍改用 curl 取回）。

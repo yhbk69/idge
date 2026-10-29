@@ -36,6 +36,7 @@
 #include <deque>
 #include "common.hpp"
 #include "runtime_paths.h"
+#include "fence_shape.h"   // geofence::FenceRole：围栏报警按角色分闯入/离岗
 
 // 前向声明
 class QSqlDatabase;
@@ -55,8 +56,9 @@ class QSqlDatabase;
 //   - imgPath: 报警抓拍图路径（可为空）——本管理器只负责判定与产出记录，
 //              截图落盘由 SnapWriter 后台线程异步完成并回填，与 SQLite 落库解耦：
 //              一条报警 = 一行 DB 记录 + 一张 data/alarms/日期/ 下的抓拍图，二者非同一生命周期
-//   - isFenceAlarm: 是否为电子围栏侵入报警（区别于按模型报警类别判定的检测报警，
-//                   走 geofence.throttleSeconds 独立限流窗口）
+//   - isFenceAlarm: 是否为电子围栏报警（闯入禁区 / 离岗，alarmType 为 fence_in / fence_out；
+//                   区别于按模型报警类别判定的检测报警，走 geofence.throttleSeconds 独立限流窗口，
+//                   节流键按角色分开，所以闯禁区后 10 秒内的离岗不会被吞）
 //
 // ============================================================================
 struct AlarmRecord {
@@ -150,23 +152,30 @@ public:
                                 const SlotContext &ctx);
 
     // ============================================================================
-    // ingestFenceAlarm: 电子围栏侵入报警
+    // ingestFenceAlarm: 电子围栏报警（闯入禁区 / 离岗）
     // ============================================================================
-    // 由解码线程在"通道级合并围栏判定"里对每个**新进入**围栏的目标调用一次。
+    // 由解码线程在"通道级合并围栏判定"里对每个**新进入违规状态**的目标调用一次。
     // 与 ingest 的区别：
-    //   - 不做类别匹配判断——能调到这里说明调用方已经判定"该目标在围栏内"，
-    //     并且已经用 IoU 事件表确认这不是"同一个人还在栏内"（进入沿触发），
-    //     围栏类别由 geofence.alarmClass 单值决定，与槽位的 alarm_class 无关；
+    //   - 不做类别匹配判断——能调到这里说明调用方已经判定该目标违规（禁区里有人，
+    //     或人在所有岗区域之外），并且已经用 IoU 事件表确认这不是"同一个人还在
+    //     违规状态里"（进入沿触发），围栏类别由 geofence.alarmClass 单值决定，
+    //     与槽位的 alarm_class 无关；
     //   - 不用 2 秒检测限流窗口，用自己的围栏窗口 geofence.throttleSeconds
-    //     （默认 10 秒），限流键 "通道:fence:类别名"（用类名而非槽位，
+    //     （默认 10 秒），限流键 "通道:fence:角色:类别名"（用类名而非槽位，
     //     配置重排后仍稳定）。
-    // 语义："一次入侵事件报一条"由调用方保证，本窗口是它之下的兜底——进入沿抖动
-    // 或多人几乎同时进入时，每通道每类别窗口内只留第一条。
+    // 语义："一次事件报一条"由调用方保证，本窗口是它之下的兜底——进入沿抖动
+    // 或多人几乎同时违规时，每通道每角色每类别窗口内只留第一条。
+    //
+    // role 决定两件事，二者都必须分角色，否则两种报警会互相吞：
+    //   - alarmType：Forbidden → "fence_in"（闯入禁区）；Workzone → "fence_out"（离岗）
+    //     下游按 alarmType 前缀识别围栏报警（见 AlarmDAO::recordFromQuery 的 isFenceAlarm）；
+    //   - 限流键里的角色段：不然"先闯入再离岗"的第二次会被第一条的窗口吃掉。
     //
     // 参数 ctx 取检出该目标的槽位，仅用于把 cls_id 翻成类别名（含 detections 明细）。
     // ============================================================================
     QVector<AlarmRecord> ingestFenceAlarm(int channel, const object_detect_result &det,
-                                          const SlotContext &ctx, long timeNs);
+                                          const SlotContext &ctx, long timeNs,
+                                          geofence::FenceRole role);
 
     // ============================================================================
     // storeAndNotify: 存储新报警并发出信号

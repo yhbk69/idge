@@ -17,7 +17,7 @@ PRAGMA busy_timeout=5000;
 
 CREATE TABLE IF NOT EXISTS alarms (
     id              TEXT PRIMARY KEY,            -- UUID 主键
-    alarm_type      TEXT NOT NULL,               -- 报警类型 (no_helmet, fire, fence等)
+    alarm_type      TEXT NOT NULL,               -- 报警类型 (no_helmet, fire, detection, fence_in/fence_out 等；自由 TEXT，围栏靠 "fence" 前缀识别)
     alarm_level     INTEGER NOT NULL DEFAULT 3,  -- 报警级别: 1紧急 2重要 3一般 4提示
     alarm_time      TEXT NOT NULL,               -- 报警发生时间 (ISO8601格式)
     channel         INTEGER NOT NULL,            -- 视频通道编号 (0-3)

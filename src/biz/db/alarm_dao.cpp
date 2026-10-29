@@ -878,7 +878,7 @@ QMap<QString, int> AlarmDAO::statusStatistics()
 //
 // 兼容旧字段处理：
 //   - timestamp: 从 alarmTime 字符串反向解析为毫秒时间戳
-//   - isFenceAlarm: 根据 alarmType 是否为 "fence" 推断
+//   - isFenceAlarm: 由 alarmType 的 "fence" 前缀推断（fence_in/fence_out 与历史的 fence）
 //
 // 使用场景：
 //   - 所有查询操作（queryByTimeRange, queryByChannel 等）都调用此函数
@@ -910,7 +910,10 @@ AlarmRecord AlarmDAO::recordFromQuery(QSqlQuery &query)
 
     // 兼容旧字段
     record.timestamp = QDateTime::fromString(record.alarmTime, Qt::ISODate).toMSecsSinceEpoch();
-    record.isFenceAlarm = (record.alarmType == "fence");
+    // 围栏报警有两种角色：fence_in（闯入禁区）/ fence_out（离岗），
+    // 老库里存的是不带后缀的 "fence"。前缀判断把三代都认下来 —— 漏掉这条会让
+    // 重启后回读的围栏报警掉进"类别"Tab，显示成 "person 检测到报警"。
+    record.isFenceAlarm = record.alarmType.startsWith(QLatin1String("fence"));
 
     return record;
 }

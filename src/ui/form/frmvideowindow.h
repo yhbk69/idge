@@ -8,7 +8,8 @@
  * 作用：定义视频监控窗口类，提供4路视频通道的管理和显示功能。
  *       每个通道对应一个 PlayerWidget，支持独立播放和控制。
  *       另含单通道全屏放大切换与电子围栏绘制工具栏（通道选择/
- *       矩形/多边形/删除/清空，操作经 FenceManager+PlayerWidget::fenceOverlay 下发）。
+ *       角色（禁区·岗区域）/矩形/多边形/删除/清空，操作经
+ *       FenceManager+PlayerWidget::fenceOverlay 下发）。
  */
 
 #include <QWidget>
@@ -78,7 +79,14 @@ private:
     int currentFenceChannel_ = 0;  // 当前围栏操作的通道
     QButtonGroup *fenceToolGroup_ = nullptr;
     QButtonGroup *fenceDrawGroup_ = nullptr;  // 绘制工具按钮组（矩形/多边形/删除）
+    // 角色按钮组（禁区/岗区域）。**必须独立于 fenceDrawGroup_**：后者的 id 0/1/2
+    // 在 onFenceToolClicked 里被直接翻译成 DrawMode，混进去会让"点禁区"变"换工具"。
+    QButtonGroup *fenceRoleGroup_ = nullptr;
     QPushButton *fenceChannelBtns_[4] = {nullptr};
+
+    // 把当前选中的角色推给指定通道的 overlay（绘制前与切通道后都要调，
+    // 否则角色会落后于通道，画出来的形状带着上一个通道的选择落盘）。
+    void applyFenceRole(int channel);
 
 private slots:
     /** @brief 初始化表单：连接信号与槽 */

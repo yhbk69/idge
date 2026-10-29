@@ -16,7 +16,7 @@
 | gl_video_widget.h/.cpp | GLVideoWidget：QOpenGLWidget 双缓冲零拷贝视频控件（含 FPS 叠加） |
 | player_widget.h/.cpp | PlayerWidget：视频 + OSD + 围栏叠加 + 放大按钮的通道窗体，持有解码器 |
 | dashboard_widget.h/.cpp | DashboardWidget：统计卡片、/proc 系统监控（CPU/内存/温度）、类别排行条 |
-| alarm_list_widget.h/.cpp | AlarmListWidget：类别/围栏双 Tab 报警表，300ms 防抖刷新与筛选 |
+| alarm_list_widget.h/.cpp | AlarmListWidget：类别/围栏双 Tab 报警表，300ms 防抖刷新与筛选；围栏 Tab 第 4 列「围栏类型」区分**闯入禁区/离岗** |
 | video_alarm_widget.h/.cpp | VideoAlarmWidget：视频监控页右侧报警卡片列表（QScrollArea），点击跳转详情 |
 | alarm_detail_dialog.h/.cpp | AlarmDetailDialog：报警详情对话框，支持误报标记与单条确认；"视频"行展示片段文件名/大小与网页副本是否随行 |
 
@@ -41,6 +41,9 @@ GLuint tex = pool.acquire(fd, w, h, stride, DRM_FORMAT_ABGR8888);
 - 依赖 EGL/GLES2（Mali）、drm_fourcc、Qt Widgets/OpenGL；buffer（DMA-BUF 约定）、rga（格式与 stride 来源）、alarm/fence 管理器等业务模块。
 
 ## 注意事项
+- **围栏 Tab 的筛选靠 `isFenceAlarm`（`alarmType` 前缀 `fence`）**：新增的 `fence_in`/`fence_out` 与
+  历史数据里裸的 `"fence"` 都要落进同一个 Tab，判据一旦改成精确相等，重启回读的老围栏报警会
+  掉进「类别」Tab 显示成"person 检测到报警"。第 4 列的文字按 `fence_out` 分「离岗」，其余围栏出「闯入禁区」。
 - **线程约束**：一切 GL/EGL 调用只能发生在 widget 的 GUI 上下文 current 期间（initializeGL/paintGL 内）；跨线程调用 EGLImage 或纹理是 UB。fd 可从任意线程 dup 后投递。
 - **dup 所有权协议**：`EglFramePool::acquire` 与 `RenderFrame` 均持有 dup 副本并负责唯一一次 close；原 fd 归解码侧。EGLImage 建立后与原 fd 解耦（内核各持引用）。
 - EglFramePool 导入失败槽位仍被占用（in_use 未回滚 + dup fd 泄漏，4 槽漏完池失效）；仅支持单平面格式，勿传 NV12；无析构，GL 对象靠上下文销毁兜底。

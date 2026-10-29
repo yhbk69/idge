@@ -529,9 +529,16 @@ void frmMain::showAlarmToast(const AlarmRecord &alarm)
     QDateTime dt = QDateTime::fromString(alarm.alarmTime, Qt::ISODate);
     // 围栏事件与类别事件分开措辞：都写成"检测到 person"会让人以为围栏通道上的
     // COCO 在按类别报警，而那个模型的 alarm_class 明明为空（只画框不报警）。
-    const QString head = alarm.isFenceAlarm
-        ? QString("⚠ 通道%1 围栏侵入 %2").arg(alarm.channel + 1).arg(alarm.className)
-        : QString("⚠ 通道%1 检测到 %2").arg(alarm.channel + 1).arg(alarm.className);
+    // 围栏内部再按角色分两种（闯入禁区 / 离岗），弹一条"围栏侵入"却在人跑出去时报，
+    // 处置的人就会往反方向找。
+    QString head;
+    if (alarm.isFenceAlarm) {
+        head = alarm.alarmType == QLatin1String("fence_out")
+            ? QString("⚠ 通道%1 离岗（在岗区域外） %2").arg(alarm.channel + 1).arg(alarm.className)
+            : QString("⚠ 通道%1 闯入禁区 %2").arg(alarm.channel + 1).arg(alarm.className);
+    } else {
+        head = QString("⚠ 通道%1 检测到 %2").arg(alarm.channel + 1).arg(alarm.className);
+    }
     alarmToast_->setText(QString("%1 (%2%%)  %3")
         .arg(head)
         .arg(alarm.confidence * 100, 0, 'f', 1)
@@ -1259,11 +1266,24 @@ void frmMain::initDebugPage()
     // 围栏配置信息
     {
         auto &fm = geofence::FenceManager::instance();
-        log("fence", QString("围栏配置: 启用=%1, 模式=%2, 围栏类别=%3, 最小间隔=%4秒")
+        // 不再打"模式"：报警规则由每个形状自带的角色决定，一条通道可以同时有
+        // 禁区（进去就报）和岗区域（在外面就报），所以这里报的是形状清点。
+        int forbidden = 0, workzone = 0, channels = 0;
+        for (int ch = 0; ch < cfg.channelCount(); ++ch) {
+            if (!fm.hasFence(ch)) continue;
+            channels++;
+            const geofence::ChannelFence cf = fm.channelFence(ch);
+            for (const auto &sh : cf.shapes) {
+                if (sh.role == geofence::FenceRole::Workzone) workzone++;
+                else forbidden++;
+            }
+        }
+        log("fence", QString("围栏配置: 启用=%1, 围栏类别=%2, 最小间隔=%3秒, "
+                             "有围栏通道=%4个, 禁区=%5个, 岗区域=%6个")
             .arg(fm.enabled() ? "是" : "否")
-            .arg(fm.mode())
             .arg(cfg.geofenceAlarmClass())
-            .arg(cfg.geofenceThrottleSeconds()));
+            .arg(cfg.geofenceThrottleSeconds())
+            .arg(channels).arg(forbidden).arg(workzone));
     }
 }
 

@@ -6,7 +6,7 @@
 
 `src/ui/form` 是 IDGE（RK3588 施工行为监测与分析系统）的**顶层窗体目录**，包含主窗口 `frmMain` 及其挂载的全部页面控件：
 
-- **视频监控页**：4 路视频 2x2 网格实时显示（`frmVideoWindow` + `src/ui/PlayerWidget` + `src/ui/GLVideoWidget`），含单通道全屏放大与电子围栏绘制工具栏；
+- **视频监控页**：4 路视频 2x2 网格实时显示（`frmVideoWindow` + `src/ui/PlayerWidget` + `src/ui/GLVideoWidget`），含单通道全屏放大与电子围栏绘制工具栏（画之前先选角色：禁区红 / 岗区域绿）；
 - **调试设置页**（导航文本"调试设置" → `ui->pageSettings`）：`config.json` 的编辑界面（视频通道/模型/阈值/报警类别/围栏类别）、WebSocket 地址与连接状态、级联模型 5 槽位配置、通道备注与清空，页底是带颜色分类的运行日志（`textBrowserLog`）。配置控件与日志同在一页，全部内嵌在 `frmmain.cpp` 的 `initDebugPage()`/`initCascadeUi()`，没有独立的"系统设置/帮助"页；
 - **报警查询页**：数据看板（`dashboard_widget`）与报警记录列表（`alarm_list_widget`），本目录仅负责挂载与角标/toast 联动；
 - **人员点名页**（caichao 合入）：任务列表 + 拍照选图 + 登记识别 + 注销匹配全流程；
@@ -26,7 +26,7 @@
 | 文件 | 职责 | 来源 |
 |---|---|---|
 | frmmain.h/.cpp/.ui | 主窗口：导航、页面装配、config.json 编辑、级联模型配置、日志、报警 toast/角标、业务服务初始化与注入 | main |
-| frmvideowindow.h/.cpp/.ui | 4 路视频 2x2 网格窗口 + 围栏绘制工具栏（矩形/多边形/删除/清空） | main |
+| frmvideowindow.h/.cpp/.ui | 4 路视频 2x2 网格窗口 + 围栏绘制工具栏（**角色：禁区/岗区域**、矩形/多边形、删除、清空） | main |
 | video_decoder.h/.cpp | FFmpeg 软解码器（录像回放），独立线程 + PTS 帧同步；**当前无实例化点** | main |
 | roll_call_widget.h/.cpp | 人员点名任务列表页（创建/查看/注销/删除/导出报告） | caichao 合入 |
 | photo_selection_widget.h/.cpp | 拍照/选图对话框（点名与设备盘点共用；GL 预览 + 快门 + 上传） | caichao 合入 |
@@ -74,7 +74,9 @@
 - `src/biz/service`：RollCallService、EquipmentInventoryService（业务数据与 NPU 识别封装）；
 - `src/ui/widgets`：PlayerWidget/GLVideoWidget/DashboardWidget/AlarmListWidget；
 - `src/media/reader`：FFmpegVideoDecoder（实时）、CameraPreviewDecoder（摄像头预览/拍照，取流地址同 `smartRecognition.camera`）；
-- `src/biz/geofence`（经 `src/fence_manager.h` 等）：FenceManager、FenceOverlay、DrawMode；
+- `src/biz/geofence`（经 `src/fence_manager.h` 等）：FenceManager、FenceOverlay、DrawMode、FenceRole；
+  视频监控页的角色按钮**必须放在独立的 `fenceRoleGroup_`**，不能塞进 `fenceDrawGroup_`——
+  后者的 id 空间 0/1/2 在 `onFenceToolClicked` 里被直接翻译成 `DrawMode`，混进去会让"点角色按钮"变成"换绘制工具"。
 - `src/base/imaging`：qt_image_utils 的 `loadPixmapSafe`（板端 Qt JPEG 插件与 libjpeg ABI 冲突的安全解码，业务页所有图片加载必须走它）；
 - `src/ui/form/smart_recognition_widget`：二维码链路依赖 `3rdparty/zbar`（编译期 `HAS_ZBAR`，见 `3rdparty/README.md`），OCR 链路用 `QProcess` 起 `3rdparty/ppocrv4/bin` 的两个 rknn_model_zoo demo（不链接，见 `3rdparty/ppocrv4/README.md`），权重在 `model/library/ppocrv4-ocr/`；取流地址读 `config.json` 的 `smartRecognition.camera`；
 - 根目录：`ConfigManager`（config.json）、`AlarmManager`、`SharedTypes.hpp`、`src/ui/core`（IconHelper/QtHelper/theme/AppInit）；

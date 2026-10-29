@@ -929,12 +929,18 @@ void ConfigManager::setNmsThreshold(double val)
 // {
 //   "geofence": {
 //     "enabled": true,                    // 是否启用围栏检测
-//     "mode": "inside_alarm",             // 报警模式："inside_alarm"/"outside_alarm"
+//     "mode": "inside_alarm",             // 【退役键】报警规则改由每个形状的 role 决定。
+//                                         // 运行期无人读它；只在 FenceManager::loadFromConfig
+//                                         // 里给没有 role 的老形状补一次角色，之后固定写回
+//                                         // 一个占位值。新配置不必再管这个键。
 //     "channels": {                       // 各通道围栏配置
 //       "0": {                            // 通道 0（通道 1）
 //         "shapes": [                     // 围栏形状列表
 //           {
 //             "type": "rectangle",        // 形状类型："rectangle"/"polygon"
+//             "role": "forbidden",        // 角色："forbidden"=禁区（进去就报）
+//                                         //       "workzone"=岗区域（在外面就报）
+//                                         // 缺键→按上面的 mode 推断；认不出→forbidden
 //             "points": [[100,50],[300,200]]  // 顶点坐标（overlay 像素坐标）
 //           }
 //         ]
@@ -942,9 +948,10 @@ void ConfigManager::setNmsThreshold(double val)
 //     },
 //     "alarmClass": "person",             // 触发围栏报警的检测类别（单值；围栏不属于
 //                                         // 级联模型，判定只看"这一路里是不是人"）
-//     "throttleSeconds": 10               // 围栏报警节流下限：每通道每类别窗口内只出一条。
+//     "throttleSeconds": 10               // 围栏报警节流下限：每通道每【角色】每类别窗口内只出一条。
 //                                         // "一个人站进去只报一次"是解码器的进入沿事件表决定的，
-//                                         // 这个窗口只兜住沿抖动/遮挡重匹配/多人同时进入
+//                                         // 这个窗口只兜住沿抖动/遮挡重匹配/多人同时违规。
+//                                         // 分角色是必须的：否则闯入后 10 秒内的离岗会被吞掉
 //   }
 // }
 //
@@ -976,8 +983,12 @@ void ConfigManager::setGeofenceEnabled(bool enabled)
 }
 
 /**
- * @brief 获取围栏报警模式
- * @return: "inside_alarm"（围栏内报警，默认）或 "outside_alarm"（围栏外报警）
+ * @brief 读退役键 geofence.mode
+ * @return: "inside_alarm"（默认）或 "outside_alarm"
+ *
+ * 运行期已无判断读它 —— 报警规则现在是每个围栏形状自带的 role。
+ * 唯一的消费者是 FenceManager::loadFromConfig()：给 role 缺失的老形状补角色
+ * （outside_alarm → workzone，其余 → forbidden）。
  */
 QString ConfigManager::geofenceMode() const
 {
@@ -986,8 +997,8 @@ QString ConfigManager::geofenceMode() const
 }
 
 /**
- * @brief 设置围栏报警模式
- * @param mode: "inside_alarm"（围栏内报警）或 "outside_alarm"（围栏外报警）
+ * @brief 写退役键 geofence.mode（保留键本身，值不再有语义）
+ * @param mode: 由调用方给出；FenceManager 固定写 "inside_alarm"
  */
 void ConfigManager::setGeofenceMode(const QString &mode)
 {

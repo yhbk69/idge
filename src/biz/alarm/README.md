@@ -20,6 +20,7 @@
 ## 核心类与数据流
 - **AlarmManager**（`QObject` 单例）：全局唯一。
 - **AlarmRecord**：一条报警（时间戳、通道、类别、置信度、确认位、截图路径、视频片段路径、是否围栏报警）。
+  围栏报警的 `alarmType` 是 `fence_in`/`fence_out`（闯入禁区/离岗），普通检测报警是 `"detection"`。
 
 数据流：
 ```
@@ -27,7 +28,7 @@
   → ingest(channel, od, SlotContext{alarmClass, classNames})   ← 上下文由解码器按通道局部组装，栈上传入
   → 生成 newAlarms(未存/未截图)
   → 收集本帧围栏候选（类别 == geofence.alarmClass 的目标）
-  → 槽循环结束后一次通道级合并判定：ingestFenceAlarm(channel, det, ctx, timeNs)
+  → 槽循环结束后一次通道级合并判定：ingestFenceAlarm(channel, det, ctx, timeNs, role)
   → storeAndNotify(newAlarms) → 存入内存环形列表(≤1000) + AlarmDAO::insertAlarms 落库
   → emit alarmGenerated / statsUpdated → UI 更新
   → (解码侧另投 ClipWriter 任务)
@@ -42,14 +43,19 @@ ClipWriter 后台线程(报警 +2s 到点) → dump 裸流/MP4 → attachVideoCl
 | 路径 | 键 | 窗口 |
 | --- | --- | --- |
 | 普通报警 `ingest` | `"通道:槽下标:cls_id"`（如 `"0:1:0"`） | `kAlarmThrottleNs` = 2 秒 |
-| 围栏报警 `ingestFenceAlarm` | `"通道:fence:类别名"`（如 `"0:fence:person"`） | `geofence.throttleSeconds`，默认 10 秒 |
+| 围栏报警 `ingestFenceAlarm` | `"通道:fence:角色:类别名"`（如 `"0:fence:in:person"`、`"0:fence:out:person"`） | `geofence.throttleSeconds`，默认 10 秒 |
 
 普通报警键里带槽下标，不同级联槽恰好同类号不再互相压制；围栏键刻意**用类名而不是槽号**，
 配置重排槽位顺序后限流窗口依然稳定。
+**围栏键里还必须带角色段**：少了它，一个人闯禁区后 10 秒内离开岗区域，那条离岗会被同一个窗口吞掉。
+围栏报警的 `alarmType` 按角色分成 `fence_in`（闯入禁区）与 `fence_out`（离岗），
+下游（列表 Tab、DB 回读、WS 上行的 `alarm_type`）靠 `startsWith("fence")` **前缀**认围栏——
+历史数据存的是裸 `"fence"`，改成精确相等会让老围栏报警重启后掉进「类别」Tab。
 **围栏的"只报一次"不是这个窗口给的**：一个人站在围栏里只出一条报警，靠的是解码器里的
-进入沿判定（`FFmpegVideoDecoder::fenceTracks_` 用 IoU 把同一目标的连续命中归并成一次入侵事件，
-离开 1.5 秒后事件结束、再进来算新事件）。`throttleSeconds` 是它之下的兜底——
-进入沿抖动、遮挡后重匹配、或两人几乎同时进入时，每通道每类别窗口内只留第一条。
+进入沿判定（`FFmpegVideoDecoder::fenceTracks_` 用 IoU 把同一目标的连续命中归并成一次事件，
+离开 1.5 秒后事件结束、再进来算新事件；**事件表按角色分池，匹配前先比角色**，
+否则闯入 track 会把同一个人的离岗命中续期掉、离岗永久静默）。`throttleSeconds` 是它之下的兜底——
+进入沿抖动、遮挡后重匹配、或两人几乎同时进入时，每通道每角色每类别窗口内只留第一条。
 （历史：早期实现寄生在级联里且无限流，40 秒出 200~340 条；改成节流窗口后仍是"每 10 秒一条"的电平语义，
 人不动就一直报。`bypassThrottle` 形参已删除，不存在"豁免限流"的调用路径。）
 
@@ -66,8 +72,8 @@ if (!news.isEmpty()) {
     // 片段在报警后 2 秒才生成，路径由 ClipWriter 落盘后回填，此处不要读 videoPath
 }
 
-// 围栏判定（通道级，槽循环结束后一次；几何命中才调）
-alarms += AlarmManager::instance().ingestFenceAlarm(ch, det, ctx, timeNs);
+// 围栏判定（通道级，槽循环结束后一次；几何判定出违规才调，role 来自 FenceViolation）
+alarms += AlarmManager::instance().ingestFenceAlarm(ch, det, ctx, timeNs, v.role);
 
 // ClipWriter 后台线程（片段写完后；mp4 副本没写成时第三参传空串）
 AlarmManager::instance().attachVideoClip(ids, rawClipPath, mp4Path);

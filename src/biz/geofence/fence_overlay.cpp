@@ -51,6 +51,33 @@ void FenceOverlay::setDrawMode(DrawMode mode)
 }
 
 // ============================================================================
+// setRole - 设置下一个画出来的形状属于哪种角色
+// ============================================================================
+// 只存值 + 重绘（临时图形要立刻换成新角色的颜色）。
+// 刻意不清 polyPoints_：setDrawMode 之所以清，是因为换工具意味着上一个图形作废，
+// 而"画到一半换个角色"是合法操作，清掉顶点等于把用户已点的点静默扔掉。
+// ============================================================================
+void FenceOverlay::setRole(FenceRole role)
+{
+    role_ = role;
+    update();
+}
+
+// ============================================================================
+// 角色配色
+// ============================================================================
+// 禁区红（沿用旧配色，老用户不必重学）；岗区域绿（"待在里面是对的"）。
+// 只有颜色区分两种规则，所以画完必须能一眼看出这是哪一种 —— 角色事后不可改。
+// ============================================================================
+QColor FenceOverlay::roleColor(FenceRole role) {
+    return role == FenceRole::Workzone ? QColor(0, 200, 0) : QColor(255, 0, 0);
+}
+
+QColor FenceOverlay::roleFillColor(FenceRole role) {
+    return role == FenceRole::Workzone ? QColor(0, 255, 0, 45) : QColor(255, 0, 0, 50);
+}
+
+// ============================================================================
 // loadFences - 从 FenceManager 加载围栏数据
 // ============================================================================
 void FenceOverlay::loadFences()
@@ -101,20 +128,23 @@ void FenceOverlay::paintEvent(QPaintEvent *)
 // ============================================================================
 // 矩形：用 QRect + drawRect 绘制四条边
 // 多边形：用 QPainterPath 依次连接各顶点
-// 填充：红色半透明 (255,0,0,50)
-// 边框：红色实线，宽度 2
+// 填充：按角色的半透明色（禁区红、岗区域绿）
+// 边框：按角色的实线，宽度 2
 // ============================================================================
 void FenceOverlay::drawFenceShape(QPainter &painter, const FenceShape &shape)
 {
     if (shape.points.empty()) return;
+
+    const QColor penColor = roleColor(shape.role);
+    const QColor fillColor = roleFillColor(shape.role);
 
     if (shape.type == ShapeType::Rectangle && shape.points.size() >= 2) {
         // 矩形：用两个对角点构造 QRect
         int x1 = shape.points[0].x, y1 = shape.points[0].y;
         int x2 = shape.points[1].x, y2 = shape.points[1].y;
         QRect rect(QPoint(x1, y1), QPoint(x2, y2));
-        painter.fillRect(rect, QColor(255, 0, 0, 50));
-        painter.setPen(QPen(QColor(255, 0, 0), 2));
+        painter.fillRect(rect, fillColor);
+        painter.setPen(QPen(penColor, 2));
         painter.setBrush(Qt::NoBrush);
         painter.drawRect(rect);
     } else {
@@ -126,8 +156,8 @@ void FenceOverlay::drawFenceShape(QPainter &painter, const FenceShape &shape)
         }
         path.closeSubpath();
 
-        painter.fillPath(path, QColor(255, 0, 0, 50));
-        painter.setPen(QPen(QColor(255, 0, 0), 2));
+        painter.fillPath(path, fillColor);
+        painter.setPen(QPen(penColor, 2));
         painter.setBrush(Qt::NoBrush);
         painter.drawPath(path);
     }
@@ -136,26 +166,27 @@ void FenceOverlay::drawFenceShape(QPainter &painter, const FenceShape &shape)
 // ============================================================================
 // drawTempRect - 绘制正在拖动的临时矩形
 // ============================================================================
-// 虚线边框 + 半透明填充，表示尚未确认的矩形
+// 虚线边框 + 半透明填充，表示尚未确认的矩形；颜色跟当前所选角色一致
 // ============================================================================
 void FenceOverlay::drawTempRect(QPainter &painter)
 {
     QRect rect(rectStart_, rectEnd_);
-    painter.setPen(QPen(QColor(255, 0, 0, 180), 2, Qt::DashLine));
-    painter.setBrush(QColor(255, 0, 0, 30));
+    painter.setPen(QPen(roleColor(role_).lighter(120), 2, Qt::DashLine));
+    painter.setBrush(roleFillColor(role_));
     painter.drawRect(rect);
 }
 
 // ============================================================================
 // drawTempPolygon - 绘制正在绘制的临时多边形
 // ============================================================================
-// 已点击的顶点用小圆点标记，顶点之间用虚线连接
+// 已点击的顶点用小圆点标记，顶点之间用虚线连接；颜色跟当前所选角色一致
 // ============================================================================
 void FenceOverlay::drawTempPolygon(QPainter &painter)
 {
-    QPen pen(QColor(255, 0, 0, 180), 2, Qt::DashLine);
+    const QColor penColor = roleColor(role_);
+    QPen pen(penColor.lighter(120), 2, Qt::DashLine);
     painter.setPen(pen);
-    painter.setBrush(QColor(255, 0, 0, 30));
+    painter.setBrush(roleFillColor(role_));
 
     // 绘制已有点之间的连线
     QPainterPath path;
@@ -166,7 +197,7 @@ void FenceOverlay::drawTempPolygon(QPainter &painter)
     painter.drawPath(path);
 
     // 绘制顶点圆点
-    painter.setBrush(QColor(255, 0, 0, 150));
+    painter.setBrush(QColor(penColor.red(), penColor.green(), penColor.blue(), 150));
     for (const auto &pt : polyPoints_) {
         painter.drawEllipse(pt, 4, 4);
     }
@@ -202,6 +233,7 @@ void FenceOverlay::mousePressEvent(QMouseEvent *event)
             if (polyPoints_.size() >= 3) {
                 FenceShape shape;
                 shape.type = ShapeType::Polygon;
+                shape.role = role_;
                 for (const auto &pt : polyPoints_) {
                     shape.points.push_back(Point(pt.x(), pt.y()));
                 }
@@ -278,6 +310,7 @@ void FenceOverlay::mouseReleaseEvent(QMouseEvent *event)
         if ((x2 - x1) > 5 && (y2 - y1) > 5) {
             FenceShape shape;
             shape.type = ShapeType::Rectangle;
+            shape.role = role_;
             shape.points.push_back(Point(x1, y1));
             shape.points.push_back(Point(x2, y2));
             channelFence_.shapes.push_back(shape);
@@ -299,6 +332,7 @@ void FenceOverlay::mouseDoubleClickEvent(QMouseEvent *event)
         if (polyPoints_.size() >= 3) {
             FenceShape shape;
             shape.type = ShapeType::Polygon;
+            shape.role = role_;
             for (const auto &pt : polyPoints_) {
                 shape.points.push_back(Point(pt.x(), pt.y()));
             }

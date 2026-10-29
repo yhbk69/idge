@@ -272,7 +272,7 @@ void AlarmListWidget::setupUi()
     */
     fenceTable_ = new QTableWidget();
     fenceTable_->setColumnCount(5);
-    fenceTable_->setHorizontalHeaderLabels({"时间", "通道", "类别", "置信度", "围栏"});
+    fenceTable_->setHorizontalHeaderLabels({"时间", "通道", "类别", "置信度", "围栏类型"});
     fenceTable_->horizontalHeader()->setStretchLastSection(true);
     fenceTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     fenceTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -520,7 +520,12 @@ void AlarmListWidget::refreshFenceTable()
         confItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
         fenceTable_->setItem(i, 3, confItem);
 
-        fenceTable_->setItem(i, 4, new QTableWidgetItem("围栏"));
+        // 第 4 列出角色：一条通道可以同时有禁区和岗区域，都写"围栏"就看不出
+        // 报的是"闯进来了"还是"人跑出去了"。老库里的 "fence" 归到闯入。
+        fenceTable_->setItem(i, 4, new QTableWidgetItem(
+                a.alarmType == QLatin1String("fence_out")
+                    ? QStringLiteral("离岗")
+                    : QStringLiteral("闯入禁区")));
     }
 }
 

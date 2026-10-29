@@ -50,6 +50,7 @@ extern "C" {
 #include "priority_queue.h"
 #include "ppe_task.hpp"
 #include "video_recorder.h"
+#include "fence_shape.h"
 
 class FFmpegVideoDecoder : public QObject
 {
@@ -222,16 +223,21 @@ private:
     };
     std::vector<BoxSmoother> boxSmoother_;
 
-    // ===== 围栏侵入事件表（进入沿触发）=====
-    // 每个元素 = 一次进行中的"入侵事件"，记最近一次命中时的框与时刻。
+    // ===== 围栏事件表（进入沿触发）=====
+    // 每个元素 = 一次进行中的围栏违规事件，记最近一次命中时的框与时刻。
     //   框用模型 640 空间（与围栏候选的 det.box 同口径，跨帧可直接算 IoU），
     //   时刻用 steady_clock 纳秒（只与自身做差，不与报警里的 epoch 时间混用）。
-    // 命中已有事件 → 只续期，不再报警；匹配不上 → 视为"刚进入"，报警并新建事件；
-    // 连续 kFenceTrackKeepNs 没被命中 → 认为人已离开，事件结束，再进围栏算新事件。
+    // 命中已有事件 → 只续期，不再报警；匹配不上 → 视为"刚进入违规状态"，报警并新建事件；
+    // 连续 kFenceTrackKeepNs 没被命中 → 认为人已离开，事件结束，再进来算新事件。
     // 只被本通道解码线程访问，无需加锁（与 boxSmoother_ 同一口径）。
+    //
+    // role 是这张表能同时管两种事件的关键：闯入（禁区）与离岗（岗区域）是两个
+    //   独立事件，IoU 匹配时必须先比角色再算重叠 —— 同一个人的闯入 track 若被
+    //   他的离岗命中"续期"掉，此后这条通道的离岗报警会永久静默，且不报错。
     struct FenceInsideTrack {
         float x, y, w, h;
         long long lastHitNs = 0;
+        geofence::FenceRole role = geofence::FenceRole::Forbidden;
     };
     std::vector<FenceInsideTrack> fenceTracks_;
 

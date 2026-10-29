@@ -160,39 +160,56 @@ bool FenceChecker::isInsideFence(const object_detect_result &det,
 }
 
 // ============================================================================
-// checkDetection - 综合判断检测目标是否违反围栏规则
+// checkDetection - 综合判断检测目标违反了哪种围栏规则
 // ============================================================================
-// 遍历该通道所有围栏形状，只要目标在任一围栏内即判定为 inside。
+// 逐形状判定，按角色分两条归并（语义与裁决顺序见 fence_checker.h 的注释）：
+//   禁区(Forbidden) —— 脚点在任一个之内即闯入：OR 归并，取下标最小的命中者
+//   岗区域(Workzone) —— 脚点在所有岗区域之外才离岗：AND 归并，无责任形状
+// 两条规则不是互补关系，所以必须分开扫；旧实现把整张表 OR 成一个 insideAny
+// 再按全局 mode 取反，于是"这一路既要禁进 A 区又要守在 B 区"根本表达不出来。
 //
-// alarmInside:
-//   true  → 目标在围栏内需要报警（默认模式，检测人员闯入禁区）
-//   false → 目标在围栏外需要报警（检测人员离开安全区域）
-//
-// 返回 true 表示该检测结果应该触发报警。
+// 禁区优先：命中禁区就直接返回，不再判岗区域。一人一帧只出一条报警。
 // ============================================================================
-bool FenceChecker::checkDetection(const object_detect_result &det,
-                                  int srcW, int srcH,
-                                  int modelW, int modelH,
-                                  int overlayW, int overlayH,
-                                  const ChannelFence &channelFence,
-                                  bool alarmInside) {
-    // 围栏未启用或没有形状，不做围栏过滤
+FenceViolation FenceChecker::checkDetection(const object_detect_result &det,
+                                            int srcW, int srcH,
+                                            int modelW, int modelH,
+                                            int overlayW, int overlayH,
+                                            const ChannelFence &channelFence) {
+    FenceViolation out;
+
+    // 围栏未启用或没有形状，不做围栏判定
     if (!channelFence.enabled || channelFence.shapes.empty()) {
-        return false;
+        return out;   // verdict == None
     }
 
-    // 检查目标是否在任一围栏内
-    bool insideAny = false;
-    for (const auto &shape : channelFence.shapes) {
-        if (isInsideFence(det, srcW, srcH, modelW, modelH,
-                          overlayW, overlayH, shape)) {
-            insideAny = true;
-            break;
+    bool hasWorkzone = false;       // 本通道到底有没有岗区域（决定离岗规则是否成立）
+    bool insideAnyWorkzone = false;
+
+    for (size_t i = 0; i < channelFence.shapes.size(); ++i) {
+        const FenceShape &shape = channelFence.shapes[i];
+        const bool inside = isInsideFence(det, srcW, srcH, modelW, modelH,
+                                          overlayW, overlayH, shape);
+        if (shape.role == FenceRole::Forbidden) {
+            if (inside) {
+                out.verdict = FenceVerdict::Intrusion;
+                out.role = FenceRole::Forbidden;
+                out.shapeIndex = static_cast<int>(i);
+                return out;         // 禁区优先，岗区域不再看
+            }
+        } else {
+            hasWorkzone = true;
+            if (inside) insideAnyWorkzone = true;
         }
     }
 
-    // 根据模式决定是否报警
-    return alarmInside ? insideAny : !insideAny;
+    // 只在"确实画了岗区域"时才谈离岗：一条纯禁区通道会把每个检到的人都判成
+    // 离岗（hasWorkzone=false 时 !insideAnyWorkzone 恒成立），那是最糟的误报。
+    if (hasWorkzone && !insideAnyWorkzone) {
+        out.verdict = FenceVerdict::Absence;
+        out.role = FenceRole::Workzone;
+        out.shapeIndex = -1;
+    }
+    return out;
 }
 
 } // namespace geofence

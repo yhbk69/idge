@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-C++ 测试源码目录。含六个测试程序与一个人工联调工具：
+C++ 测试源码目录。含七个测试程序与一个人工联调工具：
 
 - `test_database.cpp`：针对 `src/biz/db/` 的检测记录 DAO / 报警记录 DAO /
   DatabaseManager 做初始化、插入、批量插入、条件查询、统计、状态更新与维护
@@ -41,6 +41,13 @@ C++ 测试源码目录。含六个测试程序与一个人工联调工具：
   ④队列语义——水位闸门、上限丢最旧、`uplink_ack` 只对账队首、退避梯子 `min(2^n×2s, 30s)`、
   断线时帧不越序、`media_failed` 的各成因。
   **其中 `ws_binary` 那 11 组是"代码保留但默认关"的回归保护，改协议时不许顺手删。**
+- `test_geofence_role.cpp`：电子围栏**按形状角色**判定的离线契约自检（`FenceChecker::checkDetection`
+  返回 `FenceViolation`）。八组断言：禁区命中优先于离岗（一人一帧一条）、**通道无岗区域时永不出
+  `Absence`**（少了这条守卫，纯禁区通道会把每个人每帧都判离岗）、人在任一岗区域内即不算离岗、
+  离岗的 `shapeIndex` 恒为 -1、多禁区时命中下标正确、禁用/空形状出 `None`、凹多边形命中与迁移前
+  逐位一致（守 letterbox + 射线法，同时证明多边形没被降级成 `toRect`）、
+  `roleFromString` 对缺键/空串/垃圾一律回落 `forbidden`（迁移的安全失效方向）。
+  只链 `Qt5::Core`、无 GUI、与 cwd 无关，任意机器可跑。
 - `ws_sink.cpp`：**不是自检，是人工对拍的接收端**（`QWebSocketServer`）。板子出网受限，联调只能走
   loopback：`./ws_sink 8765 /tmp/sink_out` 起一个假对端，把 `websocket.server_url` 指到
   `ws://127.0.0.1:8765`。`ws_binary` 档它按 `media_id` 把二进制分块拼回文件并与报文里的 sha256 对拍；
@@ -58,17 +65,22 @@ C++ 测试源码目录。含六个测试程序与一个人工联调工具：
 | `test_latest_frame_slot.cpp` | LatestFrameSlot 单槽广播契约自检（跳帧/生命周期/close 唤醒/reset），末行打印一行 PASS 说明 |
 | `test_channel_reload.cpp` | 通道热更新板端离线自测（停→releaseTasks→重建 ×4 轮，槽位集合/线程数/RSS 三项断言），须在 build 目录下跑 |
 | `test_alarm_uplink.cpp` | 报警上行离线自检（18 组：两种 transport 报文形状 / 帧序 / 地址换算与路径逃逸 / 队列·ack·退避），纯 Qt Core，任意机器可跑 |
+| `test_geofence_role.cpp` | 围栏角色判定离线自检（8 组：禁区优先 / 无岗区域守卫 / 任一岗区域内 / shapeIndex 口径 / 凹多边形回归 / role 回落），纯 Qt Core，任意机器可跑 |
 | `ws_sink.cpp` | 人工联调用的假对端（`QWebSocketServer`）：收 text+binary、按 media_id 拼文件对拍 sha256，url 档只打印地址 |
 
 ## 使用方法
 
-六个测试与 `ws_sink` 都已接入根 `CMakeLists.txt`（各自一个 `add_executable`，随主程序一并构建）：
+七个测试与 `ws_sink` 都已接入根 `CMakeLists.txt`（各自一个 `add_executable`，随主程序一并构建）：
 
 ```bash
 ./build-linux.sh -t rk3588 -b Release
 ./build/build_rk3588_linux/test_database    # 退出码：失败数>0 时为 1，否则 0
 ./build/build_rk3588_linux/test_latest_frame_slot   # 同上；纯 CPU，不依赖板子外设
 ./build/build_rk3588_linux/test_alarm_uplink        # 同上；纯 Qt Core，不依赖外设与 cwd
+
+# 围栏判定自检只链 fence_checker.cpp，改判定逻辑时优先跑它（目标级构建，不整树重编）
+cmake --build build/build_rk3588_linux --target test_geofence_role -j"$(nproc)"
+./build/build_rk3588_linux/test_geofence_role       # 同上；无 GUI、与 cwd 无关
 
 # 盘点/点名自测必须在仓库根运行（依赖 assets/test/ + model/library/yolo11n-coco +
 # model/face/ 两件套权重；点名对照还需 model/face/face_recognition）；
@@ -115,6 +127,9 @@ curl -o /tmp/x.jpg '<sink 打出的 snapshot/media_begin url>' && sha256sum /tmp
 - `test_alarm_uplink` 只链 `Qt5::Core`，源 = `alarm_uplink_engine.cpp` + `media_payload.cpp` 两个文件
   （**故意不链** `ws_client`/`alarm_manager`/DAO/`media_pump`：前者是 QObject + 真 socket，
   后者的成品回调要投回 GUI 线程，都留给板端端到端验，不进离线自检）
+- `test_geofence_role` 只链 `Qt5::Core`，源 = `fence_checker.cpp` 一个文件：它只依赖
+  `fence_shape.h` 与 `common.hpp` 里的 `image_rect_t` 字段，不碰 OpenCV/RKNN 符号，
+  所以围栏判定改动能在不链主程序的前提下验证
 - `ws_sink` 链 `Qt5::Core` + `Qt5::WebSockets`，`QCoreApplication` 无 GUI 依赖
 - `test_channel_reload` 链的是主流水线的依赖闭包：`ffmpeg_video_decoder` + `video_recorder` +
   `ppe_task`/`base_task` + `model_registry` + `ConfigManager`/`parse_config` +
@@ -127,7 +142,7 @@ curl -o /tmp/x.jpg '<sink 打出的 snapshot/media_begin url>' && sha256sum /tmp
 
 - **新增测试源必须同时在 `.gitignore` 加 `!tests/xxx.cpp`**：根 `.gitignore` 里有
   `test_*.cpp` 这条"临时验证文件"规则，会把正式测试源一并挡掉，而根 CMakeLists 已经
-  引用它 —— 结果是本地能编、别人克隆后 `No such file` 编不过。六个测试都已放行。
+  引用它 —— 结果是本地能编、别人克隆后 `No such file` 编不过。七个测试都已放行。
   **`ws_sink.cpp` 不在 `test_*.cpp` 的射程里（文件名不以 `test_` 开头），不需要豁免**——
   当初 `test_alarm_uplink.cpp` 就是这么被静默挡住过一轮，`git status` 里根本没有它。
 - 断言基于 `src/biz/db/` 接口行为（如"批量插入10条"后 `queryByTimeRange` 期望 ≥11 条），

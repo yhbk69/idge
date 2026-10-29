@@ -175,6 +175,8 @@ public:
     bool geofenceEnabled() const;
     void setGeofenceEnabled(bool enabled);
 
+    // 退役键：报警规则改由每个围栏形状自带的 role 决定（见 geofence/FenceRole）。
+    // 只有 FenceManager::loadFromConfig 读它一次，用于给老配置里缺 role 的形状补角色。
     QString geofenceMode() const;
     void setGeofenceMode(const QString &mode);
 
@@ -192,7 +194,7 @@ public:
     QString geofenceAlarmClass() const;
     void setGeofenceAlarmClass(const QString &cls);
 
-    /** @brief 围栏报警节流下限（秒，默认 10）——每通道每类别窗口内只出一条；
+    /** @brief 围栏报警节流下限（秒，默认 10）——每通道每角色每类别窗口内只出一条；
      *         "站着不动只报一次"由解码器的进入沿事件表保证，本窗口只兜沿抖动 */
     int geofenceThrottleSeconds() const;
     void setGeofenceThrottleSeconds(int seconds);

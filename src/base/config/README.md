@@ -20,7 +20,8 @@
   `save()` 才整体序列化写回文件。配置节：`video`（含 `models` 参数表与 `channels` 列表）/
   `detect` / `geofence` / `recording` / `database` / `websocket` / `smartRecognition`
   （另有一整段 `gb28181` 由国标模块自己读，见下）。文件不存在时按 **schema V2** 写入内置默认并
-  `save()`；JSON 解析失败置空 `root_`，getter 回退默认值（0.25 / 0.45 / "inside_alarm" / "person" / 10 …）。
+  `save()`；JSON 解析失败置空 `root_`，getter 回退默认值（0.25 / 0.45 / "person" / 10 …，
+  遗留的 `"inside_alarm"` 只在迁移分支里出现）。
 - **一次性迁移**：两类，都在 `load()` 内、有变化才 `saveUnsafe()` 落盘：
   1. `migrateModelPaths()` / `migrateRecordingDefaults()` 等段级补齐——只在整段不存在时写默认值，
      目的是让新开关在文件里可见可改，程序本身仍靠 getter 兜底；
@@ -30,6 +31,9 @@
      （用 `md5sum` 对比可验证幂等）。它跑在 `migrateModelPaths()` **之后**——必须先归一化老路径
      才能反查库 id；且**只允许用纯字符串**的 `pathToLibraryId()` 反查，不得回调 `ModelRegistry`
      （`mutex_` 不可重入，回调即启动死锁）。
+- **围栏形状的角色迁移不在这里**：`geofence` 段 `channels/*/shapes[]` 缺 `role` 时由
+  `FenceManager::loadFromConfig()` 自己按老 `mode` 补齐并落盘。`migrateSchemaV2()` 是一次性闸门、
+  板端已跑过，且不触碰 shapes；为角色重新武装它会误伤现场已画好的围栏。
 - **ConfigParser**（CLI 用）：解析 `-m/-i/-a/-t/-c/-d/-r/-s/-p/-v/-h` 等选项填充 `AppConfig`，
   缺 `-m`/`-i` 或文件不存在即报错 `exit`。
 
@@ -52,15 +56,15 @@
 **推理间隔没有配置键**：`ffmpeg_video_decoder.cpp` 的 4.6 节写死 `frame_count % 3`，
 别在 `video` 下加 `render.sampleInterval` 之类的键——那只会造出一个改了不生效的假开关。
 
-### geofence 段（通道级、独立于级联）
+### geofence 段（开关/类别通道级、角色**形状级**、独立于级联）
 
 | 键 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `enabled` | bool | `true` | 总开关；有围栏数据时 `FenceManager::loadFromConfig` 会自动置 true |
-| `mode` | string | `inside_alarm` | `inside_alarm` / `outside_alarm` |
-| `alarmClass` | string | `person` | 触发围栏报警的**单一类别**（旧列表 `alarmClasses` 已废弃） |
-| `throttleSeconds` | int | `10` | 围栏报警**节流下限**：每通道每类别窗口内只出一条，由 `AlarmManager::ingestFenceAlarm` 执行。"同一个人站进去只报一次"不靠它，靠解码器的进入沿事件表（见 `src/biz/geofence/README.md`） |
-| `channels.<ch>` | object | — | 围栏形状 + `overlay_w/h`（顶点是 overlay 像素坐标） |
+| `enabled` | bool | `true` | 总开关；有围栏数据时 `FenceManager::loadFromConfig` 会自动置 true。**通道级**——混用两种角色的通道无法只关其中一种 |
+| `mode` | string | `inside_alarm` | **已退役**：运行期无任何判断读它。唯一读者是 `FenceManager::loadFromConfig` 的迁移分支，用来给没有 `role` 键的老形状补角色；`saveToConfig` 固定写 `"inside_alarm"` 只为不让键消失。`geofenceMode()`/`setGeofenceMode()` 因此是遗留 API，**别再拿它做判断** |
+| `alarmClass` | string | `person` | 触发围栏报警的**单一类别**（旧列表 `alarmClasses` 已废弃）。产不出这个类名的通道，禁区和岗区域两条规则**都**静默失效 |
+| `throttleSeconds` | int | `10` | 围栏报警**节流下限**：每通道**每角色**每类别窗口内只出一条（节流键含角色段，闯禁区后 10 秒内的离岗不会被吞），由 `AlarmManager::ingestFenceAlarm` 执行。"同一个人站进去只报一次"不靠它，靠解码器的进入沿事件表（见 `src/biz/geofence/README.md`） |
+| `channels.<ch>` | object | — | 围栏形状 + `overlay_w/h`（顶点是 overlay 像素坐标）。每个形状带 `role`：`forbidden` 禁区（进去就报）/ `workzone` 岗区域（待在外面就报）；**缺键时按 `mode` 推断、并立即落盘补齐**（幂等），解析不出来的值一律回落 `forbidden`。角色创建后不可改，改角色 = 删了重画 |
 
 围栏不占推理任务：它复用该通道已有模型产出的检测结果，只做几何判定。若某通道挂了围栏却
 没有任何模型能产出 `alarmClass`，启动日志打 `[geofence] 通道N 无模型产出类别 person，围栏不会触发`。

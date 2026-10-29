@@ -15,10 +15,13 @@
 //   原始视频空间: 解码后的视频帧分辨率（如 1920x1080）
 //   overlay 空间: FenceOverlay widget 的像素坐标（用户绘制围栏时使用）
 //
-// 判断逻辑：
-//   取检测框的"底边中点"（脚部位置），判断该点是否在围栏内。
-//   - inside_alarm 模式: 目标在围栏内 → 报警
-//   - outside_alarm 模式: 目标在围栏外 → 报警
+// 判断逻辑（按形状角色，见 FenceRole）：
+//   取检测框的"底边中点"（脚部位置），判断该点落在哪个角色里。
+//   - 禁区 Forbidden:  脚点在任一带禁区角色的围栏内 → Intrusion（闯入）
+//   - 岗区域 Workzone: 该通道有岗区域、且脚点在所有岗区域之外 → Absence（离岗）
+//   两条规则的归并方向相反，于是逐形状判定，不再有一个全局 mode 开关。
+//   （旧 geofence.mode 的 inside_alarm/outside_alarm 已退役，只在加载时用作
+//    给老配置补角色的依据，之后每个形状自带角色。）
 //
 // ============================================================================
 
@@ -26,6 +29,30 @@
 #include "common.hpp"
 
 namespace geofence {
+
+// ============================================================================
+// FenceVerdict / FenceViolation - 单个目标对一个通道围栏表的裁决结果
+// ============================================================================
+// 之所以返回一个结构而不是 bool：禁区与岗区域的违规条件不是彼此的补集
+// （"不在任何岗区域内"与"不在任何禁区内"可以同时成立），调用方需要知道
+// 报的是哪一种，才能给报警分类、给事件表分角色。
+//
+// verdict:    None = 不违规；Intrusion = 闯入禁区；Absence = 离岗
+// role:       与 verdict 对应的形状角色，直接喂给解码器的事件表做分角色去重
+// shapeIndex: Intrusion 时命中的那个禁区形状下标；Absence 恒为 -1，
+//             因为"在所有岗区域之外"是对整张表的负向推断，没有单一责任形状。
+// ============================================================================
+enum class FenceVerdict {
+    None,
+    Intrusion,  // 闯入禁区
+    Absence     // 离岗：人在所有岗区域之外
+};
+
+struct FenceViolation {
+    FenceVerdict verdict = FenceVerdict::None;
+    FenceRole role = FenceRole::Forbidden;
+    int shapeIndex = -1;
+};
 
 class FenceChecker {
 public:
@@ -77,16 +104,27 @@ public:
                               const FenceShape &fence);
 
     // ========================================================================
-    // 综合判断：检测目标是否违反围栏规则
-    // alarmInside=true:  目标在围栏内 → 返回 true（需要报警）
-    // alarmInside=false: 目标在围栏外 → 返回 true（需要报警）
+    // 综合判断：检测目标违反了哪个角色的围栏规则
+    //
+    // 单遍扫描该通道形状，按下面顺序出结论（**禁区优先，一人一帧一条**）：
+    //   1. 命中任一带 Forbidden 角色的形状      → {Intrusion, Forbidden, idx}
+    //   2. 否则本通道有岗区域、且不在任一带 Workzone 角色的形状内
+    //                                          → {Absence, Workzone, -1}
+    //   3. 否则                                → None
+    // 取禁区优先的理由：禁区命中是一条正向的几何事实，离岗是对整张形状表的
+    // 负向推断。同一具身体既落在禁区里又落在岗区域外时发两条报警，会把一次
+    // 现场事件拆成两次处置，而其中更可处置的正是"他闯进了禁区"。
+    //
+    // 推论（容易读错，写明）：岗区域是"在所有岗区域之外"，不是逐区域判定 ——
+    // 人在任一岗区域内就不算离岗，即使他同时不在第二个岗区域内。
+    //
+    // 通道未启用或一个形状都没有时返回 None（围栏不参与过滤）。
     // ========================================================================
-    static bool checkDetection(const object_detect_result &det,
-                               int srcW, int srcH,
-                               int modelW, int modelH,
-                               int overlayW, int overlayH,
-                               const ChannelFence &channelFence,
-                               bool alarmInside);
+    static FenceViolation checkDetection(const object_detect_result &det,
+                                         int srcW, int srcH,
+                                         int modelW, int modelH,
+                                         int overlayW, int overlayH,
+                                         const ChannelFence &channelFence);
 };
 
 } // namespace geofence

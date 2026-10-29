@@ -25,15 +25,15 @@ FenceManager &FenceManager::instance()
 //   {
 //     "geofence": {
 //       "enabled": true,
-//       "mode": "inside_alarm",
+//       "mode": "inside_alarm",              // 退役键，仅作兼容读写，见下
 //       "channels": {
 //         "0": {
 //           "enabled": true,
 //           "overlay_w": 400,
 //           "overlay_h": 300,
 //           "shapes": [
-//             { "type": "rectangle", "points": [[100,50],[300,200]] },
-//             { "type": "polygon", "points": [[10,10],[200,10],[100,150]] }
+//             { "type": "rectangle", "role": "forbidden", "points": [[100,50],[300,200]] },
+//             { "type": "polygon",   "role": "workzone",  "points": [[10,10],[200,10],[100,150]] }
 //           ]
 //         }
 //       },
@@ -41,18 +41,29 @@ FenceManager &FenceManager::instance()
 //       "throttleSeconds": 10                   // 围栏报警节流下限（主判据是"进入沿"，见 README）
 //     }
 //   }
+//
+// 老配置（没有 "role"）在这里就地补齐：以该文件当时的 mode 为准，
+// outside_alarm → workzone，其余 → forbidden。补齐后立刻落盘，因此这个推断只发生一次
+// —— 第二次加载时每个形状都带显式 role，用户重画出来的角色不会再被 mode 拍平。
+// 迁移不放 ConfigManager::migrateSchemaV2()：那是一次性闸门、现场已经跑过、
+// 而且它只动 geofence 顶层键、从不遍历 channels/*/shapes。
 // ============================================================================
 void FenceManager::loadFromConfig()
 {
     QMutexLocker locker(&mutex_);
     ConfigManager &cfg = ConfigManager::instance();
     enabled_ = cfg.geofenceEnabled();
-    mode_ = cfg.geofenceMode();
     // 围栏触发类别必须由配置决定，不能写死：级联槽位挂 PPE 模型时类名是
     // un_helmet/helmet/people/vest/workWear，硬编码的 "person" 一个都匹配不上。
     // V2 里它是单值（围栏判定只看"这一路里是不是人"），老配置的列表由
     // migrateSchemaV2() 折叠成一个；geofenceAlarmClass() 缺键时回落 "person"。
     alarmClass_ = cfg.geofenceAlarmClass();
+
+    // 退役中的全局 mode：运行期不再有任何消费者（角色改为逐形状判定、由
+    // FenceShape::role 承载），这里只留作"老配置里没有 role 的形状该补哪个角色"
+    // 的唯一依据，所以读进局部变量、不存成员 —— 存了就会有人误以为它还能切行为。
+    const QString legacyMode = cfg.geofenceMode();
+    bool roleInferred = false;
 
     fences_.clear();
     overlaySizes_.clear();
@@ -71,6 +82,16 @@ void FenceManager::loadFromConfig()
             FenceShape shape;
             QString type = sObj["type"].toString("rectangle");
             shape.type = (type == "polygon") ? ShapeType::Polygon : ShapeType::Rectangle;
+
+            // 角色：有显式键就照它（roleFromString 认不出的值回落 forbidden），
+            // 没有键说明是角色机制之前的老围栏，按当时的全局 mode 推断。
+            if (sObj.contains("role")) {
+                shape.role = roleFromString(sObj["role"].toString().toStdString());
+            } else {
+                shape.role = (legacyMode == "outside_alarm")
+                                 ? FenceRole::Workzone : FenceRole::Forbidden;
+                roleInferred = true;
+            }
 
             // 解析顶点坐标数组 [[x,y], [x,y], ...]
             QJsonArray pts = sObj["points"].toArray();
@@ -107,6 +128,15 @@ void FenceManager::loadFromConfig()
 
     qDebug() << "[Fence] loadFromConfig: enabled=" << enabled_
              << "channels=" << fences_.size();
+
+    // 推断过角色就立刻写回，把"role 缺失"这条路一次性封死。
+    // 必须先解锁：saveToConfig 自己也要拿同一把 QMutex（非递归），持锁调用即死锁。
+    if (roleInferred) {
+        locker.unlock();
+        saveToConfig();
+        qDebug() << "[Fence] loadFromConfig: 老配置无 role，已按 mode=" << legacyMode
+                 << " 补齐并落盘";
+    }
 }
 
 // ============================================================================
@@ -125,6 +155,9 @@ void FenceManager::saveToConfig()
         for (const auto &shape : it.value().shapes) {
             QJsonObject sObj;
             sObj["type"] = (shape.type == ShapeType::Polygon) ? "polygon" : "rectangle";
+            // 角色无条件写：老配置第一次加载时补齐，此后每次保存都带得走，
+            // 手工编辑的配置文件也保证落盘后是自洽的。
+            sObj["role"] = QString::fromStdString(roleToString(shape.role));
 
             QJsonArray pts;
             for (const auto &p : shape.points) {
@@ -146,23 +179,23 @@ void FenceManager::saveToConfig()
     }
 
     // 写入 ConfigManager 并保存文件
+    // mode 是退役键：角色已下放到每个 shape，运行期没人读它。仍写一个固定值，
+    // 是为了让老程序/老配置读到这个键时不至于拿到 null；它不再表达任何语义。
     ConfigManager::instance().setGeofenceEnabled(enabled_);
-    ConfigManager::instance().setGeofenceMode(mode_);
+    ConfigManager::instance().setGeofenceMode(QStringLiteral("inside_alarm"));
     ConfigManager::instance().setGeofenceAlarmClass(alarmClass_);
     ConfigManager::instance().setGeofenceChannels(channels);
     ConfigManager::instance().save();
 }
 
 // ============================================================================
-// 围栏开关和模式
+// 围栏总开关
 // ============================================================================
+// 通道级只有"开/关"两态：一条通道里混用禁区与岗区域时无法只关其中一种
+// （要单独停用某条规则，就把那个形状删掉重画成别的角色）。
 bool FenceManager::enabled() const { QMutexLocker locker(&mutex_); return enabled_; }
 
 void FenceManager::setEnabled(bool enabled) { QMutexLocker locker(&mutex_); enabled_ = enabled; }
-
-QString FenceManager::mode() const { QMutexLocker locker(&mutex_); return mode_; }
-
-void FenceManager::setMode(const QString &mode) { QMutexLocker locker(&mutex_); mode_ = mode; }
 
 // ============================================================================
 // 围栏报警类别

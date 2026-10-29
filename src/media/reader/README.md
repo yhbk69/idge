@@ -14,7 +14,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `ffmpeg_video_decoder.h/.cpp` | 主流水线解码总控：硬解、零拷贝 DMA-BUF 借还、**按通道**级联多模型任务分发、结果合成画框、帧限速（截止期节拍：按流 avg_frame_rate 定间隔，落后重锚丢弃连发）、通道级围栏判定挂钩、报警片段录制挂钩、**帧捕获槽**（供智能识别按需拉最新帧） |
+| `ffmpeg_video_decoder.h/.cpp` | 主流水线解码总控：硬解、零拷贝 DMA-BUF 借还、**按通道**级联多模型任务分发、结果合成画框、帧限速（截止期节拍：按流 avg_frame_rate 定间隔，落后重锚丢弃连发）、通道级围栏判定挂钩（禁区/岗区域按形状角色）、报警片段录制挂钩、**帧捕获槽**（供智能识别按需拉最新帧） |
 | `video_recorder.h/.cpp` | `VideoRecorder`：画框后的 RGBA → RGA → rkmpp 硬编（hevc/h264）→ Annex-B 环形缓冲区；报警时 dump 裸流/MP4 片段 |
 | `camera_preview_decoder.h/.cpp` | 摄像头预览解码：v4l2 输入格式协商（MJPEG/NV12/YUYV）、JPEG 魔数缓存抓拍（裸格式回退现场编码）、SCRFD 同步检测、PpeTask 异步检测、CPU 画框 |
 | `scrfd_face_detector.h/.cpp` | SCRFD 人脸检测器（RKNN NPU）：letterbox 预处理、9 输出解码、类别内 NMS |
@@ -41,8 +41,9 @@ FFmpegVideoDecoder（QObject，独立 QThread）
                     → PpeTask 推理 → resultQueue.push(od_results)
   解码线程 tryPop 各任务结果 → 坐标还原/画框进 RGBA
       → 逐槽 AlarmManager::ingest(ch, od, SlotContext) + 收集围栏候选（通道级）
-      → 槽循环结束后一次合并围栏判定 → 进入沿匹配（fenceTracks_，IoU 0.3 / 保活 1.5 秒）
-        → 只有"新进入"才 ingestFenceAlarm（throttleSeconds 只作节流下限）
+      → 槽循环结束后一次合并围栏判定（禁区/离岗按形状角色裁决）
+        → 进入沿匹配（fenceTracks_，IoU 0.3 / 保活 1.5 秒，**匹配前先按角色分池**）
+        → 只有"新事件"才 ingestFenceAlarm(role)（throttleSeconds 只作节流下限）
       → emit frameReady(RenderFrame)
   （RenderFrame 携带 dup 出的 fd：所有权移交接收方，接收方负责 close）
 
@@ -153,8 +154,11 @@ det.detectRgba(rgbaPixels, width, height, stride /*>=width*4*/,
   不同模型的同类号互相认错、画框抖动。所以画框与 `ingest` 都保持逐槽进行；只有**围栏**是通道级判定，
   在槽循环结束后用本帧收集的候选跑一次（`dislayImage` 还是带框的本帧缓冲，快照/片段才带得出框）。
 - **围栏是"进入沿"事件，不是电平**：`fenceTracks_`（每解码器一份，只被本通道解码线程访问，
-  与 `boxSmoother_` 同口径、无需加锁）把同一目标的连续命中归并成一次入侵事件——匹配上只续期不报警，
-  匹配不上才算新进入并报警，离开超过 1.5 秒事件结束、再进来算新事件。
+  与 `boxSmoother_` 同口径、无需加锁）把同一目标的连续命中归并成一次事件——匹配上只续期不报警，
+  匹配不上才算新事件并报警，离开超过 1.5 秒事件结束、再触发算新事件。
+  **事件带角色、匹配前先比角色**（`tr.role != v.role` 直接跳过）：不分区的话，一个人的闯入 track
+  会把他随后的离岗命中续期掉，离岗永久静默。track 数量按角色翻倍是预期代价，不应无界增长。
+  离岗仍以"本帧检到该类别的人"为前提——没人 = 岗位无人，本模块不做。
   `decodeLoop()` 开头与 `boxSmoother_` 一起清空（重开流即新的一段监控）。
 - **改模型列表 = 重开该路，不是重启程序**：设置页改 `channels[].models` / `enabled` 后走
   `signalStop → waitForStop → releaseTasks() → start()`，任务集合按新配置重建；改

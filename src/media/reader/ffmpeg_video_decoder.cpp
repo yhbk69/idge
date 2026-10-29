@@ -1869,10 +1869,18 @@ void FFmpegVideoDecoder::decodeLoop()
                     //   - 围栏坐标是 overlay 像素空间，需与本帧 dislayImage 尺寸同口径；
                     //   - 截图要用同一帧带框画面，deliverAlarms 才能拍到越界目标。
                     //
-                    // 语义是"进入沿触发"而非"电平触发"：一个人站在围栏里只报一次，
+                    // 语义是"进入沿触发"而非"电平触发"：一个人站在违规状态里只报一次，
                     // 不是每 10 秒报一次。靠 fenceTracks_ 把连续命中同一个目标的若干帧
-                    // 归并成"同一次入侵事件"；离开超过 kFenceTrackKeepNs 后事件结束，
+                    // 归并成"同一次事件"；离开超过 kFenceTrackKeepNs 后事件结束，
                     // 再进来算新事件。（此前每命中一帧就调一次报警，40 秒能出三百多条。）
+                    //
+                    // 两种角色共用这套事件表，但违规条件由每个形状自带的 role 决定
+                    // （见 FenceChecker::checkDetection）：
+                    //   禁区   —— 脚点在任一个之内  → 闯入报警（"进入沿"字面意义）
+                    //   岗区域 —— 脚点在所有岗区域外 → 离岗报警（"进入违规状态的沿"）
+                    // 离岗同样是"检到的人出现在区域外"，**不是**"区域里没人"：整段判定
+                    // 包在 `!fenceCandidates.empty()` 里，一个人都没检到时什么都不做。
+                    // 跟踪表按角色分流，否则同一个人的闯入事件会吃掉他的离岗报警。
                     if (fenceScan) {
                         const long long steadyNow =
                             std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -1889,37 +1897,53 @@ void FFmpegVideoDecoder::decodeLoop()
 
                         if (!fenceCandidates.empty()) {
                             const geofence::ChannelFence cf = fenceMgr.channelFence(channel_);
-                            // alarmInside=false(outside_alarm) 时"命中"=在围栏外，
-                            // 下面逻辑于是变成"越界沿触发"，语义同样成立
-                            const bool alarmInside = (fenceMgr.mode() == "inside_alarm");
                             int oW = 0, oH = 0;
                             fenceMgr.overlaySize(channel_, oW, oH);
 
+                            // 每种角色各多少个：判定不再由全局 mode 决定，画几种就是几条规则
+                            int forbiddenCount = 0, workzoneCount = 0;
+                            for (const auto &sh : cf.shapes) {
+                                if (sh.role == geofence::FenceRole::Workzone) workzoneCount++;
+                                else forbiddenCount++;
+                            }
+
                             QVector<AlarmRecord> fenceAlarms;
-                            int insideCount = 0;   // 命中围栏的目标数（含同一次入侵的续期）
-                            int entryCount = 0;    // 其中判定为"新进入"的次数 = 建事件数
+                            int hitCount = 0;        // 违规目标数（含同一次事件的续期）
+                            int intrusionCount = 0;  // 其中"闯入禁区"
+                            int absenceCount = 0;    // 其中"离岗"（在岗区域之外）
+                            int entryCount = 0;      // 判定为"新事件"的次数 = 建 track 数
                             for (const FenceCandidate &c : fenceCandidates) {
-                                // 脚点（框底边中点）是否落在围栏多边形内
-                                const bool inside = geofence::FenceChecker::checkDetection(
+                                // 脚点（框底边中点）与这张形状表比对，得出违规类型。
+                                // 候选的收集在槽位循环里，但 cf 是通道级快照，所以判定留在这里做
+                                // （一人一帧最多一条：禁区优先，命中即不再看岗区域）。
+                                const geofence::FenceViolation v =
+                                    geofence::FenceChecker::checkDetection(
                                         c.det,
                                         dislayImage.width, dislayImage.height,
                                         640, 640, oW, oH,
-                                        cf, alarmInside);
-                                if (!inside)
+                                        cf);
+                                if (v.verdict == geofence::FenceVerdict::None)
                                     continue;
-                                insideCount++;
+                                hitCount++;
+                                if (v.verdict == geofence::FenceVerdict::Intrusion)
+                                    intrusionCount++;
+                                else
+                                    absenceCount++;
 
                                 const float nx = (float)c.det.box.left;
                                 const float ny = (float)c.det.box.top;
                                 const float nw = (float)(c.det.box.right - c.det.box.left);
                                 const float nh = (float)(c.det.box.bottom - c.det.box.top);
 
-                                // 与进行中的入侵事件做 IoU 匹配：匹配上 = 同一个人还在栏内，
-                                // 只把框与时刻刷成新值（事件续期），不报警
+                                // 与进行中的事件做 IoU 匹配：匹配上 = 同一个人还在同一个违规
+                                // 状态里，只把框与时刻刷成新值（事件续期），不报警。
+                                // **先比角色**：闯入的 track 不能被离岗的命中续期，否则一个人
+                                // 闯进禁区后，他的离岗报警会被这条 track 静默吃掉。
                                 int bestIdx = -1;
                                 float bestIou = kFenceTrackIouThr;
                                 for (size_t t = 0; t < fenceTracks_.size(); ++t) {
                                     const auto &tr = fenceTracks_[t];
+                                    if (tr.role != v.role) continue;
                                     const float ix1 = std::max(tr.x, nx);
                                     const float iy1 = std::max(tr.y, ny);
                                     const float ix2 = std::min(tr.x + tr.w, nx + nw);
@@ -1937,13 +1961,14 @@ void FFmpegVideoDecoder::decodeLoop()
                                     continue;
                                 }
 
-                                // 匹配不上 = 进入沿：报一次警，并建立事件
+                                // 匹配不上 = 进入沿：报一次警，并建立事件（带上角色，供下次分流）
                                 entryCount++;
                                 fenceAlarms += AlarmManager::instance().ingestFenceAlarm(
-                                        channel_, c.det, slotCtxs[c.slot], c.timeNs);
+                                        channel_, c.det, slotCtxs[c.slot], c.timeNs, v.role);
                                 FenceInsideTrack tr;
                                 tr.x = nx; tr.y = ny; tr.w = nw; tr.h = nh;
                                 tr.lastHitNs = steadyNow;
+                                tr.role = v.role;
                                 fenceTracks_.push_back(tr);
                             }
 
@@ -1953,25 +1978,33 @@ void FFmpegVideoDecoder::decodeLoop()
                                         .arg(slotCtxs[k].alarmClass.isEmpty()
                                                  ? QStringLiteral("(不报警)")
                                                  : slotCtxs[k].alarmClass);
-                            // 报警条数可能少于"新进入"数：同一通道同一类别被
-                            // geofence.throttleSeconds 兜住了（进入沿抖动/两人几乎同时进入），
+                            // 报警条数可能少于"新事件"数：同一通道同一角色同一类别被
+                            // geofence.throttleSeconds 兜住了（进入沿抖动/两人几乎同时违规），
                             // 这两个数并排打出来就是为了能看出来被兜住了。
                             fenceMgr.postLog("fence",
-                                QString("[通道%1] 围栏: 模式=%2, 围栏类别=%3, 围栏=%4个, "
-                                        "本通道报警类=[%5] | 候选%6个, 栏内%7个, 新进入%8个, "
-                                        "报警%9条(最小间隔%10秒)")
-                                    .arg(channel_ + 1).arg(fenceMgr.mode()).arg(fenceCls)
-                                    .arg(cf.shapes.size()).arg(alarmClassDesc.join(", "))
-                                    .arg((int)fenceCandidates.size()).arg(insideCount)
+                                QString("[通道%1] 围栏: 围栏类别=%2, 围栏=%3个(禁区%4/岗区域%5), "
+                                        "本通道报警类=[%6] | 候选%7个, 违规%8个(侵入%9/离岗%10), "
+                                        "新事件%11个, 报警%12条(最小间隔%13秒)")
+                                    .arg(channel_ + 1).arg(fenceCls)
+                                    .arg(cf.shapes.size()).arg(forbiddenCount).arg(workzoneCount)
+                                    .arg(alarmClassDesc.join(", "))
+                                    .arg((int)fenceCandidates.size()).arg(hitCount)
+                                    .arg(intrusionCount).arg(absenceCount)
                                     .arg(entryCount).arg(fenceAlarms.size())
                                     .arg(ConfigManager::instance().geofenceThrottleSeconds()));
 
                             if (!fenceAlarms.isEmpty()) {
-                                fenceMgr.postLog("alarm",
-                                    QString("  [通道%1] ★ 围栏侵入报警: %2 (置信度 %3%)")
-                                        .arg(channel_ + 1)
-                                        .arg(fenceAlarms.front().className)
-                                        .arg(fenceAlarms.front().confidence * 100, 0, 'f', 1));
+                                // 逐条出：一批里可能同时有闯入和离岗，只报第一条会看错类型
+                                for (const AlarmRecord &a : fenceAlarms) {
+                                    fenceMgr.postLog("alarm",
+                                        QString("  [通道%1] ★ %2报警: %3 (置信度 %4%)")
+                                            .arg(channel_ + 1)
+                                            .arg(a.alarmType == QLatin1String("fence_out")
+                                                     ? QStringLiteral("离岗")
+                                                     : QStringLiteral("围栏侵入"))
+                                            .arg(a.className)
+                                            .arg(a.confidence * 100, 0, 'f', 1));
+                                }
                             }
                             deliverAlarms(channel_, fenceAlarms, dislayImage, videoRecorder_);
                         }

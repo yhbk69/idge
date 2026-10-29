@@ -328,42 +328,51 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
 }
 
 // ============================================================================
-// ingestFenceAlarm: 电子围栏侵入报警
+// ingestFenceAlarm: 电子围栏报警（闯入禁区 / 离岗）
 // ============================================================================
-// 由解码线程的"通道级合并围栏判定"对每个**新进入**围栏的目标调用。与 ingest 不同：
+// 由解码线程的"通道级合并围栏判定"对每个**新进入违规状态**的目标调用。与 ingest 不同：
 //   - 类别不做匹配（能调到这里，说明调用方已按 geofence.alarmClass 选好类别、
-//     确认目标在围栏内，并且已用 IoU 事件表判定这不是"同一个人还在栏内"），
+//     判定该目标违规，并且已用 IoU 事件表判定这不是"同一个人还在违规状态里"），
 //     本函数只负责限流与建记录；
 //   - 限流走独立窗口 geofence.throttleSeconds（默认 10 秒），键
-//     "通道:fence:类别名"。用类名而非 "槽位:cls_id"，配置重排槽位后仍稳定。
-//     "一个人站进去只报一次"由调用方的进入沿判定保证，这个窗口是它之下的兜底：
-//     框抖碎成多个事件、或两个人几乎同时进入时，最多 10 秒出一条。
+//     "通道:fence:角色:类别名"。用类名而非 "槽位:cls_id"，配置重排槽位后仍稳定；
+//     **角色必须在键里**，否则同一个人先闯入禁区再被判离岗时，第二条会被第一条的
+//     窗口吞掉——两种报警共用一个窗口就等于只有一种报得出来。
+//   - alarmType 按角色分："fence_in"（闯入禁区）/ "fence_out"（离岗）。下游
+//     AlarmDAO 按 alarmType 前缀 "fence" 恢复 isFenceAlarm，报警列表按它出中文文案，
+//     上行报文原样把 alarm_type 发给对端。
+//     "一次事件报一条"由调用方的进入沿判定保证，这个窗口是它之下的兜底：
+//     框抖碎成多个事件、或两个人几乎同时违规时，最多 10 秒出一条。
 //   历史：再之前是按每帧一条入库（bypassThrottle=true），40 秒出三百多条，已不可用。
 //
 // 统计（totalDetections_/classCount_）不在这里累加：同一批检测结果已经由
 // 该槽位的 ingest 计过一次，围栏路径只补报警记录。
 // ============================================================================
 QVector<AlarmRecord> AlarmManager::ingestFenceAlarm(int channel, const object_detect_result &det,
-                                                   const SlotContext &ctx, long timeNs)
+                                                   const SlotContext &ctx, long timeNs,
+                                                   geofence::FenceRole role)
 {
     QVector<AlarmRecord> newAlarms;
     const QString className = slotClassName(ctx, det.cls_id);
+    const QString roleTag = QString::fromLatin1(
+            role == geofence::FenceRole::Workzone ? "out" : "in");
     const long windowNs = (long)ConfigManager::instance().geofenceThrottleSeconds()
                               * 1000000LL * 1000LL;
     const long steadyNow = steadyNowNs();
     {
         QMutexLocker lock(&mutex_);
-        const QString key = QString("%1:fence:%2").arg(channel).arg(className);
+        const QString key = QString("%1:fence:%2:%3").arg(channel).arg(roleTag).arg(className);
         if (steadyNow - lastAlarmTime_.value(key, 0) < windowNs)
-            return newAlarms;          // 节流窗口内：进入沿抖动或多人几乎同时进入，只留第一条
+            return newAlarms;   // 节流窗口内：进入沿抖动或多人几乎同时违规，只留第一条
         lastAlarmTime_[key] = steadyNow;
 
         AlarmRecord alarm = makeAlarmRecord(channel, det, className, timeNs,
-                                            QStringLiteral("fence"), 2);
+                                            QStringLiteral("fence_") + roleTag, 2);
         alarm.isFenceAlarm = true;
 
         qDebug() << "AlarmManager: Creating fence alarm - id:" << alarm.id
                  << "channel:" << alarm.channel
+                 << "type:" << alarm.alarmType
                  << "className:" << alarm.className
                  << "windowSeconds:" << ConfigManager::instance().geofenceThrottleSeconds();
 

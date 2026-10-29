@@ -17,8 +17,8 @@
 //
 // 线程安全：
 //   通过 QMutex 保护所有成员变量的读写
-//   UI 线程可调用 setEnabled/setMode/addShape 等写操作
-//   解码线程同时调用 checkDetection 读取数据
+//   UI 线程可调用 setEnabled/addShape/removeShape 等写操作
+//   解码线程同时调用 channelFence() 读取数据（按值返回快照）
 //
 // ============================================================================
 
@@ -49,16 +49,15 @@ public:
     void saveToConfig();
 
     // ========================================================================
-    // 围栏开关和模式
+    // 围栏总开关
     // ========================================================================
-    // enabled: 是否启用围栏检测
-    // mode:    "inside_alarm"  = 目标在围栏内报警（默认）
-    //          "outside_alarm" = 目标在围栏外报警
+    // 报警"模式"不再是这里的成员：禁区/岗区域是**每个形状自带的角色**
+    // （FenceShape::role，判定见 FenceChecker::checkDetection），
+    // 一条通道可以同时有两种角色。
+    // 旧的全局 geofence.mode 只在 loadFromConfig 里被读一次，用来给没有 role 键的
+    // 老形状补角色；运行期无人读它，saveToConfig 也不再按它写回（固定写退役兼容值）。
     bool enabled() const;
     void setEnabled(bool enabled);
-
-    QString mode() const;
-    void setMode(const QString &mode);
 
     // ========================================================================
     // 通道围栏操作
@@ -111,8 +110,7 @@ private:
     FenceManager() = default;
 
     mutable QMutex mutex_;                                  // 保护所有成员变量的互斥锁
-    bool enabled_ = false;                                  // 围栏总开关
-    QString mode_ = "inside_alarm";                         // 报警模式
+    bool enabled_ = false;                                  // 围栏总开关（通道内混角色时无法只关一种）
     QString alarmClass_ = "person";                         // 触发围栏报警的类别（loadFromConfig 从 config 读，缺失回落 person）
     QMap<int, ChannelFence> fences_;                        // 各通道围栏数据
     QMap<int, QPair<int,int>> overlaySizes_;                // 各通道 overlay 尺寸
