@@ -6,9 +6,9 @@
 src/
 ├── main.cpp  head.h          # 入口：CLI/GUI 双模式、EGL 初始化、data/ 旧布局迁移
 ├── base/     基础设施域       # buffer queue config imaging runtime_paths.h perf_probe.h
-├── media/    视频管线域       # reader(FFmpeg硬解/硬编环形录像) rga
+├── media/    视频管线域       # reader(FFmpeg硬解/硬编环形录像) rga server(报警媒体的内嵌 http 文件服务)
 ├── ai/       推理与模型应用域  # yolo11 model_repo recognition task
-├── biz/      业务域           # alarm geofence service db(报警库+业务库) sip(GB28181) ws(Pad↔Aibox)
+├── biz/      业务域           # alarm geofence service db(报警库+业务库) sip(GB28181) ws(Pad↔Aibox 客户端 + 本机报警上行)
 └── ui/       界面域           # form widgets(原src/ui) core(主题/Qt助手 + qss与字体图片资源)
 ```
 
@@ -20,10 +20,16 @@ base ← media ← ai ← biz ← ui
 
 - **base**：零业务依赖。队列/DMA 缓冲/配置解析/图像读写与绘制（`imaging/`）/运行时路径与采样开关。
 - **media**：解码、色彩转换、硬件编码环形录像。产出帧与检测结果，不含业务判定。
+  `server/` 是报警上行的内嵌 http 静态文件服务（ZLMediaKit `mk_*` 的**全工程唯一封装点**，
+  进程级单例、`mk_env_init` 不可重入，所以起在 frmMain、停在 main.cpp 事件循环之后）。
 - **ai**：RKNN 推理、模型库注册、检测任务、人脸桥接（调 `tools/face_recognition` 产物）。
 - **biz**：报警/围栏/点名/盘点业务逻辑（含点名/盘点的任务目录组织 `service/task_manager`）、
   两套持久层（QtSQL `data/idge.db` + sqlite3 `roll_call.db`）、
-  GB28181 设备侧推流（`sip/`，纯 UDP/TCP socket + FFmpeg 复用/打包）、Pad↔Aibox WebSocket 客户端（`ws/`）。
+  GB28181 设备侧推流（`sip/`，纯 UDP/TCP socket + FFmpeg 复用/打包）、Pad↔Aibox WebSocket 客户端与
+  本机报警上行（`ws/`：入站报警解析 + 心跳重连，出站 `alarm_info`/`media_begin`/`media_failed` 组装、
+  内存队列、水位闸门、ack/退避、媒体读盘泵）。`ws/` 不 include 任何 media 域头——文件服务地址由
+  ui 侧算好注入（`AlarmUplink::setMediaBaseUrl`，反向依赖在这条线上断掉）；引擎与 socket 全程
+  只在 GUI 线程被碰，读盘在 `MediaPump` 后台线程做完再投递回来。
 - **ui**：窗口、控件、渲染，以及主题/Qt 助手/皮肤与字体图片资源（`core/`）。仅被 main.cpp 装配。
 
 同域内模块互引允许；跨域只允许右侧引左侧。

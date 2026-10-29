@@ -32,9 +32,10 @@
   → emit alarmGenerated / statsUpdated → UI 更新
   → (解码侧另投 ClipWriter 任务)
 
-ClipWriter 后台线程(报警 +2s 到点) → dump 裸流/MP4 → attachVideoClip(ids, 裸流路径)
+ClipWriter 后台线程(报警 +2s 到点) → dump 裸流/MP4 → attachVideoClip(ids, 裸流路径, mp4 副本路径)
          → 改内存 alarms_ 中同批记录的 videoPath + AlarmDAO::updateVideoPath 落库
-         （不发信号：详情对话框打开时读 alarms() 自然拿到最新路径）
+         → emit videoClipAttached(ids, 裸流路径, mp4 副本路径)（**当前只有报警上行 url 档是消费者**）
+         （UI 不发信号：详情对话框打开时读 alarms() 自然拿到最新路径）
 ```
 两条判定路径的限流键与窗口**互相独立**：
 
@@ -68,8 +69,8 @@ if (!news.isEmpty()) {
 // 围栏判定（通道级，槽循环结束后一次；几何命中才调）
 alarms += AlarmManager::instance().ingestFenceAlarm(ch, det, ctx, timeNs);
 
-// ClipWriter 后台线程（片段写完后）
-AlarmManager::instance().attachVideoClip(ids, rawClipPath);
+// ClipWriter 后台线程（片段写完后；mp4 副本没写成时第三参传空串）
+AlarmManager::instance().attachVideoClip(ids, rawClipPath, mp4Path);
 
 // UI 侧
 int unread = AlarmManager::instance().unacknowledgedCount();
@@ -102,6 +103,10 @@ AlarmManager::instance().cleanOldData(30);
   若某条报警已被挤出内存后才生成片段，内存侧改不到，但 DB 的 `video_path` 仍会更新。
 - 线程安全：内部用 `QMutex` 保护；截图开关用 `std::atomic<bool>`。`attachVideoClip` 先解锁
   再写库；`DatabaseManager` 每线程独立连接，故后台线程 `new AlarmDAO` 安全。
+- **`attachVideoClip` 的第三参（`.mp4` 副本）只用于转发、不入库**：`alarms.video_path` 与内存态的
+  `AlarmRecord::videoPath` 至今存的仍是 Annex-B 裸流路径，详情对话框的"视频"行读的也是它。
+  入库口径改成 mp4 会让历史数据的关联错位，也让国标/上传那套按裸流写的注释全部失真，所以不改。
+  mp4 目前只有一个去处：**报警上行 url 档申报的那个地址**（浏览器/播放器打不开裸流，这才需要副本）。
 - `acknowledged`/`videoPath` 为内存态，重启后以 DB 为准；截图 `imgPath` 由外部异步回填，可能短暂为空。
 - **`SlotContext` 没有拥有权也不共享**：由解码器每帧在栈上构造、按槽传入，`AlarmManager` 只在调用期间
   读取，不缓存。因此 4 个解码器并发报警不会互相覆盖类别名表（旧实现把全局槽表写进单例，

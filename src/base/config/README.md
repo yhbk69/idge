@@ -68,14 +68,34 @@
 ### recording 段（报警视频硬件编码录制）
 | 键 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `enabled` | bool | `false` | 常驻硬编要占 VPU，必须显式打开；关闭时不分配任何硬件资源 |
+| `enabled` | bool | **`true`** | 出厂即开：报警必带关联片段是需求验收项（`plan/requirements.md` §三①）。关掉会让 `alarm_uplink.send_clip` 自动降级为不发片段 |
 | `codec` | string | `hevc` | `hevc`→`hevc_rkmpp`（主用，带宽减半）/ `h264`→`h264_rkmpp`；其余值一律按 `hevc` 处理 |
-| `buffer_seconds` | int | `5` | 环形缓冲区时长（1~60 秒），决定能回溯多久 |
+| `buffer_seconds` | int | `8` | 环形缓冲区时长（1~60 秒），决定能回溯多久。缺键与启动补齐都是 **8**：报警窗口"前3+后2"共 5 秒，但缓冲区按**包数**算（`buffer_seconds` × 流报帧率），入包节拍被 pacer 限到 ≤30fps，`gop_seconds=1` 的关键帧对齐最坏再吃掉前向 1 秒——5 秒是零余量卡边。**⚠ 当前 `config_example.json` 模板里写的是 5**，照模板装的新板会拿到 5（模板值优先于缺键默认）；代码注释认定 5 太紧，这个不一致本轮只记录不改值 |
 | `bitrate` | int | `2000000` | CBR 码率 bps（20 万~1600 万） |
 | `gop_seconds` | int | `1` | 关键帧间隔（1~10 秒），越小报警片段起点对齐误差越小 |
 
 片段**没有目录配置项**：裸流与网页副本固定落在 `RuntimePaths::alarmsDir()/yyyyMMdd`，与抓拍图
 同一棵树，好处是报警媒体只有一套按天保留 + 容量回收逻辑（见 `src/biz/alarm/README.md`）。
+
+### alarm_uplink 段（本机报警上行）
+| 键 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | 总开关。**默认关的理由与 `recording` 相反**：这是往外发数据，且链路明文零鉴权，装完就自动推等于默认把数据送上网，必须人来打开。false 时 `AlarmUplink` 不订阅信号、不建线程、零分配 |
+| `send_snapshot` | bool | `true` | 第一段 `alarm_info` 是否申报抓拍图 |
+| `send_clip` | bool | `true` | 第二段是否申报片段；`recording.enabled=false` 时自动降级为不发，并打一条 warning |
+| `media_transport` | string | `url` | `url`=本机内嵌 http 文件服务、JSON 只发地址（**默认**）；`ws_binary`=媒体字节走 WS 二进制分块帧。getter 只归一化成这两个值；`ws_binary` 档下 `mk_*` 一次都不调、不监听端口 |
+| `media_http_port` | int | `8090` | `url` 档的服务口，`qBound(1024, _, 65535)`。取 8090 而非 80：板端 uid 1000 + `net.ipv4.ip_unprivileged_port_start=1024`，80/443 bind 不上。**改口必须重启进程**（ZLM 运行时进程级一次） |
+| `media_base_url` | string | 空 | 地址前缀，空 = 自动（第一个非回环 IPv4 + 实际绑定端口）；多网卡猜错、对端经 NAT/域名访问时在这里写死 |
+| `chunk_size` | int | `262144` | 仅 `ws_binary` 档有效：单个二进制帧大小，对端 `maxFrameSize` 更小时调这里 |
+| `ack_timeout_ms` | int | `15000` | 仅 `expect_ack=true` 有意义：等 `uplink_ack` 的超时 |
+| `max_attempts` | int | `3` | 同一项最多重投几次，超过判失败并 warning |
+| `max_pending` | int | `16` | 待发队列上限，满了丢最旧（与 `ClipWriter`/`SnapWriter` 同口径） |
+| `expect_ack` | bool | `false` | 对端当前不回 `uplink_ack`；打开后发完帧要留在队首等确认才算完成 |
+
+**本段与 `recording` 段的迁移口径都是「只补缺失段、不覆盖已有段」**（`migrateAlarmUplinkDefaults()`
+`ConfigManager.cpp:580`）：所以现场那台已经跑过一次的 `config.json` 里，后加的
+`media_transport`/`media_http_port`/`media_base_url` 三个键**永远不会自动出现**，只能靠上面这些
+getter 的默认值兜住。要显式改必须手改 JSON 并重启——报警上行、录制、文件服务都没有设置页控件。
 
 ### smartRecognition 段（智能识别取流）
 | 键 | 类型 | 默认 | 说明 |
@@ -102,7 +122,7 @@ MJPEG**，只认 MJPEG 会把这颗物理摄像头整个漏掉）。只出 10-bi
 ### websocket 段（Pad↔Aibox 客户端）
 | 键 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `server_url` | string | 空 | `ws://`/`wss://` 地址；空 = 整条链路不启动。**有 setter**（`setWsServerUrl`），调试设置页的 WebSocket 分组可直接编辑 |
+| `server_url` | string | 空 | **只填 `ws://`** 地址（`wss://` 在本机不可用，Qt 的 OpenSSL 符号缺口未适配，详见 `src/biz/ws/README.md`）；空 = 整条链路不启动。**有 setter**（`setWsServerUrl`），调试设置页的 WebSocket 分组可直接编辑 |
 | `heartbeat_interval` | int（秒） | 30 | 应用层 `{"type":"ping"}` 周期；界面无控件，只能改 JSON |
 | `reconnect_interval` | int（秒） | 5 | 非主动断开后的重连延时；界面无控件，只能改 JSON |
 

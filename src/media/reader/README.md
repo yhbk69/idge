@@ -81,8 +81,11 @@ decodeLoop 打开流后：用 dec_ctx 的实际宽高 + 流的 avg_frame_rate(�
     → 任务带 due = 报警时刻 + kClipPostMs(2s)，到点才取窗口：
       "前 3 秒 + 后 2 秒"里的后 2 秒在报警那一刻还没发生
     → dumpAnnexB(上传用裸流) + dumpMp4(网页副本，同批包只加封装不重编)
-    → AlarmManager::attachVideoClip(ids, 裸流路径) 回填内存 + AlarmDAO::updateVideoPath
-  队列上限 8，积压时丢最旧（队首窗口的帧早被环覆盖，留着也是残缺）
+    → AlarmManager::attachVideoClip(ids, 裸流路径, mp4 路径) 回填内存 + AlarmDAO::updateVideoPath
+      mp4 没写成时第三参传**空串**（只 qWarning，不发 videoClipSkipped）：裸流已在盘上，本地留档这条不变。
+      撤承诺发生在上行那侧——url 档发的就是 mp4，`AlarmUplink::onVideoClipAttached` 拿到空路径
+      会替它发一条 `media_failed{reason:"mp4 副本没写成"}`，对端不会静默等一段没有的视频
+  队列上限 8，积压时丢最旧（队首窗口的帧早被环覆盖，留着也是残缺）→ 同样发 reportVideoClipSkipped
 ```
 
 `shared_ptr` 的所有权约定：片段是"报警后 2 秒"才做的延迟任务，ClipJob 自带一份

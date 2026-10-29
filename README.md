@@ -79,9 +79,10 @@ $IDGE_WORKSPACE/
 | （无 `video.render`） | 推理间隔是编译期的 `frame_count % 3`（`ffmpeg_video_decoder.cpp` 的 4.6 节），**没有配置键**，别在 JSON 里加 `render.sampleInterval`——它只会变成一个改了不生效的假开关 |
 | `geofence` | 围栏**不属于级联**：复用该通道已有的检测结果、只做几何判定，不额外占用 NPU。`enabled` 总开关、`mode`（`inside_alarm`/`outside_alarm`）、`alarmClass` **单值触发类别**（默认 `person`，必须是该通道某个模型 `labels.txt` 里的叫法）、`throttleSeconds` 报警**节流下限**（默认 10 秒，每通道每类别窗口内只留一条）、`channels` 每路的矩形/多边形顶点（overlay 像素坐标，随存 `overlay_w`/`overlay_h`，改窗口布局会偏移）。报警语义是**进入沿**：人走进围栏报 1 条，站在里面不动不再报，离开 1.5 秒后再进来才算新事件（事件表在解码器 `fenceTracks_`，见 `src/biz/geofence/README.md`） |
 | `database` | `storeDetections`（报警相关检测明细是否入 `detections` 表）与 `detectionRetentionDays`（保留天数）；写成 `null` 等于吃默认值 true/30 |
-| `recording` | 报警视频硬件编码录制（默认 `enabled=false`，见下）；`buffer_seconds` 需 ≥ 片段窗口 3+2 秒 |
+| `recording` | 报警视频硬件编码录制（**默认 `enabled=true`**，报警必带关联片段是需求验收项）；`buffer_seconds` 需 ≥ 片段窗口 3+2 秒，缺键默认 8（`config_example.json` 模板当前写 5） |
 | `smartRecognition` | 智能识别四张卡片（二维码/OCR/点名/盘点）共用的取流地址；键缺省时自动探测摄像头节点（MJPEG 优先，其次 CSI/rkisp 的 NV12、YUYV），探测不到退回 `/dev/video0`。仅 getter，设置页不编辑 |
-| `websocket` | Pad↔Aibox 客户端：`server_url`（空=不启用，设置页可改）+ 心跳/重连间隔（仅 JSON） |
+| `websocket` | Pad↔Aibox 客户端：`server_url`（空=整条链路不启动，设置页可改）+ 心跳/重连间隔（仅 JSON）。**本机是客户端，这条连接本身不监听端口** |
+| `alarm_uplink` | 本机报警的**上行推送**（`enabled` **默认 `false`**——往外发数据必须人开）。两段式：报警当刻发 `alarm_info`（文字 + 媒体地址承诺），媒体写稳后再发 `media_begin`。`media_transport` 默认 `url`＝本机起内嵌 http 静态文件服务（**监听 `media_http_port`，默认 8090，明文零鉴权**）只在 JSON 里发地址；`ws_binary`＝字节走 WS 分块帧（已实测，代码保留、非默认）。只能改 JSON，设置页无控件；键表见 [src/base/config/README.md](src/base/config/README.md) |
 
 另有一整段 **`gb28181`** 不经 `ConfigManager`，由 `src/biz/sip/gb28181_config.cpp` 直接读文件
 （国标推流的平台参数与通道列表；无此段即不启用推流），但会被 `save()` 原样保留。明细见
@@ -89,9 +90,12 @@ $IDGE_WORKSPACE/
 [src/biz/ws/README.md](src/biz/ws/README.md)。
 
 报警记录写入 `data/idge.db`（Qt SQL 检测库），抓拍图片保存在 `data/alarms/YYYYMMDD/` 目录。
-打开 `recording.enabled` 后，同一目录还会多出报警前后共 5 秒、**带检测框**的视频片段：
+打开 `recording.enabled` 后（出厂即开），同一目录还会多出报警前后共 5 秒、**带检测框**的视频片段：
 `ch{N}_{类别}_{HHmmss_zzz}.h265`（Annex-B 裸流，用于上传/国标）与同名 `.mp4`（网页播放副本）。
 片段由后台线程在报警后 2 秒落盘，路径回填到 `alarms.video_path`，详情对话框的"视频"行可见。
+⚠ 开启 `alarm_uplink` 的 `url` 档（默认档）后，**`data/alarms/` 这棵树会被内嵌 http 服务整体对外可读**
+（监听 `media_http_port`，无鉴权，只关目录索引）——该目录即暴露面，按天保留与 4GB 容量回收会删掉旧地址，
+所以发给对端的地址是 best-effort。部署前确认网络隔离范围（见 `src/media/server/README.md`）。
 
 ## 4. 其他常用脚本
 
@@ -190,6 +194,19 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
 | ffmpeg-rkmpp | `3rdparty/ffmpeg-rkmpp/lib/` | 带 rkmpp 支持的 FFmpeg 6.1（板子原生编译） |
 | Qt5 | `/usr/local/Qt-5.15.18/lib/` | Qt5 运行库（板子安装） |
 | librga | `/usr/lib/` | RGA 硬件加速库（系统自带） |
+| libmk_api | `3rdparty/zlmediakit/aarch64/` | 报警上行 url 档的内嵌 http 服务（进程级单例，`src/media/server/` 唯一封装点） |
+| OpenSSL 1.1 | `3rdparty/openssl1.1.0/lib/` | `libmk_api.so` 的 NEEDED（`libssl.so.1.1`/`libcrypto.so.1.1`）；与系统 OpenSSL 3 并存，**仅供 ZLM 链接**，Qt 的 TLS 仍走系统 3（故 `wss://` 不可用，见 §八 第 11 条）。本工程链了 `--disable-new-dtags` → DT_RPATH 可传递，`run.sh` 不需要为此加 `LD_LIBRARY_PATH` |
+
+### 网络端口口径（部署/防火墙要看的就这三条）
+
+| 方向 | 端口 | 何时存在 | 说明 |
+|------|------|----------|------|
+| 出站 | 对端的 `websocket.server_url` | 配了地址才连（空=整条链路不启动） | 本机是 **WS 客户端**，不监听这条；**只填 `ws://`**，`wss://` 本机连不上 |
+| **入站 TCP** | `alarm_uplink.media_http_port`，默认 **8090** | 仅 `alarm_uplink.enabled=true` 且 `media_transport="url"`（后者是默认档） | 内嵌 http 静态文件服务，根 = `data/alarms` 绝对路径，**只读、明文、零鉴权**（只关了目录索引）。报警媒体地址的交付面；想限来源网段可配库内的 `http.allow_ip_range`（默认未设＝不限）。详见 `src/media/server/README.md` |
+| 出入站 UDP | `gb28181.platform.localSipPort`（默认 5060）本机 `bind` | 仅 `gb28181` 段能凑出 platform + streams | SIP 注册/心跳/MANSCDP 收发（本机也收平台报文，但它是 UDP、不是 TCP 监听口）；RTP 推流另按 SDP 协商走 TCP/UDP。**当前 `platform.transport` 不影响发包，固定 UDP** |
+
+`ss -ltnp | grep 8090` 为空 + `/proc/<pid>/task` 里没有 ZLM 线程，是"出厂态没开文件服务"的两个证据
+（别看日志行数）。
 
 ---
 
@@ -198,7 +215,7 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
 - **全链路零拷贝**：从 FFmpeg 解码到 EGL 渲染，全程通过 DMA-BUF fd 传递，无 CPU 内存拷贝
 - **3 NPU 核心并行推理**：充分利用 RK3588 的 3 个 NPU 核心，实现高吞吐量检测
 - **RGA 硬件加速预处理**：色彩转换和图像缩放由 RGA 引擎完成，释放 CPU
-- **报警视频硬件编码**：带检测框的 RGBA → RGA → `hevc_rkmpp` 零拷贝硬编 + 环形缓冲，报警时切出"前 3 秒 + 后 2 秒"裸流片段（CPU 软编 x264 已彻底移出链路）
+- **报警视频硬件编码**：带检测框的 RGBA → RGA → `hevc_rkmpp` 零拷贝硬编 + 环形缓冲，报警时切出"前 3 秒 + 后 2 秒"裸流片段 + 同名 `.mp4` 网页副本（CPU 软编 x264 已彻底移出链路）
 - **电子围栏**：多边形/矩形围栏绘制，inside/outside 两种侵入判定模式；围栏**独立于级联**——
   复用该通道已有模型的检测结果做几何判定，触发类别是 `geofence.alarmClass` 单值（默认 `person`）；
   报警按**进入沿**触发（进去报一条、站着不动不报、离开再回来算新的一条），
@@ -209,6 +226,12 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
 - **智能识别**：二维码实时扫描（ZBar，三帧稳定判定）+ 设备铭牌文字识别（PP-OCRv4 det/rec 两阶段，外部 demo 经 QProcess 调用）
 - **GB/T 28181 国标推流**：SIP 注册/心跳/目录 + MPEG-PS 复用 + RTP/PT96 直通 H.264 码流，按需启用（无配置段即静默跳过）
 - **Pad↔Aibox 对接**：WebSocket 客户端接收远端报警推送并回 ACK，应用层心跳 + 断线自动重连（未配置地址即整条链路缺席）
+- **报警上行（两段式）**：`alarm_uplink.enabled` 打开后订阅本机 `AlarmManager`，报警当刻先推 `alarm_info`（文字 + 截图/片段地址承诺），
+  文件写稳再推 `media_begin`——**默认走 `url` 档**：进程内挂一个 ZLMediaKit http 静态文件服务（根锁 `data/alarms`、只读、无鉴权），
+  JSON 里只发地址、字节一律不进 JSON；`ws_binary` 档（同一份字节走 WS 二进制分块帧）已板端实测、代码保留可切回。
+  可靠性 = 待确认内存队列 + 写缓冲水位闸门 + 未发出去帧断线续传（**无落库 outbox、进程重启不补历史**）；
+  对端确认 `uplink_ack` 与指数退避重投已实现但默认关闭（`expect_ack=false`，对端当前不回这个类型）；
+  媒体拿不到时发 `media_failed` 撤承诺，绝不让对端攥着一条永不兑现的 `planned`
 - **Qt5 GUI**：blacksoft 换肤框架，无边框窗体，多页面导航
 - **多路视频支持**：支持 4 路视频同时监控
 - **模型灵活配置**：支持 YOLO11 nano/small/medium 不同大小模型与级联多模型
@@ -304,9 +327,18 @@ Annex-B H.265（或 h264_rkmpp → H.264）AVPacket —— **同一份包两路�
       源本身是 H.264 → h264_mp4toannexb 直通；否则 rkmpp 硬解(退软解) + h264_rkmpp 重编(退 libx264)
     → PsMuxer(PS 打包，等齐 SPS+PPS+IDR 才出帧) → RtpSender(PT96) → 平台
 
-Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.server_url
+Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.server_url
     → 收 type=alarm → frmMain::onWsAlarmReceived → 调试页日志 + sendAck（不入 idge.db）
     → 应用层 ping 心跳 + 断开后定时重连
+
+报警上行（出站，alarm_uplink.enabled 才挂）：
+    frmMain 装配 → url 档先起 media::HttpFileService(root=data/alarms 绝对路径, media_http_port)
+      → AlarmUplink::setMediaBaseUrl() → attach() 订阅 AlarmManager::alarmGenerated
+    → 报警当刻：AlarmUplinkEngine 组装 alarm_info（截图/片段以 planned 地址形式申报）入队 → WsClient 发文本帧
+    → 媒体写稳：MediaPump 后台线程等 size 稳定 → 读全量算 sha256 → 回 GUI 线程
+      → url 档发 media_begin{transfer:"http", url, total_bytes, sha256}（一个字节都不进 WS）
+      → ws_binary 档发 media_begin + binary 分块 × N + media_end
+    → 落空则发 media_failed 撤承诺；队列按水位闸门逐帧外推，发送失败保持顺序原地重试
 ```
 
 ---
@@ -320,9 +352,9 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
 | 域 | 模块 |
 |------|------|
 | `src/base/` 基础设施 | buffer、queue、config、imaging、runtime_paths.h、perf_probe.h |
-| `src/media/` 视频管线 | reader、rga |
+| `src/media/` 视频管线 | reader、rga、server(报警上行的内嵌 http 静态文件服务) |
 | `src/ai/` 推理与模型应用 | yolo11、model_repo、recognition、task |
-| `src/biz/` 业务域 | alarm、geofence、service、db(报警库+业务库)、sip(GB28181)、ws(Pad↔Aibox) |
+| `src/biz/` 业务域 | alarm、geofence、service、db(报警库+业务库)、sip(GB28181)、ws(Pad↔Aibox 客户端 + 报警上行引擎) |
 | `src/ui/` 界面层 | form、widgets(原 src/ui)、core(主题/Qt 助手 + qss 皮肤与资源) |
 
 ### 模块速查
@@ -336,6 +368,7 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
 | `src/ui/core/` | 主题/Qt 助手/图标字体/启动钩子 + blacksoft 皮肤与字体、图片、翻译资源 | [README](src/ui/core/README.md) |
 | `src/media/reader/` | FFmpeg 解码线程、硬编环形录像(VideoRecorder/ClipWriter)、摄像头预览解码、SCRFD 人脸检测 | [README](src/media/reader/README.md) |
 | `src/media/rga/` | RGA 硬件加速封装 | [README](src/media/rga/README.md) |
+| `src/media/server/` | 报警上行的内嵌 http 静态文件服务（ZLMediaKit `mk_*` 的唯一封装点，进程级单例、不可重入） | [README](src/media/server/README.md) |
 | `src/ai/yolo11/` | YOLO11 RKNN 推理核心、前后处理 | [README](src/ai/yolo11/README.md) |
 | `src/ai/model_repo/` | 模型库注册表（library 扫描/元数据/级联槽位解析） | [README](src/ai/model_repo/README.md) |
 | `src/ai/task/` | 检测任务体系（PPE 任务 + 任务基类/配置/结果数据结构） | [README](src/ai/task/README.md) |
@@ -345,7 +378,7 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
 | `src/biz/geofence/` | 电子围栏（形状、判定、绘制 overlay） | [README](src/biz/geofence/README.md) |
 | `src/biz/db/` | 数据持久层：报警库 idge.db（QtSQL DAO）+ 业务库 roll_call.db（sqlite3 原生） | [README](src/biz/db/README.md) |
 | `src/biz/sip/` | GB/T 28181 设备侧：SIP 注册心跳、MANSCDP、PS 复用、RTP 推流 | [README](src/biz/sip/README.md) |
-| `src/biz/ws/` | Pad↔Aibox WebSocket 客户端：报警推送、心跳重连（预留 get_streams/set_fence） | [README](src/biz/ws/README.md) |
+| `src/biz/ws/` | Pad↔Aibox WebSocket 客户端（入站报警 + 心跳重连，预留 get_streams/set_fence）**与本机报警上行**：报文组装、内存队列、水位闸门、ack/退避、媒体读盘泵（`alarm_uplink*`/`media_pump`） | [README](src/biz/ws/README.md) |
 | `src/base/config/` | ConfigManager 单例 + data/config.json 解析 | [README](src/base/config/README.md) |
 | `src/base/buffer/` | DMA-BUF 分配与帧缓冲池 | [README](src/base/buffer/README.md) |
 | `src/base/queue/` | 阻塞队列 / 优先级队列 / 最新帧槽 | [README](src/base/queue/README.md) |
@@ -389,7 +422,7 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
 
 # 七、第三方库版本
 
-明细见 [3rdparty/README.md](3rdparty/README.md)。摘要：FFmpeg(rkmpp) 6.1.1、MPP 1.3.10、RKNN Runtime、librga 1.10.0、OpenCV、Qt5 5.15.18、jsoncpp 1.9.7、libjpeg-turbo、libyuv、libsndfile、OpenSSL、ZeroMQ、FFTW、stb、OpenCL stub、DRM 分配头文件、sqlite3、ZBar（二维码，头文件与 `zbar.pc` 入库、`libzbar.so` 不入库）、PP-OCRv4 RKNN demo（第三方，见 `3rdparty/ppocrv4/`）。
+明细见 [3rdparty/README.md](3rdparty/README.md)。摘要：FFmpeg(rkmpp) 6.1.1、MPP 1.3.10、RKNN Runtime、librga 1.10.0、OpenCV、Qt5 5.15.18、jsoncpp 1.9.7、libjpeg-turbo、libyuv、libsndfile、OpenSSL（**系统 3.x 给 Qt / 入库 1.1.0 给 ZLMediaKit，两份并存**）、ZeroMQ、FFTW、stb、OpenCL stub、DRM 分配头文件、sqlite3、ZBar（二维码，头文件与 `zbar.pc` 入库、`libzbar.so` 不入库）、PP-OCRv4 RKNN demo（第三方，见 `3rdparty/ppocrv4/`）、ZLMediaKit（入库的是预编译 `3rdparty/zlmediakit/aarch64/libmk_api.so` + 头文件，**当前只用于报警上行的内嵌 http 静态文件服务**，流媒体能力未编译未接入）。
 
 # 八、已知问题与技术债
 
@@ -437,8 +470,20 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
     `detect.conf_threshold`/`nms_threshold` 是假开关，改到重启都不生效（见 `src/base/config/README.md`）。
     热更新的离线自测：`./build/build_rk3588_linux/test_channel_reload`（必须在 build 目录下跑，
     它驱动真解码器 + 真推理任务做 4 轮"停→释放→重建"，并检查线程数与 RSS 不涨）。
-11. **`wss://` 放弃证书校验**：`WsClient::onSslErrors` 无条件 `ignoreSslErrors()`，只适合内网调试；
-    WS 发送也不排队，断线期间的 `ack` 直接丢弃（详见 `plan/websocket.md`）
+11. **WS 走明文 `ws://`，`wss://` 本机不可用**：`/opt/qt5.12.8` 的 QtNetwork 按 OpenSSL 3 编译但符号表仍找
+    OpenSSL 1.1 的老名字（`SSL_get_peer_certificate`/`EVP_PKEY_base_id` dlsym 失败），TLS 握手路径等于空指针；
+    当前决定不做适配，传输加密靠网络隔离兜（`WsClient::onSslErrors` 因此是死代码）。
+    `WsClient::sendJson()` 本身**不排队**：未连接时直接丢弃并记 warning，所以入站报警的回执 `ack`
+    在断线期间是真的丢了。**报警上行不受这条影响**——`AlarmUplinkEngine` 有自己的待确认队列，
+    没发出去的帧留在队首、连上后按原顺序续发（详见 `plan/websocket.md`、`src/biz/ws/README.md`）
+13. **开启报警上行的 `url` 档，本机就多监听一个明文端口**：默认 `media_http_port=8090`，
+    根目录锁在 `data/alarms`、**只读且零鉴权**（只关了目录索引，知道文件名就能取）。
+    这是"报警媒体交付方式"换来的代价，出厂 `alarm_uplink.enabled=false` 就是为了不默认开它；
+    启用前必须确认网络隔离范围。三条硬约束：①`data/alarms` 里的文件名等于可下载的地址，
+    该目录不得放任何非报警文件；②地址有效期无保证——按天保留 + 4GB 容量回收会删掉**当天**目录，
+    对端必须"收到即取回"，404 是正常终态；③端口/开关变更**必须重启进程**，
+    ZLM 的 `mk_env_init` 是进程级一次、`stop` 后不能再 `start`，所以设置页没有"改了重开服务"这条路
+    （`src/media/server/README.md`）
 12. **NPU 负载按"各通道模型数之和"计**：4 路 × 每路 3 个模型 = 12 个推理任务打在 3 个核上，
     配置不做硬拦截；任务数超过 6 时启动日志打软告警，核掩码按进程级轮转分配（跨通道共享一份
     模型上下文服务多路，仍是未做的优化）

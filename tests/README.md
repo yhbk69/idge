@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-C++ 测试源码目录。含五个测试程序：
+C++ 测试源码目录。含六个测试程序与一个人工联调工具：
 
 - `test_database.cpp`：针对 `src/biz/db/` 的检测记录 DAO / 报警记录 DAO /
   DatabaseManager 做初始化、插入、批量插入、条件查询、统计、状态更新与维护
@@ -31,6 +31,22 @@ C++ 测试源码目录。含五个测试程序：
   `alarmClsMtx_` 没被用成长临界区把解码循环锁死；选不存在的类别名是为了整轮不产报警、
   不碰报警库。这条测试已经抓到过一个真回归：`start()` 里没有把
   对象线程归属搬回 GUI 线程，第二次 `moveToThread` 被 Qt 拒绝，重开的那路一帧都不出。
+- `test_alarm_uplink.cpp`：报警上行（`src/biz/ws/alarm_uplink_engine`）的**离线契约自检**，
+  用 `FakeTransport` 顶掉 `WsClient`，所以不链 WebSockets、不建线程、不要 GUI，纯 `Qt5::Core`。
+  十八组断言覆盖四类事：①`alarm_info` 报文形状（两种 `media_transport` 各一套字段）；
+  ②`ws_binary` 档的 `media_begin`/分块/`media_end` 帧序与游标；③`url` 档只发地址——
+  `transfer:"http"` + `url`、**不产出 `media_end`**、`mediaUrlFor()` 的路径逃逸（根外 / 含 `..`
+  必须返回空串）与尾斜杠拼接，以及"相对 `imagePath` 必须先按 cwd 绝对化再换算"（这条抓到过板端
+  真 404：`QDir(root).relativeFilePath(相对路径)` 是按 root 解析的，不绝对化就得到双重前缀）；
+  ④队列语义——水位闸门、上限丢最旧、`uplink_ack` 只对账队首、退避梯子 `min(2^n×2s, 30s)`、
+  断线时帧不越序、`media_failed` 的各成因。
+  **其中 `ws_binary` 那 11 组是"代码保留但默认关"的回归保护，改协议时不许顺手删。**
+- `ws_sink.cpp`：**不是自检，是人工对拍的接收端**（`QWebSocketServer`）。板子出网受限，联调只能走
+  loopback：`./ws_sink 8765 /tmp/sink_out` 起一个假对端，把 `websocket.server_url` 指到
+  `ws://127.0.0.1:8765`。`ws_binary` 档它按 `media_id` 把二进制分块拼回文件并与报文里的 sha256 对拍；
+  `url` 档只打印 `media_begin` 给出的地址/字节数/哈希、一个字节都不落盘——那种模式下"上传成功"的
+  判据是拿这条 URL `curl` 下来的字节与盘上文件 `sha256sum` 一致。两种档都会把 `alarm_info`、
+  `media_failed`、`ack` 原样打成一行行日志供人读。
 
 ## 文件/子目录清单
 
@@ -41,15 +57,18 @@ C++ 测试源码目录。含五个测试程序：
 | `test_rollcall.cpp` | 人员点名全链离线自测（exe 对照回归 + 注册/去重/注销匹配/落库回读），逐项 `[ok]/[FAIL]` |
 | `test_latest_frame_slot.cpp` | LatestFrameSlot 单槽广播契约自检（跳帧/生命周期/close 唤醒/reset），末行打印一行 PASS 说明 |
 | `test_channel_reload.cpp` | 通道热更新板端离线自测（停→releaseTasks→重建 ×4 轮，槽位集合/线程数/RSS 三项断言），须在 build 目录下跑 |
+| `test_alarm_uplink.cpp` | 报警上行离线自检（18 组：两种 transport 报文形状 / 帧序 / 地址换算与路径逃逸 / 队列·ack·退避），纯 Qt Core，任意机器可跑 |
+| `ws_sink.cpp` | 人工联调用的假对端（`QWebSocketServer`）：收 text+binary、按 media_id 拼文件对拍 sha256，url 档只打印地址 |
 
 ## 使用方法
 
-五个测试都已接入根 `CMakeLists.txt`（各自一个 `add_executable`，随主程序一并构建）：
+六个测试与 `ws_sink` 都已接入根 `CMakeLists.txt`（各自一个 `add_executable`，随主程序一并构建）：
 
 ```bash
 ./build-linux.sh -t rk3588 -b Release
 ./build/build_rk3588_linux/test_database    # 退出码：失败数>0 时为 1，否则 0
 ./build/build_rk3588_linux/test_latest_frame_slot   # 同上；纯 CPU，不依赖板子外设
+./build/build_rk3588_linux/test_alarm_uplink        # 同上；纯 Qt Core，不依赖外设与 cwd
 
 # 盘点/点名自测必须在仓库根运行（依赖 assets/test/ + model/library/yolo11n-coco +
 # model/face/ 两件套权重；点名对照还需 model/face/face_recognition）；
@@ -59,6 +78,19 @@ cd "$(git rev-parse --show-toplevel)"
 ./build/build_rk3588_linux/test_rollcall    # 同上
 ./build/build_rk3588_linux/test_channel_reload  # 同上；需 NPU/RGA，工作目录必须是构建目录（./model 软链）
 ```
+
+`ws_sink` 不参与断言、要人工看输出，所以单独一段。板端端到端联调的最小姿势（两端都在这块板子上，走 loopback）：
+
+```bash
+./build/build_rk3588_linux/ws_sink 8765 /tmp/sink_out &   # 假对端：先起来
+# data/config.json: websocket.server_url = ws://127.0.0.1:8765
+#                   alarm_uplink.enabled = true, media_transport = "url"
+./run.sh                                                 # 触发一次报警，看 sink 的日志行
+curl -o /tmp/x.jpg '<sink 打出的 snapshot/media_begin url>' && sha256sum /tmp/x.jpg
+```
+
+`url` 档的"上传成功"判据就是最后这条 curl：取回的字节 sha256 必须与 `media_begin` 里申报的
+`sha256` 与 `data/alarms/` 下同名文件三者一致。`ws_binary` 档则由 sink 自己拼文件并比哈希。
 
 主程序用 `./run.sh` 启动（它会 `cd` 进构建目录，所以"启动目录=工作区根"；构建目录下
 的 `model`、`3rdparty` 两个软链由 CMake 在 configure 时创建，测试也按同样方式跑）。
@@ -80,6 +112,10 @@ cd "$(git rev-parse --show-toplevel)"
 - `test_rollcall` 另链：点名服务 + 两套识别器（`face_recognizer` 对照用 exe 链路与
   结构体、`in_process_face_recognizer` 被测），其余同 `test_equipment`
 - `test_latest_frame_slot` 只链 `Threads::Threads`，include 路径仅 `src/base/queue`
+- `test_alarm_uplink` 只链 `Qt5::Core`，源 = `alarm_uplink_engine.cpp` + `media_payload.cpp` 两个文件
+  （**故意不链** `ws_client`/`alarm_manager`/DAO/`media_pump`：前者是 QObject + 真 socket，
+  后者的成品回调要投回 GUI 线程，都留给板端端到端验，不进离线自检）
+- `ws_sink` 链 `Qt5::Core` + `Qt5::WebSockets`，`QCoreApplication` 无 GUI 依赖
 - `test_channel_reload` 链的是主流水线的依赖闭包：`ffmpeg_video_decoder` + `video_recorder` +
   `ppe_task`/`base_task` + `model_registry` + `ConfigManager`/`parse_config` +
   DMA 缓冲 + `alarm_manager`/`alarm_dao`/`detection_dao`/`database_manager` + 围栏两件 +
@@ -91,7 +127,9 @@ cd "$(git rev-parse --show-toplevel)"
 
 - **新增测试源必须同时在 `.gitignore` 加 `!tests/xxx.cpp`**：根 `.gitignore` 里有
   `test_*.cpp` 这条"临时验证文件"规则，会把正式测试源一并挡掉，而根 CMakeLists 已经
-  引用它 —— 结果是本地能编、别人克隆后 `No such file` 编不过。五个测试目前都已放行。
+  引用它 —— 结果是本地能编、别人克隆后 `No such file` 编不过。六个测试都已放行。
+  **`ws_sink.cpp` 不在 `test_*.cpp` 的射程里（文件名不以 `test_` 开头），不需要豁免**——
+  当初 `test_alarm_uplink.cpp` 就是这么被静默挡住过一轮，`git status` 里根本没有它。
 - 断言基于 `src/biz/db/` 接口行为（如"批量插入10条"后 `queryByTimeRange` 期望 ≥11 条），
   改动 DAO 语义时需同步核对用例假设。
 - 测试进程为单线程顺序执行，`testsPassed/testsFailed` 为全局计数，多线程化时需加锁。

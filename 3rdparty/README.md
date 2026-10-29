@@ -18,10 +18,10 @@ Rockchip（rknn_model_zoo 系）交叉编译第三方预编译依赖集合，供
 | `jsoncpp/` | **1.9.7**（`include/json/version.h`） | 配置文件 JSON 解析 | include + `jsoncpp` 链接（libjsoncpp.so.1.9.7） |
 | `nlohmann/` | **单头** `include/nlohmann/json.hpp`（原仓库根 `include/`，随根目录整理迁入） | 人脸识别 CLI 结果的 JSON 解析（header-only，不链接） | 根 CMake 把 `3rdparty/nlohmann/include` 加进 include 路径；唯一使用者 `src/ai/recognition/face_recognizer.cpp` |
 | `sqlite/` | **3.49.1** amalgamation（`sqlite/sqlite3.c/h`） | SQLite 源码包 | 本目录有独立 CMakeLists，但根工程未 `add_subdirectory`；主程序链接的是**系统 sqlite3** |
-| `zlmediakit/` | **git hash e628cba / 2023-08-14 / build 2023-08-16**（库内字符串实测）；C API 头 + `aarch64/libmk_api.so` + 独立 `MediaServer` 二进制（留作对照，不启动） | 流媒体分发（RTSP/HLS/fMP4、国标 RTP 发流） | include + `mk_api` 链接；**进程内嵌**使用，见 `3rdparty/zlmediakit/README.md`、`src/media/server/README.md` |
+| `zlmediakit/` | **git hash e628cba / 2023-08-14 / build 2023-08-16**（库内字符串实测）；C API 头 + `aarch64/libmk_api.so` + 独立 `MediaServer` 二进制（留作对照，不启动） | **报警上行的内嵌 http 静态文件服务**（把 `data/alarms` 下的抓拍图与 `.mp4` 片段按地址给对端下载）。曾经的 RTSP/HLS 分发链路已移除 | include + `mk_api` 链接；**进程内嵌**使用，见 `3rdparty/zlmediakit/README.md`、`src/media/server/README.md` |
 | `jpeg_turbo/` | libturbojpeg.a（Linux/{aarch64,armhf,...}） | JPEG 硬加速解码 | `LIBJPEG`+`LIBJPEG_INCLUDES` 经 3rdparty/CMakeLists 传递 |
 | `libyuv/` | libyuv.a | CPU 色彩转换备选 | link_directories 收录 |
-| `openssl1.1.0/` | **1.1.0l**（2019-09-10） | TLS 头文件路径（实际链接系统 crypto/ssl） | include 路径 |
+| `openssl1.1.0/` | **1.1.0l**（2019-09-10） | include 路径；**`lib/` 下的 `libssl.so.1.1`/`libcrypto.so.1.1` 是 `libmk_api.so` 的运行期依赖**（EOL 版本，随仓自带只为满足 ZLM 的 NEEDED，不作为全局 TLS 后端） | include 路径 + `CMAKE_BUILD_RPATH` 收录 `lib/` |
 | `openssl3.0.21/` | **3.0.21** | 新版 OpenSSL 备用套件，CMake 未引用 | 无 |
 | `zmq/` | **4.3.5**（zmq.h） | ZeroMQ 消息队列（备用） | 未链接进主程序 |
 | `kaldi_native_fbank/`、`fftw/`、`libsndfile/` | — | 语音特征链路（FBank/FFT/音频解码），3rdparty/CMakeLists 仅对 rv1106/rv1103 用自带静态库，其余用系统 so | rk3588 下不链接 |
@@ -45,7 +45,9 @@ Rockchip（rknn_model_zoo 系）交叉编译第三方预编译依赖集合，供
 
 ## 依赖关系
 
-- 上游消费方：`src/ai/yolo11`（rknn_api）、`src/media/rga`（im2d）、`src/media/reader`（avformat/avcodec rkmpp）、`src/base/buffer`（allocator/dma）、`src/base/config`（jsoncpp）、`src/ai/recognition`（nlohmann/json 单头）；
+- 上游消费方：`src/ai/yolo11`（rknn_api）、`src/media/rga`（im2d）、`src/media/reader`（avformat/avcodec rkmpp）、
+  `src/media/server`（zlmediakit `mk_api` + `openssl1.1.0/lib`，报警上行的静态文件服务）、
+  `src/base/buffer`（allocator/dma）、`src/base/config`（jsoncpp）、`src/ai/recognition`（nlohmann/json 单头）；
 - 本目录自身不依赖工程代码，纯被依赖方；
 - 运行期还依赖板端系统库：libdrm、libEGL/libGLESv2、libasound/Qt 多媒体后端。
 
@@ -55,10 +57,19 @@ Rockchip（rknn_model_zoo 系）交叉编译第三方预编译依赖集合，供
 - 根 CMake 的 `3rdparty/librga/lib` 与 `3rdparty/stb` 两个路径**不存在**（rga 实际链接名/`${LIBRGA}`、stb 经 `STB_INCLUDES` 指向 `stb_image`），属冗余死路径，遇到 -lrga 解析失败时优先检查系统库目录。
 - 预编译库均为 aarch64（部分含 armhf/Android 多套），**不可在本机 x86 直接链接**；换 SoC 需同步核对 `3rdparty/CMakeLists.txt` 的 SOC 分支。
 - `install(PROGRAMS ${LIBRKNNRT} ...)` 会把 librknnrt.so 拷入 install/lib；部署到板子时注意板上 NPU 驱动版本与 librknnrt 配套（不匹配报 RKNN_ERR_DRIVER_*）。
-- zlmediakit（`3rdparty/zlmediakit/`）**当前未接入主程序**：随仓仍保留预编译 `libmk_api.so`，但内嵌实时分发
-  链路已移除，根 `CMakeLists.txt` 不再链接 `mk_api`，也不再引用其 include / rpath。日后若恢复 RTSP/HLS 分发，
-  需重新接入并处理端口与进程级单例互斥（`mk_env_init` 与独立 `MediaServer` 抢同一组端口），
-  能力与限制见 `3rdparty/zlmediakit/README.md`。
+- zlmediakit（`3rdparty/zlmediakit/`）**已重新接入，但用途变了**：f775108 移除的是 RTSP/HLS 实时分发
+  链路（`src/media/server/zlm_service.*`），本轮（P0-1 报警上行 `url` 档）把同一套 `libmk_api.so`
+  用作**内嵌 http 静态文件服务**（`src/media/server/http_file_service.*`）。
+  根 `CMakeLists.txt` 重新链接 `mk_api` 并把 include / RPATH / link_directories 补回。
+  两条硬约束：`mk_env_init1` **进程级一次、`stop()` 后不能再生**（改端口必须重启进程）；
+  与独立 `MediaServer` 抢同一组端口。能力表与静态服务实测语义见 `3rdparty/zlmediakit/README.md`。
+- 本目录**开了一个监听端口**：`alarm_uplink.enabled=true` 且 `media_transport="url"`（默认档）时
+  本机监听 `media_http_port`（默认 8090，明文零鉴权）。出厂态（uplink 关）不 bind 任何口，
+  日志与线程数都能验证 `mk_env_init1` 一次都没调（见 `plan/websocket.md` §四 出厂态条目）。
+- `openssl1.1.0/lib` 里的 `libssl.so.1.1`/`libcrypto.so.1.1` **现在是运行期承重依赖**：
+  `libmk_api.so` 自身 NEEDED 它们，必须进 `CMAKE_BUILD_RPATH`。工程同时链接系统 OpenSSL 3
+  （Qt/QtNetwork 用），两套版本共存靠 RPATH 顺序——这也是 `wss://` 一直不可用的根因
+  （`plan/roadmap.md` §十 T-1），别把它当成"顺手就能统一到 3"的事情。
 - 第三方许可证各异（RKNN/RGA Apache-2.0、jsoncpp MIT、zmq MPL、zlmediakit MIT、libyuv BSD 等），对外发布前过一遍法务清单；`librga/README.md`、各 LICENSE 文件保留在原目录。
 - `zbar/` 只随仓带**头文件与 zbar.pc**，`lib/` 下的 `libzbar.{a,so*}` 被根 `.gitignore` 的 `*.a`/`*.so.*` 规则排除。
   新克隆上 `pkg_check_modules(ZBAR)` 会静默失败，`HAS_ZBAR` 不定义，二维码卡片自动降级为不可用（不影响其余功能）。
