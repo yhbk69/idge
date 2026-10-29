@@ -78,7 +78,7 @@ config.json（schema V2）里**不出现任何模型/标签路径**，只按**�
 ```json
 "video": {
   "models":   { "yolo11n-coco": { "alarm_class": "", "note": "COCO通用检测" } },
-  "channels": [ { "channel": 0, "source": "192.mp4", "models": ["yolo11n-ppe", "yolo11n-coco"] } ]
+  "channels": [ { "channel": 0, "source": "assets/test/192.mp4", "models": ["yolo11n-ppe", "yolo11n-coco"] } ]
 }
 ```
 
@@ -105,7 +105,7 @@ config.json（schema V2）里**不出现任何模型/标签路径**，只按**�
 
 ```bash
 # CLI 检测（类别表取"模型同目录 labels.txt"，取不到才退回 library/yolo11n-coco/labels.txt）
-./idge -m model/library/yolo11n-coco/model.rknn -i 192.mp4
+./idge -m model/library/yolo11n-coco/model.rknn -i assets/test/192.mp4
 
 # python 侧验证（见 python/README.md）
 python3 yolo11.py --model_path ../model/library/yolo11n-coco/model.rknn --target rk3588 --img_folder ../assets/test
@@ -122,7 +122,7 @@ python3 convert.py yolo11n.onnx rk3588 i8 ../model/library/yolo11n-coco/model.rk
 - 加载方：`src/ai/yolo11/`（YOLO11Model，经 `3rdparty/rknpu2` librknnrt 运行时推理）、
   `src/ai/model_repo/`（ModelRegistry 库扫描/导入/槽位解析）、`src/ai/recognition/`
   （点名的 `InProcessFaceRecognizer` 直接加载 `face/` 两件套权重，进程内推理）、
-  `src/base/threadpool/`（级联多模型方案）；
+  `src/ai/task/ppe_task`（级联多模型：一个模型一个推理线程）。
 - 标签文件行序必须与模型输出 `cls_id` 一致；预处理约定 640×640、/255 归一化，
   与 `config.json detect` 段（conf 0.25 / nms 0.45）配套。
 

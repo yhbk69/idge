@@ -155,8 +155,9 @@ manager.stop();      // 析构会自动调
 - **Qt**：仅用 `QString`/`QJsonDocument`/`QCryptographicHash`（MD5 摘要认证）/`QRegularExpression`，
   **不是 QObject**，不依赖信号槽与事件循环。
 - **POSIX**：`socket`/`select`/`sendto`/`inet_pton`，`std::thread`。
-- 与 `src/base/utils/xml_utils.h` **无关系**：本模块自带 SIP 头解析（按 `\r\n` 切行 +
-  `QRegularExpression`），`utf8_to_gb2312`/`extractSN`/`extractCmdType` 目前无人调用。
+- **不依赖任何 XML 工具**：本模块自带 SIP 头解析（按 `\r\n` 切行 + `QRegularExpression`）。
+  base 域曾有的一份 `xml_utils`（`utf8_to_gb2312`/`extractSN`/`extractCmdType`）从未被这里调用，
+  已随死代码清理删除——若要按 GB2312 发 MANSCDP，转码得在本模块内自己加。
 
 ## 注意事项
 
@@ -166,7 +167,7 @@ manager.stop();      // 析构会自动调
 - **XML 声明与实发编码不一致**：MANSCDP 报文头写 `encoding="GB2312"`，但 `Content-Length`
   按 UTF-8 字节数计算、正文也是 UTF-8。字段全 ASCII 时两者等价、平台能正常解；
   一旦 `deviceName`/`serialNumber` 含中文，平台按 GB2312 解会成乱码。
-  接真实平台前先确认这一点，需要时改用 `utf8_to_gb2312()` 转码后再算长度。
+  接真实平台前先确认这一点，需要时在本模块内做 UTF-8→GB2312 转码（iconv 或查表）后再算 `Content-Length`。
 - **SIP 只有一个 socket，多路流共用 localSipPort**：同一台机器上再起一个独立
   `MediaServer`/另一个 idge 实例会抢端口（`SO_REUSEADDR` 对同协议同端口不保证负载分配）。
 - **与本机其它取流方无互斥**：`type=camera` 会自己开一次 v4l2，和监控页的

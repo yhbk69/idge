@@ -48,8 +48,6 @@ extern "C" {
 #include "common.hpp"
 #include "base_task.h"
 #include "priority_queue.h"
-#include "frame_queue.h"
-#include "ModelPool.hpp"
 #include "ppe_task.hpp"
 #include "video_recorder.h"
 

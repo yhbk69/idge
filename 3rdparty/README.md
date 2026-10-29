@@ -16,6 +16,7 @@ Rockchip（rknn_model_zoo 系）交叉编译第三方预编译依赖集合，供
 | `ffmpeg/` | avcodec 60.x（普通构建） | 备用 FFmpeg，**当前 CMake 未引用** | 无 |
 | `opencv/` | **3.4.5** 静态库（`opencv-linux-aarch64/lib/libopencv_*.a`；另有 armhf/android 版） | 图像处理 | ⚠️ 实际未生效，见"注意事项"第 1 条 |
 | `jsoncpp/` | **1.9.7**（`include/json/version.h`） | 配置文件 JSON 解析 | include + `jsoncpp` 链接（libjsoncpp.so.1.9.7） |
+| `nlohmann/` | **单头** `include/nlohmann/json.hpp`（原仓库根 `include/`，随根目录整理迁入） | 人脸识别 CLI 结果的 JSON 解析（header-only，不链接） | 根 CMake 把 `3rdparty/nlohmann/include` 加进 include 路径；唯一使用者 `src/ai/recognition/face_recognizer.cpp` |
 | `sqlite/` | **3.49.1** amalgamation（`sqlite/sqlite3.c/h`） | SQLite 源码包 | 本目录有独立 CMakeLists，但根工程未 `add_subdirectory`；主程序链接的是**系统 sqlite3** |
 | `zlmediakit/` | **git hash e628cba / 2023-08-14 / build 2023-08-16**（库内字符串实测）；C API 头 + `aarch64/libmk_api.so` + 独立 `MediaServer` 二进制（留作对照，不启动） | 流媒体分发（RTSP/HLS/fMP4、国标 RTP 发流） | include + `mk_api` 链接；**进程内嵌**使用，见 `3rdparty/zlmediakit/README.md`、`src/media/server/README.md` |
 | `jpeg_turbo/` | libturbojpeg.a（Linux/{aarch64,armhf,...}） | JPEG 硬加速解码 | `LIBJPEG`+`LIBJPEG_INCLUDES` 经 3rdparty/CMakeLists 传递 |
@@ -44,7 +45,7 @@ Rockchip（rknn_model_zoo 系）交叉编译第三方预编译依赖集合，供
 
 ## 依赖关系
 
-- 上游消费方：`src/ai/yolo11`（rknn_api）、`src/media/rga`（im2d）、`src/media/reader`（avformat/avcodec rkmpp）、`src/base/buffer`（allocator/dma）、`src/base/config`（jsoncpp）；
+- 上游消费方：`src/ai/yolo11`（rknn_api）、`src/media/rga`（im2d）、`src/media/reader`（avformat/avcodec rkmpp）、`src/base/buffer`（allocator/dma）、`src/base/config`（jsoncpp）、`src/ai/recognition`（nlohmann/json 单头）；
 - 本目录自身不依赖工程代码，纯被依赖方；
 - 运行期还依赖板端系统库：libdrm、libEGL/libGLESv2、libasound/Qt 多媒体后端。
 

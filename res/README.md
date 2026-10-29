@@ -44,8 +44,8 @@ UI 中的引用写法（已核实示例）：`frmmain.ui` iconset 使用 `:/imag
 
 ## 依赖关系
 
-- 被 `src/ui/form/frmmain.ui`（图标）、`src/ui/core_helper/iconhelper.cpp`（`:/font/iconfont.ttf`、`:/font/fontawesome-webfont.ttf`）间接依赖；
-- 与 `sounds/resources.qrc`（快门音）、`src/ui/core_qss/qss.qrc`（皮肤）并列为工程的三个资源入口；
+- 被 `src/ui/form/frmmain.ui`（图标）、`src/ui/core/iconhelper.cpp`（`:/font/iconfont.ttf`、`:/font/fontawesome-webfont.ttf`）间接依赖；
+- 与 `sounds/resources.qrc`（快门音）、`src/ui/core/qss.qrc`（皮肤）并列为工程的三个资源入口；
 - `gl/*.vsh/.fsh` 为 OpenGL ES 3.0 语法（`#version 300 es`），当前运行时着色器为 ES 2.0 语法内联版，仅作 YUV 渲染方案留档。
 
 ## 注意事项
@@ -54,7 +54,7 @@ UI 中的引用写法（已核实示例）：`frmmain.ui` iconset 使用 `:/imag
   豁免（`!res/image/*.png`）。删掉这条豁免或漏提交任一图标，`rcc` 会以
   `RCC: Error in 'main.qrc': Cannot find file 'image/xxx.png'` **直接退出**，新克隆构建即失败
   （不是"图标显示不出来"这种软失败）。新增导航图标时同步确认这条规则仍然覆盖到它。
-- **字体别名重复注册**：`:/font/iconfont.ttf` 与 `:/font/fontawesome-webfont.ttf` 同时存在于 `res/main.qrc` 和 `src/ui/core_helper/qrc/font.qrc`，Qt 资源系统对重复 alias 只保留先注册者（rcc 阶段可能出 duplicate 提示）。更新字体时**两处必须同步替换**，否则可能加载到旧副本。
+- **字体别名重复注册**：`:/font/iconfont.ttf` 与 `:/font/fontawesome-webfont.ttf` 同时存在于 `res/main.qrc` 和 `src/ui/core/qrc/font.qrc`，Qt 资源系统对重复 alias 只保留先注册者（rcc 阶段可能出 duplicate 提示）。更新字体时**两处必须同步替换**，否则可能加载到旧副本。两份 ttf 已核实 sha256 一致，故当前行为不受影响；此项登记在 `src/ui/core/README.md`，本轮不合并。
 - 修改 `main.qrc` 后若 IDE 未感知，需重新 configure（GLOB 带 CONFIGURE_DEPENDS，通常自动重跑；qmake 场景无此保证）。
 - `res/gl/*.vsh/.fsh` 改动**不影响渲染**（运行时从不按路径加载它们）；调整渲染逻辑请直接改 `gl_video_widget.cpp` 内联 `VS_SRC/FS_SRC`，改完可顺手同步留档副本。
 - 资源全部内嵌二进制，大图会显著增大可执行文件与启动内存；新增资源前考虑是否适合放文件系统。

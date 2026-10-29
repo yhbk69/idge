@@ -5,11 +5,11 @@
 ```
 src/
 ├── main.cpp  head.h          # 入口：CLI/GUI 双模式、EGL 初始化、data/ 旧布局迁移
-├── base/     基础设施域       # buffer queue threadpool config utils runtime_paths.h
-├── media/    视频管线域       # reader(FFmpeg硬解/硬编环形录像) rga model(ModelPool)
+├── base/     基础设施域       # buffer queue config imaging runtime_paths.h perf_probe.h
+├── media/    视频管线域       # reader(FFmpeg硬解/硬编环形录像) rga
 ├── ai/       推理与模型应用域  # yolo11 model_repo recognition task
 ├── biz/      业务域           # alarm geofence service db(报警库+业务库) sip(GB28181) ws(Pad↔Aibox)
-└── ui/       界面域           # form widgets(原src/ui) core_helper core_qss
+└── ui/       界面域           # form widgets(原src/ui) core(主题/Qt助手 + qss与字体图片资源)
 ```
 
 ## 依赖方向（禁止反向）
@@ -18,12 +18,13 @@ src/
 base ← media ← ai ← biz ← ui
 ```
 
-- **base**：零业务依赖。队列/DMA 缓冲/线程池/配置解析/通用工具/运行时路径。
-- **media**：解码、色彩转换、帧模型池、硬件编码环形录像。产出帧与检测结果，不含业务判定。
+- **base**：零业务依赖。队列/DMA 缓冲/配置解析/图像读写与绘制（`imaging/`）/运行时路径与采样开关。
+- **media**：解码、色彩转换、硬件编码环形录像。产出帧与检测结果，不含业务判定。
 - **ai**：RKNN 推理、模型库注册、检测任务、人脸桥接（调 `tools/face_recognition` 产物）。
-- **biz**：报警/围栏/点名/盘点业务逻辑、两套持久层（QtSQL `data/idge.db` + sqlite3 `roll_call.db`）、
+- **biz**：报警/围栏/点名/盘点业务逻辑（含点名/盘点的任务目录组织 `service/task_manager`）、
+  两套持久层（QtSQL `data/idge.db` + sqlite3 `roll_call.db`）、
   GB28181 设备侧推流（`sip/`，纯 UDP/TCP socket + FFmpeg 复用/打包）、Pad↔Aibox WebSocket 客户端（`ws/`）。
-- **ui**：窗口、控件、渲染。仅被 main.cpp 装配。
+- **ui**：窗口、控件、渲染，以及主题/Qt 助手/皮肤与字体图片资源（`core/`）。仅被 main.cpp 装配。
 
 同域内模块互引允许；跨域只允许右侧引左侧。
 

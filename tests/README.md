@@ -74,16 +74,16 @@ cd "$(git rev-parse --show-toplevel)"
 - Qt5 Core / Qt5 Sql、`3rdparty/sqlite`、`3rdparty/jsoncpp`
 - `src/biz/db/`（database_manager、detection_dao、alarm_dao）
 - `test_equipment` 另链：盘点/点名服务全套（`src/biz/service`、`src/biz/db/business_db_manager`、
-  `src/base/utils`、`src/ai/recognition`、`src/ai/model_repo`、`src/base/config`）+
+  `src/base/imaging`、`src/ai/recognition`、`src/ai/model_repo`、`src/base/config`）+
   rknnrt / OpenCV / libturbojpeg / RGA（CMake 里用 `-Wl,--exclude-libs,ALL`
   阻止静态 turbojpeg 的 `jpeg_*` 符号劫持系统 OpenCV imgcodecs 的 libjpeg ABI）
 - `test_rollcall` 另链：点名服务 + 两套识别器（`face_recognizer` 对照用 exe 链路与
   结构体、`in_process_face_recognizer` 被测），其余同 `test_equipment`
 - `test_latest_frame_slot` 只链 `Threads::Threads`，include 路径仅 `src/base/queue`
 - `test_channel_reload` 链的是主流水线的依赖闭包：`ffmpeg_video_decoder` + `video_recorder` +
-  `ppe_task`/`base_task`/`helmet_task` + `model_registry` + `ConfigManager`/`parse_config` +
+  `ppe_task`/`base_task` + `model_registry` + `ConfigManager`/`parse_config` +
   DMA 缓冲 + `alarm_manager`/`alarm_dao`/`detection_dao`/`database_manager` + 围栏两件 +
-  `src/base/utils`，库侧与主目标同一套（FFmpeg-rkmpp / rknnrt / rga / sqlite3 / jsoncpp / OpenCV /
+  `src/base/imaging`，库侧与主目标同一套（FFmpeg-rkmpp / rknnrt / rga / sqlite3 / jsoncpp / OpenCV /
   GLES/EGL），并同样带 `ZERO_COPY` 与 `--allow-shlib-undefined`；库搜索目录要单独
   `target_link_directories` 一遍——主目标那份是 target 级的，不会传给别的 target
 

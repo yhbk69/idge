@@ -9,7 +9,7 @@
 | 文件 | 职责 |
 |---|---|
 | dma_alloc.h / dma_alloc.cpp | Linux DMA-BUF Heap 分配器（open /dev/dma_heap/* + ioctl + mmap）与 CPU↔设备缓存同步 |
-| DmaBufferPool.h | 线程安全 DMA 缓冲池（acquire/tryAcquire/release + shared_ptr 自动归还 + RAII Guard） |
+| DmaBufferPool.h | 线程安全 DMA 缓冲池（acquire/tryAcquire/release + 条件变量等待；原 `DmaBufferGuard` RAII 包装零调用、自身注释承认有 bug，已删除） |
 | DmaFrameBuffer.h / .cpp | 单个 DMA 帧缓冲的 RAII 封装，走 DRM DUMB Buffer（/dev/dri/card0 + PRIME fd）路径 |
 | FrameBuffer.h | 帧元信息结构体（与 DmaFrameBuffer.h 同名不同类的"数据载体版"） |
 
@@ -40,7 +40,7 @@ dma_buf_free(size, &fd, va);
 ```
 
 ## 依赖关系
-- 被引用：src/media/rga（格式/句柄约定）、src/base/queue/frame_queue.h（持池引用）、解码与渲染链路（DmaFrameBuffer/FrameBuffer 作为信号载荷）。
+- 被引用：src/media/rga（格式/句柄约定）、src/media/reader（从池取帧/回借，帧的宿主是 `PriorityQueue` 结果与 `TaskData`）、渲染链路（DmaFrameBuffer/FrameBuffer 作为信号载荷）。
 - 外部依赖：librga（im2d/RgaUtils）、Linux dma_heap 与 DRM 头、FFmpeg（仅头文件，关联 AVFrame）。
 
 ## 注意事项

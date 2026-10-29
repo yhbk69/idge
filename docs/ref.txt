@@ -1,3 +1,0 @@
-AlertGateway https://github.com
-ai-box
-videopipe

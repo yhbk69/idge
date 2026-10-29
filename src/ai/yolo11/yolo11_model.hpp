@@ -126,7 +126,7 @@ public:
         model_len = read_data_from_file(model_path, &model);
         if (model == NULL)
         {
-            printf("load_model fail!\n");
+            printf("read model file fail!\n");
             return -1;
         }
 

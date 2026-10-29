@@ -111,8 +111,6 @@
 #include "dma_alloc.h"        // dma_sync_device_to_cpu / dma_sync_cpu_to_device
 #include <libswscale/swscale.h>   // 软件帧（摄像头裸流/纯软解）→ RGBA 兜底转换
 #include "image_utils.h"
-#include "ThreadPool.hpp"
-#include "helmet_task.h"
 #include "alarm_manager.h"
 #include "fence_manager.h"
 #include "fence_checker.h"
@@ -1578,7 +1576,7 @@ void FFmpegVideoDecoder::decodeLoop()
                             image->srcWidth = dst_buf->width();   // 原始宽度（用于后处理映射坐标）
                             image->srcHeight = dst_buf->height(); // 原始高度
                             image->sp_dmaBuffer = rgabuffer;      // 保持引用，防止缓冲区被回收
-                            auto t = chrono::system_clock::now();
+                            auto t = std::chrono::system_clock::now();
                             // 时间戳取 time_since_epoch().count()：Linux/libstdc++ 下
                             // system_clock 的 tick 周期是 1ns，所以这里是"epoch 纳秒"。
                             // 该值随 TaskData 一路传到 PpeTask::run() 回填
@@ -1602,7 +1600,7 @@ void FFmpegVideoDecoder::decodeLoop()
                             //   - 时间戳（用于优先级排序）
                             //   - 图像数据（shared_ptr，多个任务共享）
                             //   - 结果队列（推理结果写回这里）
-                            auto now = chrono::system_clock::now();
+                            auto now = std::chrono::system_clock::now();
                             // TaskData 的排序时间戳（epoch 纳秒）：PpeTask::run()
                             // 用 taskData->time 回填 od_results.time，即结果队列里
                             // 的 time 来自这里（与上面 image->time 同源同单位，

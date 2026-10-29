@@ -13,7 +13,6 @@
 #include "easy_timer.h"         // 计时器工具，用于性能测量
 #include "common.hpp"           // 通用类型定义（DetectContext等）
 #include "yolo11_model.hpp"     // YOLO11目标检测模型，支持NPU加速推理
-#include "frame_queue.h"        // 帧队列，用于视频帧缓冲
 #include <thread>               // C++11线程支持
 #include <atomic>               // 原子操作（重复包含，保留原代码）
 #include "task_config.hpp"      // 任务配置结构体
@@ -27,10 +26,10 @@
 // 采用生产者-消费者模式，通过阻塞队列接收任务
 // 在独立线程中执行YOLO11模型推理，支持NPU加速
 //
-// 审查注记（与 HelmetTask/BaseTask 的关系 + 生命周期陷阱）：
+// 审查注记（与 BaseTask 的关系 + 生命周期陷阱）：
 //   - 本类**不继承** BaseTask（尽管 include 其头文件），是独立实现的
-//     完整任务：持有自己的 YOLO11Model 实例与专属推理线程，
-//     与 helmet_task（无状态静态方法、跑在 ThreadPool 上）是两种模式；
+//     完整任务：持有自己的 YOLO11Model 实例与专属推理线程，也是工程内
+//     唯一在跑的推理任务实现（一模型一 PpeTask 一推理线程）；
 //   - taskQueue_ 为裸指针（new/delete 手工管理），仅在 init() 创建：
 //     start() 之前调用 put()/requestStop() 之外的路径会解引用空指针；
 //   - stopBestEffort() 超时 detach 后，析构函数仍会 delete taskQueue_，

@@ -13,7 +13,7 @@
 //         "yolo11n-coco": {"alarm_class": "",          "note": "COCO通用检测"}
 //       },
 //       "channels": [                      // 下标即通道号（0-based），条目内 channel 字段仅供人看
-//         {"channel": 0, "source": "192.mp4", "note": "东门",
+//         {"channel": 0, "source": "assets/test/192.mp4", "note": "东门",
 //          "enabled": true, "models": ["yolo11n-ppe", "yolo11n-coco"]}
 //       ]
 //     },
@@ -142,7 +142,7 @@ ConfigManager &ConfigManager::instance()
 // 如果文件不存在，自动创建默认配置并保存。
 // 默认配置（schema V2）：
 //   - 模型参数表：ppe 报 un_helmet、coco 不报警（都按模型库目录名索引，配置里没有路径）
-//   - 4 路视频都指向 "192.mp4"，每路挂满参数表里的两个模型
+//   - 4 路视频都指向 "assets/test/192.mp4"，每路挂满参数表里的两个模型
 //   - 围栏：启用、inside_alarm、类别 person、节流 10 秒
 //   - 置信度阈值 0.25 / NMS 0.45
 //
@@ -160,7 +160,7 @@ static QJsonObject makeVideoDefaults()
     QJsonArray channels;
     for (int ch = 0; ch < 4; ++ch) {
         channels.append(QJsonObject{{"channel", ch},
-                                    {"source", "192.mp4"},
+                                    {"source", "assets/test/192.mp4"},
                                     {"note", ""},
                                     {"enabled", true},
                                     {"models", kModels}});

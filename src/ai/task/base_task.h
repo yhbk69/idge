@@ -10,7 +10,7 @@
 // 任务系统架构（现状，与文件尾 BaseTask 现状注记一致）：
 //   - BaseTask: 任务基类——目前仅为占位声明，init/run 无定义、
 //     析构非虚，尚未形成可用的抽象接口；
-//   - PpeTask / HelmetTask: 实际推理任务，均**未继承** BaseTask，
+//   - PpeTask: 实际推理任务，**未继承** BaseTask，
 //     只复用本文件定义的 DetectContext 等数据结构。
 //
 // 数据流：
@@ -58,14 +58,14 @@ struct DetectResult
 //   - frameId: 帧 ID（区分同一摄像头的不同帧）
 //   - detectResultQueue: 结果队列（检测结果写入这里）
 //   - dmaBufferPool: DMA 缓冲池（用于分配检测用的缓冲区）
-//   模型实例**不在**本上下文中：HelmetTask 经 thread_local dpool::context
-//   （ThreadPool.hpp）按 ID 取模型，属于"线程局部服务定位器"模式，
-//   要求任务必须运行在 ThreadPool 工作线程上，否则取不到模型。
+//   模型实例**不在**本上下文中：推理模型由各任务类自己持有（见 PpeTask
+//   的 model_ 成员），本结构只描述"一帧 + 一个池"的输入侧。
 //
 // 所有权约定：dmaBufferPool 为共享引用（不拥有缓冲区）；调用方把某个
-//   DmaBuffer **借**给 run() 后，由被调方负责 release 归还（见 helmet_task.cpp
-//   所有提前 return 路径均先 release 再返回）——这是本系统少数
-//   "手工借还"资源的地方，新增 return 分支时务必保持归还。
+//   DmaBuffer **借**给 run() 后，由被调方负责 release 归还（现网唯一在跑的
+//   实现是 PpeTask + ffmpeg_video_decoder 的借用链，池侧遵循"最后一个引用
+//   释放自动归还"）——这是本系统少数"手工借还"资源的地方，新增 return
+//   分支时务必保持归还。
 // ============================================================================
 struct DetectContext
 {
@@ -86,7 +86,7 @@ struct DetectContext
 //     构造/析构，init/run 无定义——一旦有代码调用即链接错误；
 //   - 无纯虚函数、无虚析构（~BaseTask 非 virtual，经基类指针 delete
 //     派生类是 UB，因此也不允许这样用）；
-//   - 实际的推理任务 PpeTask、检测任务 HelmetTask 都**没有继承**本类
+//   - 实际的推理任务 PpeTask **没有继承**本类
 //     （仅 include 其头文件复用 DetectContext 等数据结构）；
 //   - m_stream_id/m_type 未被任何代码读写。
 //   结论：本类当前价值 = "任务系统公共数据结构与架构文档的载体"。若要

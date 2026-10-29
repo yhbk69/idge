@@ -75,9 +75,9 @@
 - `src/ui/widgets`：PlayerWidget/GLVideoWidget/DashboardWidget/AlarmListWidget；
 - `src/media/reader`：FFmpegVideoDecoder（实时）、CameraPreviewDecoder（摄像头预览/拍照，取流地址同 `smartRecognition.camera`）；
 - `src/biz/geofence`（经 `src/fence_manager.h` 等）：FenceManager、FenceOverlay、DrawMode；
-- `src/base/utils`：qt_image_utils 的 `loadPixmapSafe`（板端 Qt JPEG 插件与 libjpeg ABI 冲突的安全解码，业务页所有图片加载必须走它）；
+- `src/base/imaging`：qt_image_utils 的 `loadPixmapSafe`（板端 Qt JPEG 插件与 libjpeg ABI 冲突的安全解码，业务页所有图片加载必须走它）；
 - `src/ui/form/smart_recognition_widget`：二维码链路依赖 `3rdparty/zbar`（编译期 `HAS_ZBAR`，见 `3rdparty/README.md`），OCR 链路用 `QProcess` 起 `3rdparty/ppocrv4/bin` 的两个 rknn_model_zoo demo（不链接，见 `3rdparty/ppocrv4/README.md`），权重在 `model/library/ppocrv4-ocr/`；取流地址读 `config.json` 的 `smartRecognition.camera`；
-- 根目录：`ConfigManager`（config.json）、`AlarmManager`、`SharedTypes.hpp`、`core_helper`（IconHelper/QtHelper）；
+- 根目录：`ConfigManager`（config.json）、`AlarmManager`、`SharedTypes.hpp`、`src/ui/core`（IconHelper/QtHelper/theme/AppInit）；
 - CMake 通过 `src/*/*.cpp` GLOB 收集本目录，新增 .cpp 无需改构建脚本。
 
 ## 注意事项

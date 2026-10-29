@@ -12,6 +12,7 @@
 | --- | --- |
 | `roll_call_service.h/.cpp` | 点名服务：人脸注册、点名（重复检测）、注销三大流程；调用进程内 `InProcessFaceRecognizer` 做 SCRFD 检测 + 512 维特征提取；贪心一对一余弦相似度匹配 |
 | `equipment_inventory_service.h/.cpp` | 设备盘点服务：多模型（如 coco + 明火）进程内 YOLO11Model 检测、检出转换与计数、检测框绘制回写、按 phase 登记/注销落库 |
+| `task_manager.h/.cpp` | 点名/盘点共用磁盘产物组织：带 `_N` 去重的任务目录、"时间戳+随机数"唯一文件名、抓拍落盘、列目录图片、删任务夹（原在 `src/base/utils`，因其职责就是业务产物规则而归位本域） |
 
 ## 核心类与流程
 
@@ -87,7 +88,8 @@ equipmentService_->saveResult(inv);
 - **Qt5 Core/Gui**：QImage（绘制回写，绕开板端 cv::imwrite JPEG 编码器崩溃问题）、QProcess（`loadImageWithFallback` 的 ImageMagick 转码兜底，参数数组直传不经 shell）；
 - **OpenCV**：图片读取、人脸裁剪与画框；
 - **std::vector 手写点积匹配**：当前余弦相似度匹配为逐对手工计算（贪心内按需算分），**未使用 Eigen 矩阵库**——注册库规模小（百人级），O(R·C·d) 足够，且避免引入矩阵构建与内存拷贝开销；
-- **src/base/utils**：`task_manager`（任务目录/唯一文件名）、`draw_utils`（绿实线/黄虚线框）、`qt_image_utils`（安全解码）。
+- **本目录 `task_manager`**（任务目录/唯一文件名，原 `src/base/utils`，随结构调整归位业务域）；
+  **src/base/imaging**：`draw_utils`（绿实线/黄虚线框）、`qt_image_utils`（安全解码）。
 
 ## 注意事项
 

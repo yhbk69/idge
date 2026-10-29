@@ -38,7 +38,6 @@
 #include <chrono>
 #include <functional>
 #include "ppe_task.hpp"
-#include "ThreadPool.hpp"
 #include "DmaBufferPool.h"
 #include "easy_timer.h"
 #include <QDebug>

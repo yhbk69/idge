@@ -13,21 +13,23 @@
 
 ## 使用方法
 
-编译接入（根 `CMakeLists.txt` 第 335~338 行，已验证）：
+编译接入（根 `CMakeLists.txt` 第 347~350 行，已验证）：
 
 ```cmake
+# 拍照快门音效资源（人员点名/设备盘点模块）
 qt5_add_resources(SOUND_RESOURCES
-    ${CMAKE_SOURCE_DIR}/sounds/resources.qrc)   # 随 idge 目标一起链接
+    ${CMAKE_SOURCE_DIR}/sounds/resources.qrc
+)
 ```
 
-运行时用法（`src/ui/form/photo_selection_widget.cpp:260-263`，已验证的真实接口）：
+运行时用法（`src/ui/form/photo_selection_widget.cpp:287-290`，已验证的真实接口）：
 
 ```cpp
 shutter_sound_ = new QSoundEffect(this);
 shutter_sound_->setSource(QUrl(QStringLiteral("qrc:/shutter.wav")));
 shutter_sound_->setVolume(1.0);
 // 拍照时刻（与白色闪光遮罩同步，遮罩 110ms 后自动隐藏）：
-shutter_sound_->play();          // photo_selection_widget.cpp:303
+shutter_sound_->play();          // photo_selection_widget.cpp:353
 ```
 
 替换/新增音效：把新 wav 放入本目录、在 `resources.qrc` 追加 `<file>xxx.wav</file>`，重新 `./build-linux.sh -t rk3588 -b Release`。
@@ -42,5 +44,5 @@ shutter_sound_->play();          // photo_selection_widget.cpp:303
 
 - 音效文件名即资源别名的一部分：`qrc:/shutter.wav` **不带目录前缀**（resources.qrc 未设 prefix 且文件在 qrc 同级），改名为子目录存放会破坏现有引用。
 - `QSoundEffect` 首次 `play()` 前源需加载完成（`status()==Ready`）；在低配板偶发首拍无声时，可在页面初始化后预调用一次 `play(); stop();` 预热。
-- 播放音量当前硬编码 1.0；如需可调音量/静音开关，应加到 `AppData`/config.json，而不是改组件代码。
+- 播放音量当前硬编码 1.0；如需可调音量/静音开关，应加到 `config.json`（经 `ConfigManager` 读写），而不是改组件代码。
 - 若后续为报警增加提示音：与快门音一样放本目录并登记到 `resources.qrc`，避免直接引用文件系统路径（部署目录可能被裁剪）。

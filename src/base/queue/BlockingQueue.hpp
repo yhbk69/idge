@@ -98,8 +98,7 @@ public:
     // ⚠ 注意：被丢弃的旧项是直接 pop() 掉的——若 T 携带需要归还的资源
     //   （如 DMA 缓冲指针），该资源不会被自动释放，调用方需自行回收；
     //   当前用于按值传递的轻量结构体（帧元数据/AVPacket 包装）时无此问题。
-    //   另：本实现丢弃的是最旧项（front），符合 FIFO"保最新"语义，
-    //   与 FrameQueue::pushAndReplace（错误地动 back）形成对照。
+    //   另：本实现丢弃的是最旧项（front），符合 FIFO"保最新"语义。
     // ============================================================================
     bool push_latest(T item, size_t* replaced = nullptr) {
         std::unique_lock<std::mutex> lock(mutex_);

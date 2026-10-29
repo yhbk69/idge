@@ -1,43 +1,10 @@
-// 文件职责：文件工具实现——RKNN 模型文件整体读入、图像文件读取及文本行读取，
+// 文件职责：文件内容读写原语——二进制整体读入/写出、文本行逐行读取，
 // 源自 rknn_model_zoo 示例工程，调用方需负责释放返回的堆内存。
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define MAX_TEXT_LINE_LENGTH 1024
-
-// ============================================================================
-// load_model - 加载RKNN模型文件
-// 将整个模型文件读入内存，用于RKNN推理引擎加载模型
-// ============================================================================
-unsigned char* load_model(const char* filename, int* model_size)
-{
-    // 打开模型文件（二进制只读模式）
-    FILE* fp = fopen(filename, "rb");
-    if (fp == NULL) {
-        printf("fopen %s fail!\n", filename);
-        return NULL;
-    }
-
-    // 获取文件大小：先定位到文件末尾，再获取偏移量
-    fseek(fp, 0, SEEK_END);
-    int model_len = ftell(fp);
-
-    // 分配内存并读取整个模型文件
-    unsigned char* model = (unsigned char*)malloc(model_len);
-    fseek(fp, 0, SEEK_SET);
-
-    if (model_len != fread(model, 1, model_len, fp)) {
-        printf("fread %s fail!\n", filename);
-        free(model);
-        fclose(fp);
-        return NULL;
-    }
-
-    *model_size = model_len;
-    fclose(fp);
-    return model;
-}
 
 // ============================================================================
 // read_data_from_file - 从文件读取任意二进制数据

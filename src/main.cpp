@@ -64,7 +64,6 @@
 #include "easy_timer.h"
 #include "priority_queue.h"
 #include "gl_video_widget.h"
-#include "ThreadPool.hpp"
 
 #include "parse_config.hpp"
 #include "yolo11_model.hpp"
@@ -72,8 +71,6 @@
 #include "database_manager.h"
 #include "media_runtime.h"
 #include "gb28181_manager.h"
-
-//std::shared_ptr<dpool::ThreadPool> detectPool;
 
 // ============================================================================
 // 信号处理 - 优雅关闭
@@ -264,12 +261,6 @@ int main(int argc, char *argv[])
         return runCli(argc, argv);
     }
 
-    //detectPool= std::make_shared<dpool::ThreadPool>(1);
-    
-    //Config::getInstance().load("../config.json");
-
-    //StreamLoaderManager &manager = StreamLoaderManager::getInstance();
-    
     // 设置 Qt 使用 EGL 渲染（硬件加速 OpenGL）
     // QT_XCB_GL_INTEGRATION=xcb_egl: 使用 EGL 后端，支持硬件加速
     qputenv("QT_XCB_GL_INTEGRATION", "xcb_egl");

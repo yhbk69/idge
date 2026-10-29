@@ -74,7 +74,7 @@ $IDGE_WORKSPACE/
 | 配置节 | 说明 |
 |--------|------|
 | `video.models` | 模型参数表，**以库目录名为键**：`{"yolo11n-ppe": {"alarm_class": "un_helmet", "note": "…"}}`。`alarm_class` 是**这个模型的参数**（不是槽位、不是通道），留空 = 只画框不报警；设置页"模型参数"表按行编辑 |
-| `video.channels` | 数组，**下标即通道号（0-based）**，条目里的 `channel` 字段只给人看。每路 = `source`/`note`/`enabled`/`models`。`models` 的顺序就是级联槽位顺序（画面上 `M1/M2/…` 前缀、报警 `result_id`），重排会改号；`enabled=false` 表示这一路不开流。两者在设置页改完都会**重开该路**（见 §八 第 11 条），只有手改 config 文件需要自己点「浏览」或勾一下「启用」 |
+| `video.channels` | 数组，**下标即通道号（0-based）**，条目里的 `channel` 字段只给人看。每路 = `source`/`note`/`enabled`/`models`。`models` 的顺序就是级联槽位顺序（画面上 `M1/M2/…` 前缀、报警 `result_id`），重排会改号；`enabled=false` 表示这一路不开流。两者在设置页改完都会**重开该路**（见 §八 第 10 条），只有手改 config 文件需要自己点「浏览」或勾一下「启用」 |
 | `detect` | 检测参数。⚠ 整节当前都不生效：`conf_threshold`/`nms_threshold` 是**假开关**（推理侧不传参，实际用 `common.hpp` 的编译期 `BOX_THRESH`/`NMS_THRESH`）；`class_num`/`threads` 已连 getter 一起删掉（类别数属于每个模型，推理线程数 = 各通道模型数之和，设置页显示的是真实值），老配置里残留的这两个键程序不再读取 |
 | （无 `video.render`） | 推理间隔是编译期的 `frame_count % 3`（`ffmpeg_video_decoder.cpp` 的 4.6 节），**没有配置键**，别在 JSON 里加 `render.sampleInterval`——它只会变成一个改了不生效的假开关 |
 | `geofence` | 围栏**不属于级联**：复用该通道已有的检测结果、只做几何判定，不额外占用 NPU。`enabled` 总开关、`mode`（`inside_alarm`/`outside_alarm`）、`alarmClass` **单值触发类别**（默认 `person`，必须是该通道某个模型 `labels.txt` 里的叫法）、`throttleSeconds` 报警**节流下限**（默认 10 秒，每通道每类别窗口内只留一条）、`channels` 每路的矩形/多边形顶点（overlay 像素坐标，随存 `overlay_w`/`overlay_h`，改窗口布局会偏移）。报警语义是**进入沿**：人走进围栏报 1 条，站在里面不动不再报，离开 1.5 秒后再进来才算新事件（事件表在解码器 `fenceTracks_`，见 `src/biz/geofence/README.md`） |
@@ -235,7 +235,7 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
 视频源可以是本地 `.mp4` 文件或 RTSP 摄像头流，通过 FFmpeg 的 `avformat` 打开，由 Rockchip MPP
 后端（VPU）硬解输出 DRM_PRIME(NV12) DMA-BUF。
 ⚠️ **硬解器名目前写死优先 `h264_rkmpp`**（不按流的 `codec_id` 选路），所以 **H.264 源是唯一已验证路径**；
-4 路摄像头请统一投 H.264 基线，H.265 源要等"按 codec_id 选硬解器"改造后才能用（第八节已知问题第 7 条，P6 首项）。
+4 路摄像头请统一投 H.264 基线，H.265 源要等"按 codec_id 选硬解器"改造后才能用（roadmap P6 首项）。
 
 ### 格式转换链路
 ```
@@ -272,7 +272,7 @@ Annex-B H.265（或 h264_rkmpp → H.264）AVPacket —— **同一份包两路�
 | 色彩转换 | NV12 DMA-BUF | RGBA DMA-BUF | RGA 硬件 | `src/media/rga/rga_converter.h` |
 | 推理预处理 | RGBA DMA-BUF | 640×640 RGB DMA-BUF | RGA 硬件 | `RgaConverter::rgba_to_rgb_resize()` |
 | NPU 推理 | 640×640 RGB | 检测结果 (80类) | NPU ×3 | `src/ai/yolo11/yolo11_model.hpp` |
-| 画框叠加 | RGBA DMA-BUF + 检测结果 | 带框的 RGBA DMA-BUF | CPU (mmap) | `src/base/utils/draw_utils.*` |
+| 画框叠加 | RGBA DMA-BUF + 检测结果 | 带框的 RGBA DMA-BUF | CPU (mmap) | `src/base/imaging/draw_utils.*` |
 | 渲染 | RGBA DMA-BUF fd | 屏幕像素 | GPU (Mali) | `src/ui/widgets/EglImageRenderer.h` |
 | 围栏/报警 | 检测结果 | 报警记录 + 抓拍图 | CPU | `src/biz/geofence/`、`src/biz/alarm/` |
 | 反向色彩转换 | RGBA DMA-BUF (带框) | NV12 DMA-BUF | RGA 硬件 | `RgaConverter::rgba_to_nv12()` |
@@ -319,11 +319,11 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
 
 | 域 | 模块 |
 |------|------|
-| `src/base/` 基础设施 | buffer、queue、threadpool、config、utils、runtime_paths.h |
-| `src/media/` 视频管线 | reader、rga、model(ModelPool) |
+| `src/base/` 基础设施 | buffer、queue、config、imaging、runtime_paths.h、perf_probe.h |
+| `src/media/` 视频管线 | reader、rga |
 | `src/ai/` 推理与模型应用 | yolo11、model_repo、recognition、task |
 | `src/biz/` 业务域 | alarm、geofence、service、db(报警库+业务库)、sip(GB28181)、ws(Pad↔Aibox) |
-| `src/ui/` 界面层 | form、widgets(原 src/ui)、core_helper、core_qss |
+| `src/ui/` 界面层 | form、widgets(原 src/ui)、core(主题/Qt 助手 + qss 皮肤与资源) |
 
 ### 模块速查
 
@@ -333,14 +333,12 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
 | `src/base/runtime_paths.h` | 运行时数据路径唯一事实源（data/ = **当前工作目录**相对，非源码根） | [README](src/base/README.md) |
 | `src/ui/form/` | 主窗口与全部页面/对话框（视频、看板、报警、点名、盘点、智能识别、设置） | [README](src/ui/form/README.md) |
 | `src/ui/widgets/` | EGL/OpenGL ES 零拷贝渲染、视频控件、看板、报警列表 | [README](src/ui/widgets/README.md) |
-| `src/ui/core_helper/` | 无边框窗体、图标字体、QSS 换肤组件 | [README](src/ui/core_helper/README.md) |
-| `src/ui/core_qss/` | blacksoft 皮肤资源 | [README](src/ui/core_qss/README.md) |
+| `src/ui/core/` | 主题/Qt 助手/图标字体/启动钩子 + blacksoft 皮肤与字体、图片、翻译资源 | [README](src/ui/core/README.md) |
 | `src/media/reader/` | FFmpeg 解码线程、硬编环形录像(VideoRecorder/ClipWriter)、摄像头预览解码、SCRFD 人脸检测 | [README](src/media/reader/README.md) |
 | `src/media/rga/` | RGA 硬件加速封装 | [README](src/media/rga/README.md) |
-| `src/media/model/` | 推理模型池（NPU 核心借还调度） | [README](src/media/model/README.md) |
 | `src/ai/yolo11/` | YOLO11 RKNN 推理核心、前后处理 | [README](src/ai/yolo11/README.md) |
 | `src/ai/model_repo/` | 模型库注册表（library 扫描/元数据/级联槽位解析） | [README](src/ai/model_repo/README.md) |
-| `src/ai/task/` | 检测任务体系（安全帽/PPE 任务与任务池） | [README](src/ai/task/README.md) |
+| `src/ai/task/` | 检测任务体系（PPE 任务 + 任务基类/配置/结果数据结构） | [README](src/ai/task/README.md) |
 | `src/ai/recognition/` | 人脸识别：进程内 `InProcessFaceRecognizer`（点名生产链）+ 外部 exe 桥接 `FaceRecognitionWrapper`（对照/CLI） | [README](src/ai/recognition/README.md) |
 | `src/biz/service/` | 人员点名 / 设备盘点业务服务 | [README](src/biz/service/README.md) |
 | `src/biz/alarm/` | 报警管理（限流、去重、抓拍、SQLite 持久化） | [README](src/biz/alarm/README.md) |
@@ -350,19 +348,17 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
 | `src/biz/ws/` | Pad↔Aibox WebSocket 客户端：报警推送、心跳重连（预留 get_streams/set_fence） | [README](src/biz/ws/README.md) |
 | `src/base/config/` | ConfigManager 单例 + data/config.json 解析 | [README](src/base/config/README.md) |
 | `src/base/buffer/` | DMA-BUF 分配与帧缓冲池 | [README](src/base/buffer/README.md) |
-| `src/base/queue/` | 阻塞队列 / 帧队列 / 优先级队列 | [README](src/base/queue/README.md) |
-| `src/base/threadpool/` | 通用线程池 | [README](src/base/threadpool/README.md) |
-| `src/base/utils/` | 图像/绘制/路径/日志等通用工具 | [README](src/base/utils/README.md) |
+| `src/base/queue/` | 阻塞队列 / 优先级队列 / 最新帧槽 | [README](src/base/queue/README.md) |
+| `src/base/imaging/` | 图像读写/格式转换/letterbox、软件画框、Qt 安全解码、文件读写原语 | [README](src/base/imaging/README.md) |
 | `tools/face_recognition/` | 人脸识别命令行工具（CLI 验证/点名对照回归基准，产物输出 model/face/） | [README](tools/face_recognition/README.md) |
 | `model/` | 模型库 `library/<id>/`（yolo11n/s/m-coco、ppe、ocr 等，一个模型一个目录）+ `train/`（训练侧 .pt/yaml/校准清单，程序不读） | [README](model/README.md) |
 | `data/` | 运行时数据（config/idge.db/alarms/backups/roll_call_data，内容不入库） | — |
 | `python/` | 模型转换与验证脚本：`.pt → onnx → rknn`（`pt2rknn.sh`）、ONNX→RKNN（`convert.py`）、推理/mAP 验证（`yolo11.py`） | [README](python/README.md) |
 | `tests/` | 测试程序（test_database 数据库层；test_equipment 设备盘点、test_rollcall 人员点名全链离线自测；test_latest_frame_slot 帧广播槽跳帧/生命周期，均随主构建生成） | [README](tests/README.md) |
 | `docs/` | 技术知识库 | [README](docs/README.md) |
-| `include/` | nlohmann/json 单头文件 | [README](include/README.md) |
 | `res/` | Qt 资源（qrc：图片/字体/GL 着色器/音效） | [README](res/README.md) |
 | `sounds/` | 提示音文件 | [README](sounds/README.md) |
-| `3rdparty/` | 第三方库；`zbar/`（二维码）与 `ppocrv4/`（OCR demo）的**二进制产物不入库**，新克隆需按其 README 手工还原 | [README](3rdparty/README.md) |
+| `3rdparty/` | 第三方库；`nlohmann/`（JSON 单头）、`zbar/`（二维码）与 `ppocrv4/`（OCR demo）的**二进制产物不入库**，新克隆需按其 README 手工还原 | [README](3rdparty/README.md) |
 
 运行时数据统一在 **当前工作目录下**的 `data/`（内容已 gitignore，不入库）：`data/config.json`、`data/idge.db*`、`data/alarms/`（按日抓拍）、`data/backups/`、`data/roll_call_data/`。因而是"每个启动位置一套"——`run.sh` 启动的那份在 `build/build_rk3588_linux/data/`。旧布局（散落在根目录）启动时由 `RuntimePaths::migrateLegacy()` 自动迁入。构建目录 `build*/`、`install/` 同样不入库。
 
@@ -374,9 +370,9 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
 ├── run.sh                      # 一键启动（自动设置库路径）
 ├── video-preview.sh            # MIPI CSI 摄像头预览脚本
 ├── dump_hang.sh                # 卡死堆栈抓取
+├── assets/                     # 随仓库分发的手工测试素材（test/1.mp4、192.mp4 等，构建目录软链过去）
 ├── data/                       # 运行时数据根（config.json/idge.db/alarms/backups/roll_call_data）
-├── config_example.json         # 配置模板
-└── yolo11_videocapture_demo.cc # 独立 YOLO11 摄像头检测示例
+└── config_example.json         # 配置模板
 ```
 
 ---
@@ -406,26 +402,25 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
    "warning + 全默认值"分支——写注释不是启动报错，而是**静默丢掉整份现场配置**。且 `save()`
    是整文件重写、按键名字母序输出，任何排版都留不住。要放说明只能用数据键
    （`config_example.json` 里的 `_readme` 字符串数组即可原样往返）
-3. `PriorityQueue::waitAndPop` 名为 Pop 实为 Top（只读堆顶不出队），且 `push` 不 notify 挂起的
-   消费者。现网只用 `tryPop`，`waitAndPop` 零调用方——列在 roadmap §六 清理项，不是待修 bug
-4. `src/ui/form/photo_selection_dialog.h`、`src/ai/task/helmet_task.*`/`base_task.*`/`task_pool.h`、
-   `src/ui/form/video_decoder.*`、`src/base/queue/frame_queue.h`、`src/media/model/ModelPool.hpp`、
-   `src/base/threadpool/ThreadPool.hpp` 都在 GLOB 里被编译但无实例化点（清单见 roadmap §六）
-5. `detect.conf_threshold` / `detect.nms_threshold` 是**假开关**：写进 JSON、设置页可改，
+3. `src/ui/form/photo_selection_dialog.h`、`src/ui/form/video_decoder.*`、
+   `src/ai/task/base_task.*` 都在 GLOB 里被编译但无实例化点（清单见 roadmap §六；
+   其余零调用文件已分两批删除——第一批 helmet_task/task_pool/frame_queue/ModelPool/ThreadPool/xml_utils，
+   第二批（结构调整时顺带）core_helper 的 appdata/customstyle/delegate/base64helper 四对 + base/utils 的 logging/path_utils）
+4. `detect.conf_threshold` / `detect.nms_threshold` 是**假开关**：写进 JSON、设置页可改，
    但 `ppe_task.cpp` 调 `model_->detect()` 不传参，实际生效的是编译期 `BOX_THRESH/NMS_THRESH`
-6. `YOLO11Model::output_mems[9]` 固定长度，换多于 9 个输出头的模型（分割/姿态）会越界
-7. **GB28181 MANSCDP 编码声明与实际不符**：XML 头写 `encoding="GB2312"`，实际发出的是 UTF-8 字节
+5. `YOLO11Model::output_mems[9]` 固定长度，换多于 9 个输出头的模型（分割/姿态）会越界
+6. **GB28181 MANSCDP 编码声明与实际不符**：XML 头写 `encoding="GB2312"`，实际发出的是 UTF-8 字节
    且 `Content-Length` 也按 UTF-8 长度算（`gb28181_manager.cpp` 心跳/应答处）。宽容平台无感，
    严格平台在中文 `DeviceName` 上会解析错乱。真要对接，改一处即需全模块统一口径
-8. **GB28181 配置写错只表现为"不启用"**：`serverHost`/`advertiseHost`/SDP `c=` 必须是 IPv4 字面量，
+7. **GB28181 配置写错只表现为"不启用"**：`serverHost`/`advertiseHost`/SDP `c=` 必须是 IPv4 字面量，
    `inet_pton` 失败即静默 `return` 且无日志；`platform.transport` 是假开关（值不影响发包）。
    排障先看 `data/config.json` 的 `gb28181` 段，别等错误提示
-9. **本机摄像头无互斥**：`smartRecognition.camera`（二维码/OCR 拍照 + 人员点名/设备盘点预览）、
+8. **本机摄像头无互斥**：`smartRecognition.camera`（二维码/OCR 拍照 + 人员点名/设备盘点预览）、
    `video.channels[].source`、`gb28181.streams[].source` 三条取流路径各自 `avformat_open_input`，
    同一设备被两路同时打开时后开的那路失败，报错只落在各自日志里
-10. **二维码扫描无去重/冷却**：`QRScanWorker` 每 100ms 采样、连续 3 帧内容一致即判定稳定，
+9. **二维码扫描无去重/冷却**：`QRScanWorker` 每 100ms 采样、连续 3 帧内容一致即判定稳定，
     结果对话框关闭后若码仍在镜头前，约 0.8 秒会再次弹出同一结果
-11. **通道配置改完就生效，但"生效"分两种**：报警类别（`video.models[<id>].alarm_class`）是**在线换**
+10. **通道配置改完就生效，但"生效"分两种**：报警类别（`video.models[<id>].alarm_class`）是**在线换**
     ——解码线程每帧在锁内拷一份 `slotAlarmClasses_` 去构造报警上下文，下一帧起按新值判定，这一路不重连；
     通道 `models` 与通道 `enabled` 则**重开该路**：停解码 → `releaseTasks()` → 按新配置重建任务集合。
     重开的代价要认：该路重新拉流（本地文件回到开头、RTSP/国标是重连），GUI 正常停顿 <1 秒，
@@ -442,9 +437,9 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
     `detect.conf_threshold`/`nms_threshold` 是假开关，改到重启都不生效（见 `src/base/config/README.md`）。
     热更新的离线自测：`./build/build_rk3588_linux/test_channel_reload`（必须在 build 目录下跑，
     它驱动真解码器 + 真推理任务做 4 轮"停→释放→重建"，并检查线程数与 RSS 不涨）。
-12. **`wss://` 放弃证书校验**：`WsClient::onSslErrors` 无条件 `ignoreSslErrors()`，只适合内网调试；
+11. **`wss://` 放弃证书校验**：`WsClient::onSslErrors` 无条件 `ignoreSslErrors()`，只适合内网调试；
     WS 发送也不排队，断线期间的 `ack` 直接丢弃（详见 `plan/websocket.md`）
-13. **NPU 负载按"各通道模型数之和"计**：4 路 × 每路 3 个模型 = 12 个推理任务打在 3 个核上，
+12. **NPU 负载按"各通道模型数之和"计**：4 路 × 每路 3 个模型 = 12 个推理任务打在 3 个核上，
     配置不做硬拦截；任务数超过 6 时启动日志打软告警，核掩码按进程级轮转分配（跨通道共享一份
     模型上下文服务多路，仍是未做的优化）
 
@@ -455,7 +450,7 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
 > 站着不动不再每 10 秒重复报）、
 > 围栏触发类别改为 `geofence.alarmClass` 单值（V1 的 `alarmClasses` 列表已废弃）、
 > 报警类别从槽位属性迁到模型属性、配置里不再出现模型/标签路径（绝对↔相对路径拉锯问题连根消失）、
-> 时间戳量纲注释已统一为 epoch 纳秒、`FrameQueue::pushAndReplace` 顺序、`dma_mutex` 跨 TU 单例、
+> 时间戳量纲注释已统一为 epoch 纳秒、`dma_mutex` 跨 TU 单例、
 > `QSqlDatabase` 每线程独立连接、NPU 核掩码位标志修正、级联每槽位独立标签与类别数。
 > DMA/RGA/命令注入/ns-ms 口径等 2026-09-24 批次的修复明细原载 `plan/update_log.md`（已删，
 > 结论都沉淀在上文源码注释与各目录 README 里）。

@@ -41,7 +41,7 @@
         "channels": [
             {
                 "channel": 0,
-                "source": "192.mp4",
+                "source": "assets/test/192.mp4",
                 "note": "东门",
                 "enabled": true,
                 "models": [
@@ -51,7 +51,7 @@
             },
             {
                 "channel": 1,
-                "source": "192.mp4",
+                "source": "assets/test/192.mp4",
                 "note": "",
                 "enabled": true,
                 "models": [
@@ -61,7 +61,7 @@
             },
             {
                 "channel": 2,
-                "source": "192.mp4",
+                "source": "assets/test/192.mp4",
                 "note": "",
                 "enabled": true,
                 "models": [
@@ -71,7 +71,7 @@
             },
             {
                 "channel": 3,
-                "source": "192.mp4",
+                "source": "assets/test/192.mp4",
                 "note": "",
                 "enabled": true,
                 "models": [

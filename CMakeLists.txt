@@ -144,10 +144,12 @@ endif()
 
 # 运行期资源入口链接（configure 时生成，幂等）
 # 程序按"启动目录即工作区根"解析资源（run.sh 会 cd 到构建目录后运行 ./idge），
-# 而模型在 model/、OCR 外部可执行在 3rdparty/ppocrv4/bin/，都在源码根下，
-# 故在构建目录里挂两个软链指过去，省掉每次部署再拷一遍大文件。
+# 而模型在 model/、OCR 外部可执行在 3rdparty/ppocrv4/bin/、测试/默认视频源在
+# assets/test/，都在源码根下，故在构建目录里挂软链指过去，省掉每次部署再拷一遍大文件。
+# assets 这条是出厂默认源 assets/test/192.mp4 能解析的前提
+# ——早先靠手工在构建目录放一个 192.mp4 软链，换机器即失效。
 # 已存在则跳过，不覆盖手工放置的目录或链接。
-foreach(_res model 3rdparty)
+foreach(_res model 3rdparty assets)
     if(NOT EXISTS "${CMAKE_BINARY_DIR}/${_res}")
         execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
                         "${CMAKE_SOURCE_DIR}/${_res}" "${CMAKE_BINARY_DIR}/${_res}")
@@ -177,7 +179,7 @@ include_directories(
 
     # === 项目根目录 ===
     ${CMAKE_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/3rdparty/nlohmann/include   # nlohmann/json 单头（第三方，原仓库根 include/）
 
     # === OpenCV (备用路径) ===
     # (已删除：3rdparty/opencv 旧版备用路径不存在，OpenCV 由 3rdparty/opencv4.10 CMake 配置提供)
@@ -217,23 +219,21 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src                         # 入口（main.cpp / head.h）
 
     # --- base 基础设施域（无业务依赖，被所有域引用）---
-    ${CMAKE_SOURCE_DIR}/src/base                    # runtime_paths.h 运行时路径唯一事实源
+    ${CMAKE_SOURCE_DIR}/src/base                    # runtime_paths.h 路径唯一事实源、perf_probe.h 采样开关
     ${CMAKE_SOURCE_DIR}/src/base/buffer             # DMA 缓冲池、帧缓冲区
     ${CMAKE_SOURCE_DIR}/src/base/config             # 配置管理（CLI/JSON 解析）
-    ${CMAKE_SOURCE_DIR}/src/base/queue              # 帧队列（生产者-消费者）
-    ${CMAKE_SOURCE_DIR}/src/base/threadpool         # 线程池
-    ${CMAKE_SOURCE_DIR}/src/base/utils              # 工具函数（文件、图像、路径）
+    ${CMAKE_SOURCE_DIR}/src/base/queue              # 阻塞队列/优先级队列/最新帧槽
+    ${CMAKE_SOURCE_DIR}/src/base/imaging            # 图像读写/绘制/letterbox/Qt 安全解码（含文件读写原语）
 
     # --- media 视频管线域 ---
     ${CMAKE_SOURCE_DIR}/src/media                 # 媒体运行时初始化
-    ${CMAKE_SOURCE_DIR}/src/media/model             # 模型管理（RKNN 帧模型池 ModelPool）
     ${CMAKE_SOURCE_DIR}/src/media/reader            # 视频读取（FFmpeg 硬解/MPP 解码/录像）
     ${CMAKE_SOURCE_DIR}/src/media/rga               # RGA 色彩转换
 
     # --- ai 推理与模型应用域 ---
     ${CMAKE_SOURCE_DIR}/src/ai/model_repo           # 模型库注册表（扫描/导入/级联槽位）
     ${CMAKE_SOURCE_DIR}/src/ai/recognition          # 人脸识别桥接（fork+execv 调 tools/face_recognition）
-    ${CMAKE_SOURCE_DIR}/src/ai/task                 # 检测任务（helmet/ppe 等）
+    ${CMAKE_SOURCE_DIR}/src/ai/task                 # 检测任务（PpeTask 及其数据结构）
     ${CMAKE_SOURCE_DIR}/src/ai/yolo11               # YOLOv11 RKNN 推理
 
     # --- biz 业务域 ---
@@ -245,8 +245,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/biz/ws                  # WebSocket 客户端（Pad↔Aibox 通信）
 
     # --- ui 界面域 ---
-    ${CMAKE_SOURCE_DIR}/src/ui/core_helper          # 核心辅助（单例、样式、日志）
-    ${CMAKE_SOURCE_DIR}/src/ui/core_qss             # QSS 样式表
+    ${CMAKE_SOURCE_DIR}/src/ui/core                 # 主题/Qt 助手/图标字体/启动钩子 + qss 皮肤与字体翻译资源
     ${CMAKE_SOURCE_DIR}/src/ui/form                 # 窗口界面（主窗口、视频窗口）
     ${CMAKE_SOURCE_DIR}/src/ui/widgets              # 可复用控件与 EGL/GL 渲染
 )
@@ -334,14 +333,14 @@ file(GLOB PROJECT_SOURCES CONFIGURE_DEPENDS
 # qt5_add_big_resources: 将资源文件嵌入到可执行文件中
 # 使用大资源模式（big resources），适合包含大量资源的项目
 qt5_add_big_resources(CORE_HELPER_SOURCES_QRC
-    ${CMAKE_SOURCE_DIR}/src/ui/core_helper/qrc/font.qrc    # 字体资源
-    ${CMAKE_SOURCE_DIR}/src/ui/core_helper/qrc/image.qrc   # 图片资源
-    ${CMAKE_SOURCE_DIR}/src/ui/core_helper/qrc/qm.qrc      # 翻译文件
-    ${CMAKE_SOURCE_DIR}/src/ui/core_helper/qrc/wasm.qrc    # WebAssembly 资源（可选）
+    ${CMAKE_SOURCE_DIR}/src/ui/core/qrc/font.qrc    # 字体资源
+    ${CMAKE_SOURCE_DIR}/src/ui/core/qrc/image.qrc   # 图片资源
+    ${CMAKE_SOURCE_DIR}/src/ui/core/qrc/qm.qrc      # 翻译文件
+    ${CMAKE_SOURCE_DIR}/src/ui/core/qrc/wasm.qrc    # 中文字体兜底（注册 /font/DroidSansFallback.ttf）
 )
 
 qt5_add_big_resources(CORE_QRC
-    ${CMAKE_SOURCE_DIR}/src/ui/core_qss/qss.qrc            # QSS 样式表资源
+    ${CMAKE_SOURCE_DIR}/src/ui/core/qss.qrc         # blacksoft 皮肤（:/qss/...）
 )
 
 # 拍照快门音效资源（人员点名/设备盘点模块）
@@ -517,11 +516,11 @@ add_executable(test_equipment
     src/biz/service/equipment_inventory_service.cpp
     src/biz/service/roll_call_service.cpp
     src/biz/db/business_db_manager.cpp
-    src/base/utils/task_manager.cpp
-    src/base/utils/draw_utils.cpp
-    src/base/utils/image_utils.cpp
-    src/base/utils/image_drawing.cpp
-    src/base/utils/file_utils.cpp
+    src/biz/service/task_manager.cpp
+    src/base/imaging/draw_utils.cpp
+    src/base/imaging/image_utils.cpp
+    src/base/imaging/image_drawing.cpp
+    src/base/imaging/file_utils.cpp
     src/ai/recognition/face_recognizer.cpp
     src/ai/recognition/in_process_face_recognizer.cpp
     src/ai/model_repo/model_registry.cpp
@@ -554,11 +553,11 @@ add_executable(test_rollcall
     tests/test_rollcall.cpp
     src/biz/service/roll_call_service.cpp
     src/biz/db/business_db_manager.cpp
-    src/base/utils/task_manager.cpp
-    src/base/utils/draw_utils.cpp
-    src/base/utils/image_utils.cpp
-    src/base/utils/image_drawing.cpp
-    src/base/utils/file_utils.cpp
+    src/biz/service/task_manager.cpp
+    src/base/imaging/draw_utils.cpp
+    src/base/imaging/image_utils.cpp
+    src/base/imaging/image_drawing.cpp
+    src/base/imaging/file_utils.cpp
     src/ai/recognition/face_recognizer.cpp
     src/ai/recognition/in_process_face_recognizer.cpp
     src/base/config/ConfigManager.cpp
@@ -633,7 +632,6 @@ add_executable(test_channel_reload
     src/media/reader/video_recorder.cpp
     src/ai/task/ppe_task.cpp
     src/ai/task/base_task.cpp
-    src/ai/task/helmet_task.cpp
     src/ai/model_repo/model_registry.cpp
     src/base/config/ConfigManager.cpp
     src/base/config/parse_config.cpp
@@ -645,12 +643,11 @@ add_executable(test_channel_reload
     src/biz/db/database_manager.cpp
     src/biz/geofence/fence_manager.cpp
     src/biz/geofence/fence_checker.cpp
-    src/base/utils/image_utils.cpp
-    src/base/utils/image_drawing.cpp
-    src/base/utils/draw_utils.cpp
-    src/base/utils/file_utils.cpp
-    src/base/utils/path_utils.cpp
-    src/base/utils/task_manager.cpp
+    src/base/imaging/image_utils.cpp
+    src/base/imaging/image_drawing.cpp
+    src/base/imaging/draw_utils.cpp
+    src/base/imaging/file_utils.cpp
+    src/biz/service/task_manager.cpp
 )
 
 # 主目标的库搜索路径是 target_link_directories(${PROJECT_NAME})，不会传给本目标，

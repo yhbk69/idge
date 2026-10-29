@@ -42,7 +42,6 @@
 #include "easy_timer.h"
 #include "common.hpp"
 #include "yolo11_model.hpp"
-#include "frame_queue.h"
 #include <thread>
 #include "task_config.hpp"
 #include "BlockingQueue.hpp"

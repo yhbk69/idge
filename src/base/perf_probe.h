@@ -27,7 +27,7 @@ inline bool perfProbe()
 // 用途是把"画框"整段从帧预算里摘出来做 A/B，量它对吞吐的真实占比
 // （分阶段探针报的 draw 占比需要这样一次反证，而不是只看数字推断）。
 //
-// 板端 A/B 实测（4 路 1080p/30fps，同一份 192.mp4）：
+// 板端 A/B 实测（4 路 1080p/30fps，同一份 assets/test/192.mp4）：
 //   开：单帧 total 55~69ms，实际 14.5~18fps，进程 CPU 420%，节拍 sleep 仅 12us
 //   关：单帧 total 33.3ms（贴着 30fps 锚线），4 路稳定 30.00fps，
 //       paints/s = arrivals/s = 30.0，进程 CPU 96~103%

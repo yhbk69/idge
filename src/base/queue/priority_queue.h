@@ -30,20 +30,11 @@
 //   - 自动维护优先级（使用堆数据结构）
 //   - 队列满时自动淘汰低优先级元素
 //   - 非阻塞 tryPop：立即返回，不等待
-//   - 阻塞 waitAndPop：等待直到有数据
 //
-// ⚠⚠【核心语义警示：waitAndPop 名为 Pop 实为 Top（tryPop 已修复）】
-//   tryPop 现为"取出即删除"（pop_heap + pop_back），符合命名语义；
-//   但 waitAndPop 仍只读取堆顶 c_.front() 拷贝给调用方，不移除元素。
-//   隐患：
-//   1) 消费方循环调用 waitAndPop 会反复拿到同一最高优先级元素——
-//      同一条检测结果被处理多次（重复告警/重复存图），且队列永远
-//      "非空"，等待新数据的逻辑失效（忙等自旋风险）；
-//   2) 想真正消费 waitAndPop 取出的堆顶必须额外手动调用 pop()，
-//      二者不成对即产生"读了没删"（重复消费）或"删了没读"（丢数据）的错配；
-//   3) 与标准库 priority_queue::pop()（只删不读）语义相反，
-//      极易被熟悉 STL 的维护者误用。
-//   需要"取出即删除"的阻塞语义时，应改用 BlockingQueue 或组合 top()+pop()。
+// ⚠ 本类**只有非阻塞出口**：原先的 waitAndPop（名为 Pop 实为 Top：只读堆顶不删除，
+//   且 push 从不 notify、无 shutdown 通道，停机可致消费者永久挂起）在全工程零调用的
+//   前提下已删除，连同其 condition_variable 成员。若将来确实需要"阻塞消费"语义，
+//   请改用同目录的 BlockingQueue，别在本类上补一个名字带 Pop 却不删元素的函数。
 //
 // 【内部结构】c_ 是 std::vector 维护的堆：c_.front() 恒为堆顶（最大元素），
 //   但其余元素顺序无序，begin()/end() 暴露的是未排序的裸迭代器，
@@ -58,7 +49,6 @@
 #include <algorithm>
 #include <vector>
 #include <mutex>
-#include <condition_variable>
 
 /// A priority queue with fixed size. When the maximum size was reached,
 /// the element with the lowest priority would be removed automatically.
@@ -89,10 +79,9 @@ class PriorityQueue
     // ⚠ 比较器不一致：满员判断用裸 operator<（*iterator_min < x），
     //   未走 cmp——若模板参数换了自定义 Compare（如 greater），
     //   "谁优先"在两处会互相矛盾；且 min_element 也是默认 < 语义。
-    // ⚠【唤醒缺失】push 只加锁写数据，从不 cv_.notify_*()：
-    //   正在 waitAndPop 中挂起的消费者不会因新元素入队而被唤醒，
-    //   只有其他线程碰巧 notify 该 cv_ 才恢复——阻塞消费路径事实上
-    //   不可依赖，建议本类仅与 tryPop 轮询搭配使用（当前工程用法）。
+    // ⚠ 出队只有 tryPop 一条路（非阻塞轮询）：本类没有阻塞等待出口，
+    //   生产者入队不会唤醒任何消费者——消费方必须自己轮询。需要
+    //   "入队即唤醒"的场景请用同目录的 BlockingQueue。
     // ============================================================================
     inline void push(const T &x) {
       std::unique_lock<std::mutex> lock(mtx_);
@@ -149,32 +138,6 @@ class PriorityQueue
       return true;
     }
 
-    // ============================================================================
-    // waitAndPop: 等待并获取优先级最高的元素（阻塞）
-    // ============================================================================
-    // 如果队列为空，阻塞等待直到有元素被插入。
-    // 一旦有元素可用，立即返回 true。
-    //
-    // 使用场景：
-    //   - 消费者线程需要等待生产者生产数据
-    //   - 程序启动时等待第一帧数据
-    //
-    // ⚠ 隐患（与文件头警示联动）：
-    //   1) 不移除元素：队列非空时立即返回堆顶旧值，消费循环会
-    //      对同一元素反复执行后处理（重复告警等）；
-    //   2) push 不 notify cv_（见 push 警示），挂起在此处的线程
-    //      不会被新数据唤醒；若队列被清空后又无人 push，
-    //      本 wait 无谓词超时、无 shutdown 通道 → 停机时永久挂起，
-    //      join 该消费者线程会死锁。
-    // ============================================================================
-    inline bool waitAndPop(T& value) {
-      std::unique_lock<std::mutex> lock(mtx_);
-      cv_.wait(lock, [this]{ return !c_.empty(); });
-      value = c_.front();
-      // printf("queue size: %zu\n", queue_.size());
-      return true;
-    }
-
     inline const bool empty() const {
       std::unique_lock<std::mutex> lock(mtx_);
       return c_.empty();
@@ -204,7 +167,6 @@ class PriorityQueue
 
   private:
     mutable std::mutex mtx_;     // 互斥锁（保护并发访问）
-    std::condition_variable cv_; // 条件变量（用于 waitAndPop）
     // 禁止堆分配（这个对象应该在栈上或作为成员变量）
     void * operator new   (size_t);
     void * operator new[] (size_t);

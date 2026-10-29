@@ -132,7 +132,7 @@ ConfigManager::instance().save();                          // 显式落盘
 // 围栏整段由 geofence::FenceManager 经 setGeofenceChannels()+save() 落盘
 
 // schema V2：按通道 + 按模型（ch 一律 0-based）。本类只负责存值，
-// "改完要不要重开该路"是设置页的事（见 README §八 第 11 条）
+// "改完要不要重开该路"是设置页的事（见 README §八 第 10 条）
 ConfigManager::instance().setChannelSource(0, "rtsp://192.168.1.10/stream1");
 ConfigManager::instance().setChannelModelIds(0, {"yolo11n-ppe", "yolo11n-coco"}); // 顺序即槽位
 ConfigManager::instance().setModelAlarmClass("yolo11n-ppe", "un_helmet");         // 模型参数
