@@ -70,6 +70,14 @@ assets/test/*_faces.json
 # 不放行则新克隆 `cmake --build` 卡在 autorcc 编不过——必须入库（共 9 个，约 500KB）。
 !res/image/*.png
 
+# 同上：src/ui/core 的两个 qrc 也按相对路径引用 png，被全局 *.png 挡住会让新克隆构建失败
+#   qss.qrc   → qss/blacksoft/*.png（23 张皮肤图：勾选框/单选框/箭头/分支符/日历）
+#   image.qrc → image/bg_novideo.png（无信号占位图）
+# 这些是 Qt 资源清单的组成部分，不是运行产物，必须入库。
+!src/ui/core/qss/*.png
+!src/ui/core/qss/*/*.png
+!src/ui/core/qrc/image/*.png
+
 *.db-shm
 *.db-wal
 *.db.corrupt-*

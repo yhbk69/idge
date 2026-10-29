@@ -80,3 +80,8 @@ if (!qss.isEmpty()) {
   保留是为了将来接平台配置时对照，不等于可用；`checkRun` 在本 Linux 目标上直接返回 true，别拿它当单实例保护。
 - `getStyle` 按 `stream >> line` 逐词读取，css 里不要依赖一行的列对齐（读取会压缩空白）。
 - PNG 均为 14~19px 状态图，替换时保持尺寸，否则控件指示器错位；改 css 后重新构建即可（qrc 内容变化会触发 rcc 重新生成）。
+- **皮肤 PNG 必须入库**：根 `.gitignore` 全局忽略 `*.png`，本目录靠三条显式豁免放行
+  （`!src/ui/core/qss/*.png`、`!src/ui/core/qss/*/*.png`、`!src/ui/core/qrc/image/*.png`，共 24 个、约 31KB）。
+  漏掉任何一条，新克隆会在 autorcc 阶段以
+  `RCC: Error in 'qss.qrc': Cannot find file 'qss/blacksoft/xxx.png'` **直接构建失败**（不是"皮肤显示不出来"的软失败）；
+  新增皮肤图或换 qss 包时，先 `git status --porcelain` 确认文件真的出现在未跟踪列表里而不是被忽略。
