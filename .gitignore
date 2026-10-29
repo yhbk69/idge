@@ -53,11 +53,13 @@ test_*.cpp
 #   test_equipment / test_rollcall —— 点名、盘点离线全链自检
 #   test_latest_frame_slot        —— 帧广播槽的跳帧/生命周期自检（根 CMakeLists 有同名 target）
 #   test_channel_reload           —— 通道热更新（停→releaseTasks→重建）离线自测
+#   test_alarm_uplink             —— 报警上行报文组装/队列/水位/ack/退避 十八条离线契约
 !tests/test_database.cpp
 !tests/test_equipment.cpp
 !tests/test_rollcall.cpp
 !tests/test_latest_frame_slot.cpp
 !tests/test_channel_reload.cpp
+!tests/test_alarm_uplink.cpp
 
 # 测试素材（*.jpg/*.mp4 全局忽略，此处显式放行；*_faces.json 等为运行产物不放行）
 !assets/test/1.mp4

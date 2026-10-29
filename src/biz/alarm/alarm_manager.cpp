@@ -436,8 +436,12 @@ void AlarmManager::storeAndNotify(const QVector<AlarmRecord> &alarms)
 // 内存按"扫到的改"、DB 按"传入的改"：内存列表只留最近 1000 条，
 // 若某条已被挤出内存，它在 DB 里的记录仍然应该拿到视频路径。
 // DatabaseManager 为每个线程分配独立连接，因此后台线程里 new AlarmDAO 是安全的。
+//
+// webPath（.mp4 副本）只往下游信号里带，不进 DB 也不进内存记录：那两个字段是界面与
+// 报警详情用来定位本地文件的，换成副本路径会让点开报警找不到图旁边那段视频。
 // ============================================================================
-void AlarmManager::attachVideoClip(const QStringList &alarmIds, const QString &videoPath)
+void AlarmManager::attachVideoClip(const QStringList &alarmIds, const QString &videoPath,
+                                   const QString &webPath)
 {
     if (alarmIds.isEmpty() || videoPath.isEmpty()) return;
 
@@ -456,6 +460,17 @@ void AlarmManager::attachVideoClip(const QStringList &alarmIds, const QString &v
             dao.updateVideoPath(id, videoPath);
         }
     }
+
+    // 只是"通知"，不改上面的 UPDATE 行为：报警上行的第二段（片段）靠这一刻才拿到路径
+    emit videoClipAttached(alarmIds, videoPath, webPath);
+}
+
+void AlarmManager::reportVideoClipSkipped(const QStringList &alarmIds, const QString &reason)
+{
+    if (alarmIds.isEmpty()) {
+        return;
+    }
+    emit videoClipSkipped(alarmIds, reason);
 }
 
 // 设置通道在线状态

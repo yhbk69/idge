@@ -226,15 +226,16 @@ public:
 
     // ========== 报警视频录制配置 ==========
     // 全部键可选：缺失即返回下面的默认值，现场老配置不改也能启动。
-    // enabled 默认 false —— 硬件编码器会常驻占用 VPU，必须由人显式打开。
+    // enabled 默认 true —— 报警关联片段是需求验收项（requirements.md §三①）；
+    // 代价是 4 路常驻硬编占用 VPU，不想要就在 JSON 里关掉。
 
-    /** @brief 是否启用报警片段录制（默认 false） */
+    /** @brief 是否启用报警片段录制（默认 true） */
     bool recordingEnabled() const;
 
     /** @brief 编码格式："hevc"（默认，hevc_rkmpp）或 "h264"（h264_rkmpp） */
     QString recordingCodec() const;
 
-    /** @brief 环形缓冲区时长（秒，默认 5）——决定能回溯多久 */
+    /** @brief 环形缓冲区时长（秒，默认 8）——决定能回溯多久，须 ≥ 前3+后2 窗口再加关键帧对齐余量 */
     int recordingBufferSeconds() const;
 
     /** @brief 编码码率（bps，默认 2000000，CBR） */
@@ -242,6 +243,44 @@ public:
 
     /** @brief 关键帧间隔（秒，默认 1）——越小报警片段起点对齐误差越小 */
     int recordingGopSeconds() const;
+
+    // ========== 报警上行配置（P0-1）==========
+    // 同样全是只读 getter：值在 AlarmUplink::attach() 时一次性读取，运行期改动不重建状态机。
+    // enabled 默认 false —— 这是往外发数据，且当前链路明文 ws + 零鉴权，必须人来打开
+    //（理由与 recording 相反，见 ConfigManager.cpp 的 makeAlarmUplinkDefaults）。
+
+    /** @brief 是否启用报警上行（默认 false） */
+    bool alarmUplinkEnabled() const;
+
+    /** @brief 第一段（报警信息）是否带截图传输计划（默认 true） */
+    bool alarmUplinkSendSnapshot() const;
+
+    /** @brief 第二段是否发视频片段（默认 true；recording.enabled=false 时降级为不发） */
+    bool alarmUplinkSendClip() const;
+
+    /** @brief 二进制帧分块大小（字节，默认 262144，范围 64KB~1MB） */
+    int alarmUplinkChunkSize() const;
+
+    /** @brief 等 uplink_ack 的超时（毫秒，默认 15000；仅 expect_ack=true 时有意义） */
+    int alarmUplinkAckTimeoutMs() const;
+
+    /** @brief 同一项最多重投几次（默认 3），超过判 failed 并打 warning */
+    int alarmUplinkMaxAttempts() const;
+
+    /** @brief 待确认队列上限（默认 16），满了丢最旧 */
+    int alarmUplinkMaxPending() const;
+
+    /** @brief 是否要求对端回 uplink_ack 才算完成（默认 false） */
+    bool alarmUplinkExpectAck() const;
+
+    /** @brief 媒体交付方式："url"（默认，本机 http 文件服务出地址）| "ws_binary"（WS 二进制分块帧） */
+    QString alarmUplinkMediaTransport() const;
+
+    /** @brief 内嵌 http 文件服务监听端口（默认 8090，范围 1024~65535；板端特权口 bind 不上） */
+    int alarmUplinkMediaHttpPort() const;
+
+    /** @brief 媒体地址前缀（默认空 = 自动取本机非回环 IPv4 + 实际绑定端口） */
+    QString alarmUplinkMediaBaseUrl() const;
 
     // ========== WebSocket 配置 ==========
 
@@ -323,6 +362,15 @@ private:
      * @return true=root_ 有改动（调用方负责 saveUnsafe 落盘）
      */
     bool migrateRecordingDefaults();
+
+    /**
+     * @brief 老配置缺少 alarm_uplink 段时补齐默认值（load 内持锁调用，勿单独使用）
+     *
+     * 与 migrateRecordingDefaults 同口径：只为让开关落进文件可见可改，
+     * 已存在 alarm_uplink 段时不做任何修改（现场配置不会被启动流程覆盖）。
+     * @return true=root_ 有改动（调用方负责 saveUnsafe 落盘）
+     */
+    bool migrateAlarmUplinkDefaults();
 
     QString configPath_;   ///< 配置文件路径
     QJsonObject root_;     ///< JSON 根对象

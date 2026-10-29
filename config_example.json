@@ -24,7 +24,14 @@
         "  各通道的模型数之和超过 6 路会打软告警（3 个 NPU 核，不是硬限制）。",
         "gb28181 段由 Gb28181Config::load 独立读取（程序不会写回它），平台地址/本机地址/SDP c= 必须是 IPv4 字面量，",
         "inet_pton 失败即静默不启用国标链路且无日志；platform.transport 当前不影响发包。",
-        "websocket 段留空即整条链路不启动；本程序是 WS 客户端，不监听端口（详见 plan/websocket.md）。",
+        "websocket 段留空即整条链路不启动；对 WS 而言本机是【客户端】，不主动监听端口。",
+        "  但报警上行开 url 档（alarm_uplink.enabled=true 且 media_transport=\"url\"）时，本机会内嵌起一台",
+        "  http 静态文件服务监听 media_http_port（默认 8090）——这是唯一被监听的口，明文零鉴权，",
+        "  能连通本机的任何人都可按路径取走 data/alarms 下的全部报警媒体，开启前先确认网段隔离（详见 src/media/server/README.md）。",
+        "websocket.server_url 【只填 ws://】：本机 Qt 的 TLS 后端缺两个 OpenSSL 符号，wss:// 连不上（plan/roadmap.md §十）。",
+        "alarm_uplink.enabled 出厂 false：往外发数据必须人来打开。recording.enabled 出厂 true（报警必带片段）。",
+        "  alarm_uplink 段与 recording 段的迁移口径都是【只补缺失段、不覆盖已有段】，所以现场老 config.json",
+        "  里新增的键永远不会自动出现，全靠 getter 的默认值兜底；要改只能手改 JSON 并重启（媒体服务不支持运行期重开）。",
         "geofence.channels 的坐标是 overlay 像素空间，附带 overlay_w/h；改窗口布局或分屏方式后旧围栏会偏移。"
     ],
     "video": {
@@ -139,11 +146,24 @@
         "detectionRetentionDays": 30
     },
     "recording": {
-        "enabled": false,
+        "enabled": true,
         "codec": "hevc",
         "buffer_seconds": 5,
         "bitrate": 2000000,
         "gop_seconds": 1
+    },
+    "alarm_uplink": {
+        "enabled": false,
+        "send_snapshot": true,
+        "send_clip": true,
+        "media_transport": "url",
+        "media_http_port": 8090,
+        "media_base_url": "",
+        "chunk_size": 262144,
+        "ack_timeout_ms": 15000,
+        "max_attempts": 3,
+        "max_pending": 16,
+        "expect_ack": false
     },
     "smartRecognition": {
         "camera": ""

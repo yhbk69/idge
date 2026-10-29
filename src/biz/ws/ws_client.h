@@ -13,10 +13,12 @@
  * 发生在 GUI 线程，QWebSocket/QTimer 也都挂在这个线程，无跨线程信号槽。
  * 因此 start()/stop() 只能从 GUI 线程调。
  *
- * 与报警链路的关系：**只读旁路**。收到的远端报警经 frmMain::onWsAlarmReceived 打进
- * 调试页日志并回一条 ack，不写 idge.db、不参与 AlarmManager 限流；本机的围栏多边形
+ * 与报警链路的关系：**入站只读旁路 + 出站上行**。收到的远端报警经 frmMain::onWsAlarmReceived
+ * 打进调试页日志并回一条 ack，不写 idge.db、不参与 AlarmManager 限流；本机的围栏多边形
  * （geofence::FenceManager）也不从这里同步——sendSetFence 的矩形参数与本机的任意多边形
- * 模型不兼容，且与 sendGetStreams 一样当前无调用方。协议与现状详见本目录 README.md。
+ * 模型不兼容，且与 sendGetStreams 一样当前无调用方。出站方向是另一件事：本机生成的报警
+ * 由 AlarmUplink 经本类的 UplinkTransport 接口上行（P0-1，见本目录 README.md）。
+ * 协议与现状详见本目录 README.md。
  */
 #include <QObject>
 #include <QWebSocket>
@@ -25,13 +27,19 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 
+#include "uplink_transport.h"
+
 /**
  * @brief WebSocket 客户端（单例）
  *
  * Pad 端连接远端 Aibox 服务器，接收报警推送、查询视频流列表、下发围栏配置。
  * 通过 ping/pong 心跳保持连接，断线自动重连。
+ *
+ * 同时充当报警上行的传输层（UplinkTransport）：AlarmUplinkEngine 经本类发文本帧
+ * 与二进制帧，水位闸门读 socket_ 的 bytesToWrite()。既有 sendJson 的"未连接即丢弃"
+ * 语义只属于它的四个调用方，上行那一路要的是排队，两者不共用出口。
  */
-class WsClient : public QObject
+class WsClient : public QObject, public uplink::UplinkTransport
 {
     Q_OBJECT
 
@@ -54,10 +62,25 @@ public:
     bool isConnected() const;
     QString lastAlarmId() const { return lastAlarmId_; }
 
+    // ===== UplinkTransport（报警上行的出站口）=====
+    bool transportConnected() const override { return isConnected(); }
+    /// 写缓冲低于 kWriteWatermarkBytes 才允许继续投喂，见 uplink_transport.h
+    bool readyForMore() const override;
+    qint64 sendText(const QString &text) override;
+    qint64 sendBinary(const QByteArray &bytes) override;
+
 signals:
     /// 服务端 type=alarm 的 data 字段原样转发，由 frmMain 决定怎么展示
     void alarmReceived(const QJsonObject &data);
     void streamsReceived(const QJsonArray &streams);
+    /**
+     * @brief 服务端 type=uplink_ack：对本站发出的某一条（报警信息或某段媒体）的确认
+     *
+     * 只有 `data` 里的原样字段，判断都留给 AlarmUplinkEngine（phase 决定用哪个 id 认领队首）。
+     * 对端当前不回这个类型，所以 alarm_uplink.expect_ack 默认 false；开了才有本信号的消费方。
+     */
+    void uplinkAcked(const QString &messageId, const QString &mediaId, const QString &phase,
+                     const QString &status, const QString &error);
     void connected();
     void disconnected();
     /// (category, message)，frmMain 接到自己的调试页日志区
@@ -87,6 +110,10 @@ private:
     QWebSocket *socket_;
     QTimer *heartbeatTimer_;
     QTimer *reconnectTimer_;
+    /// 出站水位：报警上行的二进制帧是 MB 级的，超过这个字节数就让它等下一次定时器。
+    /// 没有这道闸门，媒体字节会直接堆进 Qt 的写缓冲，GUI 线程的绘制被挤后
+    /// （4 路 1080p 零卡顿是明确成果，见 a2c6227）
+    static constexpr qint64 kWriteWatermarkBytes = 1 * 1024 * 1024;
     // 最后一条收到的 alarm_id，仅用于重连后补 sync_request
     QString lastAlarmId_;
     // true = 调用方主动 stop()，此时断线不再重连

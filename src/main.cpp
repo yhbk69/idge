@@ -68,6 +68,7 @@
 #include "parse_config.hpp"
 #include "yolo11_model.hpp"
 #include "alarm_manager.h"
+#include "http_file_service.h"   // 报警上行 url 模式的内嵌文件服务（进程退出时停在这里）
 #include "database_manager.h"
 #include "media_runtime.h"
 #include "gb28181_manager.h"
@@ -382,6 +383,10 @@ int main(int argc, char *argv[])
     // 程序退出前清理和同步
     qInfo() << "Shutting down, cleaning up...";
     if (gb28181) gb28181->stop();
+    // 内嵌 http 文件服务（报警上行 url 模式）。停在这里而不是 ~frmMain：
+    // mk_env_init 是进程级一次、mk_stop_all_server 之后不能再起，
+    // 生命周期必须覆盖整个进程，而 frmMain 是 main 的栈对象、析构点比这早
+    HttpFileService::instance().stop();
     AlarmManager::instance().syncToDatabase();
     AlarmManager::instance().cleanOldData(30);
 

@@ -33,6 +33,8 @@
 #include "video_alarm_widget.h"
 #include "fence_manager.h"
 #include "ws_client.h"
+#include "alarm_uplink.h"
+#include "http_file_service.h"   // 报警媒体的内嵌文件服务（url 模式；装配点在此）
 #include "roll_call_widget.h"
 #include "equipment_inventory_widget.h"
 #include "smart_recognition_widget.h"
@@ -484,6 +486,35 @@ void frmMain::initNewPages()
     connect(&WsClient::instance(), &WsClient::connected,
             this, [this]() { log("system", "WebSocket 已连接到 Aibox"); });
     WsClient::instance().start();
+
+    // 报警上行（P0-1）：本机生成的报警两段式发往对端，出厂默认关闭
+    connect(&AlarmUplink::instance(), &AlarmUplink::logMessage,
+            this, [this](const QString &cat, const QString &msg) {
+                log(cat, msg);
+            });
+
+    // url 模式（默认）要先把本机文件服务起起来，JSON 里才可能有能下载的地址。
+    // 起在这里而不是 AlarmUplink 内部：依赖方向是 base ← media ← biz ← ui，biz 反过来
+    // include media 域的头就是破例，所以由装配层起服务、拿底址、注进去。
+    // ⚠ stop 在 src/main.cpp 的事件循环之后，与这里故意不成对：mk_env_init 是进程级
+    //   一次、停了不能再起，生命周期必须覆盖整个进程（见 http_file_service.h 文件头）。
+    ConfigManager &uplinkCfg = ConfigManager::instance();
+    if (uplinkCfg.alarmUplinkEnabled()
+        && uplinkCfg.alarmUplinkMediaTransport() == QLatin1String(uplink::kTransportUrl)) {
+        HttpFileService &svc = HttpFileService::instance();
+        // alarmsDir() 是随 cwd 变的相对路径，服务要的是绝对路径：给错了症状是
+        // "URL 全 404，但本地文件明明在"（它退回库默认的 <exe 目录>/www 当根）
+        const QString root = QFileInfo(RuntimePaths::alarmsDir()).absoluteFilePath();
+        const quint16 port = static_cast<quint16>(uplinkCfg.alarmUplinkMediaHttpPort());
+        if (!svc.start(root, port)) {
+            log("warning", QStringLiteral("报警媒体文件服务没起来 port=%1，"
+                                          "本次不申报媒体地址").arg(port));
+        }
+        // 地址前缀：配置写了就用配置的（服务没起来也照用，可能指向别处的反代）
+        AlarmUplink::instance().setMediaBaseUrl(svc.baseUrl(uplinkCfg.alarmUplinkMediaBaseUrl()));
+    }
+
+    AlarmUplink::instance().attach();
 
     // 类别名表由解码器按通道槽位建立（见 FFmpegVideoDecoder::buildCascadeTasks），
     // 这里不再从全局标签文件填 AlarmManager。

@@ -318,10 +318,21 @@ public:
     // 提交一个延迟 dump 任务，立即返回（解码线程不等待）
     void submit(ClipJob job)
     {
-        std::lock_guard<std::mutex> lk(mtx_);
-        if (static_cast<int>(q_.size()) >= kMaxPending) q_.pop_front();   // 满了丢最旧
-        q_.push_back(std::move(job));
-        cv_.notify_one();
+        QStringList evictedIds;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (static_cast<int>(q_.size()) >= kMaxPending) {
+                evictedIds = q_.front().alarmIds;   // 满了丢最旧
+                q_.pop_front();
+            }
+            q_.push_back(std::move(job));
+            cv_.notify_one();
+        }
+        // 在锁外发通知：队列锁里跑别人的槽，早晚撞上交叉等待
+        if (!evictedIds.isEmpty()) {
+            AlarmManager::instance().reportVideoClipSkipped(
+                evictedIds, QStringLiteral("片段队列已满，本段被更晚的报警挤掉"));
+        }
     }
 
 private:
@@ -367,17 +378,28 @@ private:
     static void writeClip(ClipJob &job)
     {
         if (!job.recorder || !job.recorder->isInitialized()) {
+            AlarmManager::instance().reportVideoClipSkipped(
+                job.alarmIds, QStringLiteral("录像器未就绪，片段没取窗口"));
             return;
         }
         if (!job.recorder->dumpAnnexB(job.rawPath, job.centerMs, kClipPreMs, kClipPostMs)) {
-            return;   // dumpAnnexB 内部已 qWarning，且不留残档
+            // dumpAnnexB 内部已 qWarning，且不留残档；这里只补"上行那侧要知道没这东西"
+            AlarmManager::instance().reportVideoClipSkipped(
+                job.alarmIds, QStringLiteral("取窗口写裸流失败"));
+            return;
         }
-        // MP4 只是网页可播的副本，失败不影响报警本身（裸流已落盘）
+        // MP4 是网页可播的副本：ws_binary 那档用不上它（发的是裸流字节），
+        // url 那档发的就是它 —— 副本没写成，上行就没有视频可报，得说清
         const bool mp4Ok = job.recorder->dumpMp4(job.mp4Path, job.centerMs, kClipPreMs, kClipPostMs);
 
         // 两次 collectWindow 取到的是同一批包：本任务到点时墙钟已达
         // center+post，之后入环的包 wall_ms 必然 > 窗口上界，不会再进窗口。
-        AlarmManager::instance().attachVideoClip(job.alarmIds, job.rawPath);
+        AlarmManager::instance().attachVideoClip(job.alarmIds, job.rawPath,
+                                                 mp4Ok ? job.mp4Path : QString());
+        if (!mp4Ok) {
+            // 裸流已经在盘上（本地留档这条不变），只是没有能对外给的副本
+            qWarning() << "Alarm clip: mp4 副本没写成" << job.mp4Path;
+        }
         qInfo() << "Alarm clip:" << job.rawPath << "mp4" << (mp4Ok ? "ok" : "skipped");
     }
 

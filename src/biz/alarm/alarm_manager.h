@@ -181,9 +181,21 @@ public:
     // ============================================================================
     // 由 ClipWriter 后台线程调用：片段是"报警后 2 秒"才生成的，报警入库时
     // 文件还不存在，所以路径只能在写好后补。ids 为同一批报警（同通道同瞬间
-    // 共享一个片段）。内存与 DB 都更新，不发信号——界面打开详情时自然读到。
+    // 共享一个片段）。内存与 DB 都更新，末尾发 videoClipAttached（报警上行的第二段）。
+    //
+    // webPath 是同名的 .mp4 副本，**只用于转发给上行订阅方**：DB 与内存里的 video_path
+    // 仍是 Annex-B 裸流。改那个字段会让报警记录与本地图像的关联对不上（界面也读它）。
     // ============================================================================
-    void attachVideoClip(const QStringList &alarmIds, const QString &videoPath);
+    void attachVideoClip(const QStringList &alarmIds, const QString &videoPath,
+                         const QString &webPath = QString());
+
+    // ============================================================================
+    // reportVideoClipSkipped: 告诉订阅者"这批报警不会有片段了"
+    // ============================================================================
+    // ClipWriter 丢最旧 / recorder 未就绪 / dump 失败时由后台线程调用。上面那个
+    // 信号只有成功路径，缺了失败路径订阅方就只能自己猜（详见 videoClipSkipped）。
+    // ============================================================================
+    void reportVideoClipSkipped(const QStringList &alarmIds, const QString &reason);
 
     // 获取所有报警记录
     QVector<AlarmRecord> alarms() const;
@@ -269,6 +281,22 @@ signals:
 
     // 统计更新信号（通知界面刷新统计数据）
     void statsUpdated();
+
+    /**
+     * @brief 报警视频片段已落盘（**ClipWriter 后台线程发出**，跨线程接收方必须 QueuedConnection）
+     *
+     * 比 alarmGenerated 晚约 (post 窗口 + 排队) 毫秒：报警那一刻片段还没写出来。
+     * 报警上行用它把 alarm_info 里预告的那个 clip media_id 对上真实路径。
+     * @param alarmIds 本片段对应的一批报警 id（同通道同瞬间共享一个片段）
+     * @param videoPath Annex-B 裸流路径（DB 里存的那个）
+     * @param webPath 同名 .mp4 副本；空 = 副本没写成，url 模式下等于这条报警没有视频
+     */
+    void videoClipAttached(const QStringList &alarmIds, const QString &videoPath,
+                           const QString &webPath);
+
+    /// 片段确定不会产出（队列满丢最旧 / recorder 未就绪 / dump 失败）——同上，后台线程发出
+    /// 没有这条通知，"承诺了片段却没有片段"就只是对端单方面的等待
+    void videoClipSkipped(const QStringList &alarmIds, const QString &reason);
 
 private:
     // 私有构造函数（单例模式）

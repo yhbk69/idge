@@ -8,7 +8,11 @@
 // 心跳与重连都是 QTimer 驱动的**应用层**行为：连上才起心跳，断开才起单次重连
 // 定时器，间隔取自 websocket.heartbeat_interval / reconnect_interval（秒）。
 // 未配置 server_url 时 start() 只打 warning 并返回——程序照常跑，这条链路整个缺席。
+// 地址口径：**只填 ws://**。本机 Qt 的 OpenSSL 符号解析缺两个（见 plan/roadmap.md §十 T-1），
+// 填 wss:// 会走 TLS 握手路径，那两处的函数指针为空。
 // 消息不做排队：未连接时 sendJson 直接丢弃并记 warning。
+// 出站还有第二个身份：本类实现 UplinkTransport，把本机报警（JSON 控制面 + 媒体二进制帧）
+// 交给 AlarmUplink 排队发送，那条路有自己的队列与水位闸门，不走 sendJson。
 // ============================================================================
 
 #include "ws_client.h"
@@ -149,6 +153,40 @@ void WsClient::sendJson(const QJsonObject &obj)
     socket_->sendTextMessage(QString::fromUtf8(doc.toJson(QJsonDocument::Compact)));
 }
 
+// ============================================================================
+// UplinkTransport：报警上行的出站口
+// ----------------------------------------------------------------------------
+// 与 sendJson 的区别是刻意的：上面那个出口"未连接即丢弃"，是 ping/ack/
+// sync_request/get_streams/set_fence 四个既有发送方的行为，动它们会改现有语义；
+// 上行的排队在 AlarmUplinkEngine 里做，这里只负责"能不能写、写了多少"。
+// 返回值一律用 Qt 的实际写入字节数（失败为 -1），部分写/失败由调用方决定重试，
+// 本层不做任何缓冲。
+// ============================================================================
+
+bool WsClient::readyForMore() const
+{
+    return socket_->bytesToWrite() < kWriteWatermarkBytes;
+}
+
+qint64 WsClient::sendText(const QString &text)
+{
+    if (socket_->state() != QAbstractSocket::ConnectedState) {
+        return -1;
+    }
+    return socket_->sendTextMessage(text);
+}
+
+qint64 WsClient::sendBinary(const QByteArray &bytes)
+{
+    if (socket_->state() != QAbstractSocket::ConnectedState) {
+        return -1;
+    }
+    // Qt 5.12 的 QWebSocket 私有实现里，一次 sendBinaryMessage = 一次 doWriteFrames，
+    // 没有分片循环：所以一帧就是链路上的一个数据帧，块大小必须由上层（chunk_size）控制，
+    // 不能指望 Qt 帮我们切。见 plan/roadmap.md 的 P0-1 说明。
+    return socket_->sendBinaryMessage(bytes);
+}
+
 void WsClient::onConnected()
 {
     emit logMessage("system", "WebSocket: 已连接");
@@ -200,6 +238,14 @@ void WsClient::onTextMessageReceived(const QString &message)
     } else if (type == "streams_list") {
         QJsonArray streams = obj["data"].toArray();
         emit streamsReceived(streams);
+    } else if (type == "uplink_ack") {
+        // 报警上行的确认。这里只拆字段，"认领哪一项、算不算成功"全在引擎里判
+        const QJsonObject data = obj["data"].toObject();
+        emit uplinkAcked(data["message_id"].toString(),
+                         data["media_id"].toString(),
+                         data["phase"].toString(),
+                         data["status"].toString(),
+                         data["error"].toString());
     } else {
         emit logMessage("info", QString("WebSocket: 未知消息类型: %1").arg(type));
     }
@@ -216,9 +262,10 @@ void WsClient::onError(QAbstractSocket::SocketError error)
 void WsClient::onSslErrors(const QList<QSslError> &errors)
 {
     Q_UNUSED(errors);
-    // ⚠ 无条件放行所有证书错误（自签/过期/域名不符都连），wss:// 下等于放弃证书校验，
-    // 只适合内网调试。对接公网 Aibox 前应改为按指纹白名单或干脆拒绝。
-    // 注：地址填 ws:// 时走明文，本回调不会被触发。
+    // 当前口径：server_url 只填 ws://，明文路径不会触发本回调，这里是死代码。
+    // 若将来启用 wss://：① 本机 Qt 的 TLS 后端还缺 SSL_get_peer_certificate/EVP_PKEY_base_id
+    // 两个符号，握手路径本身就不安全（见 plan/roadmap.md §十 T-1）；② 这句无条件放行
+    // （自签/过期/域名不符都连）必须同时改成按指纹白名单或直接拒绝。
     socket_->ignoreSslErrors();
 }
 

@@ -193,6 +193,9 @@ include_directories(
     # === Rockchip MPP 媒体处理平台 ===
     ${CMAKE_SOURCE_DIR}/3rdparty/mpp/include
 
+    # === ZLMediaKit 流媒体服务器（内嵌 http 静态文件服务，供报警媒体出地址） ===
+    ${CMAKE_SOURCE_DIR}/3rdparty/zlmediakit/include
+
     # === JsonCpp JSON 解析库 ===
     ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/include
 
@@ -229,6 +232,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/media                 # 媒体运行时初始化
     ${CMAKE_SOURCE_DIR}/src/media/reader            # 视频读取（FFmpeg 硬解/MPP 解码/录像）
     ${CMAKE_SOURCE_DIR}/src/media/rga               # RGA 色彩转换
+    ${CMAKE_SOURCE_DIR}/src/media/server            # 内嵌 http 文件服务（报警媒体出地址用；全工程唯一 include mk_*.h 的目录）
 
     # --- ai 推理与模型应用域 ---
     ${CMAKE_SOURCE_DIR}/src/ai/model_repo           # 模型库注册表（扫描/导入/级联槽位）
@@ -306,6 +310,11 @@ set(CMAKE_INSTALL_RPATH "$ORIGIN/../lib")
 # 构建时的库搜索路径（编译时链接）
 set(CMAKE_BUILD_RPATH
     "${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg-rkmpp/lib"      # FFmpeg RKMPP 硬件解码库
+    "${CMAKE_SOURCE_DIR}/3rdparty/zlmediakit/aarch64"    # ZLMediaKit 流媒体库（报警媒体的 http 文件服务）
+    # libmk_api.so 自己的 DT_NEEDED 是版本化的 libssl.so.1.1/libcrypto.so.1.1，系统只有 OpenSSL 3。
+    # 本文件下方给 idge 传了 LINKER:--disable-new-dtags → 写出来是老式 DT_RPATH，能**传递**地
+    # 满足"依赖的依赖"（换成 DT_RUNPATH 就不行，那时只能靠 LD_LIBRARY_PATH）。
+    "${CMAKE_SOURCE_DIR}/3rdparty/openssl1.1.0/lib"      # OpenSSL 1.1（仅供 libmk_api.so 运行期解析）
     "${CMAKE_SOURCE_DIR}/3rdparty/rknpu2/Linux/aarch64"  # RKNN NPU 推理库
     "${CMAKE_SOURCE_DIR}/3rdparty/librga/Linux/aarch64"  # RGA 2D 加速库
     "${CMAKE_SOURCE_DIR}/3rdparty/kaldi_native_fbank/Linux/aarch64"  # 语音特征库（可选）
@@ -381,6 +390,7 @@ add_executable(${PROJECT_NAME}
 target_link_directories(${PROJECT_NAME} PUBLIC
     ${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg-rkmpp/lib       # FFmpeg 硬件解码库
     ${CMAKE_SOURCE_DIR}/3rdparty/libyuv/lib             # libyuv 色彩转换库
+    ${CMAKE_SOURCE_DIR}/3rdparty/zlmediakit/aarch64     # ZLMediaKit 流媒体库
     ${CMAKE_SOURCE_DIR}/3rdparty/librga/lib             # RGA 2D 加速库
     ${CMAKE_SOURCE_DIR}/3rdparty/rknpu2/Linux/aarch64   # RKNN NPU 推理库
     ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/lib            # JsonCpp JSON 库
@@ -422,6 +432,7 @@ target_link_libraries(${PROJECT_NAME}
     ssl                         # OpenSSL SSL/TLS
 
     # ==================== 第三方库 ====================
+    mk_api                      # ZLMediaKit 流媒体 API（报警媒体的内嵌 http 文件服务）
     jsoncpp                     # JsonCpp JSON 解析库
     sqlite3                     # SQLite 嵌入式数据库
 
@@ -616,6 +627,46 @@ target_include_directories(test_latest_frame_slot PRIVATE
 
 target_link_libraries(test_latest_frame_slot
     Threads::Threads
+)
+
+# ============================================================================
+# 报警上行离线自检（alarm_info 报文 + 媒体分块 + 读盘 + url 档地址换算）
+# 只编 alarm_uplink_engine.cpp 与 media_payload.cpp：用 FakeTransport 顶掉 WsClient，
+# 所以本目标不链 Qt5::WebSockets、不链 AlarmManager/DAO，也不需要 GUI 线程。
+# media_pump.cpp 不在这里——它是 QObject + 后台线程，成品回调要投回 GUI，留给板端端到端。
+# 两种 media_transport（ws_binary 分块帧 / url 只发地址）都在断言里，
+# ws_binary 那 11 组是"保留代码但默认关"的回归保护，改协议时不许顺手删。
+# 契约清单见 tests/test_alarm_uplink.cpp 文件头
+# 仓库根运行：./build/build_rk3588_linux/test_alarm_uplink，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_alarm_uplink
+    tests/test_alarm_uplink.cpp
+    src/biz/ws/alarm_uplink_engine.cpp
+    src/biz/ws/media_payload.cpp
+)
+
+target_include_directories(test_alarm_uplink PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/biz/ws
+)
+
+target_link_libraries(test_alarm_uplink
+    Qt5::Core
+)
+
+# ============================================================================
+# 报警上行接收端（人工对拍，不是自检）
+# QWebSocketServer 收 text + binary：ws_binary 档按 media_id 拼成文件落 outdir 并比 sha256；
+# url 档只打印 media_begin 里的地址与 sha256，一个字节都不落盘（对拍改用 curl 取回）。
+# 板子出网受限，联调只能 loopback：idge 的 server_url 指 ws://127.0.0.1:8765 即可。
+# 无 GUI 依赖（QCoreApplication），./build/build_rk3588_linux/ws_sink [port] [outdir]
+# ============================================================================
+add_executable(ws_sink
+    tests/ws_sink.cpp
+)
+
+target_link_libraries(ws_sink
+    Qt5::Core
+    Qt5::WebSockets
 )
 
 # ============================================================================

@@ -23,7 +23,7 @@
 //                  //    推理线程数 = 各通道模型数之和（一个模型一个 PpeTask 线程）。
 //     "geofence": {"enabled":true, "mode":"inside_alarm", "alarmClass":"person",
 //                  "throttleSeconds":10, "channels":{ "0":{...形状...} }},
-//     "recording":{...}, "database":{...}, "websocket":{...}, "gb28181":{...}
+//     "recording":{...}, "alarm_uplink":{...}, "database":{...}, "websocket":{...}, "gb28181":{...}
 //   }
 //
 // 两条设计口径，改配置或加键前先对齐：
@@ -145,12 +145,14 @@ ConfigManager &ConfigManager::instance()
 //   - 4 路视频都指向 "assets/test/192.mp4"，每路挂满参数表里的两个模型
 //   - 围栏：启用、inside_alarm、类别 person、节流 10 秒
 //   - 置信度阈值 0.25 / NMS 0.45
+//   - recording.enabled=true（报警必带关联片段）、alarm_uplink.enabled=false（默认不往外发）
 //
 // 参数：
 //   - path: 配置文件路径（默认 data/config.json）
 //
 // ============================================================================
 static QJsonObject makeRecordingDefaults();
+static QJsonObject makeAlarmUplinkDefaults();
 
 // 新装现场的默认 video 段。直接按 V2 写，是为了让全新配置根本不进迁移分支
 // （迁移分支只在读到老文件时才该跑一次）。
@@ -198,6 +200,9 @@ void ConfigManager::load(const QString &path)
         // 报警视频录制（硬件编码环形缓冲区）
         root_["recording"] = makeRecordingDefaults();
 
+        // 报警上行（P0-1：报警信息 + 截图 + 片段经 WS 推送）
+        root_["alarm_uplink"] = makeAlarmUplinkDefaults();
+
         saveUnsafe();  // 保存默认配置
         return;
     }
@@ -237,9 +242,15 @@ void ConfigManager::load(const QString &path)
             saveUnsafe();
     }
 
-    // 缺 recording 段时补齐默认值（enabled=false，不影响现网行为），让开关在文件里可见
+    // 缺 recording 段时补齐默认值（enabled=true，报警片段是需求验收项），让开关在文件里可见
     if (migrateRecordingDefaults()) {
         qInfo() << "[ConfigManager] 已补齐报警视频录制默认配置 (recording/)";
+        saveUnsafe();
+    }
+
+    // 缺 alarm_uplink 段时补齐默认值（enabled=false，默认不往外发；见 migrate 注释）
+    if (migrateAlarmUplinkDefaults()) {
+        qInfo() << "[ConfigManager] 已补齐报警上行默认配置 (alarm_uplink/)";
         saveUnsafe();
     }
 
@@ -511,9 +522,9 @@ bool ConfigManager::migrateSchemaV2()
 }
 
 // ============================================================================
-// 报警视频录制默认值一次性迁移（load 内持锁调用）
+// 报警视频录制 / 报警上行 默认值一次性迁移（load 内持锁调用）
 // ============================================================================
-// 老配置里没有 recording 段时补上全默认值（enabled=false，不改变现网行为）。
+// 老配置里没有这些段时补上全默认值。
 // 目的不是给程序兜底（getter 本来就有默认值），而是让这一段落进文件，
 // 现场运维能直接看到并改开关，否则要凭空手写一段 JSON。
 // 已有段一律不动：现场改过的值不能被启动流程覆盖。
@@ -521,9 +532,12 @@ bool ConfigManager::migrateSchemaV2()
 static QJsonObject makeRecordingDefaults()
 {
     return QJsonObject{
-        {"enabled", false},          // 常驻硬编要占 VPU，必须显式打开
+        {"enabled", true},           // 报警关联片段是需求验收项（requirements.md §三①），出厂即开
         {"codec", "hevc"},           // D2=b：主用 H.265（带宽减半）
-        {"buffer_seconds", 5},       // 环形缓冲区 5 秒
+        {"buffer_seconds", 8},       // 环形缓冲区 8 秒：报警窗口是"前3+后2"共 5 秒，
+                                     //   但缓冲区按**包数**算（buffer_seconds × 流报帧率），
+                                     //   入包节拍被 pacer 限到 ≤30fps，再加 gop_seconds=1 的
+                                     //   关键帧对齐最坏吃掉前向 1 秒 —— 5 秒是零余量卡边，故给 8
         {"bitrate", 2000000},        // 2 Mbps CBR
         {"gop_seconds", 1}           // 1 秒一个 IDR，报警片段起点对齐误差 ≤1s
     };
@@ -535,6 +549,40 @@ bool ConfigManager::migrateRecordingDefaults()
         return false;
     }
     root_["recording"] = makeRecordingDefaults();
+    return true;
+}
+
+// enabled 默认 false 的理由和 recording 相反：这是**往外发数据**，
+// 且当前链路是明文 ws + 零鉴权（plan/websocket.md §三 缺口 5），
+// 装完就自动往配置里的地址推报警，等于默认把数据送上网，必须人来打开。
+static QJsonObject makeAlarmUplinkDefaults()
+{
+    return QJsonObject{
+        {"enabled", false},          // 总开关：false 时 AlarmUplink 不订阅、不建线程、零分配
+        {"send_snapshot", true},     // 第一段（报警信息）里带上截图的传输计划
+        {"send_clip", true},         // 第二段带视频片段；recording.enabled=false 时自动降级为不发
+        {"media_transport", "url"},  // 媒体怎么交出去："url" = 本机起 http 文件服务、JSON 只发地址
+                                     //   （默认）；"ws_binary" = 字节走 WS 二进制分块帧（已实测，
+                                     //   但会占 GUI 线程写缓冲，且要求对端能收大帧，故不作默认）
+        {"media_http_port", 8090},   // media_transport="url" 时内嵌 http 服务的监听口。
+                                     //   取 8090 而非 80：板端 uid 1000 + ip_unprivileged_port_start=1024
+        {"media_base_url", ""},      // 地址前缀，空 = 自动（本机第一个非回环 IPv4 + 实际绑定端口）。
+                                     //   多网卡猜错、或对端只能经 NAT/域名访问时在这里写死
+        {"chunk_size", 262144},      // 二进制帧分块大小 256KB：Qt 出站按"一次调用=一个整帧"设计，
+                                     //   对端 maxFrameSize 更小时调这里，不用改代码
+        {"ack_timeout_ms", 15000},   // 等 uplink_ack 的超时（仅 expect_ack=true 时有意义）
+        {"max_attempts", 3},         // 同一项最多重投几次，超过判 failed 并打 warning
+        {"max_pending", 16},         // 待确认队列上限，满了丢最旧（与 ClipWriter/SnapWriter 同口径）
+        {"expect_ack", false}        // 对端当前不回 uplink_ack；true 时必须等确认才算完成
+    };
+}
+
+bool ConfigManager::migrateAlarmUplinkDefaults()
+{
+    if (root_.contains("alarm_uplink")) {
+        return false;
+    }
+    root_["alarm_uplink"] = makeAlarmUplinkDefaults();
     return true;
 }
 
@@ -1087,7 +1135,7 @@ static QJsonObject recordingSection(const QJsonObject &root)
 bool ConfigManager::recordingEnabled() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    return recordingSection(root_).value("enabled").toBool(false);
+    return recordingSection(root_).value("enabled").toBool(true);
 }
 
 QString ConfigManager::recordingCodec() const
@@ -1100,7 +1148,7 @@ QString ConfigManager::recordingCodec() const
 int ConfigManager::recordingBufferSeconds() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    return qBound(1, recordingSection(root_).value("buffer_seconds").toInt(5), 60);
+    return qBound(1, recordingSection(root_).value("buffer_seconds").toInt(8), 60);
 }
 
 int ConfigManager::recordingBitRate() const
@@ -1113,6 +1161,96 @@ int ConfigManager::recordingGopSeconds() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return qBound(1, recordingSection(root_).value("gop_seconds").toInt(1), 10);
+}
+
+// ============================================================================
+// alarm_uplink 段：报警上行（报警信息走 JSON；截图与片段按 media_transport 二选一，
+//                  默认本机 http 文件服务出地址，另一档是 WS 二进制分块帧）
+// ----------------------------------------------------------------------------
+// 与 recording 段同为只读 getter：这些值在 AlarmUplink::attach() 时一次性读取，
+// 运行期改动不重建状态机，因此不提供 setter（避免"改了不生效"的假接口）。
+// http 服务本体更不允许运行期重开：ZLM 的 mk_env_init 是进程级一次、stop 后不能再起
+//（见 src/media/server/http_file_service.h），所以端口改了要重启进程。
+// 缺键回退到 makeAlarmUplinkDefaults() 的同一份默认值。
+// ⚠ migrate 只补**整个缺失的 alarm_uplink 段**，不往已有段里加键 —— 现场老 config.json
+//   永远看不到 media_transport/media_http_port/media_base_url 这三键，靠的就是上面的缺键回退。
+// ============================================================================
+
+static QJsonObject alarmUplinkSection(const QJsonObject &root)
+{
+    return root["alarm_uplink"].toObject();
+}
+
+bool ConfigManager::alarmUplinkEnabled() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return alarmUplinkSection(root_).value("enabled").toBool(false);
+}
+
+bool ConfigManager::alarmUplinkSendSnapshot() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return alarmUplinkSection(root_).value("send_snapshot").toBool(true);
+}
+
+bool ConfigManager::alarmUplinkSendClip() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return alarmUplinkSection(root_).value("send_clip").toBool(true);
+}
+
+int ConfigManager::alarmUplinkChunkSize() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return qBound(65536, alarmUplinkSection(root_).value("chunk_size").toInt(262144), 1048576);
+}
+
+int ConfigManager::alarmUplinkAckTimeoutMs() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return qBound(2000, alarmUplinkSection(root_).value("ack_timeout_ms").toInt(15000), 60000);
+}
+
+int ConfigManager::alarmUplinkMaxAttempts() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return qBound(1, alarmUplinkSection(root_).value("max_attempts").toInt(3), 10);
+}
+
+int ConfigManager::alarmUplinkMaxPending() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return qBound(1, alarmUplinkSection(root_).value("max_pending").toInt(16), 64);
+}
+
+bool ConfigManager::alarmUplinkExpectAck() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return alarmUplinkSection(root_).value("expect_ack").toBool(false);
+}
+
+// 媒体交付方式。原样返回字符串，认不认得由 uplink 侧判（base 域不依赖 biz 域的字面量）。
+// 缺键或非 "ws_binary" 的一切取值都按 "url" 处理：url 是本轮定的默认，
+// 而把拼错的 "Ws_Binary"/"wsbinary" 也当默认，比"静默不发消息"更容易在日志里被发现。
+QString ConfigManager::alarmUplinkMediaTransport() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const QString raw = alarmUplinkSection(root_).value("media_transport").toString("url").trimmed();
+    return raw == QLatin1String("ws_binary") ? raw : QStringLiteral("url");
+}
+
+int ConfigManager::alarmUplinkMediaHttpPort() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    // 下界 1024 不是随手写的：板端 net.ipv4.ip_unprivileged_port_start=1024，
+    // 给个 80 进去只会 bind 失败，然后现场排查人员对着"服务起不来"的日志一头雾水
+    return qBound(1024, alarmUplinkSection(root_).value("media_http_port").toInt(8090), 65535);
+}
+
+QString ConfigManager::alarmUplinkMediaBaseUrl() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return alarmUplinkSection(root_).value("media_base_url").toString().trimmed();
 }
 
 // ==========================================
