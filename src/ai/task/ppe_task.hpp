@@ -143,12 +143,16 @@ public:
     //   newPath - 新模型文件路径
     //   newLabelPath - 新标签文件路径
     //   coreMask - NPU 核心掩码
+    //   numClasses - 新模型类别数，须与 init() 用的 config.numClasses 同源：
+    //                YOLO11Model 按类别数铺解码通道，传错（含形参缺省时的 80）
+    //                会让 1 类模型（如吸烟检测）解码错乱
     // 返回：true=成功；false=失败（新模型加载失败=旧模型继续工作；
     //   线程未在时限内退出=本槽位推理已停止，可待 isThreadFinished 后重试）
     // =================================================================
     bool reloadModel(const std::string &newPath,
                      const std::string &newLabelPath,
-                     rknn_core_mask coreMask);
+                     rknn_core_mask coreMask,
+                     int numClasses);
 
     // =================================================================
     // isThreadFinished - 推理线程是否已确认退出

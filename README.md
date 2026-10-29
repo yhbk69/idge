@@ -74,7 +74,7 @@ $IDGE_WORKSPACE/
 | 配置节 | 说明 |
 |--------|------|
 | `video.models` | 模型参数表，**以库目录名为键**：`{"yolo11n-ppe": {"alarm_class": "un_helmet", "note": "…"}}`。`alarm_class` 是**这个模型的参数**（不是槽位、不是通道），留空 = 只画框不报警；设置页"模型参数"表按行编辑 |
-| `video.channels` | 数组，**下标即通道号（0-based）**，条目里的 `channel` 字段只给人看。每路 = `source`/`note`/`enabled`/`models`。`models` 的顺序就是级联槽位顺序（画面上 `M1/M2/…` 前缀、报警 `result_id`），重排会改号；`enabled=false` 只决定启动时是否开这一路（改完需重启） |
+| `video.channels` | 数组，**下标即通道号（0-based）**，条目里的 `channel` 字段只给人看。每路 = `source`/`note`/`enabled`/`models`。`models` 的顺序就是级联槽位顺序（画面上 `M1/M2/…` 前缀、报警 `result_id`），重排会改号；`enabled=false` 表示这一路不开流。两者在设置页改完都会**重开该路**（见 §八 第 11 条），只有手改 config 文件需要自己点「浏览」或勾一下「启用」 |
 | `detect` | 检测参数。⚠ 整节当前都不生效：`conf_threshold`/`nms_threshold` 是**假开关**（推理侧不传参，实际用 `common.hpp` 的编译期 `BOX_THRESH`/`NMS_THRESH`）；`class_num`/`threads` 已连 getter 一起删掉（类别数属于每个模型，推理线程数 = 各通道模型数之和，设置页显示的是真实值），老配置里残留的这两个键程序不再读取 |
 | （无 `video.render`） | 推理间隔是编译期的 `frame_count % 3`（`ffmpeg_video_decoder.cpp` 的 4.6 节），**没有配置键**，别在 JSON 里加 `render.sampleInterval`——它只会变成一个改了不生效的假开关 |
 | `geofence` | 围栏**不属于级联**：复用该通道已有的检测结果、只做几何判定，不额外占用 NPU。`enabled` 总开关、`mode`（`inside_alarm`/`outside_alarm`）、`alarmClass` **单值触发类别**（默认 `person`，必须是该通道某个模型 `labels.txt` 里的叫法）、`throttleSeconds` 报警**节流下限**（默认 10 秒，每通道每类别窗口内只留一条）、`channels` 每路的矩形/多边形顶点（overlay 像素坐标，随存 `overlay_w`/`overlay_h`，改窗口布局会偏移）。报警语义是**进入沿**：人走进围栏报 1 条，站在里面不动不再报，离开 1.5 秒后再进来才算新事件（事件表在解码器 `fenceTracks_`，见 `src/biz/geofence/README.md`） |
@@ -425,19 +425,23 @@ Pad↔Aibox：frmMain 构造 → WsClient::start() → QWebSocket 连 websocket.
    同一设备被两路同时打开时后开的那路失败，报错只落在各自日志里
 10. **二维码扫描无去重/冷却**：`QRScanWorker` 每 100ms 采样、连续 3 帧内容一致即判定稳定，
     结果对话框关闭后若码仍在镜头前，约 0.8 秒会再次弹出同一结果
-11. **换模型/改通道模型仍需重启**：推理任务（`PpeTask` + 结果队列 + 类名表 + 报警类别）只在解码器
-    首次 `start()` 时按 `video.channels[ch].models` 建立，此后配置改动不影响在跑的任务；
-    `PpeTask::reloadModel()` 保留了唯一安全的换模型实现但全工程无调用方（roadmap P1-2）；
-    模型测试按钮会短时独占一次 NPU 上下文（GUI 阻塞秒级）。
+11. **通道配置改完就生效，但"生效"分两种**：报警类别（`video.models[<id>].alarm_class`）是**在线换**
+    ——解码线程每帧在锁内拷一份 `slotAlarmClasses_` 去构造报警上下文，下一帧起按新值判定，这一路不重连；
+    通道 `models` 与通道 `enabled` 则**重开该路**：停解码 → `releaseTasks()` → 按新配置重建任务集合。
+    重开的代价要认：该路重新拉流（本地文件回到开头、RTSP/国标是重连），GUI 正常停顿 <1 秒，
+    最坏被驱动卡住时按 `waitForStop()` 的有界等待走。出口只有 `frmMain::applyChannelConfigNow()` 一个。
+    `PpeTask::reloadModel()`（同数量原地换模型）仍未接线，留给 roadmap P1-2。
+    另：模型库的「测试选中」按钮会短时独占一次 NPU 上下文（GUI 阻塞秒级），与热更新无关。
     **设置页各改动的生效时机**（"改了没反应"先对这段口径）：
     即时生效——围栏形状（`FenceManager` 内存态，解码线程每帧现取）、围栏类别、围栏报警最小间隔、
-    WebSocket 地址（重连）、通道备注/模型备注、模型库导入与删除（盘点服务 `reloadEquipmentService()` 热更）；
-    重启后生效——通道 `models`、通道 `enabled`、模型 `alarm_class`（三者都被 `buildCascadeTasks()` 的
-    一次性 guard 冻结，报警判定沿用建任务时的快照）；`geofence.enabled`/`mode` 设置页里没有，
-    手改 config 后要么重启、要么在页面上动一次「围栏类别」触发 `loadFromConfig()` 顺带重载；
-    手输的视频源地址只落盘，要点「浏览」按钮才重开本路（重开后**模型列表仍是旧的**）；
+    WebSocket 地址（重连）、通道备注/模型备注、模型 `alarm_class`、模型库导入与删除
+    （盘点服务 `reloadEquipmentService()` 热更）；
+    重开该路——通道 `models`、通道 `enabled`、移除模型条目（槽位数变了，只能重建任务集合）；
+    只落盘——手输的视频源地址，要点「浏览」重开本路（或把「启用」勾掉再勾回）；
+    `geofence.enabled`/`mode` 设置页里没有，手改 config 后要么重启、要么在页面上动一次「围栏类别」触发 `loadFromConfig()` 顺带重载；
     `detect.conf_threshold`/`nms_threshold` 是假开关，改到重启都不生效（见 `src/base/config/README.md`）。
-    UI 上凡是重启后才生效的项，日志都会明写"（重启后生效）"。
+    热更新的离线自测：`./build/build_rk3588_linux/test_channel_reload`（必须在 build 目录下跑，
+    它驱动真解码器 + 真推理任务做 4 轮"停→释放→重建"，并检查线程数与 RSS 不涨）。
 12. **`wss://` 放弃证书校验**：`WsClient::onSslErrors` 无条件 `ignoreSslErrors()`，只适合内网调试；
     WS 发送也不排队，断线期间的 `ack` 直接丢弃（详见 `plan/websocket.md`）
 13. **NPU 负载按"各通道模型数之和"计**：4 路 × 每路 3 个模型 = 12 个推理任务打在 3 个核上，

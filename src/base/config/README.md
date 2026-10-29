@@ -37,13 +37,13 @@
 
 | 键 | 类型 | 说明 |
 | --- | --- | --- |
-| `models.<库目录名>.alarm_class` | string | **模型的参数**：该模型检出这一类才出报警；空 = 只画框不报警。不是通道或槽位属性，同一个模型挂在哪一路触发的都是同一个类别 |
+| `models.<库目录名>.alarm_class` | string | **模型的参数**：该模型检出这一类才出报警；空 = 只画框不报警。不是通道或槽位属性，同一个模型挂在哪一路触发的都是同一个类别。设置页改动对引用它的通道即时生效（见 `frmMain::applyAlarmClassNow`） |
 | `models.<库目录名>.label` | string | 标签文件覆盖，库外标签的逃生口；留空用库内 `labels.txt`（优先级：此值 > 库内） |
 | `models.<库目录名>.note` | string | 备注，仅供设置页展示 |
 | `channels[i]` | object | **数组下标即通道号（0-based）**；条目里的 `channel` 字段只给人看、不参与解析 |
 | `channels[i].source` | string | 本地文件 / `/dev/videoN` / RTSP，交给 `avformat_open_input` |
-| `channels[i].enabled` | bool | 只影响启动时是否打开这一路（改完需重启，不做运行期起停） |
-| `channels[i].models` | array | 有序库 id 列表，**顺序即级联槽位顺序**（画面上 M1/M2/… 前缀与报警 `result_id`），重排会改号 |
+| `channels[i].enabled` | bool | 这一路是否开流。设置页改完即时生效（停用=停本路，启用=按 `source` 重开），手改文件需重启或让该路重开一次 |
+| `channels[i].models` | array | 有序库 id 列表，**顺序即级联槽位顺序**（画面上 M1/M2/… 前缀与报警 `result_id`），重排会改号。设置页改动即时生效：该路 stop→`releaseTasks()`→start 重开一次 |
 
 对应 API：`channelSource/Note/Enabled/ModelIds(int ch)`（一律 0-based）+
 `modelParam/libId` 系列 + `modelParamUsers(id)`（供删除守卫统计引用）。
@@ -131,7 +131,8 @@ ConfigManager::instance().save();                          // 显式落盘
 
 // 围栏整段由 geofence::FenceManager 经 setGeofenceChannels()+save() 落盘
 
-// schema V2：按通道 + 按模型（ch 一律 0-based；改完需重启才生效）
+// schema V2：按通道 + 按模型（ch 一律 0-based）。本类只负责存值，
+// "改完要不要重开该路"是设置页的事（见 README §八 第 11 条）
 ConfigManager::instance().setChannelSource(0, "rtsp://192.168.1.10/stream1");
 ConfigManager::instance().setChannelModelIds(0, {"yolo11n-ppe", "yolo11n-coco"}); // 顺序即槽位
 ConfigManager::instance().setModelAlarmClass("yolo11n-ppe", "un_helmet");         // 模型参数

@@ -618,3 +618,77 @@ target_include_directories(test_latest_frame_slot PRIVATE
 target_link_libraries(test_latest_frame_slot
     Threads::Threads
 )
+
+# ============================================================================
+# 通道配置热更新自测（真解码器 + 真推理任务，无 GUI）
+# 覆盖三条契约：停止判据 isLoopAlive、releaseTasks 后按新配置重建槽位、
+# 反复重开线程数与 RSS 不涨；顺带用 updateSlotAlarmClasses 的返回值验证形状判据
+# cwd 必须是 build 目录（模型库按 ./model/library 解析）：
+#   ./build/build_rk3588_linux/test_channel_reload，rc 0=PASS 1=FAIL
+# 源列表 = ffmpeg_video_decoder.cpp 的依赖闭包（平铺 include 与主目标同套库）
+# ============================================================================
+add_executable(test_channel_reload
+    tests/test_channel_reload.cpp
+    src/media/reader/ffmpeg_video_decoder.cpp
+    src/media/reader/video_recorder.cpp
+    src/ai/task/ppe_task.cpp
+    src/ai/task/base_task.cpp
+    src/ai/task/helmet_task.cpp
+    src/ai/model_repo/model_registry.cpp
+    src/base/config/ConfigManager.cpp
+    src/base/config/parse_config.cpp
+    src/base/buffer/dma_alloc.cpp
+    src/base/buffer/DmaFrameBuffer.cpp
+    src/biz/alarm/alarm_manager.cpp
+    src/biz/db/alarm_dao.cpp
+    src/biz/db/detection_dao.cpp
+    src/biz/db/database_manager.cpp
+    src/biz/geofence/fence_manager.cpp
+    src/biz/geofence/fence_checker.cpp
+    src/base/utils/image_utils.cpp
+    src/base/utils/image_drawing.cpp
+    src/base/utils/draw_utils.cpp
+    src/base/utils/file_utils.cpp
+    src/base/utils/path_utils.cpp
+    src/base/utils/task_manager.cpp
+)
+
+# 主目标的库搜索路径是 target_link_directories(${PROJECT_NAME})，不会传给本目标，
+# 这里同一套再来一遍（av*/rga/jsoncpp 都只在这些目录里）。
+target_link_directories(test_channel_reload PRIVATE
+    ${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg-rkmpp/lib
+    ${CMAKE_SOURCE_DIR}/3rdparty/libyuv/lib
+    ${CMAKE_SOURCE_DIR}/3rdparty/librga/lib
+    ${CMAKE_SOURCE_DIR}/3rdparty/rknpu2/Linux/aarch64
+    ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/lib
+)
+
+target_link_libraries(test_channel_reload
+    Qt5::Core
+    Qt5::Gui
+    Qt5::Widgets
+    Qt5::Sql
+    Qt5::Network
+    avformat
+    avcodec
+    avutil
+    swscale
+    swresample
+    pthread
+    dl
+    drm
+    jsoncpp
+    sqlite3
+    rknnrt
+    rga
+    ${OpenCV_LIBS}
+    ${GLES2_LIBRARIES}
+    ${EGL_LIBRARIES}
+    ${LIBJPEG}
+    ${LIBRGA}
+    Threads::Threads
+)
+# 与主目标同宏：零拷贝流水线（DMA-BUF/RGA）在 decodeLoop 里是编译期分支
+target_compile_definitions(test_channel_reload PRIVATE ZERO_COPY)
+
+target_link_options(test_channel_reload PRIVATE "LINKER:--allow-shlib-undefined" "LINKER:--disable-new-dtags")

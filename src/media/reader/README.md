@@ -27,8 +27,10 @@ FFmpegVideoDecoder（QObject，独立 QThread）
   （智能识别 QR/OCR），下面第二条分支不存在
   buildCascadeTasks 在 **start()** 里执行（不是构造期）：4 个 PlayerWidget 是 .ui 提升控件、
   构造时拿不到通道号，而 open() 是 setChannel(ch) 紧接 start(url)，只有在 start() 才
-  能按 channel_ 解析本通道的槽位。入口有 `if (!tasks_.empty()) return;` 守卫，
-  保持"任务与模型只加载一次、改配置需重启"的既有语义
+  能按 channel_ 解析本通道的槽位。入口的 `if (!tasks_.empty()) return;` 守卫含义是
+  "任务集合只在容器为空时建立"，**不是**"改配置必须重启程序"：改模型列表走
+  signalStop/waitForStop → releaseTasks()（清空四个并行向量，能删的 PpeTask 真删，
+  推理线程未确认退出的转入 quarantine_ 不删）→ 重新 start()，下一次建任务即按新配置
   ModelRegistry::resolveChannelSlots(channel_) → 每槽一个 PpeTask（核掩码进程级轮转，
   不是每通道各自 slotIdx%3）；槽的类别名/报警类留在解码器（slotClassNames_/slotAlarmClasses_）
   av_read_frame → AVPacket(h264) → avcodec(MPP) → AVFrame(DRM_PRIME NV12, fd)
@@ -151,9 +153,20 @@ det.detectRgba(rgbaPixels, width, height, stride /*>=width*4*/,
   与 `boxSmoother_` 同口径、无需加锁）把同一目标的连续命中归并成一次入侵事件——匹配上只续期不报警，
   匹配不上才算新进入并报警，离开超过 1.5 秒事件结束、再进来算新事件。
   `decodeLoop()` 开头与 `boxSmoother_` 一起清空（重开流即新的一段监控）。
-- **改模型列表要重启**：`buildCascadeTasks()` 只在首次 `start()` 生效（`tasks_` 非空即返回），
-  换模型/改级联不会热更新；`PpeTask::reloadModel()` 是这条能力唯一安全的实现，当前无调用方
-  （详见 `plan/roadmap.md` P1-2）。
+- **改模型列表 = 重开该路，不是重启程序**：设置页改 `channels[].models` / `enabled` 后走
+  `signalStop → waitForStop → releaseTasks() → start()`，任务集合按新配置重建；改
+  `models[].alarm_class` 更轻，`updateSlotAlarmClasses()` 在线换（只改写 `slotAlarmClasses_`，
+  解码线程每帧在 `alarmClsMtx_` 内拷一份去构造 `SlotContext`，画面不重连）。
+  判据是形状：槽位数与配置不符（例如该路走的是默认回退模型）时 `updateSlotAlarmClasses()`
+  返回 false，调用方据此退回整路重开。同数量原地换模型仍未接线（`PpeTask::reloadModel()`，
+  详见 `plan/roadmap.md` P1-2）。
+- **重开前必须把对象搬回 GUI 线程**：`start()` 里 `moveToThread(thread_)` 之后，本对象的线程归属
+  就在解码线程上；那一轮 `QThread` 析构后归属仍挂在那条已不存在的线程上，下一次 `start()` 的
+  `moveToThread` 会被 Qt 拒绝（`Current thread ... is not the object's thread`），于是
+  `started → decodeLoop` 这条队列连接投递不出去，**本路一帧都不出**（画面静默冻在最后一帧）。
+  `start()` 因此额外挂了一个 `finished` 的 DirectConnection：由正在结束的线程自己把对象搬回
+  开流线程，并用 `liveLoops_ == 0 && currentThread() == thread()` 两个判据避免抢搬
+  （被遗弃的旧循环可能晚于新一轮 `start()` 才退出）。回归位：`tests/test_channel_reload.cpp`。
 - **NPU 负载 = Σ各通道模型数**：4 通道 × 3 模型 = 12 路推理任务会打爆 3 个核。任务创建时按进程级
   轮转分配核，总数 > 6 只打软告警、不拦截；跨通道共享一份模型上下文是尚未做的优化。
 - **模型输入约定**：PpeTask 收到的是 RGA letterbox 后的 640x640 RGB888 DMA-BUF，坐标还原靠 `letterbox_t{x_pad,y_pad,scale}`；SCRFD 是左上对齐黑边填充，逆变换只除 scale。
@@ -163,7 +176,10 @@ det.detectRgba(rgbaPixels, width, height, stride /*>=width*4*/,
   指针本身在解码器运行期间一直有效，但**内容约 2 帧后就被覆盖**，取到必须当场读完；调用方（智能识别页）
   负责"先停自己的取帧线程、再 `decoder->stop()`"，`stop()` 会把指针置 nullptr 作为兜底。
   需要跨线程安全交付帧请走 `frameReady` 信号（自带 dup fd）或 `src/base/queue/latest_frame_slot.h`，别拿这个接口当队列用。
-- **线程约束**：ScrfdFaceDetector 的 `rknn_context` 非线程安全，仅在解码线程内使用；`stop()` 后 `tasks_` 故意不 delete（detach 线程可能仍在回调，防 UAF）；`dmaBufferPool_` 借用遵循"最后一个引用释放自动归还"，新增提前 return 必须保证归还。
+- **线程约束**：ScrfdFaceDetector 的 `rknn_context` 非线程安全，仅在解码线程内使用；`stop()` 后 `tasks_`
+  故意不 delete（detach 线程可能仍在回调，防 UAF），只有 `releaseTasks()` 在"解码循环已退出 +
+  逐个 `isThreadFinished()` 确认"的前提下才真删，确认不了的转入 `quarantine_`（宁可漏一个对象，
+  也不在 detach 的线程脚下抽走内存）；`dmaBufferPool_` 借用遵循"最后一个引用释放自动归还"，新增提前 return 必须保证归还。
 - **已知隐患**（详见各文件头注释）：
   - `image_buffer_t::time`/`TaskData::time` 实际为 **epoch 纳秒**，而 `common.hpp` 文档写毫秒、`src/biz/alarm` 限流常量按纳秒比较——单位三方不一致，勿随手"换算"；
   - EOF drain 分支仅 unref 尾部 packet，可能丢最后几帧；

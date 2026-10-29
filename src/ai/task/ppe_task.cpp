@@ -318,7 +318,8 @@ void PpeTask::restartThread()
 // ============================================================================
 bool PpeTask::reloadModel(const std::string &newPath,
                            const std::string &newLabelPath,
-                           rknn_core_mask coreMask)
+                           rknn_core_mask coreMask,
+                           int numClasses)
 {
     qInfo() << "PpeTask: Reloading model from" << QString::fromStdString(newPath);
 
@@ -338,7 +339,9 @@ bool PpeTask::reloadModel(const std::string &newPath,
     // 2. 尝试创建新模型（如果失败，旧模型原样重启）
     std::shared_ptr<YOLO11Model> newModel;
     try {
-        newModel = std::make_shared<YOLO11Model>(newPath, newLabelPath, coreMask);
+        // numClasses 必须与 init() 同源：YOLO11Model 的解码按类别数分配，
+        // 少传会落到默认 80，1 类模型（吸烟检测）走这条路必然解码错乱。
+        newModel = std::make_shared<YOLO11Model>(newPath, newLabelPath, coreMask, numClasses);
     } catch (const std::exception &e) {
         qWarning() << "PpeTask: Failed to load new model:" << e.what();
         restartThread();  // 旧线程已确认退出，重启安全
@@ -351,6 +354,7 @@ bool PpeTask::reloadModel(const std::string &newPath,
     config.modelPath = newPath;
     config.labelPath = newLabelPath;
     config.core_mask = coreMask;
+    config.numClasses = numClasses;
 
     // 4. 清空残留旧帧 + 复位队列 + 重启推理线程
     restartThread();

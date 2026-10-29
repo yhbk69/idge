@@ -314,8 +314,8 @@ void frmMain::initForm()
     geofence::FenceManager::instance().loadFromConfig();
 
     // 11. 按通道配置打开四路视频（必须在 config 加载之后）
-    //     enabled=false 的通道留空，四宫格显示"未开流"；改这个开关需要重启才生效
-    //     （解码器的推理任务只在首次 start() 时建立，见 buildCascadeTasks）。
+    //     enabled=false 的通道留空，四宫格显示"未开流"。运行中改这个开关（以及
+    //     模型列表）不需要重启：设置页会经 applyChannelConfigNow() 重开该路。
     ConfigManager &cfg = ConfigManager::instance();
     for (int ch = 0; ch < cfg.channelCount(); ++ch) {
         if (cfg.channelEnabled(ch))
@@ -1048,7 +1048,7 @@ void frmMain::initDebugPage()
             });
             gl->addWidget(chNoteEdit_[i], i, 3);
 
-            // 启用开关：只决定启动时是否打开这一路（改完需重启生效）
+            // 启用开关：即时生效——停用即停本路，启用即按当前源地址重开本路
             QCheckBox *enableBox = new QCheckBox("启用");
             enableBox->setChecked(cfg.channelEnabled(i));
             enableBox->setStyleSheet(theme::text(theme::TEXT, theme::FS_BODY));
@@ -1056,8 +1056,8 @@ void frmMain::initDebugPage()
                 ConfigManager &c = ConfigManager::instance();
                 c.setChannelEnabled(i, on);
                 c.save();
-                log("system", QString("通道%1 已%2（重启后生效）")
-                        .arg(i + 1).arg(on ? "启用" : "停用"));
+                log("system", QString("通道%1 已%2").arg(i + 1).arg(on ? "启用" : "停用"));
+                applyChannelConfigNow(i);
             });
             gl->addWidget(enableBox, i, 4);
 
@@ -1253,6 +1253,106 @@ QLineEdit *frmMain::channelSourceEdit(int channel) const
 }
 
 // ============================================================
+// applyChannelConfigNow: 让某一路按当前 config 重新拉起来
+// ============================================================
+// 语义是"重开本路"：停解码线程 → 释放该路全部推理任务 → 按 config 重新开流。
+// 下一次 start() 里 buildCascadeTasks() 见 tasks_ 为空，就会按新配置重建槽位
+// （数量、顺序、类名表、报警类别、围栏前置告警全部重算一遍）。
+//
+// 为什么不在跑着的解码线程里原地增删槽位：stop/signalStop/waitForStop 都从
+// GUI 线程遍历 tasks_，解码线程同时也在读它，改形状只允许发生在解码循环
+// 已退出之后 —— 所以整条热更新路径都必须"先停干净，再动容器"。
+//
+// 这里的阻塞是刻意的：waitForStop 有界（3s + 10s + 1.5s×槽位），正常 <1 秒。
+// 所以日志必须先打再停，否则现场只看到"点了没反应"。
+//
+// 前提：调用方已把改动写进 ConfigManager 并 save()，本函数只读配置、不写。
+// ============================================================
+void frmMain::applyChannelConfigNow(int channel)
+{
+    PlayerWidget *pw = videoWindow ? videoWindow->playerWidget(channel) : nullptr;
+    FFmpegVideoDecoder *dec = pw ? pw->decoder() : nullptr;
+    if (!dec) {
+        log("system", QStringLiteral("通道%1 没有解码器，配置将在下次开流时生效").arg(channel + 1));
+        return;
+    }
+
+    log("system", QStringLiteral("通道%1 正按新配置重开本路…").arg(channel + 1));
+    pw->signalStop();
+    pw->waitForStop();
+    if (dec->isLoopAlive()) {
+        // 上一轮解码卡在驱动里没退（此时 releaseTasks/start 都不安全）：交给下一次点击
+        log("system", QStringLiteral("通道%1 解码线程仍在退出中，本次重开已跳过（配置已保存，稍后再改一次即可生效）")
+                            .arg(channel + 1));
+        return;
+    }
+    dec->releaseTasks();
+
+    ConfigManager &cfg = ConfigManager::instance();
+    const QString source = cfg.channelSource(channel);
+    const QStringList ids = cfg.channelModelIds(channel);
+    if (!cfg.channelEnabled(channel))
+        log("system", QStringLiteral("通道%1 已停用，本路不开流").arg(channel + 1));
+    else if (source.isEmpty())
+        log("system", QStringLiteral("通道%1 没有视频源地址，本路不开流").arg(channel + 1));
+    else {
+        videoWindow->openVideo(channel, source);
+        log("system", QStringLiteral("通道%1 已重开: %2 ｜ 模型 %3")
+                            .arg(channel + 1)
+                            .arg(source)
+                            .arg(ids.isEmpty() ? QStringLiteral("(未配置，回退库内默认模型)")
+                                               : ids.join(QStringLiteral(" → "))));
+    }
+    // 界面显示的"推理线程数 = Σ各通道模型"，重建后必须跟着刷新，否则是旧值
+    if (ui->labThreadsVal)
+        ui->labThreadsVal->setText(QString("%1 路（Σ各通道模型）").arg(configuredTaskCount()));
+}
+
+// ============================================================
+// applyAlarmClassNow: 报警类别改动即时生效
+// ============================================================
+// 报警类别只是一个字符串，不动模型、不动槽位数，可以在解码线程继续跑的同时换掉：
+// 解码器每帧在锁内拷一份 slotAlarmClasses_ 去构造报警上下文，下一帧起就是新值。
+// 只碰"引用该模型的通道"，其余路与本条改动无关。
+// 若某路的槽位数已与配置对不上（该路模型列表也改过，或它走的是默认回退模型），
+// 在线换做不了，该路退回整路重开。
+// ============================================================
+void frmMain::applyAlarmClassNow(const QString &libId)
+{
+    ConfigManager &cfg = ConfigManager::instance();
+    const QList<int> users = cfg.modelParamUsers(libId);
+    if (users.isEmpty()) {
+        log("system", QStringLiteral("模型 %1 当前没有通道引用，报警类别将在它被勾上时生效").arg(libId));
+        return;
+    }
+
+    QStringList live;
+    for (int ch : users) {
+        PlayerWidget *pw = videoWindow ? videoWindow->playerWidget(ch) : nullptr;
+        FFmpegVideoDecoder *dec = pw ? pw->decoder() : nullptr;
+        if (!dec)
+            continue;
+        std::vector<QString> cls;
+        // 变量名不能叫 slots：Qt 把 slots 定义成宏（qobjectdefs.h）
+        const QList<ResolvedSlot> resolved = ModelRegistry::resolveChannelSlots(ch);
+        cls.reserve(resolved.size());
+        for (const ResolvedSlot &s : resolved)
+            cls.push_back(s.alarmClass);
+        if (dec->updateSlotAlarmClasses(cls)) {
+            live << QString::number(ch + 1);
+            continue;
+        }
+        if (dec->isLoopAlive()) {
+            log("system", QStringLiteral("通道%1 的槽位数与配置不一致，本路按新配置重开").arg(ch + 1));
+            applyChannelConfigNow(ch);
+        }
+        // 没在跑的路不用管：下次开流本来就会按新配置建任务
+    }
+    if (!live.isEmpty())
+        log("system", QStringLiteral("报警类别已即时生效（无需重开流）: 通道%1").arg(live.join(QStringLiteral("、"))));
+}
+
+// ============================================================
 // settingsContentLayout: 设置页滚动区的内容布局
 //   initDebugPage 开头把 pageSettings 的原控件整体包进了 QScrollArea，
 //   它是 pageSettings 布局的第 0 项；要往页尾加分组框就往这里插。
@@ -1295,7 +1395,8 @@ void frmMain::initModelParamsUi()
     QVBoxLayout *v = new QVBoxLayout(group);
 
     QLabel *hint = new QLabel(
-        "报警类别留空 = 这个模型只画框不报警；改完需重启（推理任务只在启动时建立）");
+        "报警类别留空 = 这个模型只画框不报警；改动对已引用它的通道即时生效"
+        "（槽位数没变则在线换，否则自动重开那一路）");
     hint->setWordWrap(true);
     hint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
     v->addWidget(hint);
@@ -1380,8 +1481,9 @@ void frmMain::refreshModelParamsTable()
                     const QString cls = clsCombo->currentData().toString();
                     c.setModelAlarmClass(id, cls);
                     c.save();
-                    log("system", QString("模型 %1 报警类别: %2（重启后生效，运行中的通道仍按旧类别判定）")
+                    log("system", QString("模型 %1 报警类别: %2")
                             .arg(id, cls.isEmpty() ? QStringLiteral("(不报警)") : cls));
+                    applyAlarmClassNow(id);
                 });
         modelParamTable_->setCellWidget(r, 1, clsCombo);
 
@@ -1418,11 +1520,17 @@ void frmMain::refreshModelParamsTable()
                 != QMessageBox::Ok)
                 return;
             ConfigManager &c = ConfigManager::instance();
+            // 引用名单必须在移除前取：removeModelParam 会连各通道的 models 一起剔掉，
+            // 之后 modelParamUsers(id) 恒为空，就不知道该重开哪几路了。
+            const QList<int> affected = c.modelParamUsers(id);
             c.removeModelParam(id);
             c.save();
             refreshModelParamsTable();
             refreshModelLibraryTable();
             log("system", QStringLiteral("模型 %1 的配置条目已移除").arg(id));
+            // 少了一个槽位 = 任务集合形状变了，在线换类别这条路走不通，只能整路重开
+            for (int ch : affected)
+                applyChannelConfigNow(ch);
         });
         modelParamTable_->setCellWidget(r, 4, removeBtn);
     }
@@ -1452,7 +1560,8 @@ void frmMain::openChannelModelsDialog(int channel)
 
     QLabel *tip = new QLabel(QStringLiteral(
         "勾选该通道要跑的模型；列表顺序即级联槽位顺序（画面左上角 M1/M2… 与报警 result_id 同序），"
-        "用『上移/下移』调整。改完重启生效。"));
+        "用『上移/下移』调整。确定后本通道会立即按新列表重开一次：该路重新拉流"
+        "（本地文件回到开头、RTSP/国标是重连），画面停顿约一秒。"));
     tip->setWordWrap(true);
     tip->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
     v->addWidget(tip);
@@ -1525,10 +1634,12 @@ void frmMain::openChannelModelsDialog(int channel)
     c.save();
     refreshModelParamsTable();
     refreshModelLibraryTable();
-    log("system", QStringLiteral("通道%1 级联模型: %2（重启后生效）")
+    log("system", QStringLiteral("通道%1 级联模型: %2")
                     .arg(channel + 1)
                     .arg(picked.isEmpty() ? QStringLiteral("(空，将回退库内默认模型)")
                                           : picked.join(QStringLiteral(" → "))));
+    // 模型列表决定推理任务的槽位数与类名表，只能重建任务集合 → 重开本路
+    applyChannelConfigNow(channel);
 }
 
 // ============================================================
@@ -1968,7 +2079,7 @@ void frmMain::openVideoToChannel(int channel, const QString &path)
     // decoder 通道号改成 0——槽位解析、报警键、围栏全部按通道 0 走。
     videoWindow->openVideo(channel, path);
     if (!path.isEmpty())
-        log("system", QString("通道%1 视频源已加载: %2（模型列表沿用启动时的配置，改模型/报警类别需重启程序）")
+        log("system", QString("通道%1 视频源已加载: %2（模型与报警类别沿用当前配置，改动在设置页即时生效）")
                         .arg(channel + 1).arg(path));
 }
 

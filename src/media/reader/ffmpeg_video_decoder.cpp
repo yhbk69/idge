@@ -608,7 +608,8 @@ static std::vector<std::string> readLabelNames(const QString &labelPath)
 void FFmpegVideoDecoder::buildCascadeTasks()
 {
     if (!tasks_.empty())
-        return;  // stop()→start() 重启路径：任务与模型只在首次建立（改配置需重启）
+        return;  // 任务集合只在 tasks_ 为空时建立。改模型列表请先 releaseTasks()
+                 // 再 start()（设置页「模型…」即走这条路）；只改报警类别用 updateSlotAlarmClasses()。
 
     ConfigManager &cfg = ConfigManager::instance();
     // 正常启动时 frmmain 早已 load()；这里只兜"直接 new 解码器"这种用法下配置还没读进来。
@@ -683,7 +684,11 @@ void FFmpegVideoDecoder::buildCascadeTasks()
         // 报警类别是"模型的参数"（video.models[<id>].alarm_class），空 = 只画框不报警。
         // 存在本解码器里而非 AlarmManager 单例：按通道配置后，通道 0 的槽位 1 与
         // 通道 2 的槽位 1 是两个不同模型，写进同一张全局表会互相覆盖。
-        slotAlarmClasses_.push_back(s.alarmClass);
+        // 加锁是因为运行期 GUI 可以经 updateSlotAlarmClasses() 改写这张表（槽位数不变时）。
+        {
+            std::lock_guard<std::mutex> lk(alarmClsMtx_);
+            slotAlarmClasses_.push_back(s.alarmClass);
+        }
     }
 
     qDebug() << "Cascade tasks channel" << channel_ << ":" << tasks_.size();
@@ -715,6 +720,66 @@ void FFmpegVideoDecoder::buildCascadeTasks()
 }
 
 FFmpegVideoDecoder::~FFmpegVideoDecoder() { stop(); }
+
+// ============================================================================
+// releaseTasks: 丢弃本通道全部推理任务与槽位表（热更新用）
+// ============================================================================
+// 前提见头文件：解码循环已退出（isLoopAlive()==false）且由 GUI 线程调用。
+// 之后下一次 start() 里 buildCascadeTasks() 会因 tasks_ 为空而按新配置重建，
+// 槽位数/顺序/类名表/报警类别/围栏前置告警全部重新算一遍。
+//
+// 为什么这里可以 delete，而 stop() 不行：stop() 之后解码线程可能还在跑，
+// 而本函数的调用点已确认旧循环退出、且每个任务的推理线程用 isThreadFinished()
+// 逐个确认（finished_ 由 run() 退出时置位）。没确认的那些照旧不删，转入
+// quarantine_ —— 宁可漏一个对象，也不在 detach 的线程脚下抽走内存。
+void FFmpegVideoDecoder::releaseTasks()
+{
+    if (liveLoops_.load() > 0) {
+        qWarning() << "[decoder] 通道" << channel_
+                   << "解码循环仍在运行，releaseTasks 已拒绝（推理任务保持不变）";
+        return;
+    }
+
+    int freed = 0;
+    for (PpeTask *task : tasks_) {
+        if (!task)
+            continue;
+        if (task->isThreadFinished()) {
+            delete task;
+            ++freed;
+        } else {
+            qWarning() << "[decoder] 通道" << channel_
+                       << "有推理线程未确认退出，本槽对象暂不回收（隔离计数"
+                       << (int)(quarantine_.size() + 1) << "）";
+            quarantine_.push_back(task);
+        }
+    }
+
+    tasks_.clear();
+    slotQueues_.clear();
+    slotClassNames_.clear();
+    {
+        std::lock_guard<std::mutex> lk(alarmClsMtx_);
+        slotAlarmClasses_.clear();
+    }
+    qInfo() << "[decoder] 通道" << channel_ << "推理任务已释放" << freed << "个，等待按新配置重建";
+}
+
+// ============================================================================
+// updateSlotAlarmClasses: 在线换报警类别（不换模型、不动槽位数）
+// ============================================================================
+// 只改写 slotAlarmClasses_：解码线程每帧在锁内拷一份去构造 SlotContext，
+// 所以下一帧起报警判定就是新值。画框、类名表、推理任务一概不受影响。
+bool FFmpegVideoDecoder::updateSlotAlarmClasses(const std::vector<QString> &cls)
+{
+    std::lock_guard<std::mutex> lk(alarmClsMtx_);
+    if (cls.size() != slotAlarmClasses_.size()) {
+        // 槽位数变了 = 模型列表改过，这条路做不了，交回调用方走 releaseTasks+重开
+        return false;
+    }
+    slotAlarmClasses_ = cls;
+    return true;
+}
 
 // ============================================================================
 // 启动解码器
@@ -753,7 +818,7 @@ void FFmpegVideoDecoder::start(const QString &url)
     running_ = true;
 
     // 按本通道配置建立推理任务（PreviewOnly 模式整条推理链路不建；
-    // 已有任务时是空操作，即"改配置需重启"）
+    // 已有任务时是空操作，所以"换模型列表"必须先 releaseTasks() 再走到这里）
     if (inferenceEnabled_)
         buildCascadeTasks();
 
@@ -767,6 +832,21 @@ void FFmpegVideoDecoder::start(const QString &url)
     moveToThread(thread_);
     connect(thread_, &QThread::started, this, &FFmpegVideoDecoder::decodeLoop);
     connect(thread_, &QThread::finished, thread_, &QThread::deleteLater);
+
+    // 线程结束时把本对象的归属搬回开流线程（GUI）。
+    // 不做这一步，重开同一通道必然哑火：上一轮的 QThread 析构后，本对象的线程
+    // 归属仍挂在那条已不存在的线程上，下一次 start() 里 moveToThread() 会被 Qt
+    // 拒绝（"Current thread is not the object's thread"），于是 started→decodeLoop
+    // 这条队列连接永远投递不到，本路一帧都不出。
+    // finished 由正在结束的线程自己发出（DirectConnection 保证在本线程执行），
+    // 此刻 currentThread 正是对象所属线程，移动才合法。
+    // 两个判据各挡一种误伤：liveLoops_ 挡"本对象已被新一轮 start() 接管"，
+    // currentThread()==thread() 挡"被遗弃的旧线程比新一轮 start() 更晚退出"。
+    QThread *owner = QThread::currentThread();
+    connect(thread_, &QThread::finished, this, [this, owner] {
+        if (liveLoops_.load() == 0 && QThread::currentThread() == thread())
+            moveToThread(owner);
+    }, Qt::DirectConnection);
 
     thread_->start();
 }
@@ -1568,8 +1648,16 @@ void FFmpegVideoDecoder::decodeLoop()
                     // 由解码器构造、随结果传进 AlarmManager，单例里不再存全局槽表——
                     // 按通道配置之后，通道 0 的槽位 1 与通道 2 的槽位 1 是两个不同模型。
                     std::vector<AlarmManager::SlotContext> slotCtxs(slotQueues_.size());
+                    // 报警类别每帧现取一份快照：设置页改 alarm_class 时不重启、不重开本路
+                    // 也能生效（槽位数不变的前提下）。锁只覆盖这一次 ≤5 元素的拷贝。
+                    std::vector<QString> alarmClassSnap;
+                    {
+                        std::lock_guard<std::mutex> lk(alarmClsMtx_);
+                        alarmClassSnap = slotAlarmClasses_;
+                    }
                     for (size_t k = 0; k < slotQueues_.size(); ++k) {
-                        slotCtxs[k].alarmClass = slotAlarmClasses_[k];
+                        slotCtxs[k].alarmClass =
+                            (k < alarmClassSnap.size()) ? alarmClassSnap[k] : QString();
                         slotCtxs[k].classNames.reserve((int)slotClassNames_[k].size());
                         for (const auto &n : slotClassNames_[k])
                             slotCtxs[k].classNames << QString::fromStdString(n);

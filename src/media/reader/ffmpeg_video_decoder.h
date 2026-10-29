@@ -28,6 +28,7 @@
 #include <QThread>
 #include <QString>
 #include <atomic>
+#include <mutex>
 #include <thread>
 #include <vector>
 #include <string>
@@ -76,6 +77,36 @@ public:
     void signalStop();
     void waitForStop();
     void setChannel(int ch) { channel_ = ch; }
+
+    /**
+     * @brief 本路 decodeLoop 是否还在跑（start() 拒绝重启用的同一判据）
+     *
+     * 热更新流程要靠它确认"旧循环真的退了"：signalStop()+waitForStop() 之后
+     * 若仍为 true，说明解码线程被超时遗弃，此时绝不能碰 tasks_，也不能 start()。
+     */
+    bool isLoopAlive() const { return liveLoops_.load() > 0; }
+
+    /**
+     * @brief 丢弃本通道全部推理任务与槽位表，让下一次 start() 按新配置重建
+     *
+     * 调用前提（两个都必须满足，否则是 UAF）：
+     *   1. 已在 GUI 线程 signalStop() + waitForStop()，且 isLoopAlive()==false；
+     *   2. 由 GUI 线程调用（解码循环已退出，tasks_ 不再有并发访问者）。
+     * 只 delete 推理线程已确认退出(isThreadFinished())的任务；未确认的转入
+     * quarantine_ 并打告警——沿用 stop() "只停不删"的既有政策，detach 后的推理线程
+     * 仍可能访问对象。正常路径走不到 quarantine_，只有 NPU 卡死才会攒。
+     */
+    void releaseTasks();
+
+    /**
+     * @brief 在线替换各槽位的报警类别（video.models[<id>].alarm_class）
+     * @param cls 下标 = 槽位，空串 = 只画框不报警；长度必须等于当前槽位数
+     * @return false 表示槽位数不匹配（模型列表变了），调用方应改走 releaseTasks+重开
+     *
+     * 这是唯一允许在解码器运行期从 GUI 线程调的接口：只换字符串，不动任务、
+     * 不动队列、不碰 NPU 上下文。报警类别本就在每帧的 SlotContext 里现取。
+     */
+    bool updateSlotAlarmClasses(const std::vector<QString> &cls);
 
     /**
      * @brief 报警片段录制器（硬件编码环形缓冲区）
@@ -163,7 +194,15 @@ private:
     // 每槽位模型的报警类别（config 的 video.models[<id>].alarm_class），空=只画框不报警。
     // 与 slotClassNames_ 同下标；随结果一起传进 AlarmManager::ingest 的 SlotContext，
     // 不再写进 AlarmManager 单例的全局槽表（按通道配置后那张表会被别的通道覆盖）。
+    // **唯一允许运行期改写的槽位向量**：写方是 GUI 线程的 updateSlotAlarmClasses()，
+    // 读方是解码线程每帧的 SlotContext 构造，故由 alarmClsMtx_ 保护（只锁这一次拷贝，
+    // 与模型加载/NPU 调用完全不重叠）。其余三个向量运行期只读。
     std::vector<QString> slotAlarmClasses_;
+    std::mutex alarmClsMtx_;                 ///< 只保护 slotAlarmClasses_ 的读写
+
+    // releaseTasks() 里"推理线程未确认退出所以不敢 delete"的任务转入这里（见其注释）。
+    // 只在 NPU 卡死导致 stopBestEffort 超时 detach 的异常路径上增长，每次一条告警。
+    std::vector<PpeTask*> quarantine_;
 
     // 见 InferenceMode：false 时本对象只做"解码 + 显示 + 取帧"，
     // tasks_/slotQueues_/dmaBufferPool_ 全都不分配。

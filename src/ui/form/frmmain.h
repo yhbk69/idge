@@ -181,6 +181,24 @@ private:
     QLineEdit *channelSourceEdit(int channel) const;    ///< 通道号(0..3) → 源地址输入框
     void browseChannelSource(int channel, QLineEdit *edit);  ///< 浏览并打开某路视频源
 
+    // ========== 通道配置热更新（改完不必重启整个程序） ==========
+    /**
+     * @brief 让某一路按当前 config 重新拉起来：停本路 → 释放推理任务 → 重开
+     *
+     * 凡改动**需要重建槽位**的配置（通道模型列表、启用开关、移除模型条目）都走这里，
+     * 是这类改动的唯一出口。代价：该路重新拉流（本地文件回到开头、RTSP/国标是重连），
+     * 停→起之间画面保留最后一帧；等待有界（正常 <1 秒）。
+     */
+    void applyChannelConfigNow(int channel);
+    /**
+     * @brief 让某模型的报警类别改动即时生效（不动模型、不重开流）
+     *
+     * 只覆盖 video.models[<id>].alarm_class：槽位数没变就能在线换字符串，
+     * 解码线程下一帧起按新类别判定报警。若某路的槽位数已与配置不符（模型列表
+     * 也改过），这条路走不通，该路退回 applyChannelConfigNow()。
+     */
+    void applyAlarmClassNow(const QString &libId);
+
     // ========== 模型参数表（报警类别是"模型的参数"，键 = 模型库目录名） ==========
     QTableWidget *modelParamTable_ = nullptr;
     void initModelParamsUi();       ///< 在通道分组框后插入"模型参数"表格区
