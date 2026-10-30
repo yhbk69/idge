@@ -41,6 +41,18 @@ GLuint tex = pool.acquire(fd, w, h, stride, DRM_FORMAT_ABGR8888);
 - 依赖 EGL/GLES2（Mali）、drm_fourcc、Qt Widgets/OpenGL；buffer（DMA-BUF 约定）、rga（格式与 stride 来源）、alarm/fence 管理器等业务模块。
 
 ## 注意事项
+- **`PlayerWidget` 的占位件是"这一路到底死在哪一环"的唯一入口**（2026-10-30）：
+  `placeholder_` 是个 `QLabel`，加在**同一个 grid cell (0,0)、`fenceOverlay_` 之后**（浮在视频上），
+  `WA_TransparentForMouseEvents` —— 否则既挡 ⊕ 放大也挡围栏绘制。文案优先级在 `updatePlaceholder()` 里单点定义：
+  `未启用` → `视频待接入（未配置地址）` → `接入失败：<msg>` → `信号中断` → `正在接入…` → 出帧即隐藏。
+  两条依赖是刻意的，别顺手"优化"掉：
+  ① `setChannel(i)` 必须**早于**按 `channelEnabled/channelSource` 开流那一段
+  （`frmMain::initForm()` 现在就是这个顺序），这样"未启用/没地址"在 `setChannel()` 里就能查出来，
+  不依赖额外信号；② `decoder_->error` 那条 lambda 以前只 `qWarning`，现在既 warning 又刷占位，
+  存的是 `msg.section('\n',0,0).left(80)` —— **不打印媒体字节、不 `fromUtf8` 碰二进制**。
+- **`statusChanged(ch,0)` 会在本地 mp4 播完时如实报"信号中断"，这不是 bug**；
+  而画面右上角的 `FPS: 25.3` 在这种时候是**陈旧的**——`currentFps_` 只在有帧的那 1 秒窗口里更新，
+  EOF 后冻结在最后一个值。别拿它当"流还活着"的证据（本轮误判过一次，占位文案其实是对的）。
 - **触屏命中区**：本目录的控件尺寸同样走 `src/ui/core/README.md`「触屏命中区设计令牌」那套档（10 寸屏、1920x1200 实测）。
   两处值得单独记：`PlayerWidget::expandBtn_` 是 T4 固定 48x48，其内联 QSS **必须显式 `padding: 0px`**——
   全局 `.QPushButton` 现在是触屏档 `padding-left/right:14px`，48px 的固定钮被它吃掉后 `⊕` 需要 50px 只剩 46px（探针实测截字）；
@@ -48,6 +60,13 @@ GLuint tex = pool.acquire(fd, w, h, stride, DRM_FORMAT_ABGR8888);
 - **围栏 Tab 的筛选靠 `isFenceAlarm`（`alarmType` 前缀 `fence`）**：新增的 `fence_in`/`fence_out` 与
   历史数据里裸的 `"fence"` 都要落进同一个 Tab，判据一旦改成精确相等，重启回读的老围栏报警会
   掉进「类别」Tab 显示成"person 检测到报警"。第 4 列的文字按 `fence_out` 分「离岗」，其余围栏出「闯入禁区」。
+- **`contentRect()` 是围栏层的唯一几何真值**：GLVideoWidget 里"视频实际占了哪块 widget 像素"只有一处算式
+  （`aspectScale()` 给 sx/sy，`drawQuad()` 摆顶点和 `contentRect()` 算画面块共用它），
+  所以渲染与围栏映射不可能各写一边再漂移。paintGL 与 resizeGL 末尾各调一次 `notifyContentRect()`，
+  判重后才 emit `contentRectChanged` —— 30fps x 4 路不能每帧发事件。
+  `video_width_/height_` 只在 GUI 线程被 paintGL 写，`contentRect()` 也只在 GUI 线程读，**不拿 `mutex_`**
+  （拿锁会在 paintGL 末尾形成"通知时又回头抢自己"的重入路径）。
+  无帧或宽高比取不到时退化为整个 widget（铺满、无黑边）。
 - **线程约束**：一切 GL/EGL 调用只能发生在 widget 的 GUI 上下文 current 期间（initializeGL/paintGL 内）；跨线程调用 EGLImage 或纹理是 UB。fd 可从任意线程 dup 后投递。
 - **dup 所有权协议**：`EglFramePool::acquire` 与 `RenderFrame` 均持有 dup 副本并负责唯一一次 close；原 fd 归解码侧。EGLImage 建立后与原 fd 解耦（内核各持引用）。
 - EglFramePool 导入失败槽位仍被占用（in_use 未回滚 + dup fd 泄漏，4 槽漏完池失效）；仅支持单平面格式，勿传 NV12；无析构，GL 对象靠上下文销毁兜底。

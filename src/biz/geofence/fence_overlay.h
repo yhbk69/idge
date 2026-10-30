@@ -22,14 +22,19 @@
 //   要改就删了重画。
 //
 // 坐标空间：
-//   所有坐标都是 overlay widget 的像素坐标。
-//   保存时同时记录 widget 尺寸，检测时用于坐标映射。
+//   围栏顶点存的是**归一化的视频内容坐标**（0..kFenceNormBase，见 fence_shape.h）。
+//   本 widget 只负责"把归一化坐标画成像素 / 把像素点击换算回归一化"，换算基准是
+//   set 进来的 contentRect（GLVideoWidget 里真正有画面的那块矩形，不含黑边）。
+//   所以换视图模式、全屏、拖窗口都只改 contentRect，不改围栏语义。
+//   临时图形（拖动中的矩形、画到一半的顶点）仍然用 widget 像素存 —— 它们不落盘，
+//   只在落盘那一刻统一 toNorm。
 //
 // ============================================================================
 
 #include <QWidget>
 #include <QVector>
 #include <QPoint>
+#include <QRect>
 #include <QColor>
 #include "fence_shape.h"
 
@@ -70,6 +75,12 @@ public:
     // 的围栏会各说各话。
     static QColor roleColor(FenceRole role);
 
+    // 视频内容矩形（GLVideoWidget::contentRect()，widget 像素坐标，已扣掉黑边）。
+    // 这是"归一化坐标 ↔ 屏幕像素"唯一的换算基准，由 PlayerWidget 在 resize 与
+    // 首帧到达时推过来。尺寸 <=0 时换算退化成直接用 widget 像素（首帧前的兜底，
+    // 宁可画得不准，也不能让 overlay 因为拿不到内容区而整块不显示围栏）。
+    void setContentRect(const QRect &contentRect);
+
     // 从 FenceManager 加载围栏数据并刷新显示
     void loadFences();
 
@@ -87,6 +98,14 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent *event) override;
 
 private:
+    // ========================================================================
+    // 归一化坐标 <-> widget 像素坐标
+    // ========================================================================
+    // 画围栏（norm → 像素）与收输入（像素 → norm）必须走同一对函数、同一个
+    // contentRect_，否则"看到的围栏"和"报警判的围栏"会分家。
+    QPoint toWidget(const Point &p) const;     // 围栏顶点 → 屏幕像素
+    Point  toNorm(const QPoint &pt) const;     // 鼠标点 → 归一化顶点
+
     // 绘制一个已保存的围栏形状
     void drawFenceShape(QPainter &painter, const FenceShape &shape);
 
@@ -113,7 +132,9 @@ private:
     // 多边形绘制状态
     QVector<QPoint> polyPoints_;     // 已点击的顶点列表
 
-    ChannelFence channelFence_;      // 当前通道的围栏数据
+    ChannelFence channelFence_;      // 当前通道的围栏数据（顶点为归一化坐标）
+
+    QRect contentRect_;              // 视频内容区（widget 像素），换算基准
 };
 
 } // namespace geofence

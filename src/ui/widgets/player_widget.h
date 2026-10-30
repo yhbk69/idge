@@ -69,6 +69,16 @@ public:
     geofence::FenceOverlay* fenceOverlay() const { return fenceOverlay_; }
     void setChannel(int channel);
 
+    /*
+    ====================================================
+    作用：按当前配置与接入状态刷新"视频待接入"占位文案
+    说明：公开是因为设置页热更新（frmMain::applyChannelConfigNow）改了本路
+          enabled / 地址之后，本窗体收不到任何回调 —— 那两处正是占位文案
+          唯一会读到新值的时机，不刷新的话界面上会一直挂着上一条状态。
+    ====================================================
+    */
+    void updatePlaceholder();
+
 public:
     // 设置放大状态
     void setExpanded(bool expanded);
@@ -86,6 +96,30 @@ private:
     FFmpegVideoDecoder* decoder_;  // FFmpeg视频解码器
     QPushButton* expandBtn_;  // 放大/缩小按钮
     bool expanded_ = false;  // 当前是否放大状态
+
+    /*
+    ====================================================
+    "视频待接入"占位（1b）
+    ----------------------------------------------------
+    placeholder_  未接上视频时盖在画面上的整块提示
+    channel_      本窗体负责的通道号（-1=还没分配，此时不显示任何文案）
+    hasFrame_     本路是否已经出过帧（open() 会复位，换流后要重新等）
+    errorText_    解码器最后一次报错的首行（空=没报过错）
+    signalLost_   最后一次 statusChanged 是不在线
+    pollTimer_    仅在"等第一帧"这个态里跑的轮询定时器
+    说明：出帧没有走信号，是 500ms 轮询 video_widget_->hasFrame()。原因是
+          RenderFrame 携带的是 dup 出来的 fd，所有权协议规定"每个副本恰好一次
+          close"且唯一消费者是 GLVideoWidget::onFrameReady；给 frameReady 挂
+          第二个槽会多投递一份副本、多出一个没人 close（或重复 close）的 fd。
+          轮询只在占位可见时跑，画面正常后定时器是停的，不进每帧热路径。
+    ====================================================
+    */
+    QLabel* placeholder_ = nullptr;
+    int channel_ = -1;
+    bool hasFrame_ = false;
+    QString errorText_;
+    bool signalLost_ = false;
+    QTimer* pollTimer_ = nullptr;
 
 private slots:
     void onExpandClicked();

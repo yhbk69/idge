@@ -311,6 +311,69 @@ void GLVideoWidget::paintGL()
     if (perfProbe() && paintCostMs > 20) {
         qWarning() << "[PROBE] paintGL cost" << paintCostMs << "ms widget" << this;
     }
+
+    // 首帧、或换流导致宽高比变化时，画面块在 widget 里挪位/改大小，围栏要跟着改换算基准。
+    // 先放锁再通知：消费者是围栏层，持锁 emit 等于给它一次回调回本 widget 抢同一把锁的机会。
+    lock.unlock();
+    notifyContentRect();
+}
+
+// ============================================================================
+// aspectScale —— 保持宽高比的归一化缩放系数（NDC 半轴）
+// ============================================================================
+// 唯一一处 letterbox 算式：drawQuad 用它摆顶点，contentRect 用它算画面块。
+// 视频宽高比取不到（还没帧）时按 widget 自身比例，即铺满、无黑边。
+// ============================================================================
+void GLVideoWidget::aspectScale(float &sx, float &sy) const
+{
+    sx = 1.0f;
+    sy = 1.0f;
+    if (width() <= 0 || height() <= 0) return;
+
+    const float video_aspect = (video_width_ > 0 && video_height_ > 0)
+                                   ? (float)video_width_ / video_height_
+                                   : (float)width() / height();
+    const float view_aspect = (float)width() / height();
+
+    if (video_aspect > view_aspect)
+        sy = view_aspect / video_aspect;  // 视频更宽，垂直方向缩放（上下黑边）
+    else
+        sx = video_aspect / view_aspect;  // 视频更高，水平方向缩放（左右黑边）
+}
+
+// ============================================================================
+// contentRect —— 视频内容真正占的那块 widget 像素
+// ============================================================================
+// 与 drawQuad 摆出来的四边形严格同几何：NDC 里 [-sx,sx]x[-sy,sy] 对应 widget 里
+// 以中心为基准、占 width()*sx × height()*sy 的矩形。围栏叠加层靠它把归一化顶点
+// 画回画面上，所以宁可四舍五入也不能各算各的。
+// ============================================================================
+QRect GLVideoWidget::contentRect() const
+{
+    const int w = width();
+    const int h = height();
+    if (w <= 0 || h <= 0) return QRect(0, 0, w, h);
+
+    float sx = 1.0f, sy = 1.0f;
+    aspectScale(sx, sy);
+
+    const int cw = qRound(w * sx);
+    const int ch = qRound(h * sy);
+    return QRect((w - cw) / 2, (h - ch) / 2, cw, ch);
+}
+
+// ============================================================================
+// notifyContentRect —— 内容矩形变了才发通知
+// ============================================================================
+// paintGL 是逐帧跑的，不判重就是每秒 30 次无谓的槽调用；围栏只在尺寸/宽高比
+// 真的换了时才需要重画。判重放在这里，调用方不用管。
+// ============================================================================
+void GLVideoWidget::notifyContentRect()
+{
+    const QRect rect = contentRect();
+    if (rect == lastContentRect_) return;
+    lastContentRect_ = rect;
+    emit contentRectChanged(rect);
 }
 
 // ============================================================================
@@ -333,17 +396,9 @@ void GLVideoWidget::drawQuad()
 
     shader_->bind();
 
-    // 计算保持宽高比的缩放系数
-    float video_aspect = (video_width_ > 0 && video_height_ > 0)
-                             ? (float)video_width_ / video_height_
-                             : (float)width() / height();
-    float view_aspect = (float)width() / height();
+    // 计算保持宽高比的缩放系数（与 contentRect 同源，见 aspectScale）
     float sx = 1.0f, sy = 1.0f;
-
-    if (video_aspect > view_aspect)
-        sy = view_aspect / video_aspect;  // 视频更宽，垂直方向缩放
-    else
-        sx = video_aspect / view_aspect;  // 视频更高，水平方向缩放
+    aspectScale(sx, sy);
 
     // 顶点数据：位置(x,y) + 纹理坐标(u,v)
     GLfloat vertices[] = {
@@ -401,4 +456,7 @@ void GLVideoWidget::drawQuad()
 void GLVideoWidget::resizeGL(int w, int h)
 {
     glViewport(0, 0, w, h);
+    // 视图尺寸变了 = 内容矩形变了（2x2↔单路放大、全屏、拖窗口都走这里）。
+    // 没帧可画的时候 paintGL 不一定跑，围栏不能只等 paintGL 的通知。
+    notifyContentRect();
 }

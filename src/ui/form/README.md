@@ -93,14 +93,42 @@
 - **触屏命中区**：本目录的界面按**板载 10 寸触摸屏、1920x1200 实测**（≈226 PPI，1mm≈8.9 逻辑 px）设计，
   令牌表与"字号不动、只长命中区"的口径见 `src/ui/core/README.md` 的「触屏命中区设计令牌」。落到本目录的三件事：
   顶部导航钮**已去 icon**（纯文字、`FS_NAV_TOUCH`、min-width 112），`widgetMenu` 在代码里覆盖到 160px
-  （`.ui` 里锁的 100px 装不下 T4 档三钮），**双击标题栏切最大化已删除**——触屏误触源，且窗口尺寸一变
-  围栏 overlay 的像素坐标就漂，直接变成漏报/误报。
+  （`.ui` 里锁的 100px 装不下 T4 档三钮），**双击标题栏切最大化已删除**——触屏误触源。
+  （原先附带的第二条理由"窗口尺寸一变围栏像素坐标就漂"2026-10-30 起已不成立，围栏顶点改存归一化坐标。）
   报警角标 `alarmBadge_` 与导航钮是耦合的：导航从"图上字下"变纯文字后文字矩形上移，
   `refreshAlarmBadge()` 必须按新钮尺寸重算 `move()`，否则角标压字（实测过，探针看不见这种重叠）。
-- **围栏工具栏尺寸**：`frmvideowindow.cpp` 的整条工具栏是内联 QSS（不经 `getStyle()`，多 token 值正常），
+- **item-view 的勾选态在 QSS 下不能靠换底色表达**（2026-10-30 逐像素核对，本目录最反直觉的一条）：
+  `QListWidget` 一旦挂了 `theme::field()` 的样式表，`QListWidgetItem::setBackground()` 的 brush **被样式表忽略**，
+  而 `setForeground()` **仍然生效** —— 于是"选中行底色没变、字却成了黑的"，深底深字直接读不了。
+  正确机制是**字重 + 前景亮度**：选中 = `TEXT` 色 + `setBold(true)`，未选 = `TEXT_MUTED` 色不加粗。
+  底色交给 QSS，不要在这里跟样式表抢。
+- **勾选行要点整行，不能只点靶心**：`item->setFlags(flags & ~Qt::ItemIsUserCheckable)`
+  关掉视图自己的切换（勾**仍由 `Qt::CheckStateRole` 画出来**，所以不存在"双切换"bug），
+  再在 `itemClicked` 里手动取反 `setCheckState`。靶心是样式给的 ~13px，指肚按不中。
+  `indicator` 想真放大只能改 QSS 的 `::indicator` 尺寸（Qt 里那就是命中区）；
+  本目录的通道模型选择框两者都做了。
+- **按需 new 的对话框要显式挂 QScroller**：`frmMain` 构造末尾那次全量扫描扫不到它们
+  （通道模型选择框、OCR 结果框各补了一行 `QtHelper::enableTouchScroll`）。
+  挂载范围与 tap/drag 分界的整体口径见 `src/ui/core/README.md`「手指拖动滚动」。
+- **日志区自动跟随必须条件化**：`logWithColor()` 只在 `verticalScrollBar()->value() >= maximum()-4`
+  时才 `ensureCursorVisible()`。无条件跟随 + 报警约 1 条/秒 = 手指根本滑不动日志。
+- **看板不需要"重建后恢复滚动位置"这种代码**：`DashboardWidget` 每 2s 整块重建，实测
+  `QScrollArea` 的滚动位置**本来就能跨重建存活**；强行 `setValue()` 恢复反而会跟惯性动画打架。
+  这条是本轮做过又撤回的改动，留个记录免得再犯。
+- **真全屏归 `frmMain::on_btnMenu_Max_clicked()` 管**：构造里那句
+  `this->on_btnMenu_Max_clicked()` 已删（它把窗口摆成 `availableGeometry()`，与全屏冲突），
+  槽函数换成 `isFullScreen()` 切换 + `setProperty("canMove", ...)`。为什么非 `_NET_WM_STATE_FULLSCREEN`
+  不可（dock 是 shell actor，`setGeometry` 与 `X11BypassWindowManagerHint` 都动不了它）见
+  `src/ui/core/README.md`「真全屏」。
+- **围栏工具栏**：`frmvideowindow.cpp` 的整条工具栏是内联 QSS（不经 `getStyle()`，多 token 值正常），
   高度 86、钮 T1 档；通道钮固定 56x72，**角色钮不设固定宽**（固定 44px 撞上 `padding:8px 14px` 会吃掉"岗区域"三字）。
   角色语义不能只写 tooltip——触屏 hover 不到，所以文字前挂了 12px 实色方块，
   颜色取 `geofence::FenceOverlay::roleColor`（已提到 public），与画布上围栏同口径、改一处两边同步。
+  **工具栏必须 `addWidget(toolbar, 2, 0, 1, 2)` 跨两列**：插进单列会把那一列的最小宽度顶到 ~700px，
+  四宫格左右两列立刻不等宽（这就是"四个监控不一样大"的唯一成因）。
+  同理**不要在网格里放横向 `QSpacerItem` 撑居左**——弹簧的最小宽度同样会灌进第二列，
+  居左交给工具栏自己 `QHBoxLayout` 末尾的 `addStretch()`。
+  放大模式（player 占 `(0,0,2,2)`）下跨列写法同样成立，别把它拆回单列。
 - **表格行高只能走代码**：`QTableView::item{padding}` 不改行高，必须
   `verticalHeader()->setDefaultSectionSize(theme::TOUCH_TABLE_ROW)`（本目录 2 张 + `alarm_list_widget` 2 张）。
 - **中文文案编码**：`cancellation_result_dialog.*` 刻意使用 `\uXXXX` 转义书写中文，防源文件编码差异乱码，新增文案请保持该约定。

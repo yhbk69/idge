@@ -3,6 +3,8 @@
 
 #include "head.h"
 
+class QAbstractScrollArea;   // enableTouchScroll 的入参类型，这里只传指针，前置声明即可
+
 // ============================================================================
 // QtHelper - Qt通用工具类
 // 作用：封装常用的屏幕信息、窗口管理、文件操作、加密校验、样式设置等实用方法
@@ -140,6 +142,24 @@ public:
 
     // 检查程序是否已运行(通过共享内存实现,仅Windows)
     static void checkRun();
+
+    // ========================================================================
+    // 触屏拖动滚动（QScroller）
+    // ========================================================================
+    // 需求：手指在列表/日志/设置页上直接上下划，不再依赖 26px 的滚动条。
+    //
+    // 为什么是 LeftMouseButtonGesture：本机是 X11 + GNOME，电容屏的手指是以
+    // **合成鼠标事件**进来的（没有 libinput touch 通道给 Qt），而 Qt 5.12 的
+    // grabGesture 只接受**单个** gesture type（没有 6.x 的 MouseTouchGesture）。
+    // 挂 TouchGesture 在这套环境下收不到事件，等于没挂。
+    //
+    // 代价（已接受并记录在 src/ui/core/README.md）：QScroller 一挂到 viewport 就
+    // 接管该 viewport 的左键拖动，"按住拖选文字再复制"在日志区不再可用。
+    static void enableTouchScroll(QAbstractScrollArea *area);
+
+    // 扫描 root 自身 + 其全部子孙里的 QAbstractScrollArea，逐个挂上。
+    // 必须在页面**全部建完之后**调（构造中途挂会漏掉后建的件）。
+    static void enableTouchScrollAll(QWidget *root);
 
     // ========================================================================
     // 样式/字体/编码

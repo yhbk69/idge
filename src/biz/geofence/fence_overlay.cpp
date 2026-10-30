@@ -64,6 +64,40 @@ void FenceOverlay::setRole(FenceRole role)
 }
 
 // ============================================================================
+// setContentRect - 视频内容矩形（归一化坐标 <-> 像素的唯一换算基准）
+// ============================================================================
+// 只做"值变了就重绘"：围栏存的是归一化坐标，画布尺寸变化不改变任何一条围栏的
+// 语义，只改变它落在屏幕上的哪几个像素，所以这里刻意不碰 channelFence_。
+// ============================================================================
+void FenceOverlay::setContentRect(const QRect &contentRect)
+{
+    if (contentRect_ == contentRect) return;
+    contentRect_ = contentRect;
+    update();
+}
+
+// ============================================================================
+// toWidget / toNorm - 归一化坐标 <-> widget 像素
+// ============================================================================
+// 画围栏与收输入必须走这一对函数、同一个画布，否则"看到的围栏"和"报警判的围栏"
+// 会分家。画布还没拿到时（contentRect_ 非法，首帧前）退化成整个 widget —— 后果
+// 只是画得不一定准，不会除零，也不会让已有围栏整块消失。
+// ============================================================================
+QPoint FenceOverlay::toWidget(const Point &p) const
+{
+    const QRect canvas = contentRect_.isValid() ? contentRect_ : rect();
+    return QPoint(pixelFromNorm(p.x, canvas.left(), canvas.width()),
+                  pixelFromNorm(p.y, canvas.top(), canvas.height()));
+}
+
+Point FenceOverlay::toNorm(const QPoint &pt) const
+{
+    const QRect canvas = contentRect_.isValid() ? contentRect_ : rect();
+    return Point(normFromPixel(pt.x(), canvas.left(), canvas.width()),
+                 normFromPixel(pt.y(), canvas.top(), canvas.height()));
+}
+
+// ============================================================================
 // 角色配色
 // ============================================================================
 // 禁区红（沿用旧配色，老用户不必重学）；岗区域绿（"待在里面是对的"）。
@@ -89,14 +123,12 @@ void FenceOverlay::loadFences()
 // ============================================================================
 // saveFences - 保存围栏数据到 FenceManager
 // ============================================================================
-// 先记录当前 widget 尺寸再落数据：围栏顶点是 widget 像素坐标，检测端要把帧坐标
-// 反算回同一 widget 空间，必须知道这组坐标"生成时"的画布大小，二者配对才有意义。
-// 若在窗口缩放后未重新保存，围栏坐标与 overlay_w/h 会失配，导致命中判断整体偏移。
-// 顺序：setOverlaySize → setChannelFence（触发 fenceChanged 刷新）→ saveToConfig 落盘。
+// 不再记录 overlay 尺寸：围栏顶点是归一化坐标，判定端不需要画布几何，
+// 换视图 / 全屏 / 拖窗口都不会让既有围栏改语义（旧实现记 overlay_w/h 正是失配之源）。
+// 顺序：setChannelFence（触发 fenceChanged 刷新）→ saveToConfig 落盘。
 // ============================================================================
 void FenceOverlay::saveFences()
 {
-    FenceManager::instance().setOverlaySize(channel_, width(), height());
     FenceManager::instance().setChannelFence(channel_, channelFence_);
     FenceManager::instance().saveToConfig();
     emit fenceUpdated();
@@ -130,6 +162,8 @@ void FenceOverlay::paintEvent(QPaintEvent *)
 // 多边形：用 QPainterPath 依次连接各顶点
 // 填充：按角色的半透明色（禁区红、岗区域绿）
 // 边框：按角色的实线，宽度 2
+// 顶点是归一化坐标，一律先 toWidget 换算成像素再画；normalized() 是因为存储顺序
+// 不保证左上在前（老数据如此），不处理会画出零宽或负向的矩形。
 // ============================================================================
 void FenceOverlay::drawFenceShape(QPainter &painter, const FenceShape &shape)
 {
@@ -140,9 +174,8 @@ void FenceOverlay::drawFenceShape(QPainter &painter, const FenceShape &shape)
 
     if (shape.type == ShapeType::Rectangle && shape.points.size() >= 2) {
         // 矩形：用两个对角点构造 QRect
-        int x1 = shape.points[0].x, y1 = shape.points[0].y;
-        int x2 = shape.points[1].x, y2 = shape.points[1].y;
-        QRect rect(QPoint(x1, y1), QPoint(x2, y2));
+        QRect rect(toWidget(shape.points[0]), toWidget(shape.points[1]));
+        rect = rect.normalized();
         painter.fillRect(rect, fillColor);
         painter.setPen(QPen(penColor, 2));
         painter.setBrush(Qt::NoBrush);
@@ -150,9 +183,10 @@ void FenceOverlay::drawFenceShape(QPainter &painter, const FenceShape &shape)
     } else {
         // 多边形：依次连接各顶点，首尾闭合
         QPainterPath path;
-        path.moveTo(shape.points[0].x, shape.points[0].y);
+        const QPoint first = toWidget(shape.points[0]);
+        path.moveTo(first);
         for (int i = 1; i < shape.points.size(); ++i) {
-            path.lineTo(shape.points[i].x, shape.points[i].y);
+            path.lineTo(toWidget(shape.points[i]));
         }
         path.closeSubpath();
 
@@ -235,7 +269,7 @@ void FenceOverlay::mousePressEvent(QMouseEvent *event)
                 shape.type = ShapeType::Polygon;
                 shape.role = role_;
                 for (const auto &pt : polyPoints_) {
-                    shape.points.push_back(Point(pt.x(), pt.y()));
+                    shape.points.push_back(toNorm(pt));   // 像素 → 归一化，落盘用
                 }
                 channelFence_.shapes.push_back(shape);
                 channelFence_.enabled = true;
@@ -245,17 +279,20 @@ void FenceOverlay::mousePressEvent(QMouseEvent *event)
             update();
         }
     } else if (drawMode_ == DrawMode::DeleteMode) {
+        // 命中测试在归一化空间做：围栏存的就是归一化坐标，把点击点换算进同一空间
+        // 即可。点的包含关系在仿射变换下不变，所以矩形/多边形两种判法都不用改。
+        const Point hit = toNorm(pos);
         // 从后往前遍历，优先删除最上层的围栏
         for (int i = channelFence_.shapes.size() - 1; i >= 0; --i) {
             const auto &shape = channelFence_.shapes[i];
-            bool hit = false;
+            bool hitFlag = false;
             if (shape.type == ShapeType::Rectangle && shape.points.size() >= 2) {
                 // 矩形：判断点击点是否在矩形范围内
                 int x1 = std::min(shape.points[0].x, shape.points[1].x);
                 int y1 = std::min(shape.points[0].y, shape.points[1].y);
                 int x2 = std::max(shape.points[0].x, shape.points[1].x);
                 int y2 = std::max(shape.points[0].y, shape.points[1].y);
-                hit = (pos.x() >= x1 && pos.x() <= x2 && pos.y() >= y1 && pos.y() <= y2);
+                hitFlag = (hit.x >= x1 && hit.x <= x2 && hit.y >= y1 && hit.y <= y2);
             } else {
                 // 多边形：用 QPainterPath::contains 判断
                 QPainterPath path;
@@ -264,9 +301,9 @@ void FenceOverlay::mousePressEvent(QMouseEvent *event)
                     path.lineTo(shape.points[j].x, shape.points[j].y);
                 }
                 path.closeSubpath();
-                hit = path.contains(pos);
+                hitFlag = path.contains(QPointF(hit.x, hit.y));
             }
-            if (hit) {
+            if (hitFlag) {
                 channelFence_.shapes.erase(channelFence_.shapes.begin() + i);
                 saveFences();
                 update();
@@ -293,7 +330,9 @@ void FenceOverlay::mouseMoveEvent(QMouseEvent *event)
 // mouseReleaseEvent - 鼠标松开事件
 // ============================================================================
 // 矩形模式：松开完成矩形绘制
-// 最小尺寸 5x5 像素，太小则忽略（防止误触）
+// 最小尺寸 5x5 **像素**，太小则忽略（防止误触）—— 这条检查刻意留在像素空间，
+// 因为"防误触"的本意就是手指的真实接触尺寸，归一化值会随内容区大小变。
+// 落盘的顶点则换算成归一化坐标。
 // ============================================================================
 void FenceOverlay::mouseReleaseEvent(QMouseEvent *event)
 {
@@ -311,8 +350,8 @@ void FenceOverlay::mouseReleaseEvent(QMouseEvent *event)
             FenceShape shape;
             shape.type = ShapeType::Rectangle;
             shape.role = role_;
-            shape.points.push_back(Point(x1, y1));
-            shape.points.push_back(Point(x2, y2));
+            shape.points.push_back(toNorm(QPoint(x1, y1)));
+            shape.points.push_back(toNorm(QPoint(x2, y2)));
             channelFence_.shapes.push_back(shape);
             channelFence_.enabled = true;
             saveFences();
@@ -334,7 +373,7 @@ void FenceOverlay::mouseDoubleClickEvent(QMouseEvent *event)
             shape.type = ShapeType::Polygon;
             shape.role = role_;
             for (const auto &pt : polyPoints_) {
-                shape.points.push_back(Point(pt.x(), pt.y()));
+                shape.points.push_back(toNorm(pt));   // 像素 → 归一化，落盘用
             }
             channelFence_.shapes.push_back(shape);
             channelFence_.enabled = true;

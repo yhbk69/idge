@@ -7,6 +7,7 @@
 #include <QOpenGLShaderProgram>
 #include <QMutex>
 #include <QQueue>
+#include <QRect>
 #include <QElapsedTimer>
 
 #include "eglimage_helper.h"
@@ -61,6 +62,39 @@ public:
     */
     ~GLVideoWidget();
 
+    /*
+    ====================================================
+    作用：视频内容矩形（本 widget 像素坐标）
+    说明：QOpenGLWidget 按宽高比居中渲染，widget 里会留出上下或左右黑边；
+          这个矩形就是"画面真正占的那块"。电子围栏用它做归一化坐标 ↔ 像素的换算，
+          所以它与 drawQuad 的顶点必须出自同一个算式（见 aspectScale）。
+          没有帧信息时退化为整个 widget（比例 1:1 贴合，与旧行为一致）。
+    ====================================================
+    */
+    QRect contentRect() const;
+
+    /*
+    ====================================================
+    作用：这一路到底有没有真的收到过帧
+    说明：PlayerWidget 的"视频待接入"占位靠它决定何时消失。
+          video_width_/height_ 只由 GUI 线程的 paintGL 写，本方法也只会被 GUI 线程调
+          （占位轮询定时器），同线程读写不并发 ⇒ 不拿 mutex_，理由与 contentRect 相同。
+    ====================================================
+    */
+    bool hasFrame() const { return video_width_ > 0 && video_height_ > 0; }
+
+signals:
+    /*
+    ====================================================
+    作用：视频内容矩形变化通知
+    说明：围栏叠加层用它做"归一化坐标 ↔ 像素"的换算基准。widget 尺寸变了、
+          或来的帧宽高比变了，都会让画面块在 widget 里挪位/改大小。
+          只在算出来的矩形真的变了时才发（paintGL 是逐帧跑的，不判重等于
+          每秒给 GUI 线程白加几十次槽调用）。
+    ====================================================
+    */
+    void contentRectChanged(const QRect &contentRect);
+
 public slots:
     /* 
     ====================================================
@@ -106,6 +140,17 @@ private:
     */
     void createShaderProgram();
 
+    /*
+    ====================================================
+    作用：算出保持宽高比所需的归一化缩放系数（NDC 半轴，取值 0..1）
+    说明：drawQuad 的顶点与 contentRect 都从这里取，letterbox 的口径只能有一处；
+          以前它内联在 drawQuad 里，围栏换算另写一遍，两处一旦漂移围栏就贴不准画面。
+          只读 video_width_/video_height_，这两个成员只在 GUI 线程被 paintGL 写，
+          调用方（drawQuad / 围栏所在的 GUI 线程）也在 GUI 线程，故不需要拿 mutex_。
+    ====================================================
+    */
+    void aspectScale(float &sx, float &sy) const;
+
     /* 
     ====================================================
     作用：绘制四边形
@@ -113,6 +158,15 @@ private:
     ====================================================
     */
     void drawQuad();
+
+    /*
+    ====================================================
+    作用：内容矩形变了就发通知
+    说明：paintGL（帧尺寸/宽高比变化）与 resizeGL（视图尺寸变化）末尾各调一次，
+          判重后 emit。围栏层是唯一的消费者，它需要的是"画面对应的像素块"。
+    ====================================================
+    */
+    void notifyContentRect();
 
     // 成员变量
     EglImageHelper egl_;  // EGL图像辅助类
@@ -130,6 +184,8 @@ private:
     int video_width_ = 0;         // 视频宽度（用于宽高比计算）
     int video_height_ = 0;        // 视频高度（用于宽高比计算）
     bool frame_updated_ = false;  // 帧更新标记
+
+    QRect lastContentRect_;       // 上次 emit 的内容矩形，notifyContentRect 判重用
 
     RenderFrame pending_frame_;  // 待 paintGL 消费的帧（fd 由 paintGL 关闭）
     RenderFrame prev_frame_;     // 滞留帧：paintGL 迟迟未执行时兜底关闭其 fd

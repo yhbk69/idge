@@ -941,7 +941,7 @@ void ConfigManager::setNmsThreshold(double val)
 //             "role": "forbidden",        // 角色："forbidden"=禁区（进去就报）
 //                                         //       "workzone"=岗区域（在外面就报）
 //                                         // 缺键→按上面的 mode 推断；认不出→forbidden
-//             "points": [[100,50],[300,200]]  // 顶点坐标（overlay 像素坐标）
+//             "points": [[100,50],[300,200]]  // 顶点坐标（归一化内容坐标 0..10000）
 //           }
 //         ]
 //       }
@@ -956,8 +956,11 @@ void ConfigManager::setNmsThreshold(double val)
 // }
 //
 // 坐标系说明：
-//   - 围栏坐标是在 overlay widget 像素空间中绘制的
-//   - 检测时需要将坐标映射到原始视频空间（通过 overlaySize 缩放比例）
+//   - channels.<ch>.coord 标记形状顶点的坐标空间："norm"=归一化视频内容坐标
+//     （0..10000，横轴除帧宽、纵轴除帧高），本版本读写只用这一种；
+//     缺键或 "pixel" 是归一化之前的 widget 像素数据，由 FenceManager::loadFromConfig
+//     就地换算并改写标记（换算口径见该函数注释）。
+//   - 判定端不需要 widget 几何，overlay_w/h 已退役，只在换算那一次被当分母读。
 // ============================================================================
 
 /**

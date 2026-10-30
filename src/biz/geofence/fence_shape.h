@@ -5,18 +5,32 @@
 // ============================================================================
 //
 // 定义围栏的基本数据结构：
-//   - Point:          二维坐标点
+//   - Point:          二维坐标点（归一化到视频内容空间，见下方坐标空间约定）
+//   - kFenceNormBase: 归一化基准（10000），配 normFromPixel/pixelFromNorm 两个互转
 //   - Rectangle:      矩形（左上角 + 右下角）
 //   - FenceRole:      围栏形状的角色（禁区 / 岗区域）
 //   - FenceShape:     围栏形状（矩形或多边形，包含一组顶点 + 一个角色）
 //   - ChannelFence:   单通道的围栏配置（是否启用 + 形状列表）
 //
-// 坐标空间约定：
-//   围栏顶点坐标以 overlay widget 的像素为单位（用户绘制时"所见即所得"）。
-//   点命中判断时被变换坐标的不是围栏，而是检测框的"脚点"：
-//   检测框坐标位于原始视频帧空间，需先按 letterbox 规则映射到 overlay/widget
-//   空间，再与本身就是 widget 坐标的围栏顶点比较。围栏不参与坐标变换。
-//   （详见 fence_checker.cpp 的 isInsideFence）
+// 坐标空间约定（2026-10-30 起，替代此前的"overlay widget 像素"口径）：
+//   围栏顶点存的是**视频内容空间的归一化坐标**，范围 0..kFenceNormBase（=10000，即 0.01%）。
+//   横轴按视频帧宽归一、纵轴按帧高归一，两轴各除各的 ⇒ 与宽高比无关。
+//
+//   判定端（fence_checker）只需要帧尺寸：脚点 norm = footX * 10000 / srcW。
+//   绘制端（fence_overlay）只需要内容矩形（GLVideoWidget 按 letterbox 算出的那块）：
+//   像素 = contentRect.origin + norm / 10000 * contentRect.size。
+//   两侧不再共享任何"画布尺寸"，所以换 2x2/单路放大、换窗口大小、进全屏都不动围栏语义。
+//
+//   为什么基准是"视频内容"而不是"widget"：widget 里视频上下（或左右）有黑边，黑边不属于
+//   画面，围栏画在黑边里没有物理意义；以内容矩形为基准，用户看到的围栏始终贴在画面上，
+//   判定也始终落在画面内的目标上。
+//
+//   允许出现 0..10000 之外的值（用户把围栏拖进黑边）：刻意不 clamp，
+//   画出来什么样，判的就是什么样。
+//
+//   ⚠ 老配置（config.json 里没有 "coord":"norm" 的通道）顶点仍是 widget 像素，
+//   由 FenceManager::loadFromConfig 就近换算一次并落盘；那条路径是**近似**，
+//   详见 fence_manager.cpp 的迁移注释。
 //
 // ============================================================================
 
@@ -35,6 +49,36 @@ struct Point {
     Point() = default;
     Point(int x, int y) : x(x), y(y) {}
 };
+
+// ============================================================================
+// kFenceNormBase / normFromPixel / pixelFromNorm - 归一化坐标与本层画布像素的互转
+// ============================================================================
+// 围栏顶点存归一化值（见文件头"坐标空间约定"），而"归一化到哪个矩形"只有握着
+// GLVideoWidget 内容矩形的绘制端知道，所以这里只给纯算术、不引 Qt：
+//   normFromPixel(像素, 该轴内容起点, 该轴内容长度)  → 归一化
+//   pixelFromNorm(归一化, 该轴内容起点, 该轴内容长度) → 像素
+// 两者互为逆运算（四舍五入误差 ≤1 个单位 = 1920 宽下 0.19px）。
+//
+// 用 long long 中间量：1920 像素 * 10000 = 1.92e7 还在 int 里，但归一化值可达
+// 数万（围栏画到黑边外），乘上 extent 就溢出 int 了。
+// ============================================================================
+constexpr int kFenceNormBase = 10000;
+
+// 四舍五入的整除（den 必须 > 0）；C++ 的 / 对负数向零截断，直接用会让所有点系统性
+// 向原点偏半个单位。
+inline int normDivRound(long long num, long long den) {
+    if (num >= 0) return static_cast<int>((num + den / 2) / den);
+    return -static_cast<int>((-num + den / 2) / den);
+}
+
+inline int normFromPixel(int pixel, int origin, int extent) {
+    if (extent <= 0) return 0;   // 画布还没布局好（首帧前/尺寸为 0），不猜
+    return normDivRound(static_cast<long long>(pixel - origin) * kFenceNormBase, extent);
+}
+
+inline int pixelFromNorm(int norm, int origin, int extent) {
+    return origin + normDivRound(static_cast<long long>(norm) * extent, kFenceNormBase);
+}
 
 // ============================================================================
 // Rectangle - 矩形（用两个对角点表示）

@@ -152,7 +152,9 @@ void AlarmDetailDialog::onMarkFalsePositive()
     QtHelper::localizeMessageBoxButtons(&box);
     box.adjustSize();
 
-    if (QScreen *screen = QGuiApplication::primaryScreen()) {
+    // 按"本对话框所在屏"居中，不是 primaryScreen：双屏调试机上 primary 是外接屏，
+    // 这个确认框会整块弹到没有触摸的那台显示器上，岗位上按不到。与 frmMain::systemExit 同一条口径。
+    if (QScreen *screen = QGuiApplication::screenAt(geometry().center())) {
         QRect scr = screen->availableGeometry();
         box.move(scr.center() - box.rect().center());
     }

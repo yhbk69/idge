@@ -99,8 +99,59 @@ if (!qss.isEmpty()) {
    该轮把角色钮等处的固定宽换成了 `setMinimumHeight` + `setMinimumSize`。
 
 顶部导航已从"图标+文字（`ToolButtonTextUnderIcon`）"改为**纯文字**，`IconHelper` 只留给标题栏三钮的 glyph；
-`labIco`（日历 glyph）隐藏。顺带删掉了"双击标题栏切最大化"——触屏上是误触源，且窗口尺寸一变，
-围栏 overlay 的像素坐标就跟着漂，直接变成漏报/误报。
+`labIco`（日历 glyph）隐藏。顺带删掉了"双击标题栏切最大化"——触屏上是误触源。
+（当初记的第二条理由"窗口尺寸一变围栏像素坐标就漂"在 2026-10-30 已不成立：围栏顶点改存
+归一化坐标，见 `src/biz/geofence/README.md`。但双击仍然不该回来，误触源这条就够了。）
+
+## 手指拖动滚动（`QtHelper::enableTouchScroll`，2026-10-30 批次）
+
+十寸屏上只有 26px 滚动条可拖是不够的——设置页、报警表、日志区都需要"手指一划"。
+实现压在 `qthelper.cpp` 的两个函数上，`QScroller` 挂在 **viewport** 而不是 area 上：
+
+- `enableTouchScroll(QAbstractScrollArea*)`：单件挂载，内部 `hasScroller` 判重（重复挂会覆盖上一份 properties）。
+  **必须在 `grabGesture` 之后 `setScrollerProperties`**——反着写等于把刚设的值盖掉。
+- `enableTouchScrollAll(QWidget *root)`：`root` 自身（可能本身就是个滚动区）+ `findChildren<QAbstractScrollArea*>` 递归扫。
+
+挂载时机只有一个正确答案：**`frmMain` 构造函数的最后一行**。`initForm()` 之后还有
+`initNewPages/initBusinessPages/initLeftMain` 在造件，放 `initForm` 末尾会扫到一批空目录。
+按需 new 的对话框扫不到，必须在创建处各补一行显式调用（通道模型选择框、OCR 结果框已经补了）。
+
+档位（`touchScrollerProps()`，只动了四个，理由都写在该函数上方注释里）：
+`DragStartDistance=0.005m`（≈19px@96dpi，**tap 与 drag 的唯一分界**，调小会把按下抖动判成滚动）、
+`AxisLockThreshold=0.6`（偏纵轴）、两端 `OvershootAlwaysOff`（回弹要额外重绘，不值当让 GUI 线程吐帧预算）、
+`FrameRate=Fps30`（惯性动画与 4 路 1080p@30fps 抢同一个线程）。
+手势档**押 `LeftMouseButtonGesture`**：本机 X11 下手指是以合成鼠标事件进来的，`TouchGesture` 一个事件都收不到。
+
+实测代价与结论（都是板上手指量出来的，不是推理）：
+
+1. **滑动与 tap 共存**：甩动之后单点仍然响应——报警行 `详情`、模型列表整行切换勾选、对话框按钮都一点就响。
+   所以 `DragStartDistance` 这一档不需要为"能点"再往上调。
+2. **被接管的那两个区失去"按住拖选文字"**：QScroller 吃掉 viewport 的左键拖动，
+   日志 `textBrowserLog` 与 OCR 结果框里的文字不能跨行拖选复制。本轮可接受（无虚拟键盘，本来也没有复制入口），
+   但这是**已知取舍**，别再当 bug 报。
+3. **代价换不来性能损失**：`IDGE_PERF=1` 下空闲 20s 与 16 次连续甩动期间，`paintGL` 间隔 >200ms 的尖峰条数都是 **0**，
+   paints/s 25~29（arrivals/s ~30），VmRSS 无增长 ⇒ 没有任何区需要"为保帧率摘掉 QScroller"。
+4. **日志自动跟随必须条件化**：`frmMain::logWithColor()` 现在只在
+   `verticalScrollBar()->value() >= maximum()-4` 时才 `ensureCursorVisible()`。
+   无条件跟随在报警约 1 条/秒时会让手指**根本滑不动**（每来一条就把视图拽回尾部）——
+   这条不改，Lane D 在日志区等于白做。
+
+## 真全屏：为什么 `setGeometry` 这条路走不通（2026-10-30 批次）
+
+系统 dock 的让位只认 `_NET_WM_STATE_FULLSCREEN`，不认尺寸。`getScreenRect()` 默认
+`available=true`，返回的是 `availableGeometry()`——**它天生把 dock 的 strut 排除在外**，
+所以"铺满"和"盖掉 dock"在这套 API 下是互斥的。手动 `setGeometry(0,0,1920,1200)`
+也只是让 mutter 把一个普通窗摆到那个位置，GNOME 的 dash 是 **shell actor，层级在普通 X 窗之上**；
+`Qt::X11BypassWindowManagerHint` 同样不改变 actor 层级。唯一有效的是真全屏状态位——
+mutter 的 `meta_window_is_fullscreen()` 才是它主动收起 top-bar/dash 的判据。
+
+落到代码：`main.cpp` 用 `w.showFullScreen()`；`frmMain::on_btnMenu_Max_clicked()` 是
+`isFullScreen()` 与 `showNormal()+restore_` 的切换，**并且要同步 `setProperty("canMove", !isFullScreen())`**——
+`AppInit::eventFilter` 按这个 property 在标题栏拖动窗口，全屏下拖窗体会把满屏窗搅成"位置怪掉的满屏窗"。
+两个容易复发的坑：① 全屏落在**光标所在的那块屏**（本机 DSI-1 + HDMI-1 双屏），
+调试时先把指针 warp 到 (900,600) 再启动，否则程序会跑到外接屏上；
+② 无边框自绘标题栏下 `showMinimized()` 要先 `showNormal()`，否则最小化后回不来。
+验证判据是 `xprop` 里必须出现 `_NET_WM_STATE_FULLSCREEN`，`xwininfo` 必须报 1920x1200+0+0。
 
 ## 依赖关系
 

@@ -2,11 +2,92 @@
 #include <QNetworkInterface>
 #include <QNetworkProxy>
 #include <QWidget>
+#include <QAbstractScrollArea>
+#include <QScroller>
+#include <QScrollerProperties>
+#include <QCoreApplication>
 
 // 时间戳宏,用于调试输出
 #define TIMEMS qPrintable(QTime::currentTime().toString("HH:mm:ss zzz"))
 
 bool QtHelper::useRatio = true;
+
+// ============================================================================
+// 触屏拖动滚动（QScroller）
+// ============================================================================
+//
+// 【为什么挂 LeftMouseButtonGesture 而不是 TouchGesture】
+// 本机是 X11 + GNOME/mutter，十寸电容屏（goodix-ts）的手指出现在 X 里是
+// **合成鼠标指针事件**（X 没有把多点触摸送进 Qt 的 touch 通道；Qt 的 TouchGesture
+// 只在 xcb 收到 XI_TouchBegin 时才生成，而这台机子上没有）。
+// 更硬的约束是：Qt 5.12 的 QScroller::grabGesture 只接受**单个** gesture type
+// （6.x 才有 MouseTouchGesture 这种"两个都收"的枚举）。所以这里必须押在鼠标上，
+// 押 TouchGesture 会一个事件都收不到 —— 表现是"挂了就等于没挂"。
+// 将来若切到 Wayland/Qt6，唯一要改的就是这一个枚举值。
+//
+// 【只调四个档，其余留默认】
+// 逐个说清为什么是这四个、以及为什么没有第五个：
+//   DragStartDistance —— 单位是**米**（头文件注释 "qreal [m]"），本 X server 的
+//     resolution 实测 96x96 dpi，所以 0.005m ≈ 19px ≈ 半行(56px 档)。
+//     这是 tap（点行/点钮）与 drag（划走）的唯一分界：调小会把手指按下时几像素的
+//     抖动判成滚动 → "点了没反应，画面还溜走了"；调大要划很远才开始动，手感像黏住。
+//   AxisLockThreshold —— "atan(|min(dx,dy)|/|max(dx,dy)|)"，与头文件口径一致。
+//     从默认 0.5 抬到 0.6：偏纵向（本仓的可滚动区基本都是纵向列表），
+//     划得稍微斜一点也锁在纵轴上，不锁的话斜着划会顺带把横向也推走。
+//   OvershootPolicy —— 两端都关。回弹要额外重绘，而 GUI 线程刚被 4 路 1080p@30fps
+//     占了一部分，不值得为动效吐回帧预算。
+//   FrameRate —— 显式 Fps30。惯性滚动是 QScroller 自己在 GUI 线程上跑的定时器，
+//     不设这档时它按内部默认帧率发重绘请求；而 GUI 线程同时要扛 4 路 1080p@30fps 的
+//     paintGL，滚动期间两边抢同一个线程。压到 30 帧的滑动视觉上已经连续，
+//     省下的那半截重绘预算留给视频上屏。
+//
+// 【刻意没调的那些】MousePressEventDelay / DecelerationFactor / SnapPositionRatio /
+// ScrollingCurve 一律留默认，**不要照抄 6.x 的档名**：Qt 5.12 的 QEasingCurve::Type
+// 里没有 VelocityMomentum（本机头文件核对过，NCurveTypes 前一个就是 Custom），
+// 写"ScrollingCurve = VelocityMomentum"是编不过的。
+// ============================================================================
+static QScrollerProperties touchScrollerProps()
+{
+    QScrollerProperties props;
+    props.setScrollMetric(QScrollerProperties::DragStartDistance, 0.005);   // ≈19px @96dpi
+    props.setScrollMetric(QScrollerProperties::AxisLockThreshold, 0.6);
+    props.setScrollMetric(QScrollerProperties::HorizontalOvershootPolicy,
+                          QScrollerProperties::OvershootAlwaysOff);
+    props.setScrollMetric(QScrollerProperties::VerticalOvershootPolicy,
+                          QScrollerProperties::OvershootAlwaysOff);
+    props.setScrollMetric(QScrollerProperties::FrameRate, QScrollerProperties::Fps30);
+    return props;
+}
+
+void QtHelper::enableTouchScroll(QAbstractScrollArea *area)
+{
+    if (!area) return;
+    // scroller 挂在 viewport 上，不是挂在 area 上：拖动事件是从 viewport 收到的
+    QWidget *view = area->viewport();
+    if (!view) return;
+    if (QScroller::hasScroller(view)) return;   // 重复挂会把上一份的 properties 覆盖掉
+
+    QScroller::grabGesture(view, QScroller::LeftMouseButtonGesture);
+    // 必须在 grab **之后** set：grabGesture 内部先装了一份默认 properties，
+    // 反过来写等于把刚设的值盖掉。
+    if (QScroller *scroller = QScroller::scroller(view)) {
+        scroller->setScrollerProperties(touchScrollerProps());
+    }
+}
+
+void QtHelper::enableTouchScrollAll(QWidget *root)
+{
+    if (!root) return;
+    // root 自己也可能就是个 QAbstractScrollArea（整页一个滚动区那种）
+    if (QAbstractScrollArea *self = qobject_cast<QAbstractScrollArea *>(root)) {
+        enableTouchScroll(self);
+    }
+    // findChildren 默认递归，会把嵌套在页面里的所有滚动区一次扫完
+    const QList<QAbstractScrollArea *> areas = root->findChildren<QAbstractScrollArea *>();
+    for (QAbstractScrollArea *area : areas) {
+        enableTouchScroll(area);
+    }
+}
 
 // ============================================================================
 // 屏幕信息相关

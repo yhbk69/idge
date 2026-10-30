@@ -43,6 +43,7 @@
 #include "model_registry.h"
 #include "runtime_paths.h"
 #include "easy_timer.h"  // yolo11_model.hpp 依赖 TIMER（与 ppe_task 同序）
+#include <QScrollBar>   // 日志区"只在贴底时跟随"要读滚动条位置
 #include "yolo11_model.hpp"
 #include <QDateTime>
 #include <QDir>
@@ -85,7 +86,15 @@ frmMain::frmMain(QWidget *parent) : QWidget(parent), ui(new Ui::frmMain)
     this->initNewPages();
     this->initBusinessPages();
     this->initLeftMain();
-    this->on_btnMenu_Max_clicked();
+    // 触屏拖动滚动挂到本页所有可滚动区。必须晚于**所有**页面构建：
+    // findChildren 扫的是"此刻已存在"的子件，而 initForm() 之后还有
+    // initNewPages/initBusinessPages/initLeftMain 在造件 —— 放 initForm 末尾会漏掉大半。
+    // 按需 new 的对话框（通道模型选择框、智能识别）不在这里，各自在创建处补一行。
+    //
+    // 原先这里的最后一行是 on_btnMenu_Max_clicked()，作用只是把窗口摆成
+    // availableGeometry()；全屏改由 main() 的 showFullScreen() 负责后它就成了冲突项
+    // （构造里改 geometry 会打断全屏），见 Lane E 的说明。
+    QtHelper::enableTouchScrollAll(this);
 }
 
 frmMain::~frmMain()
@@ -191,6 +200,13 @@ void frmMain::log(const QString &category, const QString &message)
  */
 void frmMain::logWithColor(const QString &category, const QString &message, const QColor &color)
 {
+    // 先记下"用户此刻是不是贴着底部"。这条判断是日志区能用手划的前提：
+    // 围栏状态日志大约每秒一条，原来无条件 ensureCursorVisible() 等于每次追加都把
+    // 视图拽回底部 —— 手指刚划上去，下一条日志就把它弹回来，看着像"日志划不动"。
+    // 留 4px 容差：末行行高与视口不可能像素级相等，惯性动画收尾也会差零点几。
+    QScrollBar *bar = ui->textBrowserLog->verticalScrollBar();
+    const bool followTail = !bar || bar->value() >= bar->maximum() - 4;
+
     QTextCursor cursor = ui->textBrowserLog->textCursor();
     cursor.movePosition(QTextCursor::End);
 
@@ -210,9 +226,12 @@ void frmMain::logWithColor(const QString &category, const QString &message, cons
     msgFormat.setForeground(color);
     cursor.insertText(message + "\n", msgFormat);
 
-    // 自动滚动到底部
-    ui->textBrowserLog->setTextCursor(cursor);
-    ui->textBrowserLog->ensureCursorVisible();
+    // 自动滚动到底部 —— 仅在此前就贴底时。不贴底时连 setTextCursor 都不做：
+    // 它会顺带滚动视图，等于把"用户在往上翻"这件事又抹掉。
+    if (followTail) {
+        ui->textBrowserLog->setTextCursor(cursor);
+        ui->textBrowserLog->ensureCursorVisible();
+    }
 }
 
 // ==========================================
@@ -854,29 +873,55 @@ void frmMain::leftMainClick()
 // 窗口控制按钮
 // ==========================================
 
+/**
+ * @brief 系统最小化
+ */
 void frmMain::on_btnMenu_Min_clicked()
 {
+    // 全屏态下直接 showMinimized()：mutter 记着这个窗的 fullscreen flag，
+    // 从 dock 点回来时又满屏，而用户点最小化想看的是桌面。先退回普通态再最小化，
+    // 恢复时就是 restoreGeometry_ 那一档（连 canMove 一起由同一段代码摆平）。
+    if (isFullScreen()) {
+        on_btnMenu_Max_clicked();
+    }
     showMinimized();
 }
 
-/**
- * @brief 最大化/还原窗口切换
- * 使用 static 变量记录还原前的位置
- */
+// ============================================================================
+// on_btnMenu_Max_clicked —— 最大化/还原 = 真全屏的切换
+// ============================================================================
+// 为什么只有 _NET_WM_STATE_FULLSCREEN 这条路（旧实现是 setGeometry 铺满，是错的）：
+//   · QtHelper::getScreenRect() 默认 available=true，取的是 QScreen::availableGeometry()，
+//     而这个值**天生排除了 dock 的 strut**。所以 setGeometry(getScreenRect())
+//     永远盖不掉那条 dock —— 旧"全屏"其实是"铺到 dock 之外"，实测 1864x1200+56+0，
+//     左侧 56px 在十寸屏上等于整条可点区域左移并被 dock 挡住一部分。
+//   · 手动 setGeometry(0,0,1920,1200) 也不行：GNOME 的 dash 是 **shell actor**，
+//     合成层级在普通 X 窗之上，只有 mutter 自己判到 meta_window_is_fullscreen()
+//     才会主动收起 top-bar/dash。
+//   · Qt::X11BypassWindowManagerHint 同样无效：绕过 WM 不改变 actor 层级，
+//     还会让窗口失去正常的摆放与焦点处理。
+//   ⇒ 想让 dock 消失只能请求真全屏状态，别再试改 geometry。
+//
+// restoreGeometry_ 用成员而不是 static 局部函数变量：static 是"每个进程一份"，
+// 本类实例确实只有一个，但把"这份还原态属于这个窗口"写在类型上才对，
+// 也免得将来加第二个 frmMain 时两窗共用一份还原位。
+//
+// canMove 必须跟着改：appinit.cpp 的全局事件过滤器按这个 property 决定能不能
+// 在标题栏拖动窗口。全屏下拖动既无意义，又会让 mutter 按移动请求重排窗口、
+// 把全屏态搅成"位置怪掉的满屏窗"（dock 随之回来）。
+// ============================================================================
 void frmMain::on_btnMenu_Max_clicked()
 {
-    static bool max = false;
-    static QRect location = this->geometry();
-
-    if (max) {
-        this->setGeometry(location);           // 还原
+    if (isFullScreen()) {
+        showNormal();
+        if (restoreGeometry_.isValid()) {
+            setGeometry(restoreGeometry_);
+        }
     } else {
-        location = this->geometry();           // 记录当前位置
-        this->setGeometry(QtHelper::getScreenRect());  // 全屏
+        restoreGeometry_ = geometry();
+        showFullScreen();
     }
-
-    this->setProperty("canMove", max);
-    max = !max;
+    setProperty("canMove", !isFullScreen());
 }
 
 void frmMain::on_btnMenu_Close_clicked()
@@ -897,8 +942,11 @@ void frmMain::systemExit()
     QtHelper::localizeMessageBoxButtons(&box);
     box.adjustSize();
 
-    // 居中显示
-    if (QScreen *screen = QGuiApplication::primaryScreen()) {
+    // 居中显示——**必须按"主窗所在的那块屏"居中，不是 primaryScreen**。
+    // 本机是 DSI-1(触屏, +0+0) + HDMI-1(外接调试屏, +1920+0) 双屏，primaryScreen 恰好是 HDMI 那块，
+    // 于是全屏下点关闭，确认框整块弹到**没有触摸屏的那台显示器**上（实测：框在 +2716+451），
+    // 岗位上的人按不到 ×也按不到 取消，等于把唯一的退出通道堵死。
+    if (QScreen *screen = QGuiApplication::screenAt(geometry().center())) {
         QRect scr = screen->availableGeometry();
         box.move(scr.center() - box.rect().center());
     }
@@ -1352,6 +1400,11 @@ void frmMain::applyChannelConfigNow(int channel)
     // 界面显示的"推理线程数 = Σ各通道模型"，重建后必须跟着刷新，否则是旧值
     if (ui->labThreadsVal)
         ui->labThreadsVal->setText(QString("%1 路（Σ各通道模型）").arg(configuredTaskCount()));
+
+    // 上面两个"本路不开流"的分支只打了日志，四宫格那边没有任何回调 ——
+    // 不刷一次的话，格子会一直挂着停用前的"通道N 信号中断"，
+    // 用户看不到"未启用/未配置地址"这两种他刚刚亲手设的态。
+    if (pw) pw->updatePlaceholder();
 }
 
 // ============================================================
@@ -1604,7 +1657,9 @@ void frmMain::openChannelModelsDialog(int channel)
 
     QDialog dlg(this);
     dlg.setWindowTitle(QStringLiteral("通道%1 级联模型").arg(channel + 1));
-    dlg.resize(520, 420);
+    // 触屏档：520x420 是按鼠标时代定的，10 寸屏上列表行高 ~30、勾选靶心 ~13px，
+    // 等于"看得清但点不中"。1080x900 在 1920x1200 全屏下四周仍留白充足。
+    dlg.resize(1080, 900);
     QVBoxLayout *v = new QVBoxLayout(&dlg);
 
     QLabel *tip = new QLabel(QStringLiteral(
@@ -1624,6 +1679,26 @@ void frmMain::openChannelModelsDialog(int channel)
         if (libIds.contains(id)) ordered << id;
     for (const QString &id : libIds)
         if (!ordered.contains(id)) ordered << id;
+
+    // 勾选态的区分手段：**加粗 + 提亮**，不是换底色。
+    // 换底色这条路本机实测走不通：list 挂了 theme::field() 的 QSS，样式表一旦
+    // 管住 item 的 background，QListWidgetItem::setBackground 的 brush 就被忽略，
+    // 而 setForeground 仍然生效 —— 结果是"选中行底色没变、字却成了黑的"，
+    // 深底深字直接读不了（/tmp/ui2_after/model_dlg 逐像素核对过：四行底色全是 PANEL）。
+    // 所以底色交给 QSS，这里只动字：加粗给"会被跑"，暗色给"不会跑"。
+    const QColor checkedFg = QColor(QString::fromLatin1(theme::TEXT));
+    const QColor normalFg = QColor(QString::fromLatin1(theme::TEXT_MUTED));
+
+    // 把"勾选 + 字形"绑成一个动作：任何改状态的路径都必须走这里，否则字的
+    // 勾选态和 CheckStateRole 会各说各话（上移/下移不动状态，所以只有两处调用）。
+    auto applyChecked = [checkedFg, normalFg](QListWidgetItem *row) {
+        const bool on = row->checkState() == Qt::Checked;
+        row->setForeground(on ? checkedFg : normalFg);
+        QFont f = row->font();
+        f.setBold(on);
+        row->setFont(f);
+    };
+
     for (const QString &id : ordered) {
         QListWidgetItem *item = new QListWidgetItem(list);
         const QString alarm = cfg.modelAlarmClass(id);
@@ -1632,34 +1707,79 @@ void frmMain::openChannelModelsDialog(int channel)
                                reg.displayName(id),
                                alarm.isEmpty() ? QStringLiteral("(无)") : alarm));
         item->setData(Qt::UserRole, id);
-        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        // T1 档行高（54 + 2*8 + 2*1 = 72px ≈ 8.1mm）。列表行高由 sizeHint 定，
+        // 不写就还是样式管不到的默认 ~30px —— 触屏上点不中的第二个原因。
+        item->setSizeHint(QSize(0, 72));
+        // 刻意**清掉** ItemIsUserCheckable：靶心照样画（本机实测两种 flag 下
+        // 左侧像素完全一致，见 src/ui/form/README.md），但视图不再自己响应点击去切换，
+        // 切换统一由下面的 itemClicked 负责。留着它 = 视图切一次、我再取反一次 = 点了没反应。
+        item->setFlags(item->flags() & ~Qt::ItemIsUserCheckable);
         item->setCheckState(current.contains(id) ? Qt::Checked : Qt::Unchecked);
+        applyChecked(item);
     }
     v->addWidget(list);
+
+    // 摘要行：触屏上"顺序 = 槽位号"只看行位置容易看错，写成一行文字最省眼力
+    QLabel *summary = new QLabel(&dlg);
+    summary->setWordWrap(true);
+    summary->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
+    auto updateSummary = [list, summary]() {
+        QStringList picked;
+        for (int i = 0; i < list->count(); ++i) {
+            QListWidgetItem *item = list->item(i);
+            if (item->checkState() == Qt::Checked)
+                picked << item->data(Qt::UserRole).toString();
+        }
+        summary->setText(QStringLiteral("已选顺序：")
+                         + (picked.isEmpty()
+                                ? QStringLiteral("(未勾选，确定后该路将回退库内默认模型)")
+                                : picked.join(QStringLiteral(" → "))));
+    };
+    v->addWidget(summary);
+
+    // 点整行任意位置切换勾选 —— 本条需求在触屏上的真正修复（放大只是看得清，
+    // 点得中靠的是这个）。itemClicked 在视图自己的 edit() 之后发射，
+    // 而 edit() 因为 flag 被清不会再改状态，所以这里是唯一的改状态点。
+    connect(list, &QListWidget::itemClicked, this,
+            [applyChecked, updateSummary](QListWidgetItem *item) {
+                if (!item) return;
+                item->setCheckState(item->checkState() == Qt::Checked
+                                        ? Qt::Unchecked : Qt::Checked);
+                applyChecked(item);
+                updateSummary();
+            });
+    updateSummary();
 
     QHBoxLayout *order = new QHBoxLayout;
     QPushButton *upBtn = new QPushButton(QStringLiteral("上移"));
     QPushButton *downBtn = new QPushButton(QStringLiteral("下移"));
-    upBtn->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
-    downBtn->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
-    connect(upBtn, &QPushButton::clicked, this, [list]() {
+    // 原来是 theme::miniButton（表格内 T3 档 48px），在这个大框里显小；
+    // 改成吃全局 T1 并给下限，跟列表行同高才好按。
+    upBtn->setMinimumSize(140, 72);
+    downBtn->setMinimumSize(140, 72);
+    connect(upBtn, &QPushButton::clicked, this, [list, updateSummary]() {
         const int r = list->currentRow();
         if (r > 0) {
             list->insertItem(r - 1, list->takeItem(r));
             list->setCurrentRow(r - 1);
+            updateSummary();
         }
     });
-    connect(downBtn, &QPushButton::clicked, this, [list]() {
+    connect(downBtn, &QPushButton::clicked, this, [list, updateSummary]() {
         const int r = list->currentRow();
         if (r >= 0 && r < list->count() - 1) {
             list->insertItem(r + 1, list->takeItem(r));
             list->setCurrentRow(r + 1);
+            updateSummary();
         }
     });
     order->addWidget(upBtn);
     order->addWidget(downBtn);
     order->addStretch();
     v->addLayout(order);
+
+    // 这个列表是对话框里按需 new 的，启动时那次全量扫描（frmMain 构造末尾）扫不到它
+    QtHelper::enableTouchScroll(list);
 
     QDialogButtonBox *box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     // 按钮文案显式中文，与 QtHelper::localizeMessageBoxButtons 那套口径一致

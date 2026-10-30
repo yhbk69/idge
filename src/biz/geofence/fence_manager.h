@@ -6,9 +6,12 @@
 //
 // 职责：
 //   1. 管理各通道的围栏数据（增删改查）
-//   2. 从 config.json 加载围栏配置
+//   2. 从 config.json 加载围栏配置（含旧像素坐标的一次性换算）
 //   3. 将围栏配置保存到 config.json
-//   4. 记录各通道的 overlay widget 尺寸（用于坐标映射）
+//
+// 围栏顶点在本类里永远是**归一化内容坐标**（见 fence_shape.h）：overlay 只画它，
+// checker 只比它，config 只存它。旧的 overlay widget 尺寸记录已整条删除
+// （判定不再需要画布几何），只在加载老配置时用作换算分母。
 //
 // 使用方式：
 //   FenceManager::instance().loadFromConfig();    // 启动时加载
@@ -25,7 +28,7 @@
 #include "fence_shape.h"
 #include <QObject>
 #include <QMap>
-#include <QPair>
+#include <QSet>
 #include <QMutex>
 #include <QMutexLocker>
 
@@ -88,16 +91,8 @@ public:
     QString alarmClass() const;
 
     // ========================================================================
-    // overlay 尺寸管理（用于坐标映射）
+    // 发送日志到 UI（迁移告警等，category 固定 "fence"）
     // ========================================================================
-    // 围栏坐标是在 overlay widget 像素空间中绘制的，并被原样保存（不做归一化）。
-    // 检测时反向映射：把检测框脚点从视频帧空间换算到同一 widget 空间再比较，
-    // 这需要知道"当初绘制围栏时"的 widget 尺寸，故在此按通道记录 overlay 尺寸。
-    // 尺寸随窗口缩放而变，saveFences() 会带当前 width()/height() 一并落盘。
-    void setOverlaySize(int channel, int w, int h);
-    void overlaySize(int channel, int &w, int &h) const;
-
-    // 发送围栏日志到 UI
     void postLog(const QString &category, const QString &message);
 
 signals:
@@ -112,8 +107,12 @@ private:
     mutable QMutex mutex_;                                  // 保护所有成员变量的互斥锁
     bool enabled_ = false;                                  // 围栏总开关（通道内混角色时无法只关一种）
     QString alarmClass_ = "person";                         // 触发围栏报警的类别（loadFromConfig 从 config 读，缺失回落 person）
-    QMap<int, ChannelFence> fences_;                        // 各通道围栏数据
-    QMap<int, QPair<int,int>> overlaySizes_;                // 各通道 overlay 尺寸
+    QMap<int, ChannelFence> fences_;                        // 各通道围栏数据（顶点为归一化坐标）
+
+    // 仍停留在旧 widget 像素空间的通道：老配置没记 overlay 尺寸、无从换算时进来。
+    // 唯一的用途是让 saveToConfig 如实写 coord:"pixel" 而不是谎报 "norm"，
+    // 于是每次启动都会再提醒一次"这条围栏位置不可信、请重画"。
+    QSet<int> legacyPixel_;
 };
 
 } // namespace geofence

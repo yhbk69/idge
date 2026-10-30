@@ -33,6 +33,7 @@
 #include "ffmpeg_video_decoder.h"
 #include "gl_video_widget.h"
 #include "theme.h"
+#include "qthelper.h"   // enableTouchScroll：按需 new 的对话框扫描不到，要在创建处显式挂
 #include "ConfigManager.h"
 
 #include <QApplication>
@@ -989,6 +990,12 @@ void SmartRecognitionWidget::showOcrResultDialog(const QStringList& texts) {
                                      .arg(theme::PANEL, theme::BORDER));
     scrollArea->setWidget(contentWidget);
     root->addWidget(scrollArea, 1);
+    // 这个对话框是按需 new 的，frmMain 构造末尾那次全量扫描扫不到它，得单独挂。
+    // 代价：上面那句 TextSelectableByMouse 的"按住拖选文字"在这里失效
+    // （QScroller 接管 viewport 的左键拖动）。十寸屏上本来就没有 Ctrl+C 的入口
+    // （本轮明确不做虚拟键盘），拖选留着的实际收益是零，而结果文字超过一屏时
+    // 划动是真需求 —— 与日志区那一档取舍同一条线，见 src/ui/core/README.md。
+    QtHelper::enableTouchScroll(scrollArea);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok, &dialog);
     buttons->button(QDialogButtonBox::Ok)->setMinimumHeight(46);

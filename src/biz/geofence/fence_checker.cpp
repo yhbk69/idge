@@ -85,78 +85,37 @@ void FenceChecker::mapBoxToOriginal(const image_rect_t &box,
 // 步骤：
 //   1. 将检测框从模型空间映射到原始视频空间 (srcW x srcH)
 //   2. 取检测框底边中点（代表"脚"的位置）—— 在帧坐标系中
-//   3. 将脚部坐标从帧坐标系映射到 overlay widget 坐标系
-//      （考虑 GLVideoWidget 的 letterbox 宽高比保持）
-//   4. 判断脚部点是否在围栏内（围栏坐标本身就在 overlay widget 坐标系）
+//   3. 把脚点归一化到 0..kFenceNormBase（横轴除 srcW、纵轴除 srcH）
+//   4. 与同样是归一化坐标的围栏顶点比 —— 纯整数比较，不做任何投影
 //
 // 为什么用底边中点？
 //   围栏判断的是"人站在哪里"，脚的位置最准确。
 //   用中心点可能因为人举手等原因误判。
+//
+// 为什么被变换的是脚点而不是围栏？
+//   点在形状内的判定在仿射变换下保持不变，所以只要把两边放进同一个空间就行。
+//   选"归一化的视频内容空间"作公共空间，判定端就**完全不需要知道 widget 几何**
+//   （不需要 overlay 尺寸、不需要 letterbox 偏移），于是 2x2/单路放大/全屏/拖窗口
+//   都不会改变围栏语义 —— 这正是旧实现（围栏存 widget 像素）失配的地方。
 // ============================================================================
 bool FenceChecker::isInsideFence(const object_detect_result &det,
                                  int srcW, int srcH,
                                  int modelW, int modelH,
-                                 int overlayW, int overlayH,
                                  const FenceShape &fence) {
     // 步骤 1: 映射检测框到原始视频空间
     int left, top, right, bottom;
     mapBoxToOriginal(det.box, srcW, srcH, modelW, modelH,
                      left, top, right, bottom);
 
-    // 步骤 2: 取底边中点（脚部位置）—— 帧坐标系
-    int footX = (left + right) / 2;
-    int footY = bottom;
+    // 步骤 2+3: 脚点（帧坐标）→ 归一化。srcW/srcH <=0 时 normFromPixel 给 0，
+    // 等价于"这一帧没有可信的画面尺寸，判定不参与"，不会误报成命中。
+    const int footX = (left + right) / 2;
+    const int footY = bottom;
+    const int normX = normFromPixel(footX, 0, srcW);
+    const int normY = normFromPixel(footY, 0, srcH);
 
-    // 如果没有 overlay 尺寸信息，直接用原始坐标比较
-    if (overlayW <= 0 || overlayH <= 0) {
-        return pointInShape(footX, footY, fence);
-    }
-
-    // 步骤 3: 将脚部坐标从帧坐标系映射到 overlay widget 坐标系
-    //   GLVideoWidget 保持宽高比渲染，视频内容可能不占满整个 widget（有黑边）
-    //   需要考虑 letterbox 偏移，才能将帧坐标正确映射到 widget 坐标
-    float videoAspect = static_cast<float>(srcW) / srcH;
-    float viewAspect  = static_cast<float>(overlayW) / overlayH;
-
-    float renderW, renderH, xOffset, yOffset;
-    if (videoAspect > viewAspect) {
-        // 视频更宽 → 左右满，上下黑边
-        renderW = static_cast<float>(overlayW);
-        renderH = overlayW * srcH / static_cast<float>(srcW);
-        xOffset = 0.0f;
-        yOffset = (overlayH - renderH) / 2.0f;
-    } else {
-        // 视频更高 → 上下满，左右黑边
-        renderH = static_cast<float>(overlayH);
-        renderW = overlayH * srcW / static_cast<float>(srcH);
-        xOffset = (overlayW - renderW) / 2.0f;
-        yOffset = 0.0f;
-    }
-
-    // 帧坐标 → widget 坐标
-    float widgetX = footX * renderW / srcW + xOffset;
-    float widgetY = footY * renderH / srcH + yOffset;
-
-    // 步骤 4: 判断 widget 坐标是否在围栏内
-    if (fence.type == ShapeType::Rectangle && fence.points.size() >= 2) {
-        int fx1 = fence.points[0].x;
-        int fy1 = fence.points[0].y;
-        int fx2 = fence.points[1].x;
-        int fy2 = fence.points[1].y;
-        int rx1 = std::min(fx1, fx2);
-        int ry1 = std::min(fy1, fy2);
-        int rx2 = std::max(fx1, fx2);
-        int ry2 = std::max(fy1, fy2);
-        Rectangle rect;
-        rect.left = rx1;
-        rect.top = ry1;
-        rect.right = rx2;
-        rect.bottom = ry2;
-        return pointInRect(static_cast<int>(widgetX), static_cast<int>(widgetY), rect);
-    } else {
-        // 多边形直接用 overlay 坐标比较（围栏坐标已在 widget 空间）
-        return pointInPolygon(static_cast<int>(widgetX), static_cast<int>(widgetY), fence.points);
-    }
+    // 步骤 4: 矩形/多边形各自的分派仍走 pointInShape（内部 toRect/射线法，一行未改）
+    return pointInShape(normX, normY, fence);
 }
 
 // ============================================================================
@@ -173,7 +132,6 @@ bool FenceChecker::isInsideFence(const object_detect_result &det,
 FenceViolation FenceChecker::checkDetection(const object_detect_result &det,
                                             int srcW, int srcH,
                                             int modelW, int modelH,
-                                            int overlayW, int overlayH,
                                             const ChannelFence &channelFence) {
     FenceViolation out;
 
@@ -187,8 +145,7 @@ FenceViolation FenceChecker::checkDetection(const object_detect_result &det,
 
     for (size_t i = 0; i < channelFence.shapes.size(); ++i) {
         const FenceShape &shape = channelFence.shapes[i];
-        const bool inside = isInsideFence(det, srcW, srcH, modelW, modelH,
-                                          overlayW, overlayH, shape);
+        const bool inside = isInsideFence(det, srcW, srcH, modelW, modelH, shape);
         if (shape.role == FenceRole::Forbidden) {
             if (inside) {
                 out.verdict = FenceVerdict::Intrusion;

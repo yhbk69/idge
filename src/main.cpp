@@ -374,7 +374,16 @@ int main(int argc, char *argv[])
     shutdownCheckTimer.start(500);  // 每 500ms 检查一次
 
     QtHelper::setFormInCenter(&w);
-    w.show();
+    // 十寸触屏要的是"整屏都是应用"，而 QtHelper::getScreenRect() 取的是
+    // availableGeometry() —— 它天生排除 dock 的 strut，所以旧的"铺满可用区"
+    // 永远盖不掉那条 dock。只有真全屏（_NET_WM_STATE_FULLSCREEN）会让 mutter
+    // 自己收起 top-bar/dash（GNOME 的 dash 是 shell actor，层级在普通 X 窗之上，
+    // 改 geometry / X11BypassWindowManagerHint 都动不了它）。
+    // setFormInCenter 保留：万一 WM 拒绝了全屏请求，居中态仍是能用的兜底。
+    w.showFullScreen();
+    // 全屏时禁掉标题栏拖动（appinit 的全局事件过滤器按这个 property 搬窗口），
+    // 口径与 frmMain::on_btnMenu_Max_clicked 保持一致：拖一次窗口就会把全屏态搅没。
+    w.setProperty("canMove", !w.isFullScreen());
 
     // 进入 Qt 事件循环
     a.exec();

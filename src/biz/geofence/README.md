@@ -19,16 +19,17 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `fence_shape.h` | 几何数据结构：`Point`/`Rectangle`/`ShapeType`/`FenceRole`/`FenceShape`/`ChannelFence`；`roleFromString`/`roleToString` 是无 Qt 依赖的小 helper（迁移与离线自测共用） |
-| `fence_checker.h/.cpp` | 无状态算法：射线法命中、坐标映射、`checkDetection` 返回 `FenceViolation`（`None`/`Intrusion`/`Absence`） |
-| `fence_manager.h/.cpp` | 单例数据管理：config.json 读写、per-channel 围栏与 overlay 尺寸 |
-| `fence_overlay.h/.cpp` | 透明覆盖层 QWidget：绘制与鼠标交互（矩形/多边形/删除），按角色配色与 `setRole` |
+| `fence_shape.h` | 几何数据结构：`Point`/`Rectangle`/`ShapeType`/`FenceRole`/`FenceShape`/`ChannelFence`；归一化基准 `kFenceNormBase` 与 `normFromPixel`/`pixelFromNorm` 互转；`roleFromString`/`roleToString` 是无 Qt 依赖的小 helper（迁移与离线自测共用） |
+| `fence_checker.h/.cpp` | 无状态算法：射线法命中、脚点归一化、`checkDetection` 返回 `FenceViolation`（`None`/`Intrusion`/`Absence`） |
+| `fence_manager.h/.cpp` | 单例数据管理：config.json 读写、per-channel 围栏；**老配置的像素坐标在 `loadFromConfig` 里一次性换算成归一化** |
+| `fence_overlay.h/.cpp` | 透明覆盖层 QWidget：绘制与鼠标交互（矩形/多边形/删除），按角色配色与 `setRole`；归一化↔像素的换算基准由 `setContentRect` 提供 |
 
 ## 核心类与数据流
 - **FenceChecker**（全静态方法）：
   - `pointInPolygon`：射线法（crossing number），O(n)，支持凹多边形。
-  - `isInsideFence`：取检测框**底边中点**（脚点，帧坐标）→ 按 letterbox 规则映射到
-    widget 坐标 → 与围栏（widget 坐标）比较。
+  - `isInsideFence`：取检测框**底边中点**（脚点，帧坐标）→ `norm = 脚点 * 10000 / 帧尺寸`
+    → 与同样是归一化坐标的围栏比。**不收 overlay/widget 尺寸**（旧实现收，并据此反算
+    letterbox，换视图即失配）。
   - `checkDetection`：单遍扫描该通道所有形状，裁决顺序是**禁区优先**：
     1. 命中任一禁区 → `{Intrusion, Forbidden, 该形状下标}` 并立即返回；
     2. 否则该通道有岗区域且一个人都不在 → `{Absence, Workzone, -1}`；
@@ -43,9 +44,15 @@
   板端已跑过、且不触碰 `channels/*/shapes`，重新武装它会误伤现场围栏。规则：形状有 `role` 键就以它为准，
   没有就按当时的 `geofence.mode` 推断（`outside_alarm`→岗区域，其余→禁区）并置脏标记，
   加载末尾落盘一次 → 幂等，第二次加载走显式分支，此后 `mode` 再也影响不到角色。
-- **FenceOverlay**：绘制/交互，保存时经 `saveFences()` 把围栏顶点、角色与当前 widget 尺寸一并落盘。
+  **坐标迁移同一条路径**：通道对象没有 `coord:"norm"` 且有形状时，按"旧画布 = 内容区"近似换算
+  （见下方注意事项），换算完置脏标记落盘并打一条中文告警；`overlay_w/overlay_h` 就此退役不再写回。
+  连画布尺寸都没记录、无法换算的通道，`saveToConfig` 如实写 `coord:"pixel"` 而不是谎报 `norm`，
+  告警每次启动都重复，直到用户删了重画（`setChannelFence` 会清掉该通道的 pixel 标记）。
+- **FenceOverlay**：绘制/交互，`saveFences()` 落盘的是**归一化顶点**，不再记 widget 尺寸。
+  画与存的换算基准来自 `setContentRect()`（GLVideoWidget 的内容矩形），所以换视图/换窗口尺寸都不动围栏语义。
   `setRole()` 只存值 + `update()`，**不清空**在画的多边形顶点（`setDrawMode` 会清，切角色不该丢顶点）。
   配色按角色：禁区红、岗区域绿；正在画的临时图形用**当前所选角色**的颜色，所见即所得。
+  矩形最小尺寸检查**刻意留在 widget 像素空间**（>5px）——防误触的本意就是像素，不是画面比例。
 
 数据流：
 ```
@@ -86,14 +93,16 @@
 FenceManager::instance().loadFromConfig();
 FenceShape s; s.type = ShapeType::Polygon;
 s.role   = geofence::FenceRole::Workzone;        // 不给就是禁区（安全的失效方向）
-s.points = {{10,10},{200,10},{100,150}};
+s.points = {{1000,1000},{5000,500},{2500,4000}};  // 归一化：0..10000 = 0.01%
 FenceManager::instance().addShape(ch, s);
 FenceManager::instance().saveToConfig();
 
-auto v = FenceChecker::checkDetection(det, srcW, srcH, modelW, modelH, ovW, ovH, cf);
+auto v = FenceChecker::checkDetection(det, srcW, srcH, modelW, modelH, cf);
 if (v.verdict != geofence::FenceVerdict::None) { /* v.role / v.shapeIndex 决定报什么、报哪个 */ }
 ```
-`tests/test_geofence_role.cpp` 是这套裁决的离线契约自检（8 组断言，无 GUI 依赖）。
+`tests/test_geofence_role.cpp` 是这套裁决的离线契约自检（9 组断言，无 GUI 依赖）。
+第 9 组是本轮唯一能**离线**证明"换视图尺寸不漂"的东西：它逐像素扫三种画布，
+锁 `pixelFromNorm(normFromPixel(px))==px` 与往返误差上限，配一个跨帧尺寸的判定用例。
 
 ## 依赖关系
 - `src/ai/yolo11/common.hpp`：`object_detect_result`/`image_rect_t`。
@@ -101,12 +110,21 @@ if (v.verdict != geofence::FenceVerdict::None) { /* v.role / v.shapeIndex 决定
 - Qt Widgets：`QWidget`/`QPainter`/`QPainterPath`（overlay 绘制）。
 
 ## 注意事项
-- **坐标系约定（易错点）**：围栏顶点保存的是 **overlay/widget 像素坐标**，检测时被
-  变换方向是"**帧坐标→widget 坐标**"（脚点），围栏本身**不参与**坐标变换。
-- **letterbox 依赖 overlay 尺寸**：`saveFences` 与围栏配对保存绘制时的 `width()/height()`；
-  窗口缩放后未重新保存会导致整体偏移。`overlayW/H<=0` 时退化为直接用帧坐标比较（精度下降）。
-  角色引入后这个偏移的代价变大了：偏移在禁区一侧是**漏报闯入**，在岗区域一侧还多会**误报离岗**
-  （人实际在岗区域内，映射后落到外面）。本轮只记录、不改值。
+- **坐标系约定（易错点，2026-10-30 起）**：围栏顶点存的是**视频内容空间的归一化坐标**
+  （`kFenceNormBase = 10000`，横轴按帧宽归一、纵轴按帧高归一，两轴各除各的 ⇒ 与宽高比无关）。
+  判定端只做"脚点帧坐标 → 归一化"，**不需要任何 widget 几何**；绘制端只做"归一化 → 内容矩形内像素"，
+  基准来自 `GLVideoWidget::contentRect()`。**两侧不再共享画布尺寸**，所以换 2x2/单路放大、
+  换窗口大小、进全屏都不会让围栏漂。`pointInRect`/`pointInPolygon`/`toRect()` 一行没改 ——
+  内外判定在仿射变换下不变，改的只是输入点所在的空间。
+  允许出现 0..10000 之外的值（用户把围栏画进黑边）：刻意不 clamp，画出来什么样，判的就是什么样。
+- **老数据换算是一次近似，不是无损**：旧的 `config.json` 只记了 `overlay_w/h`（widget 尺寸），
+  **没记当时的视频宽高比**，所以"widget 像素 → 内容空间归一化"天生缺一个条件。
+  本轮取可解释的近似：**把老画布整体当成视频内容区**（`norm = px * 10000 / overlay_w` 或 `/ overlay_h`）。
+  误差来源是黑边——例如 786x521 的画布装 16:9 内容，上下黑边约 79px，y 方向最多偏 ~7.6%。
+  换算后**显示与判定仍自洽**（画出来看到的，就是报警判的），所以用户在页面上看得见偏移、
+  重画一次即彻底干净；`loadFromConfig` 会打一条中文告警提示复核。
+- **偏移的代价按角色不对称**：同一处几何偏差，在禁区一侧是**漏报闯入**，在岗区域一侧还多会
+  **误报离岗**（人实际在岗区域内，换算后落到外面）。所以迁移告警不能只写日志不提示用户。
 - 顶点数下限：矩形 2 个对角点（顺序不定，判定前 `toRect` 归一化）；多边形 ≥3，否则判为不在内部。
 - **角色创建后不可改**：形状没有稳定 id，删除模式按下标命中，所以 UI 上只能在画之前选角色，
   **改角色 = 删了重画**。默认 `forbidden`（禁区）——解析不出角色键时按"要报警"处理是更安全的失效方向。

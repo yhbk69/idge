@@ -1866,7 +1866,8 @@ void FFmpegVideoDecoder::decodeLoop()
                     //
                     // 判定放在这里（槽位循环之后、emit frameReady 之前）：
                     //   - 候选已跨槽位收齐，挂 PPE 还是挂 COCO 都能检出 person；
-                    //   - 围栏坐标是 overlay 像素空间，需与本帧 dislayImage 尺寸同口径；
+                    //   - 围栏坐标是归一化内容坐标，判定只与本帧 dislayImage 的尺寸有关，
+                    //     与 overlay/widget 几何无关（换视图、全屏、拖窗口都不改语义）；
                     //   - 截图要用同一帧带框画面，deliverAlarms 才能拍到越界目标。
                     //
                     // 语义是"进入沿触发"而非"电平触发"：一个人站在违规状态里只报一次，
@@ -1897,8 +1898,6 @@ void FFmpegVideoDecoder::decodeLoop()
 
                         if (!fenceCandidates.empty()) {
                             const geofence::ChannelFence cf = fenceMgr.channelFence(channel_);
-                            int oW = 0, oH = 0;
-                            fenceMgr.overlaySize(channel_, oW, oH);
 
                             // 每种角色各多少个：判定不再由全局 mode 决定，画几种就是几条规则
                             int forbiddenCount = 0, workzoneCount = 0;
@@ -1920,7 +1919,7 @@ void FFmpegVideoDecoder::decodeLoop()
                                     geofence::FenceChecker::checkDetection(
                                         c.det,
                                         dislayImage.width, dislayImage.height,
-                                        640, 640, oW, oH,
+                                        640, 640,
                                         cf);
                                 if (v.verdict == geofence::FenceVerdict::None)
                                     continue;

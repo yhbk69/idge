@@ -1,8 +1,10 @@
 // player_widget.cpp —— 单通道播放器窗体：GL 视频 + OSD + 围栏叠加 + 放大按钮的组合
 //
-// 【组合关系】三层叠加于同一 QGridLayout 单元 (0,0)：
+// 【组合关系】四层叠加于同一 QGridLayout 单元 (0,0)，加入顺序即叠放顺序：
 //   GLVideoWidget（底层，零拷贝渲染）→ overlayLabel（OSD，鼠标穿透）
-//   → FenceOverlay（围栏线框）→ expandBtn（悬浮按钮，手动定位右上角）。
+//   → placeholder_（"视频待接入"提示，鼠标穿透；刻意排在围栏层**之下**，
+//     这样没接上视频时存量的围栏线框仍可看见、可删可改）
+//   → FenceOverlay（围栏线框）→ expandBtn（悬浮按钮，raise 到最上层并手动定位右上角）。
 //   解码线程产物经 QueuedConnection 信号投递到 GLVideoWidget 的槽，
 //   保证 EGL/GL 调用始终发生在 GUI 线程（GL 上下文线程亲和）。
 #include "player_widget.h"
@@ -26,6 +28,7 @@
 #include <QTextBrowser>
 #include <QDateTime>
 #include <QScrollBar>
+#include <QTimer>
 #include "fence_overlay.h"
 #include "ConfigManager.h"
 
@@ -70,12 +73,41 @@ PlayerWidget::PlayerWidget(QWidget* parent)
     mainLayout->addWidget(video_widget_, 0, 0);  // 视频显示组件
     mainLayout->addWidget(overlayLabel, 0, 0);   // 覆盖层
 
+    // ------------------------------------------------------------------------
+    // "视频待接入"占位（1b）
+    // ------------------------------------------------------------------------
+    // 同一个 (0,0) 单元里的第 3 层：压在视频上、但在围栏层**之前**加入布局，
+    // 于是存量的围栏线框仍然看得见 —— 没接上视频时最想干的活恰恰是"照着画面
+    // 之外的位置把围栏挪一挪/删掉重画"，把它盖严实就成了死区。
+    // 鼠标穿透：⊕ 与围栏绘制都不该被一块提示挡住。
+    placeholder_ = new QLabel(this);
+    placeholder_->setAlignment(Qt::AlignCenter);
+    placeholder_->setTextFormat(Qt::PlainText);   // 解码器报错串可能含尖括号，绝不能吃成富文本
+    placeholder_->setWordWrap(true);
+    placeholder_->setAttribute(Qt::WA_TransparentForMouseEvents);
+    placeholder_->setStyleSheet(
+        QString("QLabel { background: rgba(14, 14, 22, 190); color: %1;"
+                "  font-size:%2px; padding: 12px; }")
+            .arg(theme::TEXT_MUTED)
+            .arg(theme::FS_CARD));
+    mainLayout->addWidget(placeholder_, 0, 0);
+
     // 创建电子围栏覆盖层
     fenceOverlay_ = new geofence::FenceOverlay(this);
     mainLayout->addWidget(fenceOverlay_, 0, 0);  // 围栏覆盖层（最上层）
 
-    // 初始化放大按钮
+    // 初始化放大按钮（内部 raise()，天然在占位与围栏之上）
     setupExpandButton();
+
+    // 等首帧的轮询：只在占位可见且还没出过帧时跑，见 player_widget.h 的说明
+    pollTimer_ = new QTimer(this);
+    pollTimer_->setInterval(500);
+    connect(pollTimer_, &QTimer::timeout, this, [this]() {
+        if (video_widget_->hasFrame()) {
+            hasFrame_ = true;
+            updatePlaceholder();
+        }
+    });
 
 
     /* 
@@ -89,11 +121,41 @@ PlayerWidget::PlayerWidget(QWidget* parent)
             video_widget_, &GLVideoWidget::onFrameReady,
             Qt::QueuedConnection);  // 使用队列连接，确保线程安全
 
+    // 视频内容矩形（扣掉黑边的那块画面）变化 -> 围栏叠加层的换算基准。
+    // 视图切换、全屏、窗口缩放、首帧到位都会走到；围栏存的是归一化坐标，
+    // 这里变的只是"画在哪几个像素"，不是围栏本身，所以不需要碰围栏数据。
+    connect(video_widget_, &GLVideoWidget::contentRectChanged,
+            fenceOverlay_, &geofence::FenceOverlay::setContentRect);
 
-    // 解码器错误信号 -> 错误处理槽函数
-    connect(decoder_, &FFmpegVideoDecoder::error, this, [](QString msg) {
+
+    // 解码器错误信号 -> 占位文案
+    // 这里刻意"既 warning 又刷占位"：原来只有一个只 qWarning 的 lambda，
+    // 现场表现为"格子黑着、什么也没说"，只有 SSH 上去看日志才知道流没连上。
+    // msg 只取首行并截断：ffmpeg 的错误串动辄几百字节，一行提示区放不下也不会更好读。
+    connect(decoder_, &FFmpegVideoDecoder::error, this, [this](const QString &msg) {
         qWarning() << "Decoder error:" << msg;
+        errorText_ = msg.section('\n', 0, 0).left(80);
+        signalLost_ = false;
+        updatePlaceholder();
     });
+
+    // 在线状态：连上就清掉上一次的失败/中断，断了才提示"信号中断"
+    // 只认本通道的广播（解码器把 statusChanged 发给了 frmMain 的 AlarmManager，
+    // 这里是第二个消费者，不判 ch 会把四路的态搅在一起）。
+    connect(decoder_, &FFmpegVideoDecoder::statusChanged, this,
+            [this](int ch, int online) {
+                if (ch != channel_) return;
+                if (online != 0) {
+                    errorText_.clear();
+                    signalLost_ = false;
+                } else {
+                    signalLost_ = true;
+                }
+                updatePlaceholder();
+            });
+
+    updatePlaceholder();   // 首帧前的初值：未启用 / 未配置地址 当场就能判出来
+
 
     
 }
@@ -204,6 +266,14 @@ void PlayerWidget::open(std::string url, int channel)
     recording.gopSeconds = cfg.recordingGopSeconds();
     decoder_->setRecordingConfig(recording);
 
+    // 换流即重新走一遍"正在接入… → 出帧"的态：上一路的失败残留（errorText_/
+    // signalLost_）不清掉的话，新流明明连上了占位还挂着"接入失败"。
+    channel_ = channel;
+    hasFrame_ = false;
+    errorText_.clear();
+    signalLost_ = false;
+    updatePlaceholder();
+
     decoder_->setChannel(channel);  // 设置解码器频道
     decoder_->start(QString::fromStdString(url));  // 启动解码
 }
@@ -251,5 +321,60 @@ PlayerWidget::~PlayerWidget() {
 
 void PlayerWidget::setChannel(int channel)
 {
+    channel_ = channel;
     fenceOverlay_->setChannel(channel);
+    // frmMain 在 ConfigManager::load() 之后、开流之前就把通道号配好了，
+    // 所以"未启用/没地址"这两种态在这里就能判出来，不用等任何信号。
+    updatePlaceholder();
+}
+
+// ============================================================================
+// updatePlaceholder —— 决定这一格该显示什么提示（不显示=画面正常）
+// ============================================================================
+// 判序是有意的，从"配置层面根本不会有流"往"流本身出了问题"排：
+//   1) 未启用          —— 配置说这路不开，任何运行期状态都不该盖过它
+//   2) 视频待接入       —— 启用了但没地址，同上，且这条正是需求点名的文案
+//   3) 接入失败：msg    —— 开过流、报过错（比"信号中断"具体，优先）
+//   4) 信号中断         —— 曾经在线/开过流，解码循环保了不在线
+//   5) 正在接入…       —— 已 open()，还没等到第一帧
+//   6) 空串            —— 出过帧且没报错，隐藏占位
+// channel_ 还是 -1（构造与 setChannel 之间的极短窗口）时不显示任何文案，
+// 免得四路在启动瞬间统一闪一遍"通道0 未启用"之类的错号。
+// ============================================================================
+void PlayerWidget::updatePlaceholder()
+{
+    if (!placeholder_) return;
+
+    QString text;
+    if (channel_ >= 0) {
+        ConfigManager &cfg = ConfigManager::instance();
+        if (!cfg.channelEnabled(channel_))
+            text = QString("通道%1 未启用").arg(channel_ + 1);
+        else if (cfg.channelSource(channel_).isEmpty())
+            text = QString("通道%1 视频待接入（未配置地址）").arg(channel_ + 1);
+        else if (!errorText_.isEmpty())
+            text = QString("通道%1 接入失败：%2").arg(channel_ + 1).arg(errorText_);
+        else if (signalLost_)
+            text = QString("通道%1 信号中断").arg(channel_ + 1);
+        else if (!hasFrame_)
+            text = QString("通道%1 正在接入…").arg(channel_ + 1);
+    }
+
+    if (text.isEmpty()) {
+        placeholder_->hide();
+        pollTimer_->stop();          // 画面正常，等首帧的轮询就此停掉
+    } else {
+        placeholder_->setText(text);
+        placeholder_->show();
+        // 只在"还没出过帧"时才需要轮询；已经出过帧的态（信号中断）是等事件，
+        // 轮询 hasFrame() 永远是真，白跑。
+        if (!hasFrame_) {
+            if (!pollTimer_->isActive()) pollTimer_->start();
+        } else {
+            pollTimer_->stop();
+        }
+    }
+    // ⊕ 必须一直在最上面：占位块是整格的，鼠标虽然穿透，但视觉上被压住
+    // 就等于这一路没法放大（触屏上尤其像"按钮没了"）。
+    if (expandBtn_) expandBtn_->raise();
 }

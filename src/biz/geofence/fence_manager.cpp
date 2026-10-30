@@ -5,6 +5,7 @@
 #include "fence_manager.h"
 #include "ConfigManager.h"
 #include <QJsonArray>
+#include <QTimer>
 #include <QDebug>
 
 namespace geofence {
@@ -29,7 +30,8 @@ FenceManager &FenceManager::instance()
 //       "channels": {
 //         "0": {
 //           "enabled": true,
-//           "overlay_w": 400,
+//           "coord": "norm",                 // 顶点是归一化内容坐标；缺这个键 = 老的 widget 像素数据
+//           "overlay_w": 400,                // 退役键，只在迁移老数据时用作换算分母
 //           "overlay_h": 300,
 //           "shapes": [
 //             { "type": "rectangle", "role": "forbidden", "points": [[100,50],[300,200]] },
@@ -47,6 +49,17 @@ FenceManager &FenceManager::instance()
 // —— 第二次加载时每个形状都带显式 role，用户重画出来的角色不会再被 mode 拍平。
 // 迁移不放 ConfigManager::migrateSchemaV2()：那是一次性闸门、现场已经跑过、
 // 而且它只动 geofence 顶层键、从不遍历 channels/*/shapes。
+//
+// 坐标迁移（同一处、同一条落盘路径）：归一化之前的围栏存的是 overlay widget 像素，
+// 判定端要按"绘制时记录的 overlay_w/h"反算 letterbox 才能比，于是换视图/全屏即失配。
+// 现在两套坐标不能共存，加载时把没有 coord:"norm" 的通道换算成归一化并写标记。
+// **这个换算天生是近似的**：老配置没有记录当时的视频宽高比，无从知道内容区在画布里
+// 的哪一块，只能把整块旧画布当作内容区（norm = 像素 * 10000 / overlay_w 或 / overlay_h）。
+// 误差来源是黑边，画布宽高比与内容越不像、偏得越多；换算后显示与判定是自洽的
+// （画出来看到的，就是报警判的），所以页面上看得见偏移、重画一次即彻底干净。
+// 告警必须走 UI 日志（用户得知道围栏该复核），而 loadFromConfig 在 initForm 阶段调用、
+// 那时 frmMain 还没 connect logMessage ⇒ 用 singleShot(0) 推到事件循环里再发，
+// 构造函数跑完时连接已就绪。qWarning 同时留一份，命令行下启动也能看到。
 // ============================================================================
 void FenceManager::loadFromConfig()
 {
@@ -65,8 +78,13 @@ void FenceManager::loadFromConfig()
     const QString legacyMode = cfg.geofenceMode();
     bool roleInferred = false;
 
+    // 坐标迁移的中文告警攒到这里，解锁后逐条 postLog（持锁发信号会让槽里的
+    // FenceManager 调用撞上同一把非递归锁）。
+    QStringList coordNotices;
+    bool coordMigrated = false;
+
     fences_.clear();
-    overlaySizes_.clear();
+    legacyPixel_.clear();
 
     QJsonObject channels = cfg.geofenceChannels();
     for (auto it = channels.begin(); it != channels.end(); ++it) {
@@ -106,11 +124,33 @@ void FenceManager::loadFromConfig()
             }
         }
 
-        // 加载 overlay 尺寸（用于坐标映射）
-        int ow = chObj["overlay_w"].toInt(0);
-        int oh = chObj["overlay_h"].toInt(0);
-        if (ow > 0 && oh > 0) {
-            overlaySizes_[ch] = qMakePair(ow, oh);
+        // 旧画布尺寸：退役键，只在本函数里当作换算分母用一次，不再存成员
+        const int ow = chObj["overlay_w"].toInt(0);
+        const int oh = chObj["overlay_h"].toInt(0);
+
+        // 坐标空间换算：没有 coord 标记的就是归一化机制之前的 widget 像素数据。
+        // 近似口径与后果见函数头注释 —— 换算完一定要在页面上复核一次。
+        const bool normCoord = chObj["coord"].toString() == QLatin1String("norm");
+        if (!normCoord && !cf.shapes.empty()) {
+            if (ow > 0 && oh > 0) {
+                for (auto &shape : cf.shapes) {
+                    for (auto &p : shape.points) {
+                        p.x = normFromPixel(p.x, 0, ow);
+                        p.y = normFromPixel(p.y, 0, oh);
+                    }
+                }
+                coordMigrated = true;
+                coordNotices.append(QStringLiteral(
+                    "通道%1 围栏已从像素坐标换算为归一化坐标（按旧画布=内容区近似），"
+                    "请到视频监控页复核并按需重画").arg(ch));
+            } else {
+                // 没有画布尺寸就没法换算，也不猜（猜出来的围栏会静默报警）。原样留着，
+                // 但如实标成 pixel，于是每次启动都会再提醒一次，直到用户重画。
+                legacyPixel_.insert(ch);
+                coordNotices.append(QStringLiteral(
+                    "通道%1 围栏是旧像素坐标且未记录画布尺寸，无法换算，位置不可信，请删除后重画")
+                    .arg(ch));
+            }
         }
 
         fences_[ch] = cf;
@@ -129,13 +169,27 @@ void FenceManager::loadFromConfig()
     qDebug() << "[Fence] loadFromConfig: enabled=" << enabled_
              << "channels=" << fences_.size();
 
-    // 推断过角色就立刻写回，把"role 缺失"这条路一次性封死。
+    // 推断过角色或换算过坐标就立刻写回，把"老格式"这条路一次性封死。
     // 必须先解锁：saveToConfig 自己也要拿同一把 QMutex（非递归），持锁调用即死锁。
-    if (roleInferred) {
+    if (roleInferred || coordMigrated) {
         locker.unlock();
         saveToConfig();
-        qDebug() << "[Fence] loadFromConfig: 老配置无 role，已按 mode=" << legacyMode
-                 << " 补齐并落盘";
+        if (roleInferred) {
+            qDebug() << "[Fence] loadFromConfig: 老配置无 role，已按 mode=" << legacyMode
+                     << " 补齐并落盘";
+        }
+        if (coordMigrated) {
+            qDebug() << "[Fence] loadFromConfig: 老配置为像素坐标，已换算为归一化并落盘";
+        }
+    }
+
+    // 告警要进 UI 日志区，但调用方是 initForm 阶段——那时 frmMain 还没 connect
+    // logMessage，直接 emit 等于把这条"请复核围栏"扔掉。singleShot(0) 把它推到
+    // 事件循环里发：构造函数跑完、连接已建立，而围栏也已经换算好了。
+    for (const QString &notice : coordNotices) {
+        qWarning() << "[Fence]" << notice;
+        const QString text = notice;
+        QTimer::singleShot(0, this, [this, text]() { postLog("fence", text); });
     }
 }
 
@@ -168,12 +222,13 @@ void FenceManager::saveToConfig()
         }
         chObj["shapes"] = shapesArr;
 
-        // 保存 overlay 尺寸
-        if (overlaySizes_.contains(it.key())) {
-            auto sz = overlaySizes_[it.key()];
-            chObj["overlay_w"] = sz.first;
-            chObj["overlay_h"] = sz.second;
-        }
+        // 坐标空间标记：本类内存里的顶点一律是归一化内容坐标，落盘必须带上这一点，
+        // 否则下一次加载又被当成老数据换算一遍（换算不幂等）。
+        // 唯一写 pixel 的情况是"老数据 + 没记录画布尺寸、换算不了"，留着它才能每次
+        // 启动继续提醒用户重画；写 norm 谎报就等于把不可信的围栏说成可信的。
+        chObj["coord"] = legacyPixel_.contains(it.key())
+                             ? QStringLiteral("pixel") : QStringLiteral("norm");
+        // overlay_w/overlay_h 不再写：判定端已经不需要画布几何，换算只在加载那一次用。
 
         channels[QString::number(it.key())] = chObj;
     }
@@ -217,10 +272,13 @@ ChannelFence FenceManager::channelFence(int channel) const
 }
 
 // 设置指定通道的围栏配置（替换整个通道的围栏）
+// 调用方是 FenceOverlay，它交上来的顶点已经是归一化坐标 ⇒ 该通道不再是"换算不了的
+// 老像素数据"，摘掉 pixel 标记，否则落盘的 coord 与内存里的坐标空间不一致。
 void FenceManager::setChannelFence(int channel, const ChannelFence &fence)
 {
     QMutexLocker locker(&mutex_);
     fences_[channel] = fence;
+    legacyPixel_.remove(channel);
     locker.unlock();
     emit fenceChanged(channel);
 }
@@ -269,47 +327,9 @@ bool FenceManager::hasFence(int channel) const
 }
 
 // ============================================================================
-// overlay 尺寸管理
+// 坐标换算：老配置里的 overlay_w/h 只在 loadFromConfig 里读一次用作分母，
+// 运行期不再记录也不再读，所以这里没有任何 widget 尺寸状态。
 // ============================================================================
-// 用户绘制围栏时，顶点坐标记录的是 overlay widget 的像素值（原样保存，不归一化）。
-// 检测时反向处理：把检测框脚点从视频帧空间按 letterbox 比例换算到 widget 空间，
-// 再与围栏比较；换算比例依赖"绘制时"的 widget 尺寸，故必须按通道记录该尺寸。
-// 若某通道未记录（overlaySize 返回 0,0），fence_checker 会退化为直接用帧坐标比较，
-// 属精度下降的兜底路径，不应作为常态。
-// ============================================================================
-
-/**
- * @brief 设置指定通道的 overlay widget 尺寸
- *
- * @param channel: 通道号（0-3）
- * @param w: overlay widget 宽度（像素）
- * @param h: overlay widget 高度（像素）
- */
-void FenceManager::setOverlaySize(int channel, int w, int h)
-{
-    QMutexLocker locker(&mutex_);
-    overlaySizes_[channel] = qMakePair(w, h);
-}
-
-/**
- * @brief 获取指定通道的 overlay widget 尺寸
- *
- * @param channel: 通道号（0-3）
- * @param w: 输出的宽度（像素），无数据时返回 0
- * @param h: 输出的高度（像素），无数据时返回 0
- */
-void FenceManager::overlaySize(int channel, int &w, int &h) const
-{
-    QMutexLocker locker(&mutex_);
-    auto it = overlaySizes_.find(channel);
-    if (it != overlaySizes_.end()) {
-        w = it.value().first;
-        h = it.value().second;
-    } else {
-        w = 0;
-        h = 0;
-    }
-}
 
 /**
  * @brief 发送围栏日志到 UI（通过信号槽跨线程安全传递）

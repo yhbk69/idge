@@ -128,6 +128,11 @@ void frmVideoWindow::btnClicked(const QString &objName)
 //       放大时只显示选中的通道，缩小恢复2x2网格
 // @param channel 要放大的通道号（0-3），-1表示恢复
 // @param expanded true=放大，false=缩小
+//
+// 两种模式都要保持的约束：围栏工具栏占 (2, 0, 1, **2**) 即跨两列，
+// 且 grid 的 columnStretch(0/1) 与 rowStretch(0/1) 都是 1。
+// 放大时 player 占满 (0,0,2,2)、工具栏仍在第 2 行，跨列写法照样成立 ——
+// 别把它拆回单列（那会让第 0 列被工具栏的 ~700px 最小宽度顶开，四格不再等大）。
 // ============================================================================
 void frmVideoWindow::setExpandedMode(int channel, bool expanded)
 {
@@ -382,14 +387,25 @@ void frmVideoWindow::setupFenceToolbar()
     });
 
     // ========================================================================
-    // 第九步：将工具栏插入到主网格布局
+    // 第九步：工具栏末尾加弹簧（居左），并把工具栏插进网格
     // ========================================================================
-    // 插入到 gridLayout 的第2行，跨2列（视频画面下方）
-    ui->gridLayout->addWidget(toolbar, 2, 0, 1, 1);  // 工具栏占第0列
+    // 弹簧必须在**工具栏自己的 QHBoxLayout** 里。上一版把它当 grid 的第 2 行第 1 列项
+    // （addItem(spacer, 2, 1)）塞进网格，于是第二列只被 40px 的弹簧撑着，而工具栏
+    // ~700px 的最小宽度全压在单一列上 —— 四宫格左右两列就此不等宽，这是
+    // "四个监控不一样大"的唯一成因（四个 PlayerWidget 在 .ui 里是对称的）。
+    // 居左效果一模一样，但不再往网格灌最小宽度。
+    lay->addStretch();
 
-    // 在右边添加弹簧控件，让工具栏居左显示
-    QSpacerItem *spacer = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Minimum);
-    ui->gridLayout->addItem(spacer, 2, 1, 1, 1);  // 弹簧占第1列
+    // 插入到 gridLayout 的第2行，跨2列（视频画面下方）。
+    // 放大模式下 player 占 (0,0,2,2)、工具栏仍在第 2 行，跨列写法两种模式都成立。
+    ui->gridLayout->addWidget(toolbar, 2, 0, 1, 2);
+
+    // 显式声明"两列两行等分"。不依赖 QGridLayout 那条"stretch 全为 0 时把额外空间
+    // 平分"的隐含行为 —— 一旦有人再往某列塞一个窄控件，隐含行为就静默变成不对称。
+    ui->gridLayout->setColumnStretch(0, 1);
+    ui->gridLayout->setColumnStretch(1, 1);
+    ui->gridLayout->setRowStretch(0, 1);
+    ui->gridLayout->setRowStretch(1, 1);
 }
 
 void frmVideoWindow::applyFenceRole(int channel)

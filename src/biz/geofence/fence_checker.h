@@ -7,13 +7,15 @@
 // 核心功能：
 //   1. 判断一个点是否在围栏形状内（射线法）
 //   2. 将检测框从模型空间（640x640）映射到原始视频空间
-//   3. 将检测框脚点（帧坐标）映射到 overlay 空间，与围栏坐标（widget 像素系）比较
+//   3. 把检测框脚点（帧坐标）归一化，与同样是归一化坐标的围栏比较
 //   4. 综合判断检测目标是否违反围栏规则
 //
 // 坐标空间说明：
 //   模型空间:     YOLO 推理输出的坐标，固定 640x640
 //   原始视频空间: 解码后的视频帧分辨率（如 1920x1080）
-//   overlay 空间: FenceOverlay widget 的像素坐标（用户绘制围栏时使用）
+//   归一化空间:   视频内容区按 0..kFenceNormBase 归一（见 fence_shape.h）。
+//                 判定端**不需要知道任何 widget 几何**：overlay 尺寸、视图模式、
+//                 全屏与否都不参与，所以换视图不会让既有围栏改语义。
 //
 // 判断逻辑（按形状角色，见 FenceRole）：
 //   取检测框的"底边中点"（脚部位置），判断该点落在哪个角色里。
@@ -90,17 +92,15 @@ public:
 
     // ========================================================================
     // 判断单个检测目标是否在围栏内
-    // 算法：取检测框"底边中点"作为脚点（帧坐标），按 letterbox 规则映射到
-    //       overlay/widget 空间，再与本身就是 widget 坐标的围栏比较。
-    //       注意变换方向是"帧→widget"，不是把围栏变换到视频空间。
-    //
-    // overlayW/H: overlay widget 尺寸，用于确定帧坐标到 widget 坐标的缩放比例
-    //             与黑边（letterbox）偏移；<=0 时退化为直接用帧坐标与围栏比较。
+    // 算法：取检测框"底边中点"作为脚点（帧坐标），按 srcW/srcH 归一到
+    //       0..kFenceNormBase，再与同样是归一化坐标的围栏比较。
+    //       不再需要 overlay 尺寸 —— 判定与 widget 几何彻底无关。
+    // srcW/srcH: 原始视频帧尺寸，同时是归一化的除数；<=0 时脚点落到 0，
+    //            等价于"这一帧尺寸不可信"，不会误判成命中。
     // ========================================================================
     static bool isInsideFence(const object_detect_result &det,
                               int srcW, int srcH,
                               int modelW, int modelH,
-                              int overlayW, int overlayH,
                               const FenceShape &fence);
 
     // ========================================================================
@@ -123,7 +123,6 @@ public:
     static FenceViolation checkDetection(const object_detect_result &det,
                                          int srcW, int srcH,
                                          int modelW, int modelH,
-                                         int overlayW, int overlayH,
                                          const ChannelFence &channelFence);
 };
 

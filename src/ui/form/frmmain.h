@@ -77,6 +77,10 @@ private:
     QTimer *toastTimer_ = nullptr;   ///< 悬浮提示消失定时器
     QTimer *alarmRefreshTimer_ = nullptr;  ///< 报警面板刷新节流（合并高频报警，防刷屏拖垮 GUI event loop）
 
+    /// 进全屏前那一格的几何，"最大化/还原"按钮退回普通态时用它复位。
+    /// 刻意做成成员而不是函数里的 static 局部：这份还原态属于本窗口。
+    QRect restoreGeometry_;
+
     QList<int> iconsMain;          ///< 主导航图标列表
     QList<QAbstractButton *> btnsMain;  ///< 主导航按钮列表
 
