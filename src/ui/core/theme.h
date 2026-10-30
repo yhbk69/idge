@@ -52,6 +52,22 @@ constexpr int FS_CARD  = 18;  ///< 卡片/分组标题
 constexpr int FS_PAGE  = 22;  ///< 页面标题
 constexpr int FS_KPI   = 30;  ///< KPI 大数字
 
+// ========== 触屏命中区档（2026-10-29 触屏批次） ==========
+// 目标硬件实测：DSI-1 1920x1200、goodix-ts 十寸面板、≈226PPI（1mm ≈ 8.9 逻辑 px），
+// 且工程未启用 HiDPI 缩放 → 这里的数字就是毫米换算的直接输入。
+// Qt QSS 的 min-height 不含 padding 与 border：总高 = min-height + 2*padding_v + 2*border。
+// 本轮原则：字号一律不动（锚在 blacksoft.css 末尾的全局 16px），只长命中区 —— 这是不截字的前提。
+constexpr int TOUCH_MAIN_MIN_H  = 54;  ///< T1 主操作/导航：54 + 2*8 + 2*1 = 72px ≈ 8.1mm
+constexpr int TOUCH_FIELD_MIN_H = 42;  ///< T2 输入件：42 + 2*6 + 2*1 = 56px ≈ 6.3mm
+constexpr int TOUCH_ROW_MIN_H   = 30;  ///< T3 表格内次级钮：30 + 2*8 + 2*1 = 48px ≈ 5.4mm
+constexpr int TOUCH_ICON_BTN    = 48;  ///< T4 纯图标钮边长（代码 setFixedSize 直接用）
+constexpr int TOUCH_TABLE_ROW   = 56;  ///< 表格行高：CSS 的 ::item padding 管不到，只能 setDefaultSectionSize
+
+// ========== 顶部导航字号（去 icon 后唯一被调大的一档） ==========
+// 导航钮从"图上字下"变"只有字"，横向不再被 22px 图标占位，才敢从 FS_NAV 抬到 18。
+// 只给导航行用，别处不要引用 —— 其余字阶本轮刻意不动。
+constexpr int FS_NAV_TOUCH = 18;
+
 // ========== 常用样式构造器 ==========
 
 /**

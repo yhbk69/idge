@@ -65,6 +65,11 @@ public:
     void setRole(FenceRole role);
     FenceRole role() const { return role_; }
 
+    // 角色配色（边框色）：禁区红、岗区域绿。放成 public 是因为工具栏的角色按钮
+    // 要用同一个颜色画色块 —— 颜色只能有这一个出处，否则按钮上的方块和画布上
+    // 的围栏会各说各话。
+    static QColor roleColor(FenceRole role);
+
     // 从 FenceManager 加载围栏数据并刷新显示
     void loadFences();
 
@@ -93,7 +98,7 @@ private:
 
     // 角色配色：三种绘制路径（已存形状 / 临时矩形 / 临时多边形）共用一套，
     // 否则"选的是绿、画出来是红"，用户会按错的图去配规则。
-    static QColor roleColor(FenceRole role);       // 边框色
+    // 边框色 roleColor 已提到 public（工具栏色块同源），这里只留填充色。
     static QColor roleFillColor(FenceRole role);   // 半透明填充色
 
     int channel_ = 0;                // 当前操作的通道号

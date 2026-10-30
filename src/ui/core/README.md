@@ -23,7 +23,7 @@
 | `theme.h/.cpp` | `theme::` 命名空间的配色/尺寸取值，form×10 + widgets×4 共 300 余处调用——本目录被依赖最广的一件 |
 | `singleton.h` | `SINGLETON_DECL/IMPL` 宏：QScopedPointer + QMutex 双重检查锁单例 |
 | `qss.qrc` | 皮肤资源脚本，prefix=`/`，注册 `qss/blacksoft.css` 与 `qss/blacksoft/` 下 24 个 PNG |
-| `qss/blacksoft.css` | 主样式表（约 15.7 KB）。首行 `QPalette{background:#444444;}…` 为约定格式，代码用 `qss.mid(20,7)` 提取背景色 |
+| `qss/blacksoft.css` | 主样式表（约 21.6 KB）。首行 `QPalette{background:#RRGGBB;}` 为约定格式，代码用 `qss.mid(20,7)` 提取背景色；**尺寸声明的写法受"注意事项"里 `getStyle` 拆行一条约束** |
 | `qss/blacksoft/*.png` | 复选框/单选框/步进器箭头/下拉箭头/树分支/日历翻页/菜单选中标记等状态图（14~19px） |
 | `qrc/font.qrc` + `qrc/font/` | 注册 `:/font/iconfont.ttf`、`:/font/fontawesome-webfont.ttf`、`:/font/pe-icon-set-weather.ttf`、`:/font/DroidSansFallback.ttf` |
 | `qrc/image.qrc` + `qrc/image/` | `:/image/bg_novideo.png`（**当前无代码引用**，素材保留） |
@@ -36,8 +36,14 @@
 ## 使用方法
 
 本目录通过根 `CMakeLists.txt` 编入主程序：头文件路径在 `include_directories(${CMAKE_SOURCE_DIR}/src/ui/core)`，
-资源经两个 `qt5_add_big_resources` 块打包——`CORE_HELPER_SOURCES_QRC`（本目录 `qrc/` 四个 qrc）
-与 `CORE_QRC`（本目录 `qss.qrc`），随 `idge` 一起链接。
+资源经两个块打包——`qt5_add_big_resources` 的 `CORE_HELPER_SOURCES_QRC`（本目录 `qrc/` 四个 qrc，字体/图片体积大）
+与 `qt5_add_resources` 的 `CORE_QRC`（本目录 `qss.qrc`），随 `idge` 一起链接。
+
+**`qss.qrc` 刻意不走 big_resources**：big_resources 生成的是 `rcc --pass 1 / --pass 2` 两段式规则，
+Makefile 里那条 `qrc_qss.o:` **前置依赖为空**，改 `blacksoft.css` 后 rcc 根本不会重跑，
+皮肤改动静默不进二进制（2026-10-29 触屏批次实测白折腾一轮）。普通 `qt5_add_resources` 会把
+`.qrc` 里列出的每个文件都挂成前置依赖（对照 `qrc_resources.cpp` 规则：`resources.qrc` + `shutter.wav` + `.depends`）。
+皮肤只有 1 个 21KB css + 23 张小图标，本来也不需要 big 模式。
 
 **资源别名由「qrc 文件所在目录 + qrc 内相对路径 + prefix」决定，改目录名/挪 qss 位置会直接破坏 `:/qss/…` 字符串**：
 `qss.qrc` 必须与 `qss/` 同级，`qrc/*.qrc` 必须与 `qrc/<子目录>` 同级。
@@ -60,6 +66,42 @@ if (!qss.isEmpty()) {
 应用级初始化在 `src/main.cpp`：`QtHelper::initMain()` → `QtHelper::initOpenGL(2,…)`（强制 OpenGLES，RK3588）
 → `AppInit::Instance()->start()` → `QtHelper::setFont()/setCode()/setTranslator()` → `QtHelper::setFormInCenter(&w)`。
 
+## 触屏命中区设计令牌（2026-10-29 批次）
+
+目标硬件是**板载 10 寸电容触摸屏**，分辨率实测而非推测：`xrandr` 报 `DSI-1 connected 1920x1200+0+0`
+（HDMI-1 上那台 1920x1080 是外接调试屏，不是目标），`/sys/class/input/event3` 名为 `goodix-ts`
+确认电容触摸控制器。面板按 10.1" 16:10 推算 ≈217x136mm → **≈226 PPI，1mm ≈ 8.9 逻辑 px**；
+工程里 `AA_EnableHighDpiScaling`/`QT_SCALE_FACTOR` 零命中，所以**逻辑 px == 物理 px**，
+样式里的数字就是毫米换算的直接输入。触摸目标换算：6mm ≈ 53px（下限）、8mm ≈ 71px（舒适）。
+
+令牌定义在 `theme.h`，css 里的数字与之一一对应（Qt QSS 的 `min-height` **不含** padding 与 border，
+故 总高 = min-height + 2×padding_v + 2×border）：
+
+| 档 | 总高 | mm | 常量 | 用在 |
+| --- | --- | --- | --- | --- |
+| T1 主操作 | 72 | 8.1 | `TOUCH_MAIN_MIN_H=54`（+2×8 padding +2×1 border） | 全局 `.QPushButton/.QToolButton`、顶部导航钮、围栏工具栏钮 |
+| T2 输入件 | 56 | 6.3 | `TOUCH_FIELD_MIN_H=42` | `QLineEdit/QComboBox/QSpinBox/QDoubleSpinBox` 及 `theme::field()` |
+| T3 表格内 | 48 | 5.4 | `TOUCH_ROW_MIN_H=30` | `详情`/`查看`/`注销`/`移除` 等行内次级钮、`theme::miniButton()` |
+| T4 图标钮 | 48x48 | 5.4 | `TOUCH_ICON_BTN` | 画面放大钮、标题栏 min/max/close、照片删除 × |
+| 指示器 | 40x40 | 4.5 | — | `QCheckBox/QRadioButton::indicator`（Qt 里 indicator 尺寸**就是**命中区，只能真放大） |
+| 步进/下拉 | 宽 44 | — | — | `::up-button/::down-button`、`::drop-down`（原 10px/15px 指肚按不到） |
+| 滚动条 | 厚 26 | 2.9 | — | `QScrollBar`（原 12px 且无翻页钮） |
+
+三条容易踩的口径，都是这一轮量出来的：
+
+1. **字号基本不动**。全局正文仍是 `font-size:16px`（css 尾部），唯一上调的一档是导航 `FS_NAV_TOUCH=18`——
+   因为导航钮去掉了 icon，横向纵向都腾出了空间。"按钮小"的解法是长命中区，不是长字号；
+   动字号必然截字，本轮用探针验过 5 个页面 626 个可见控件 0 截字才收工。
+2. **表格行高 CSS 管不到**。`QTableView::item{padding}` 不改行高，行高由 `verticalHeader()` 的
+   default section size 决定，只能在代码里 `setDefaultSectionSize(theme::TOUCH_TABLE_ROW)`（56px）。
+3. **皮肤层会被内联样式打穿**。`theme::field()/miniButton()/chip()` 是全仓 300 余处内联 QSS 的集中生成器，
+   只改 css 不改它们等于没改；反过来，凡是固定宽 `setFixedSize` 的按钮在新 padding 下会截字，
+   该轮把角色钮等处的固定宽换成了 `setMinimumHeight` + `setMinimumSize`。
+
+顶部导航已从"图标+文字（`ToolButtonTextUnderIcon`）"改为**纯文字**，`IconHelper` 只留给标题栏三钮的 glyph；
+`labIco`（日历 glyph）隐藏。顺带删掉了"双击标题栏切最大化"——触屏上是误触源，且窗口尺寸一变，
+围栏 overlay 的像素坐标就跟着漂，直接变成漏报/误报。
+
 ## 依赖关系
 
 - 依赖 `src/head.h`（聚合 QtCore/QtGui/QtWidgets）与 Qt5（Core/Gui/Widgets）；图标全部走 qrc 路径，不读文件系统；
@@ -78,8 +120,19 @@ if (!qss.isEmpty()) {
 - `IconHelper::initFont()` 用裸 `new` 且无锁，只应在主线程首次显示界面前调用（现有调用链满足）。
 - `qthelper.cpp` 里有一批**零调用的移植遗留**（`initAll`、`setSystemDateTime`、`checkRun`（仅 Windows）、`runWithSystem` 等），
   保留是为了将来接平台配置时对照，不等于可用；`checkRun` 在本 Linux 目标上直接返回 true，别拿它当单实例保护。
-- `getStyle` 按 `stream >> line` 逐词读取，css 里不要依赖一行的列对齐（读取会压缩空白）。
-- PNG 均为 14~19px 状态图，替换时保持尺寸，否则控件指示器错位；改 css 后重新构建即可（qrc 内容变化会触发 rcc 重新生成）。
+- **`getStyle` 会把带空格的值拆行，进而吃掉整条规则的后半段**（本目录最坑的一条，2026-10-29 才定位）：
+  `qthelper.cpp` 的 `getStyle()` 用 `stream >> line` 逐 **token** 读取再 `join("\n")`，
+  于是 `border:1px solid #3d3d4d;` 在交给 Qt 前就被拆成 `border:1px` / `solid` / `#3d3d4d;` 三行。
+  `QCssParser::parseDeclaration` 碰到 `solid` 这种"缺冒号的属性名"报错，`parseStyleRule` 随即
+  `skipTo(RightBrace)` —— **该条规则里剩下的声明全部作废**。所以 css 现状是"半死"的，
+  肉眼看着写了却不起作用的属性多半是这个原因。
+  **写法规约：尺寸类声明一律单 token（`padding-top/left/bottom/right` 分开写）并排在规则最前面**，
+  多 token 行（`border:`、`background:qlineargradient(...)`）留在后面别动。
+  不去改 `getStyle()` 是有意取舍：把 reader 修好会一次性点亮全仓几百条已死的声明，
+  等于给 74 个对话框和每个页面同时换肤，不属于任何一轮改动的射程。
+  代码里 `setStyleSheet()` 的内联 QSS 不经 `getStyle()`，多 token 值正常，不受本条约束。
+- PNG 均为 14~19px 状态图，替换时保持尺寸，否则控件指示器错位；改 css 后重新构建即可
+  （`qss.qrc` 已改走 `qt5_add_resources`，`blacksoft.css` 与 23 张 PNG 都是真实前置依赖）。
 - **皮肤 PNG 必须入库**：根 `.gitignore` 全局忽略 `*.png`，本目录靠三条显式豁免放行
   （`!src/ui/core/qss/*.png`、`!src/ui/core/qss/*/*.png`、`!src/ui/core/qrc/image/*.png`，共 24 个、约 31KB）。
   漏掉任何一条，新克隆会在 autorcc 阶段以

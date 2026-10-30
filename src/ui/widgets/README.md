@@ -41,6 +41,10 @@ GLuint tex = pool.acquire(fd, w, h, stride, DRM_FORMAT_ABGR8888);
 - 依赖 EGL/GLES2（Mali）、drm_fourcc、Qt Widgets/OpenGL；buffer（DMA-BUF 约定）、rga（格式与 stride 来源）、alarm/fence 管理器等业务模块。
 
 ## 注意事项
+- **触屏命中区**：本目录的控件尺寸同样走 `src/ui/core/README.md`「触屏命中区设计令牌」那套档（10 寸屏、1920x1200 实测）。
+  两处值得单独记：`PlayerWidget::expandBtn_` 是 T4 固定 48x48，其内联 QSS **必须显式 `padding: 0px`**——
+  全局 `.QPushButton` 现在是触屏档 `padding-left/right:14px`，48px 的固定钮被它吃掉后 `⊕` 需要 50px 只剩 46px（探针实测截字）；
+  报警侧栏卡片行 `setFixedHeight(104)` 是在 `.ui` 锁死的 280px 列宽内定的，加高可以、加宽不行，改前先看列宽。
 - **围栏 Tab 的筛选靠 `isFenceAlarm`（`alarmType` 前缀 `fence`）**：新增的 `fence_in`/`fence_out` 与
   历史数据里裸的 `"fence"` 都要落进同一个 Tab，判据一旦改成精确相等，重启回读的老围栏报警会
   掉进「类别」Tab 显示成"person 检测到报警"。第 4 列的文字按 `fence_out` 分「离岗」，其余围栏出「闯入禁区」。

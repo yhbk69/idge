@@ -392,7 +392,7 @@ void PhotoSelectionDialog::onPhotoCaptured(const QString& path, const QImage& im
 }
 
 // 右侧列表追加一张 280x210 卡片（图占满卡片，× 按钮以绝对坐标
-// move(280-36, 8) 钉在右上角，radius 14 → 直径 28 的圆钮）。
+// move(280-44-8, 8) 钉在右上角，radius 22 → 直径 44 的圆钮，触屏可点）。
 // image 为空表示上传的本地照片：不在此处解码，显示时才 loadPixmapSafe
 // （延迟加载，避免批量上传大图阻塞 UI）。
 // 布局末尾的 stretch 占位：插入前移除、插入后补回，保证卡片顶部对齐。
@@ -444,17 +444,18 @@ void PhotoSelectionDialog::addPhotoToList(const QString& path, const QImage& ima
     
     card_layout->addWidget(image_label);
     
-    // 删除按钮
+    // 删除按钮：触屏档 T4 圆钮 44x44 ≈ 4.9mm（原 28x28 只有 3.1mm，是全站最小的钮）。
+    // 绝对坐标按卡宽算，别写死 —— 卡宽 280，右边留 8px 内缩。
     auto* delete_btn = new QPushButton(QStringLiteral("×"), card);
-    delete_btn->setFixedSize(28, 28);
-    delete_btn->move(280 - 36, 8);
+    delete_btn->setFixedSize(44, 44);
+    delete_btn->move(280 - 44 - 8, 8);
     delete_btn->setCursor(Qt::PointingHandCursor);
     delete_btn->setStyleSheet(
         QString("QPushButton {"
         "  background: rgba(220, 38, 38, 0.9);"
         "  color: white;"
         "  border: none;"
-        "  border-radius: 14px;"
+        "  border-radius: 22px;"
         "  font-size:%1px;"
         "  font-weight: bold;"
         "}"

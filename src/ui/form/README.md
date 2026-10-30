@@ -90,4 +90,17 @@
 - **MOC**：带 `Q_OBJECT` 的 Worker 类定义在 .cpp 中时，尾部 `#include "xxx.moc"` 不可删除，否则 vtable 链接失败。
 - **.ui 文件**：`frmmain.ui`/`frmvideowindow.ui` 一律不手改；布局微调全部通过代码 `addWidget/insertWidget/moveTo` 实现。
 - **遗留文件**：`photo_selection_dialog.h` 未被引用且与 `photo_selection_widget.h` 声明同名类，二者绝不可同时 include；`recognition_result_dialog` 的 `drawFaceBoxes()`（仅声明）与 `drawBoxesOnImage()`（有定义无调用）为死代码，`equipment_detail_dialog` 的 `photoCell()` 同样无调用点，均已加警示注释，清理前需再次全工程检索。
+- **触屏命中区**：本目录的界面按**板载 10 寸触摸屏、1920x1200 实测**（≈226 PPI，1mm≈8.9 逻辑 px）设计，
+  令牌表与"字号不动、只长命中区"的口径见 `src/ui/core/README.md` 的「触屏命中区设计令牌」。落到本目录的三件事：
+  顶部导航钮**已去 icon**（纯文字、`FS_NAV_TOUCH`、min-width 112），`widgetMenu` 在代码里覆盖到 160px
+  （`.ui` 里锁的 100px 装不下 T4 档三钮），**双击标题栏切最大化已删除**——触屏误触源，且窗口尺寸一变
+  围栏 overlay 的像素坐标就漂，直接变成漏报/误报。
+  报警角标 `alarmBadge_` 与导航钮是耦合的：导航从"图上字下"变纯文字后文字矩形上移，
+  `refreshAlarmBadge()` 必须按新钮尺寸重算 `move()`，否则角标压字（实测过，探针看不见这种重叠）。
+- **围栏工具栏尺寸**：`frmvideowindow.cpp` 的整条工具栏是内联 QSS（不经 `getStyle()`，多 token 值正常），
+  高度 86、钮 T1 档；通道钮固定 56x72，**角色钮不设固定宽**（固定 44px 撞上 `padding:8px 14px` 会吃掉"岗区域"三字）。
+  角色语义不能只写 tooltip——触屏 hover 不到，所以文字前挂了 12px 实色方块，
+  颜色取 `geofence::FenceOverlay::roleColor`（已提到 public），与画布上围栏同口径、改一处两边同步。
+- **表格行高只能走代码**：`QTableView::item{padding}` 不改行高，必须
+  `verticalHeader()->setDefaultSectionSize(theme::TOUCH_TABLE_ROW)`（本目录 2 张 + `alarm_list_widget` 2 张）。
 - **中文文案编码**：`cancellation_result_dialog.*` 刻意使用 `\uXXXX` 转义书写中文，防源文件编码差异乱码，新增文案请保持该约定。

@@ -262,8 +262,10 @@ void RollCallWidget::loadTasks() {
                 .arg(pressed);
         };
 
+        // 触屏档 T3：行内钮走 minimumSize 而不是 fixedSize —— 固定宽在文字变长时
+        // 会直接截字（"查看"→"查看详情"就没了），minimum 让按钮只增不减。
         auto* view_btn = new QPushButton("查看", actions_widget);
-        view_btn->setFixedSize(82, 38);
+        view_btn->setMinimumSize(96, 48);
         view_btn->setStyleSheet(button_style(theme::ACCENT, theme::PANEL));
         connect(view_btn, &QPushButton::clicked, [this, task_id]() { onViewTask(task_id); });
         actions_layout->addWidget(view_btn);
@@ -271,14 +273,14 @@ void RollCallWidget::loadTasks() {
         // 注销按钮
         if (!is_cancelled) {
             auto* cancel_btn = new QPushButton("注销", actions_widget);
-            cancel_btn->setFixedSize(82, 38);
+            cancel_btn->setMinimumSize(96, 48);
             cancel_btn->setStyleSheet(button_style(theme::WARNING, theme::PANEL));
             connect(cancel_btn, &QPushButton::clicked, [this, task_id]() { onCancelTask(task_id); });
             actions_layout->addWidget(cancel_btn);
         }
 
         auto* delete_btn = new QPushButton("删除", actions_widget);
-        delete_btn->setFixedSize(82, 38);
+        delete_btn->setMinimumSize(96, 48);
         delete_btn->setStyleSheet(button_style(theme::DANGER, theme::DANGER_PRESSED));
         connect(delete_btn, &QPushButton::clicked, [this, task_id]() { onDeleteTask(task_id); });
         actions_layout->addWidget(delete_btn);

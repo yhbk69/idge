@@ -151,11 +151,13 @@ void EquipmentInventoryWidget::loadTasks() {
                 .arg(theme::FS_BODY)
                 .arg(theme::PANEL);
         };
-        auto* view = new QPushButton(QStringLiteral("查看"), actions); view->setFixedSize(82, 38); view->setStyleSheet(button_style(theme::ACCENT));
-        auto* delete_button = new QPushButton(QStringLiteral("删除"), actions); delete_button->setFixedSize(82, 38); delete_button->setStyleSheet(button_style(theme::DANGER));
+        // 触屏档 T3：行内钮走 minimumSize 而不是 fixedSize —— 固定宽在文字变长时
+        // 会直接截字，minimum 让按钮只增不减。
+        auto* view = new QPushButton(QStringLiteral("查看"), actions); view->setMinimumSize(96, 48); view->setStyleSheet(button_style(theme::ACCENT));
+        auto* delete_button = new QPushButton(QStringLiteral("删除"), actions); delete_button->setMinimumSize(96, 48); delete_button->setStyleSheet(button_style(theme::DANGER));
         layout->addWidget(view);
         if (!task.is_cancelled) {
-            auto* cancel = new QPushButton(QStringLiteral("注销"), actions); cancel->setFixedSize(82, 38); cancel->setStyleSheet(button_style(theme::WARNING));
+            auto* cancel = new QPushButton(QStringLiteral("注销"), actions); cancel->setMinimumSize(96, 48); cancel->setStyleSheet(button_style(theme::WARNING));
             layout->addWidget(cancel);
             connect(cancel, &QPushButton::clicked, this,
                     [this, id = task.id]() { onCancelTask(id); });

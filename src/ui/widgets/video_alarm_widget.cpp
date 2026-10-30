@@ -55,7 +55,7 @@ void VideoAlarmWidget::setupUi()
         "QLabel#alarmTime, QLabel#alarmChannel { color: %4; font-size: %5px; }"
         "QLabel#alarmClass { color: %6; font-size: %5px; font-weight: bold; }"
         "QPushButton#alarmDetail { color: %6; background: %7; border-radius: 4px;"
-        " padding: 3px 8px; font-size: %5px; }"
+        " min-height:30px; padding: 8px 14px; font-size: %5px; }"
         "QPushButton#alarmDetail:hover { background: %8; }")
                                      .arg(theme::BG, theme::PANEL, theme::BORDER,
                                           theme::TEXT_MUTED)
@@ -150,7 +150,10 @@ QWidget *VideoAlarmWidget::createAlarmItem(const AlarmRecord &alarm)
     // 子控件上不要再 setStyleSheet（见那里的注释）
     QWidget *itemWidget = new QWidget();
     itemWidget->setObjectName("alarmItem");
-    itemWidget->setFixedHeight(80);
+    // 80→104：详情钮抬到 T3（min-height 30 + 2*8 padding = 48）后，
+    // 上下 margin 12 只给到 60 会把钮压扁。侧栏列宽被 .ui 锁 280px，
+    // 这里只长高不加长，避免 280 内截字。
+    itemWidget->setFixedHeight(104);
 
     QHBoxLayout *itemLayout = new QHBoxLayout(itemWidget);
     itemLayout->setContentsMargins(8, 6, 8, 6);

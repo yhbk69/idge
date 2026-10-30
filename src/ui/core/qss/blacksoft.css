@@ -25,7 +25,10 @@ background:none;
 border-style:none;
 }
 
-QWidget[form="title"],QWidget[nav="left"],QWidget[nav="top"] QAbstractButton{
+/* 原来这三个选择器共用一条规则，padding 一起写死 5px。拆开后导航钮可以单独长高，
+   标题栏容器（form="title"）的 padding 保持不动 —— 它是容器内边距，跟着放大
+   会让整条标题栏白吃 20px，还会把左侧缩进叠到 26px。 */
+QWidget[form="title"],QWidget[nav="left"]{
 border-style:none;
 border-radius:0px;
 padding:5px;
@@ -33,10 +36,30 @@ color:#E5E7EB;
 background:qlineargradient(spread:pad,x1:0,y1:0,x2:0,y2:1,stop:0 #2d2d3d,stop:1 #262636);
 }
 
+/* 顶部导航钮：竖向 padding 与全局 T1 同档（8px），min-height 54 → 总高 70 ≈ 8.1mm。
+   尺寸声明全部拆成单 token 写在最前 —— 见文件里 skipTo(RightBrace) 那条说明。
+   横向给 16px 让四字标签有呼吸。 */
+QWidget[nav="top"] QAbstractButton{
+min-height:54px;
+padding-top:8px;
+padding-bottom:8px;
+padding-left:16px;
+padding-right:16px;
+border-style:none;
+border-radius:0px;
+color:#E5E7EB;
+background:qlineargradient(spread:pad,x1:0,y1:0,x2:0,y2:1,stop:0 #2d2d3d,stop:1 #262636);
+}
+
+/* 选中/悬停态：竖向 padding 各减 1/3px 抵消下面那条 2px 下边框（原实现的补偿关系），
+   多 token 的 border-width 排最后 —— 它后面本来就会被解析器丢掉，别让它带走尺寸。 */
 QWidget[nav="top"] QAbstractButton:hover,QWidget[nav="top"] QAbstractButton:pressed,QWidget[nav="top"] QAbstractButton:checked{
+padding-top:7px;
+padding-bottom:5px;
+padding-left:16px;
+padding-right:16px;
 border-style:solid;
 border-width:0px 0px 2px 0px;
-padding:4px 4px 2px 4px;
 border-color:#4fc3f7;
 background:qlineargradient(spread:pad,x1:0,y1:0,x2:0,y2:1,stop:0 #3d3d4d,stop:1 #343444);
 }
@@ -77,10 +100,24 @@ QLineEdit:read-only{
 background-color:#2d2d3d;
 }
 
+/* !! 本文件的每一条规则，尺寸声明必须写在最前面 !!
+   QtHelper::getStyle() 用 `stream >> line` 逐 **token** 读取（见 qthelper.cpp:940），
+   带空格的值会被拆成多行：`border:1px solid #3d3d4d;` 变成
+   `border:1px` / `solid` / `#3d3d4d;`。Qt 的 CSS 解析器碰到 `solid` 这种
+   "缺冒号的属性名"会 skipTo(RightBrace) —— **该条规则剩下的声明全部作废**。
+   所以：要么写成单 token（padding-top/left/... 分开写），要么排在多 token 行之前。
+   多 token 行本身别去动它们 —— 现状的"半死"就是现在的视觉，本轮不顺手全量点亮。 */
+
+/* 触屏档 T2：输入件总高 = min-height 42 + 2*padding 6 = 54（+2 边框 ≈ 56px ≈ 6.3mm）。
+   字号不在此处设（沿用全局 16px），只长命中区。 */
 QLineEdit,QTextEdit,QPlainTextEdit,QSpinBox,QDoubleSpinBox,QComboBox,QDateEdit,QTimeEdit,QDateTimeEdit{
+min-height:42px;
+padding-top:6px;
+padding-bottom:6px;
+padding-left:10px;
+padding-right:10px;
 border:1px solid #3d3d4d;
 border-radius:3px;
-padding:2px;
 background:none;
 selection-background-color:#4fc3f7;
 selection-color:#FFFFFF;
@@ -111,12 +148,18 @@ position:relative;
 left:10px;
 }
 
+/* 触屏档 T1：主按钮总高 = min-height 54 + 2*padding 8 = 70（+2 边框 ≈ 72px ≈ 8.1mm）。
+   这是全局底档 —— 代码里没另设尺寸的按钮全部走这一档。
+   min-height/padding 必须排在 border 那行多 token 声明之前，否则被 skipTo(RightBrace) 吃掉。 */
 .QPushButton,.QToolButton{
+min-height:54px;
+padding-top:8px;
+padding-bottom:8px;
+padding-left:14px;
+padding-right:14px;
 border-style:none;
 border:1px solid #3d3d4d;
 color:#E5E7EB;
-padding:5px;
-min-height:15px;
 border-radius:5px;
 background:qlineargradient(spread:pad,x1:0,y1:0,x2:0,y2:1,stop:0 #2d2d3d,stop:1 #262636);
 }
@@ -133,10 +176,13 @@ background:qlineargradient(spread:pad,x1:0,y1:0,x2:0,y2:1,stop:0 #2d2d3d,stop:1 
 image:None;
 }
 
+/* 标题栏三钮：触屏档 T4 = 44x44 命中区（图标本身仍是 glyph，不放大） */
 QToolButton#btnMenu,QPushButton#btnMenu_Min,QPushButton#btnMenu_Max,QPushButton#btnMenu_Close{
 border-radius:3px;
 color:#E5E7EB;
-padding:3px;
+min-width:44px;
+min-height:44px;
+padding:6px;
 margin:0px;
 background:none;
 border-style:none;
@@ -155,10 +201,12 @@ background-color:rgba(238,0,0,128);
 }
 
 /* ===== 复选/单选指示器：CSS 自绘（原灰底 PNG 与暗色主题违和，2026-09-24 统一） ===== */
+/* Qt 里 ::indicator 的尺寸就是命中区，只能真放大（40x40 ≈ 4.5mm）。
+   border-radius 跟着 15→8 的一半改成 40→20，否则圆角变方角。 */
 QRadioButton::indicator{
-width:15px;
-height:15px;
-border-radius:8px;
+width:40px;
+height:40px;
+border-radius:20px;
 border:1px solid #3d3d4d;
 background:#262636;
 }
@@ -183,8 +231,8 @@ padding:0px 0px 0px 0px;
 }
 
 QCheckBox::indicator,QGroupBox::indicator,QTreeView::indicator,QListView::indicator,QTableView::indicator{
-width:15px;
-height:15px;
+width:40px;
+height:40px;
 border-radius:3px;
 border:1px solid #3d3d4d;
 background:#262636;
@@ -215,18 +263,21 @@ border:1px solid #3d3d4d;
 background:qlineargradient(spread:pad,x1:0,y1:0,x2:0,y2:1,stop:0 #232330,stop:0.5 #232330,stop:0.5 #55606e,stop:1 #55606e);
 }
 
+/* SpinBox/DateEdit 步进钮：轨道放大到 44x28（上下各一 = 56，与 T2 输入件等高）。
+   add_top.png/add_bottom.png 仍是 10px 小箭头，在 44x28 轨道里显得小 —— 这是有意的：
+   本轮要的是命中区，不是重画图标。后人勿当漏改。 */
 QTimeEdit::up-button,QDateEdit::up-button,QDateTimeEdit::up-button,QDoubleSpinBox::up-button,QSpinBox::up-button{
 image:url(:/qss/blacksoft/add_top.png);
-width:10px;
-height:10px;
-padding:2px 5px 0px 0px;
+width:44px;
+height:28px;
+padding:0px;
 }
 
 QTimeEdit::down-button,QDateEdit::down-button,QDateTimeEdit::down-button,QDoubleSpinBox::down-button,QSpinBox::down-button{
 image:url(:/qss/blacksoft/add_bottom.png);
-width:10px;
-height:10px;
-padding:0px 5px 2px 0px;
+width:44px;
+height:28px;
+padding:0px;
 }
 
 QTimeEdit::up-button:pressed,QDateEdit::up-button:pressed,QDateTimeEdit::up-button:pressed,QDoubleSpinBox::up-button:pressed,QSpinBox::up-button:pressed{
@@ -239,15 +290,16 @@ bottom:-2px;
 
 QComboBox::down-arrow,QDateEdit[calendarPopup="true"]::down-arrow,QTimeEdit[calendarPopup="true"]::down-arrow,QDateTimeEdit[calendarPopup="true"]::down-arrow{
 image:url(:/qss/blacksoft/add_bottom.png);
-width:10px;
-height:10px;
+width:20px;
+height:20px;
 right:2px;
 }
 
+/* 下拉命中区：15px 宽的手指按不到，抬到 44px（与步进钮同档） */
 QComboBox::drop-down,QDateEdit::drop-down,QTimeEdit::drop-down,QDateTimeEdit::drop-down{
 subcontrol-origin:padding;
 subcontrol-position:top right;
-width:15px;
+width:44px;
 border-left-width:0px;
 border-left-style:solid;
 border-top-right-radius:3px;
@@ -260,10 +312,13 @@ top:1px;
 }
 
 QMenuBar::item{
+padding-top:10px;
+padding-bottom:10px;
+padding-left:14px;
+padding-right:14px;
 color:#E5E7EB;
 background-color:#2d2d3d;
 margin:0px;
-padding:3px 10px;
 }
 
 QMenu,QMenuBar,QMenu:disabled,QMenuBar:disabled{
@@ -273,13 +328,17 @@ border:1px solid #3d3d4d;
 margin:0px;
 }
 
+/* 菜单项：竖向 padding 14 → 总高 ≈ 52px，指肚可点（写成 longhand 才不会带走后续声明） */
 QMenu::item{
-padding:3px 20px;
+padding-top:14px;
+padding-bottom:14px;
+padding-left:20px;
+padding-right:20px;
 }
 
 QMenu::indicator{
-width:20px;
-height:13px;
+width:40px;
+height:40px;
 }
 
 QMenu::indicator::checked{
@@ -369,17 +428,19 @@ border-radius:6px;
 background:qradialgradient(spread:pad,cx:0.5,cy:0.5,radius:0.5,fx:0.5,fy:0.5,stop:0.6 #1e1e2e,stop:0.8 #3d3d4d);
 }
 
+/* 滚动条：12px 的手指拖不住，抬到 26px（border-radius 同步到一半保持胶囊形）。
+   add-line/sub-line 仍是 background:none 的零尺寸，即没有翻页钮 —— 维持原状。 */
 QScrollBar:horizontal{
 background:#2d2d3d;
 padding:0px;
-border-radius:6px;
-max-height:12px;
+border-radius:13px;
+max-height:26px;
 }
 
 QScrollBar::handle:horizontal{
 background:#3d3d4d;
 min-width:50px;
-border-radius:6px;
+border-radius:13px;
 }
 
 QScrollBar::handle:horizontal:hover{
@@ -409,14 +470,14 @@ background:none;
 QScrollBar:vertical{
 background:#2d2d3d;
 padding:0px;
-border-radius:6px;
-max-width:12px;
+border-radius:13px;
+max-width:26px;
 }
 
 QScrollBar::handle:vertical{
 background:#3d3d4d;
 min-height:50px;
-border-radius:6px;
+border-radius:13px;
 }
 
 QScrollBar::handle:vertical:hover{
@@ -479,14 +540,24 @@ color:#E5E7EB;
 background:#343444;
 }
 
+/* 列表/树形 item 的行高由这里的 padding 决定；QTableView 的行高不归它管
+   （表格走 verticalHeader 的 default section size，见 frmmain/alarm_list_widget 代码）。
+   这里加 padding 主要是给报警侧栏那种 QListView 卡片行留出可点的面积。 */
 QTableView::item,QListView::item,QTreeView::item{
-padding:1px;
+padding-top:10px;
+padding-bottom:10px;
+padding-left:6px;
+padding-right:6px;
 margin:0px;
 border:0px;
 }
 
+/* 表头：总高 ≈ 48px，与 T3 同档，方便点表头排序/拖动 */
 QHeaderView::section,QTableCornerButton:section{
-padding:3px;
+padding-top:10px;
+padding-bottom:10px;
+padding-left:12px;
+padding-right:12px;
 margin:0px;
 border:1px solid #3d3d4d;
 border-left-width:0px;
@@ -508,8 +579,12 @@ border-color:#4fc3f7;
 background:#1e1e2e;
 }
 
+/* Tab：竖向 padding 16 → 总高 ≈ 16*1.35 行高 + 32 + 2 ≈ 56px（触屏档） */
 QTabBar::tab:top,QTabBar::tab:bottom{
-padding:3px 8px 3px 8px;
+padding-top:16px;
+padding-bottom:16px;
+padding-left:24px;
+padding-right:24px;
 }
 
 QTabBar::tab:left,QTabBar::tab:right{
@@ -598,15 +673,16 @@ QColorDialog QPushButton,QFileDialog QPushButton{
 min-width:80px;
 }
 
+/* 日历翻月钮：20px 太窄，抬到 40px（命中区） */
 QToolButton#qt_calendar_prevmonth{
 icon-size:0px;
-min-width:20px;
+min-width:40px;
 image:url(:/qss/blacksoft/calendar_prevmonth.png);
 }
 
 QToolButton#qt_calendar_nextmonth{
 icon-size:0px;
-min-width:20px;
+min-width:40px;
 image:url(:/qss/blacksoft/calendar_nextmonth.png);
 }
 
@@ -669,8 +745,10 @@ background-color:#1e1e2e;
 color:#E5E7EB;
 }
 
+/* 对话框标准钮（确定/取消，全仓 ~74 处 QMessageBox 走这里）：
+   min-height 由上面的 T1 全局档继承，这里只把宽度抬到能放下"确定取消"四字不截。 */
 QDialogButtonBox>QPushButton{
-min-width:50px;
+min-width:96px;
 }
 
 QListView[noborder="true"],QTreeView[noborder="true"],QTabWidget[noborder="true"]::pane{
@@ -720,8 +798,9 @@ color:#4fc3f7;
 QHeaderView::section{
 font-weight:bold;
 }
+/* 指示器放大到 40px 后，标签与方框之间要留距离，否则指肚会同时盖住文字 */
 QCheckBox,QRadioButton{
-spacing:6px;
+spacing:12px;
 background:none;
 }
 QPushButton,QToolButton,QLineEdit,QTextEdit,QSpinBox,QDoubleSpinBox,QComboBox,QDateEdit,QTimeEdit,QDateTimeEdit,QCheckBox,QRadioButton,QTabBar::tab,QHeaderView::section,QTableView::item,QListView::item,QTreeView::item,QMenu::item{

@@ -71,6 +71,7 @@
 #include <QSpinBox>
 #include <QTableWidget>
 #include <QProcess>
+#include <QComboBox>
 
 // ==========================================
 // 构造 / 析构
@@ -90,23 +91,6 @@ frmMain::frmMain(QWidget *parent) : QWidget(parent), ui(new Ui::frmMain)
 frmMain::~frmMain()
 {
     delete ui;
-}
-
-// ==========================================
-// 事件过滤器
-// ==========================================
-
-/**
- * @brief 事件过滤器 - 拦截标题栏双击事件，实现最大化/还原切换
- */
-bool frmMain::eventFilter(QObject *watched, QEvent *event)
-{
-    if (watched == ui->widgetTitle) {
-        if (event->type() == QEvent::MouseButtonDblClick) {
-            on_btnMenu_Max_clicked();
-        }
-    }
-    return QWidget::eventFilter(watched, event);
 }
 
 // ==========================================
@@ -252,14 +236,19 @@ void frmMain::initForm()
     QtHelper::setFramelessForm(this);
 
     // 2. 设置标题栏图标
-    IconHelper::setIcon(ui->labIco, 0xf073, 30);       // 日历图标
     IconHelper::setIcon(ui->btnMenu_Min, 0xf068);       // 最小化
     IconHelper::setIcon(ui->btnMenu_Max, 0xf067);       // 最大化
     IconHelper::setIcon(ui->btnMenu_Close, 0xf00d);     // 关闭
+    // 标题左侧那个日历 glyph 与"施工行为监测与分析"没有语义关系（模板遗留），
+    // 触屏上去掉它可以给标题与导航行多留横向空间。三枚窗口钮的 glyph 保留 ——
+    // 去掉就没有窗口控制入口了。
+    ui->labIco->hide();
 
     // 3. 标题栏属性
     ui->widgetTitle->setProperty("form", "title");
-    ui->widgetTitle->installEventFilter(this);  // 双击最大化
+    // 原来这里 installEventFilter 拦标题栏双击切最大化 —— 触屏上那是误触源：
+    // 一旦误触，围栏 overlay 的像素坐标会随窗口尺寸漂移，直接变成漏报/误报。
+    // 拖动移动窗口由 QtHelper::setFramelessForm 负责，不经过这个过滤器。
     ui->widgetTop->setProperty("nav", "top");
 
     // 4. 设置标题文字
@@ -274,24 +263,30 @@ void frmMain::initForm()
     ui->stackedWidget->setStyleSheet(QString("QLabel{font-size:%1px;}").arg(theme::FS_BODY));
 
     // 6. 配置顶部导航按钮
-    QSize icoSize(22, 22);
-    int icoWidth = 56;
+    // 触屏改造：去掉图标。图标占掉 22px 横向 + 让"图上字下"叠成两行，
+    // 是导航字号不敢往上调的直接原因。只剩文字后横向腾出空间，字号才敢 14→18。
+    // 竖向 padding 由 blacksoft.css 的 QWidget[nav="top"] QAbstractButton 给（8px），
+    // 所以 min-height 54 + 2*8 = 72px 总高，正好是 T1 档。
     QList<QAbstractButton *> tbtns = ui->widgetTop->findChildren<QAbstractButton *>();
     foreach (QAbstractButton *btn, tbtns) {
         QToolButton *tbtn = qobject_cast<QToolButton *>(btn);
-        btn->setIconSize(icoSize);
-        btn->setMinimumWidth(icoWidth);
+        btn->setIcon(QIcon());
+        btn->setMinimumWidth(112);
         btn->setCheckable(true);
         if (tbtn) {
-            // 图标+文字（不只是图标）
-            tbtn->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
-            tbtn->setMinimumHeight(58);
+            tbtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
+            tbtn->setMinimumHeight(theme::TOUCH_MAIN_MIN_H);
             QFont bf = tbtn->font();
-            bf.setPixelSize(theme::FS_NAV);
+            bf.setPixelSize(theme::FS_NAV_TOUCH);
             tbtn->setFont(bf);
         }
         connect(btn, SIGNAL(clicked()), this, SLOT(buttonClick()));
     }
+
+    // 标题栏三钮区在 .ui 里被锁成 100px 宽（每人 33px，鼠标够用、手指不够）。
+    // .ui 不手改（见 src/ui/form/README.md 的既有约定），这里用代码覆盖上下限。
+    ui->widgetMenu->setMinimumWidth(160);
+    ui->widgetMenu->setMaximumWidth(160);
 
     // 默认选中"视频监控"
     ui->btnMain->click();
@@ -361,20 +356,15 @@ void frmMain::initNewPages()
 
     // ===== 顶部导航：视频监控 / 数据看板 / 报警数据 / 调试设置 / 退出 =====
     // （人员点名、设备盘点、智能识别三项在下方及 initBusinessPages() 补齐，共 8 项）
-    // .ui 里的图标是模板遗留的原始语义（人员/单位/查询/设置），运行时标签已改，
-    // 因此图标与标签成对在此重设，避免"数据看板配人形图标"这类错位。
+    // 只设标签、不设图标：initForm() 已把导航钮切成 ToolButtonTextOnly 并清空 icon，
+    // 触屏档下图标不显示（.ui 里遗留的原始语义图标也一并作废）。
     ui->btnMain->setText("视频监控");
-    ui->btnMain->setIcon(QIcon(":/image/main_main.png"));    // 盾牌：监控
     ui->btnRoll->setText("数据看板");
-    ui->btnRoll->setIcon(QIcon(":/image/main_help.png"));    // 分栏面板：看板
     ui->btnEquipCheck->setText("报警数据");
-    ui->btnEquipCheck->setIcon(QIcon(":/image/main_data.png"));  // 放大镜：检索
     ui->btnHelp->setText("调试设置");
-    ui->btnHelp->setIcon(QIcon(":/image/main_config.png"));  // 齿轮：设置
     ui->btnExit->setText("退出");
-    ui->btnExit->setIcon(QIcon(":/image/main_exit.png"));
     // 隐藏多余的占位按钮（人员点名/设备盘点原义、报警查询、系统设置）
-    // btnSmart（智能识别）由 .ui 直接提供标签与图标，无需在此处理
+    // btnSmart（智能识别）的标签由 .ui 直接提供，无需在此处理
     ui->btnData->hide();
     ui->btnConfig->hide();
 
@@ -442,13 +432,15 @@ void frmMain::initNewPages()
     });
 
     // ===== 未确认报警角标 =====
+    // 导航钮去掉图标后文字矩形上移，角标必须跟着重算，否则数字压字。
+    // 尺寸从 15/12px 抬到 24/13px：触屏上这枚徽标也顺带要看得清。
     alarmBadge_ = new QLabel(ui->btnEquipCheck);
     alarmBadge_->setStyleSheet(
-        QString("QLabel { background: %1; color: white; border-radius: 8px;"
-                " font-size: %2px; font-weight: bold; min-width: 15px; max-width: 40px;"
-                " padding: 1px 3px; }")
+        QString("QLabel { background: %1; color: white; border-radius: 12px;"
+                " font-size: %2px; font-weight: bold; min-width: 24px; max-width: 48px;"
+                " padding: 3px 6px; }")
             .arg(theme::DANGER)
-            .arg(theme::FS_BADGE));
+            .arg(theme::FS_HINT));
     alarmBadge_->setAlignment(Qt::AlignCenter);
     alarmBadge_->setVisible(false);
     alarmBadge_->raise();
@@ -563,9 +555,10 @@ void frmMain::updateAlarmBadge()
     if (unack > 0) {
         alarmBadge_->setText(QString::number(unack > 99 ? 99 : unack));
         alarmBadge_->adjustSize();
-        // 定位到按钮右上角
+        // 定位到按钮右上角。y=0 不是随手写的：导航钮 72 高、文字居中占 24~48，
+        // 角标高 24 贴在 0~24 正好与文字上下相切，压不到"报警数据"四个字。
         int bw = ui->btnEquipCheck->width();
-        alarmBadge_->move(bw - alarmBadge_->width() - 2, 2);
+        alarmBadge_->move(bw - alarmBadge_->width() - 4, 0);
         alarmBadge_->show();
         alarmBadge_->raise();
     } else {
@@ -1078,7 +1071,7 @@ void frmMain::initDebugPage()
             // 备注输入框（编辑完自动保存）
             chNoteEdit_[i] = new QLineEdit(cfg.channelNote(i));
             chNoteEdit_[i]->setPlaceholderText("备注");
-            chNoteEdit_[i]->setMaximumWidth(180);
+            chNoteEdit_[i]->setMaximumWidth(260);   // 180→260：内边距抬到 T2 后留给文字的宽度
             chNoteEdit_[i]->setStyleSheet(theme::field(theme::BORDER));
             connect(chNoteEdit_[i], &QLineEdit::editingFinished, this, [this, i]() {
                 ConfigManager::instance().setChannelNote(i, chNoteEdit_[i]->text().trimmed());
@@ -1100,8 +1093,10 @@ void frmMain::initDebugPage()
             gl->addWidget(enableBox, i, 4);
 
             // 级联模型：勾选 + 排序，行序即槽位顺序（= result_id）
+            // 原来 setMaximumWidth(64) 撞上新 padding(8x14) 会把"模型…"吃掉，
+            // 改成只给下限、让宽度跟着文字走 —— 触屏上截字是硬伤。
             QPushButton *modelBtn = new QPushButton("模型…");
-            modelBtn->setMaximumWidth(64);
+            modelBtn->setMinimumWidth(88);
             modelBtn->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
             connect(modelBtn, &QPushButton::clicked, this,
                     [this, i]() { openChannelModelsDialog(i); });
@@ -1109,7 +1104,7 @@ void frmMain::initDebugPage()
 
             // 清空按钮：清掉该路的视频路径 + 备注
             QPushButton *clearBtn = new QPushButton("清空");
-            clearBtn->setMaximumWidth(64);
+            clearBtn->setMinimumWidth(88);
             clearBtn->setStyleSheet(theme::miniButton(theme::DANGER));
             connect(clearBtn, &QPushButton::clicked, this, [this, i, chEdit]() {
                 chEdit->clear();
@@ -1163,7 +1158,7 @@ void frmMain::initDebugPage()
         glWs->addWidget(wsUrlEdit_, 0, 1, 1, 2);
 
         QPushButton *btnWsSave = new QPushButton("保存");
-        btnWsSave->setMaximumWidth(60);
+        btnWsSave->setMinimumWidth(88);   // 上限 60 会在新 padding 下截字，改给下限
         btnWsSave->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
         glWs->addWidget(btnWsSave, 0, 3);
 
@@ -1176,7 +1171,7 @@ void frmMain::initDebugPage()
         glWs->addWidget(wsStatusLabel_, 1, 1);
 
         wsConnectBtn_ = new QPushButton("连接");
-        wsConnectBtn_->setMaximumWidth(80);
+        wsConnectBtn_->setMinimumWidth(88);
         wsConnectBtn_->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
         glWs->addWidget(wsConnectBtn_, 1, 3);
 
@@ -1456,6 +1451,8 @@ void frmMain::initModelParamsUi()
     modelParamTable_->setHorizontalHeaderLabels(
         {"模型库id", "报警类别", "备注", "被引用通道", "操作"});
     modelParamTable_->verticalHeader()->setVisible(false);
+    // 行高只能在这里设：CSS 的 ::item padding 是 delegate 内边距，撑不起 section 高度
+    modelParamTable_->verticalHeader()->setDefaultSectionSize(theme::TOUCH_TABLE_ROW);
     modelParamTable_->setSelectionMode(QAbstractItemView::SingleSelection);
     modelParamTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     modelParamTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -1465,7 +1462,8 @@ void frmMain::initModelParamsUi()
     modelParamTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
     modelParamTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     modelParamTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
-    modelParamTable_->setMaximumHeight(260);
+    // 行高 56 后按"表头 48 + 4 行"重算上限，否则可见行数会被行长挤没
+    modelParamTable_->setMaximumHeight(300);
     modelParamTable_->setStyleSheet(QString(
         "QTableWidget { background: %1; border: 1px solid %2; color: %3; font-size: %4px; }"
         "QTableWidget::item { padding: 4px 8px; border-bottom: 1px solid %2; }"
@@ -1561,7 +1559,7 @@ void frmMain::refreshModelParamsTable()
 
         // --- 列 4：移除该模型的配置 ---
         QPushButton *removeBtn = new QPushButton(QStringLiteral("移除"));
-        removeBtn->setMaximumWidth(56);
+        removeBtn->setMinimumWidth(88);   // 上限 56 + 新 padding 会截掉"移除"二字
         removeBtn->setStyleSheet(theme::miniButton(theme::DANGER));
         connect(removeBtn, &QPushButton::clicked, this, [this, id]() {
             if (QtHelper::askConfirm(
@@ -1824,13 +1822,15 @@ void frmMain::initModelLibraryUi()
     modelLibTable_->setHorizontalHeaderLabels(
         {"id", "名称", "任务", "类别数", "输入", "被引用"});
     modelLibTable_->verticalHeader()->setVisible(false);
+    modelLibTable_->verticalHeader()->setDefaultSectionSize(theme::TOUCH_TABLE_ROW);
     modelLibTable_->setSelectionMode(QAbstractItemView::SingleSelection);
     modelLibTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     modelLibTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     modelLibTable_->setShowGrid(false);
     modelLibTable_->horizontalHeader()->setStretchLastSection(false);
     modelLibTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    modelLibTable_->setMaximumHeight(240);
+    // 行高 56 后按"表头 48 + 4 行"重算上限
+    modelLibTable_->setMaximumHeight(280);
     modelLibTable_->setStyleSheet(QString(
         "QTableWidget { background: %1; border: 1px solid %2; color: %3; font-size: %4px; }"
         "QTableWidget::item { padding: 4px 8px; border-bottom: 1px solid %2; }"

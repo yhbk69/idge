@@ -21,6 +21,8 @@
 #include <QButtonGroup>
 #include <QAbstractButton>
 #include <QFrame>
+#include <QIcon>
+#include <QPixmap>
 #include "player_widget.h"
 #include "fence_overlay.h"
 #include "fence_manager.h"
@@ -194,15 +196,17 @@ PlayerWidget *frmVideoWindow::playerWidget(int ch)
  *       用户可以通过工具栏选择通道并绘制电子围栏区域
  *
  * 布局结构：
- *   [通道:][1][2][3][4] | [矩形][多边形][删除][清空]
+ *   [通道:][1][2][3][4] | [角色:][■禁区][■岗区域] | [矩形][多边形][删除][清空]
  *
  * 位置：插入到主网格布局的第2行（视频画面下方，底部标签上方）
  *
  * 实现要点（代码动态创建，不在 .ui 中）：
- *   - 通道按钮 ×4（28x24）仅用于选中当前编辑通道，非互斥故 setExclusive(false)；
+ *   - 通道按钮 ×4 仅用于选中当前编辑通道，非互斥故 setExclusive(false)；
  *     矩形/多边形/删除为互斥绘制工具组（fenceDrawGroup_）；
  *     清空直接调 FenceManager::clearChannel + 刷新叠加层
- *   - 工具栏高 36px、按钮 12px 字体为紧凑布局的经验尺寸
+ *   - 触屏档：工具栏总高 86px（按钮 72 + 边距 + 边框），字体跟全局正文 16px
+ *   - 角色按钮自成一组（fenceRoleGroup_），且**带实色方块图标** ——
+ *     触屏没有 hover，语义只写在 tooltip 里等于没写
  *   - addWidget(toolbar, 2, 0, 1, 2) 占满两列，再把原第 2 行的提示 label
  *     挪到第 3 行，避免改动 .ui 文件
  */
@@ -213,20 +217,26 @@ void frmVideoWindow::setupFenceToolbar()
     // ========================================================================
     QFrame *toolbar = new QFrame(this);           // 创建工具栏框架容器
     toolbar->setFrameStyle(QFrame::StyledPanel);  // 设置边框样式为带阴影的面板
-    toolbar->setFixedHeight(36);                   // 固定工具栏高度为36像素
+    // 触屏档：按钮本体 72（min-height 54 + 2*8 padding + 2*1 border）
+    //         + 上下布局边距 2*6 + 面板边框 2*1 = 86。
+    // 这 50px 是从 4 路画面区里扣的，画围栏时唯一的操作面，值。
+    toolbar->setFixedHeight(86);
 
     // 设置工具栏的暗色主题样式
+    // 注意：这里的 QPushButton 内联规则特异性高于 blacksoft.css 的全局 T1，
+    // 所以必须自带 min-height，否则整条工具栏的按钮不会跟着放大。
     toolbar->setStyleSheet(
         QString("QFrame { background: %1; border: 1px solid %2; }"                 // 框架背景和边框
                 "QPushButton { background: %2; color: %3; border: 1px solid %4;"   // 按钮默认样式
-                "  border-radius: 4px; padding: 2px 8px; font-size:%5px; }"        // 圆角、内边距、字体
+                "  border-radius: 4px; min-height:54px; padding: 8px 14px;"        // T1 命中区
+                "  font-size:%5px; }"
                 "QPushButton:hover { background: %4; }"                            // 鼠标悬停样式
                 "QPushButton:checked { background: %6; color: %7; }"               // 选中状态样式（主题强调色）
                 "QLabel { color: %8; font-size:%5px; }")                           // 标签文字样式
             .arg(theme::PANEL, theme::BORDER)
             .arg(theme::TEXT)
             .arg(theme::HOVER)
-            .arg(theme::FS_HINT)
+            .arg(theme::FS_BODY)
             .arg(theme::ACCENT)
             .arg(theme::BG)
             .arg(theme::TEXT_MUTED));
@@ -234,9 +244,9 @@ void frmVideoWindow::setupFenceToolbar()
     // ========================================================================
     // 第二步：创建水平布局并设置间距
     // ========================================================================
-    QHBoxLayout *lay = new QHBoxLayout(toolbar);  // 创建水平布局，父对象为工具栏
-    lay->setContentsMargins(2, 2, 2, 2);          // 设置布局边距：左2、上2、右2、下2（左边留小空白）
-    lay->setSpacing(4);                           // 设置控件间距为4像素
+    QHBoxLayout *lay = new QHBoxLayout(toolbar);  // 创建水平布局，父对象为按钮容器
+    lay->setContentsMargins(6, 6, 6, 6);          // 布局边距 2→6，给 72px 按钮留出可点的呼吸
+    lay->setSpacing(8);                           // 控件间距 4→8，避免相邻钮边缘粘连
 
     // ========================================================================
     // 第三步：添加通道选择区域
@@ -251,7 +261,7 @@ void frmVideoWindow::setupFenceToolbar()
     for (int i = 0; i < 4; ++i) {
         QPushButton *btn = new QPushButton(QString::number(i + 1), toolbar);  // 创建按钮，显示通道号
         btn->setCheckable(true);           // 设置按钮可选中（开关样式）
-        btn->setFixedSize(28, 24);         // 设置按钮固定尺寸
+        btn->setFixedSize(56, 72);         // 单字符"1"不需要宽，但要够高够点（8mm 档）
         if (i == 0) btn->setChecked(true); // 默认选中通道1
         fenceChannelBtns_[i] = btn;        // 保存按钮指针到数组
         fenceToolGroup_->addButton(btn, i); // 添加到按钮组，ID为i
@@ -274,17 +284,32 @@ void frmVideoWindow::setupFenceToolbar()
     // 默认选禁区 —— 与围栏机制早期"只有一种模式"的默认行为一致。
     lay->addWidget(new QLabel("角色:", toolbar));
 
+    // 角色语义必须**看得见**：触屏没有 hover，写在 tooltip 里等于没写。
+    // 所以按钮文字前挂一个与画布同色的实色方块（复用 FenceOverlay::roleColor，
+    // 红=禁区、绿=岗区域），tooltip 降级为补充说明。
+    // 宽度不再 setFixedSize：撞上新 padding(8x14) 会把"岗区域"三个字吃掉，
+    // 只给 minimumHeight，让宽度跟着文字走 —— 这是"不截字"的直接手段。
+    auto makeRoleSwatch = [](geofence::FenceRole role) {
+        QPixmap pm(14, 14);
+        pm.fill(geofence::FenceOverlay::roleColor(role));
+        return QIcon(pm);
+    };
+
     QPushButton *forbiddenBtn = new QPushButton("禁区", toolbar);
     forbiddenBtn->setObjectName("fenceRoleForbidden");
     forbiddenBtn->setCheckable(true);
-    forbiddenBtn->setFixedSize(44, 24);
+    forbiddenBtn->setMinimumHeight(72);
+    forbiddenBtn->setIcon(makeRoleSwatch(geofence::FenceRole::Forbidden));
+    forbiddenBtn->setIconSize(QSize(14, 14));
     forbiddenBtn->setToolTip(QStringLiteral("画出的形状是禁区：目标进入即报警（红）"));
     lay->addWidget(forbiddenBtn);
 
     QPushButton *workzoneBtn = new QPushButton("岗区域", toolbar);
     workzoneBtn->setObjectName("fenceRoleWorkzone");
     workzoneBtn->setCheckable(true);
-    workzoneBtn->setFixedSize(56, 24);
+    workzoneBtn->setMinimumHeight(72);
+    workzoneBtn->setIcon(makeRoleSwatch(geofence::FenceRole::Workzone));
+    workzoneBtn->setIconSize(QSize(14, 14));
     workzoneBtn->setToolTip(QStringLiteral(
         "画出的形状是岗区域：目标出现在所有岗区域之外即报警（绿）。\n"
         "注意报的是\"人跑到区域外\"，不是\"区域里没人\"。"));

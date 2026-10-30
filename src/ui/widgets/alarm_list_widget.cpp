@@ -235,9 +235,11 @@ void AlarmListWidget::setupUi()
     ====================================================
     */
     tabWidget_ = new QTabWidget(this);
+    // 内联 QSS 特异性高于 blacksoft.css，Tab/表头的触屏档必须在这里一起给，
+    // 否则皮肤层放大的 padding 会被这两条打回原形。
     tabWidget_->setStyleSheet(
         QString("QTabWidget::pane { border: 1px solid %1; background: %2; }"
-                "QTabBar::tab { background: %3; color: %4; padding: 8px 20px;"
+                "QTabBar::tab { background: %3; color: %4; padding: 16px 24px;"
                 "  border: 1px solid %1; border-bottom: none; }"
                 "QTabBar::tab:selected { background: %2; color: %5; }")
             .arg(theme::BORDER, theme::BG, theme::PANEL, theme::TEXT_MUTED, theme::TEXT));
@@ -257,10 +259,14 @@ void AlarmListWidget::setupUi()
     table_->setStyleSheet(
         QString("QTableWidget { background: %1; color: %2; gridline-color: %3; }"
                 "QTableWidget::item:selected { background: %4; }"
-                "QHeaderView::section { background: %5; color: %6; padding: 6px; border: 1px solid %3; }")
+                "QHeaderView::section { background: %5; color: %6; padding: 10px 12px;"
+                "  border: 1px solid %3; }")
             .arg(theme::BG, theme::TEXT, theme::BORDER, theme::BTN_SECONDARY, theme::PANEL,
                  theme::TEXT_MUTED));
     table_->verticalHeader()->setVisible(false);
+    // 表格行高不吃 CSS 的 ::item padding（那是 item delegate 的内边距，不改 section 高度），
+    // 只能在这里设 default section size —— 56px ≈ 6.3mm，指肚能按准一行。
+    table_->verticalHeader()->setDefaultSectionSize(theme::TOUCH_TABLE_ROW);
     connect(table_, &QTableWidget::cellDoubleClicked,
             this, &AlarmListWidget::onRowDoubleClicked);
     tabWidget_->addTab(table_, "类别报警");
@@ -280,10 +286,12 @@ void AlarmListWidget::setupUi()
     fenceTable_->setStyleSheet(
         QString("QTableWidget { background: %1; color: %2; gridline-color: %3; }"
                 "QTableWidget::item:selected { background: %4; }"
-                "QHeaderView::section { background: %5; color: %6; padding: 6px; border: 1px solid %3; }")
+                "QHeaderView::section { background: %5; color: %6; padding: 10px 12px;"
+                "  border: 1px solid %3; }")
             .arg(theme::BG, theme::TEXT, theme::BORDER, theme::BTN_SECONDARY, theme::PANEL,
                  theme::TEXT_MUTED));
     fenceTable_->verticalHeader()->setVisible(false);
+    fenceTable_->verticalHeader()->setDefaultSectionSize(theme::TOUCH_TABLE_ROW);
     tabWidget_->addTab(fenceTable_, "电子围栏");
 
     mainLay->addWidget(tabWidget_, 1);
@@ -389,12 +397,15 @@ void AlarmListWidget::refreshTable()
         }
         table_->setItem(i, 4, statusItem);
 
-        // 操作列（详情按钮）
+        // 操作列（详情按钮）：触屏档 T3。这条也是报警详情的**唯一可靠入口** ——
+        // 表格双击（cellDoubleClicked）在触屏上不可靠，但那是手势问题，本轮不动。
         QPushButton *btnDetail = new QPushButton("详情");
         btnDetail->setStyleSheet(
-            QString("QPushButton { color: %1; background: %2; border-radius: 4px; padding: 4px 12px; }"
+            QString("QPushButton { color: %1; background: %2; border-radius: 4px;"
+                    "  min-height:%4px; padding: 8px 14px; }"
                     "QPushButton:hover { background: %3; }")
-                .arg(theme::TEXT, theme::BTN_SECONDARY, theme::BTN_SECONDARY_HOVER));
+                .arg(theme::TEXT, theme::BTN_SECONDARY, theme::BTN_SECONDARY_HOVER)
+                .arg(theme::TOUCH_ROW_MIN_H));
         connect(btnDetail, &QPushButton::clicked, this, [this, i]() {
             showAlarmDetail(i);
         });

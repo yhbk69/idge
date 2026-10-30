@@ -6,6 +6,7 @@
 //   解码线程产物经 QueuedConnection 信号投递到 GLVideoWidget 的槽，
 //   保证 EGL/GL 调用始终发生在 GUI 线程（GL 上下文线程亲和）。
 #include "player_widget.h"
+#include "theme.h"
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QLabel>
@@ -123,28 +124,33 @@ void PlayerWidget::setupExpandButton()
 {
     expandBtn_ = new QPushButton(this);
     expandBtn_->setObjectName("expandBtn");
-    expandBtn_->setFixedSize(32, 32);
+    // 触屏档 T4：48x48 ≈ 5.4mm（原 32x32 只有 3.6mm，四路画面里最容易误触的钮）
+    expandBtn_->setFixedSize(theme::TOUCH_ICON_BTN, theme::TOUCH_ICON_BTN);
     expandBtn_->setCursor(Qt::PointingHandCursor);
     
     // 初始状态：放大图标
     expandBtn_->setText("⊕");
     
     // 半透明悬浮样式
+    // padding 必须显式清 0：全局 .QPushButton 现在是触屏档 padding-left/right:14px，
+    // 48x48 的固定钮被它吃掉后 ⊕ 只剩 46px 可用却需要 50px（探针实测会截字）。
+    // 命中区已经是 48x48 ≈ 5.4mm，不再需要 padding 补宽。
     expandBtn_->setStyleSheet(
         "QPushButton {"
         "   background-color: rgba(0, 0, 0, 120);"
         "   border: none;"
         "   border-radius: 4px;"
+        "   padding: 0px;"
         "   color: white;"
-        "   font-size:18px;"
+        "   font-size:22px;"
         "}"
         "QPushButton:hover {"
         "   background-color: rgba(0, 0, 0, 180);"
         "}"
     );
     
-    // 按钮位置：右上角，留10px边距
-    expandBtn_->setGeometry(0, 0, 32, 32);
+    // 按钮位置：右上角，留10px边距（尺寸由 resizeEvent 按 width() 跟随）
+    expandBtn_->setGeometry(0, 0, theme::TOUCH_ICON_BTN, theme::TOUCH_ICON_BTN);
     expandBtn_->raise();  // 显示在最上层
     
     connect(expandBtn_, &QPushButton::clicked, this, &PlayerWidget::onExpandClicked);

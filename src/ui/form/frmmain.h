@@ -62,11 +62,6 @@ public:
 
 protected:
     /**
-     * @brief 事件过滤器 - 用于标题栏双击最大化/还原
-     */
-    bool eventFilter(QObject *watched, QEvent *event);
-
-    /**
      * @brief 窗口关闭事件 - 停止所有解码器线程后再关闭
      */
     void closeEvent(QCloseEvent *event) override;

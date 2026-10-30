@@ -348,7 +348,14 @@ qt5_add_big_resources(CORE_HELPER_SOURCES_QRC
     ${CMAKE_SOURCE_DIR}/src/ui/core/qrc/wasm.qrc    # 中文字体兜底（注册 /font/DroidSansFallback.ttf）
 )
 
-qt5_add_big_resources(CORE_QRC
+# 皮肤资源单独走 qt5_add_resources（**不是** big_resources）。
+# 原因：big_resources 生成的是 `rcc --pass 1/2` 两段式规则，Makefile 里
+# 那条 `qrc_qss.o:` 前置依赖为空 —— 改 blacksoft.css 后 rcc 根本不会重跑，
+# 皮肤改动静默不进二进制（本轮触屏 QSS 改造就是这么白折腾了一次）。
+# 普通 add_resources 会把 .qrc 里列出的每个文件都挂成前置依赖（见
+# qrc_resources.cpp 规则：resources.qrc + shutter.wav + .depends）。
+# qss.qrc 只有 1 个 21KB css + 23 张小图标，本来也不需要 big 模式。
+qt5_add_resources(CORE_QRC
     ${CMAKE_SOURCE_DIR}/src/ui/core/qss.qrc         # blacksoft 皮肤（:/qss/...）
 )
 
