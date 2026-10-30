@@ -104,14 +104,7 @@ bool DatabaseManager::initialize(const QString &dbPath)
         return false;
     }
 
-    // 补列：CREATE TABLE IF NOT EXISTS 对已部署的老库是空操作，新加的
-    // 施工信息两列（worker_name / construction_info）只有在这里 ALTER 才存在。
-    // 失败不致命（只影响报警带施工信息，不影响其余功能），所以只告警不返回 false。
-    if (!ensureColumns(QStringLiteral("alarms"),
-                       {QStringLiteral("worker_name TEXT"),
-                        QStringLiteral("construction_info TEXT")})) {
-        qWarning() << "Alarms construction columns not fully ensured";
-    }
+    // 补列已挪进 createTables()：它必须发生在按新列建索引之前。
 
     // 一次性单位迁移：旧版本把 detections.timestamp 写成了 epoch 纳秒，
     // 而查询/清理按毫秒约定（纳秒值恒大于毫秒 cutoff，导致永不清删）。
@@ -311,12 +304,27 @@ bool DatabaseManager::createTables()
         return false;
     }
 
+    // 补列必须夹在建表与建索引之间：CREATE TABLE IF NOT EXISTS 对已部署的老库是
+    // 空操作，新加的施工信息两列只有靠这里 ALTER 才存在；而下面两条按新列建的索引
+    // 早于 ALTER 就会失败（老库上实测 "no such column: worker_name"）。
+    // 失败不致命（只影响报警带施工信息，不影响其余功能），所以只告警不返回 false。
+    if (!ensureColumns(QStringLiteral("alarms"),
+                       {QStringLiteral("worker_name TEXT"),
+                        QStringLiteral("construction_info TEXT")})) {
+        qWarning() << "Alarms construction columns not fully ensured";
+    }
+
     // 创建报警表索引
     executeSQL("CREATE INDEX IF NOT EXISTS idx_alarms_type ON alarms(alarm_type);");
     executeSQL("CREATE INDEX IF NOT EXISTS idx_alarms_level ON alarms(alarm_level);");
     executeSQL("CREATE INDEX IF NOT EXISTS idx_alarms_status ON alarms(status);");
     executeSQL("CREATE INDEX IF NOT EXISTS idx_alarms_time ON alarms(alarm_time);");
     executeSQL("CREATE INDEX IF NOT EXISTS idx_alarms_channel ON alarms(channel);");
+    // 下面两条是检索改造带来的：单列索引只能挑一个用，之后 ORDER BY alarm_time DESC
+    // 要再建临时 B 树排序。实测 35383 行的库上「通道 + 时间档」翻页 34ms、
+    // 「按负责人」28ms，都在 GUI 线程上；复合索引让这两条退化成几万分之一秒的量级。
+    executeSQL("CREATE INDEX IF NOT EXISTS idx_alarms_channel_time ON alarms(channel, alarm_time);");
+    executeSQL("CREATE INDEX IF NOT EXISTS idx_alarms_worker ON alarms(worker_name);");
 
     qInfo() << "Database tables created successfully";
     return true;

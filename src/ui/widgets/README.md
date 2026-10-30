@@ -16,7 +16,7 @@
 | gl_video_widget.h/.cpp | GLVideoWidget：QOpenGLWidget 双缓冲零拷贝视频控件（含 FPS 叠加） |
 | player_widget.h/.cpp | PlayerWidget：视频 + OSD + 围栏叠加 + 放大按钮的通道窗体，持有解码器 |
 | dashboard_widget.h/.cpp | DashboardWidget：统计卡片、/proc 系统监控（CPU/内存/温度）、类别排行条 |
-| alarm_list_widget.h/.cpp | AlarmListWidget：类别/围栏双 Tab 报警表，300ms 防抖刷新与筛选；围栏 Tab 第 4 列「围栏类型」区分**闯入禁区/离岗**；两个 Tab 各有**负责人**列（类别表 8 列、围栏表 6 列），空值显示 `—` |
+| alarm_list_widget.h/.cpp | AlarmListWidget：**三个** Tab（类别报警 / 电子围栏 / 检测明细），数据**全部来自数据库**（不再是 `AlarmManager` 的 RAM 窗口，所以 3.5 万条历史也翻得到）。检索条 = 时间档位 4 颗（今天/近3天/近7天/全部，**自然日**不是"现在减 72 小时"）+ 5 个下拉（通道/类别/状态/负责人/施工id）+ 清除筛选 + 上一页/下一页；下拉的候选值与计数来自 DAO 的 facet 查询，表头点击弹的菜单**读的就是这些下拉**（同一份状态，不会两处漂移）。一页 200 行（旧代码的 500 含义是"总共只画 500"）；围栏表 6 列、检测表 5 列、类别表 8 列，负责人列空值显示 `—` |
 | video_alarm_widget.h/.cpp | VideoAlarmWidget：视频监控页右侧报警卡片列表（QScrollArea），点击跳转详情；卡片第二行是「通道N · 负责人」（复用 `alarmChannel` 的 objectName，卡片高度不变） |
 | alarm_detail_dialog.h/.cpp | AlarmDetailDialog：报警详情对话框，支持误报标记与单条确认；"视频"行展示片段文件名/大小与网页副本是否随行；施工信息**按 `construction_info` 的键逐行渲染**（不是按固定字段），渲染口径来自 `ConstructionInfo::fields()`（与 ConstructionDetailDialog 同一份），所以 `ConstructionInfo` 加字段这里不用改 |
 | construction_detail_dialog.h/.cpp | ConstructionDetailDialog：**当前登录的施工信息**详情框，只读、无信号无槽（不需要 moc），入口是标题栏右上角那颗登录人角标（`frmMain::sessionBadge_`）。打开时读一次 `snapshot()`，之后不回查会话。逐键渲染同样走 `ConstructionInfo::fields()`。值标签挂了 `TextSelectableByMouse`——现场要照着抄电话号码 |
@@ -24,7 +24,7 @@
 | capture_button.h | `uiwidgets::CaptureButton`：88x88 圆形快门（header-only）。原先长在智能识别页的 `.cpp` 里，扫码与 OCR 都要用才提出来；二维码改回实时扫描后**当前只有 OCR 拍照流程在用**，定义仍留在这里（智能识别页的 `.cpp` 带 moc，控件定义越少越好） |
 
 ## 核心类与数据流
-帧流：解码线程 dup(RGBA fd) → `RenderFrame` 经 `QueuedConnection` 投递 → GLVideoWidget::onFrameReady（互斥锁保护，prev/pending 两级 fd 管理）→ paintGL 中 `importRGBA → bindToTexture` 写入后台缓冲 → 双缓冲交换 drawQuad。EGL 引用计数保证"fd 已 close、画面仍可读"的重叠窗口。fd 生命周期：每个副本恰好一次 close（帧更替或析构）。界面流：AlarmManager 信号 → 防抖定时器 → 全表重建；QTimer 2s → DashboardWidget::refreshStats。
+帧流：解码线程 dup(RGBA fd) → `RenderFrame` 经 `QueuedConnection` 投递 → GLVideoWidget::onFrameReady（互斥锁保护，prev/pending 两级 fd 管理）→ paintGL 中 `importRGBA → bindToTexture` 写入后台缓冲 → 双缓冲交换 drawQuad。EGL 引用计数保证"fd 已 close、画面仍可读"的重叠窗口。fd 生命周期：每个副本恰好一次 close（帧更替或析构）。界面流：AlarmManager 信号 → 300ms 防抖 → **仅当页面 `isVisible()`** 才查库并重建当前 Tab 的表（页面藏着时一条 SQL 都不发，见「注意事项」）；QTimer 2s → DashboardWidget::refreshStats。
 
 ## 使用方法
 ```cpp
@@ -82,4 +82,16 @@ GLuint tex = pool.acquire(fd, w, h, stride, DRM_FORMAT_ABGR8888);
 - **录制参数只在 `PlayerWidget::open()` 注入一次**：编码器在解码线程打开流后按真实宽高创建，
   运行期改 `config.json` 的 recording 段不会重建编码器，必须换流/重启才生效（界面不提供入口）。
 - EglImageRenderer：无 include guard、着色器 uniform 未赋值（tex_height/img_height 默认 0 → 除零 NaN），且 BT.601 假设与 RGBA 主路径不符——仅存档参考。
-- 业务界面：报警时间由 `AlarmRecord::alarmTime`（ISO 字符串）解析展示；`timestamp` 字段单位口径见 yolo11 README 警示；通道筛选硬编码 4 路（filterChannel_ 0~3）；Dashboard CPU 差分基线为函数级 static 变量（多实例互相污染）。
+- **检索的三条硬口径**（2026-10-31，改任何一条都会让列表页说谎或卡顿）：
+  ① **命中数与当前页必须同一次 `buildFilterWhere` 的产物**——先 `countByFilter` → `clampPageToTotal()` →
+  再 `filter.offset = page_ * 200` 取行。顺序反了就会出现"第 3 / 2 页"配着不存在的 offset 取回来的行。
+  ② **页面不可见 ⇒ 零 SQL 零重建**（`reloadCurrentTab()` 与三个 `refresh*Table()` 各有 `isVisible()` 门）。
+  实测「全部」档一次重建 317~326ms（其中 SQL ≈100ms：count 10 + 取页 2 + 三个 facet 90，剩下是 200 行
+  ×8 列的 `QTableWidgetItem`），这个量级绝不能被后台的 `statsUpdated` 白白触发。
+  ③ **不做关键词输入框**——本轮没有虚拟键盘，任何要打字检索的设计都落不了地；
+  取值一律点选（下拉或表头菜单），日期一律档位（不做日历控件）。
+- **老报警行没有施工信息是事实，不是 bug**：`worker_name` 为空 → 列表与详情统一显示 `—`，
+  详情框额外补一句「（该报警产生时未登录，无施工信息）」。不回填。
+- **表头筛选菜单是从对应下拉现搭的**，不是第二份状态；围栏 Tab 点表头改的是 `fenceRole_`（闯入/离岗），
+  它不进下拉而走独立成员，因为「类别」Tab 语义上不该出现角色维度。
+- 业务界面：报警时间由 `AlarmRecord::alarmTime`（ISO 字符串）解析展示；`timestamp` 字段单位口径见 yolo11 README 警示；Dashboard CPU 差分基线为函数级 static 变量（多实例互相污染）。

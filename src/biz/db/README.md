@@ -134,7 +134,8 @@ sqlite3 data/idge.db "select count(*) from alarms where video_path<>''"
 - 与 `business_db_manager`（业务库 roll_call.db，sqlite3 原生 API）是两套
   互不相干的数据库层；勿混用连接。
 - 检测数据是否落库受 `storeDetections` 开关控制（对应提交 fc7ae46"仅存报警相关"）。
-- 建表语句在 `initialize()` 内幂等执行；修改表结构需同步 tests/test_database.cpp。
+- 建表语句在 `initialize()` 内幂等执行；修改表结构需同步 `tests/test_database.cpp` 与
+  `sql/idge_init.sql`（**两份建表必须一致**，见下）。
 
 ### 表结构演进：`ensureColumns()`（本轮新增，此前全仓没有任何迁移机制）
 
@@ -148,14 +149,23 @@ sqlite3 data/idge.db "select count(*) from alarms where video_path<>''"
 **为什么是 2 列而不是 5 列**：施工信息的字段还没定稿，5 列意味着改一次字段要动
 5 次 `ALTER` + 2 处 INSERT 列表 + `recordFromQuery` 5 行；2 列意味着只改
 `src/biz/session/construction_session.h` 里的 `ConstructionInfo` 一处，详情框与上行自动跟。
-代价：**不能直接按 SQL 过滤电话/工作内容**（要过滤得先 `json_extract`，本轮不做）。
+代价：**电话/工作内容没有独立列，SQL 过滤不了**。施工id 走
+`instr(construction_info, '"construction_id":"X"') > 0`（**不是** `json_extract`：
+Qt 的 QSQLITE 插件内建的是 SQLite 3.31.1 且**没编 JSON1**，`json_*` 函数在这条路径上根本不存在，
+本仓自带的 3.49.1 只服务业务库那条 C API 直连；也不是 `LIKE`：`LIKE` 会把 `%`/`_` 当通配符，
+needle 里出现就串味，`instr` 是精确子串且整个 needle 走 `bindValue`）。
 
 **为什么必须新增机制**：建表语句有**两份**且都是 `CREATE TABLE IF NOT EXISTS`
 （`sql/idge_init.sql` 与 `database_manager.cpp`），已部署的库不会自动长列。
 所以两份建表**同时补上这两列**（新库根本不需要 ALTER，但两份必须一致），
 老库由 `DatabaseManager::ensureColumns(table, columnDefs)` 补：`PRAGMA table_info` 逐行取列名，
-缺哪列补哪列 `ALTER TABLE … ADD COLUMN`，在 `initialize()` 里紧跟建表之后、
-纳秒转毫秒那段之前调用。
+缺哪列补哪列 `ALTER TABLE … ADD COLUMN`。
+
+**调用位置是实测出来的，不是排版选择**：`ensureColumns` 必须夹在
+`CREATE TABLE alarms` 与 `CREATE INDEX … ON alarms(worker_name)` **之间**（现在就在 `createTables()` 内部）。
+放在 `initialize()` 里建表之后曾实测失败：老库上先建索引就报
+`SQL execution failed: "no such column: worker_name"`，那一整次运行 `idx_alarms_worker` 是缺的，
+翻页只能退回单列索引 + 临时排序。
 
 - **幂等**（实测）：第一次启动日志两条 `Migrated: "ALTER TABLE alarms ADD COLUMN …"`，
   第二次启动**零条**且不报错。
@@ -166,3 +176,42 @@ sqlite3 data/idge.db "select count(*) from alarms where video_path<>''"
 - **写入侧无覆盖风险**：两处 INSERT 都是显式列名 + `bindValue`；`recordFromQuery` 按**列名**取
   （不是位置索引），所以加列不影响既有解析。报警的更新全走显式 `UPDATE alarms SET …`，
   没有"读-改-写回"，批量插入的 `INSERT OR REPLACE` 也就不会把施工信息冲空（逐条核过）。
+
+### 检索层：`AlarmFilter` / `DetectionFilter`（2026-10-31）
+
+列表页原先读的是 `AlarmManager` 的 RAM 窗口（几千条），3.5 万条历史根本翻不到。现在两侧各有一个
+filter 结构体，是**唯一**的取数入口：
+
+```cpp
+struct AlarmFilter {          // alarm_dao.h
+    long startTime = 0, endTime = 0;      // 0 = 不限；单位毫秒，内部转 ISO 文本再比
+    int channel = -1;                     // < 0 = 全部
+    QString className, status;            // 空 = 全部；status 空 ⇒ "不含误报"而不是"全部状态"
+    QString workerName, constructionId;   // 空 = 不限
+    FenceRole fenceRole;                  // RoleAll / RoleIntrusion(fence|fence_in) / RoleLeave(fence_out)
+    Scope scope;                          // All / ClassOnly / FenceOnly（按 alarm_type 的 "fence" 前缀）
+    int limit = 500, offset = 0;
+};
+```
+
+`DetectionFilter` 是它的子集（时间/通道/类别/分页）。旧的
+`queryByTimeRange / queryByChannel / queryByClass / queryByChannelAndClass` 已删——四个近亲函数
+是每个新维度都要再复制一遍的根源。
+
+- **时间比较为什么能用字典序**：`alarm_time` 是定宽 `yyyy-MM-ddTHH:mm:ss`（全库核过：19 字符、
+  恒有 `T`、无小数秒），所以 `BETWEEN` 的文本序 == 时间序，且能吃 `idx_alarms_time`。
+  改成带毫秒或换分隔符都会静默失效，别动格式。
+- **排序必须带唯一列兜底**：`ORDER BY alarm_time DESC, id ASC`（检测表同理 `timestamp, id`）。
+  `alarm_time` 只到秒，而 30fps 检测 + 2s 限流让同一秒多条成为常态（实测截图里就有 3 条同秒），
+  只按秒排的话 `OFFSET` 翻页会在页边界上重复一行或漏一行。
+- **facet 查询是候选值的唯一来源**：`classFacets` / `workerFacets` / `constructionFacets`
+  （+ 检测侧 `classFacets`）返回 `(取值, 条数)`，`LIMIT 60` 兜底，界面靠点选不需要打字。
+  `constructionFacets` 是 `GROUP BY construction_info` 后在 C++ 里用 `QJsonDocument` 取
+  `construction_id` 再合并——因为 SQL 侧没有 JSON1（见上）。
+- **新增两条索引**（两份建表都写）：`idx_alarms_channel_time(channel, alarm_time)`、
+  `idx_alarms_worker(worker_name)`。实测 35383 行的库上「通道+时间档」翻页 34ms、「按负责人」28ms
+  都发生在 GUI 线程，单列索引组合不出这个数（`EXPLAIN` 里有 `TEMP B-TREE FOR ORDER BY`）。
+- **`acknowledgeAllPending()`**：一条 `UPDATE … WHERE status <> 'rectified'`。
+  原来「全部确认」在 RAM 里最多收集 1000 个 id 再逐条 UPDATE，而库里 pending 有 27858 条 ——
+  按钮点了等于没点。现在返回受影响行数，`test_database` 断言它等于点之前的 pending 数。
+

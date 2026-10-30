@@ -68,7 +68,7 @@ C++ 测试源码目录。含七个测试程序与一个人工联调工具：
 
 | 文件 | 说明 |
 |------|------|
-| `test_database.cpp` | 数据库模块测试（4 组用例：初始化/检测/报警/维护），基于 Qt Core + 宏 `TEST_ASSERT` |
+| `test_database.cpp` | 数据库模块测试（4 组用例：初始化/检测/报警/维护），基于 Qt Core + 宏 `TEST_ASSERT`；报警组覆盖检索层（`AlarmFilter` 计数与取行同口径、分页、scope 不重不漏、围栏角色、负责人/施工id 过滤、三类 facet 候选值、`acknowledgeAllPending`） |
 | `test_equipment.cpp` | 设备盘点全链离线自测（模型加载→检测计数→画框→落库→回读→热更新原子性），逐项 `[ok]/[FAIL]` |
 | `test_rollcall.cpp` | 人员点名全链离线自测（exe 对照回归 + 注册/去重/注销匹配/落库回读），逐项 `[ok]/[FAIL]` |
 | `test_latest_frame_slot.cpp` | LatestFrameSlot 单槽广播契约自检（跳帧/生命周期/close 唤醒/reset），末行打印一行 PASS 说明 |
@@ -127,6 +127,11 @@ curl -o /tmp/x.jpg '<sink 打出的 snapshot/media_begin url>' && sha256sum /tmp
 ——本仓库不再假设某个固定版本号或某台机器的绝对路径。
 
 `test_database` 使用内存数据库（`DatabaseManager::instance().initialize(":memory:")`），不会写磁盘文件；
+内存库没有文件可 stat，所以 `databaseSize()` 必然返回 0 —— 那条断言写的就是 `== 0`，
+早先写 `> 0` 是测试自己的历史 bug（在内存库上永远失败）。
+`test_database` 的源文件是**显式列在 CMakeLists 里**的（不像主目标那样 GLOB），
+`alarm_dao` 一旦引用新模块就会链接期报 undefined reference —— 它现在额外链
+`src/biz/session/construction_session.cpp`（`constructionFacets` 要用 `ConstructionInfo::kKey*`）。
 `test_equipment` 的 db 与任务目录全部落在 `/tmp/equip_check_<pid>/`、`test_rollcall` 落在
 `/tmp/rollcall_check_<pid>/`（含 test.jpg 副本，隔离 exe 的 `_faces.json` 残留），跑完即删，不碰正式 `data/roll_call_data`。
 

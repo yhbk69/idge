@@ -17,11 +17,14 @@
 #include "alarm_dao.h"
 #include "runtime_paths.h"
 #include "database_manager.h"
+#include "construction_session.h"   // 施工id 的键名常量，别在这儿再抄一遍字面量
 #include <QSqlQuery>
 #include <QSqlError>
 #include <QDateTime>
 #include <QUuid>
 #include <QDebug>
+#include <QJsonDocument>
+#include <QJsonObject>
 
 AlarmDAO::AlarmDAO(QObject *parent)
     : QObject(parent)
@@ -400,6 +403,246 @@ QVector<AlarmRecord> AlarmDAO::queryAll(int limit)
     return results;
 }
 
+// ============================================================================
+// queryByFilter / countByFilter / *Facets: 组合条件检索
+// ============================================================================
+//
+// WHERE 由 buildFilterWhere 统一生成，queryByFilter 与 countByFilter 共用它 ——
+// 「列表里的条数」和「列表里的行」只要有一次口径不同，分页标签就会开始骗人，
+// 所以这两条 SQL 不许各自拼一遍。
+// ============================================================================
+namespace {
+
+struct FilterSql {
+    QString where;                             // 永远以 "WHERE " 开头，无条件时是 WHERE 1=1
+    QVector<QPair<QString, QVariant>> binds;   // 具名占位符 → 值
+};
+
+QString isoOf(long msecs)
+{
+    return QDateTime::fromMSecsSinceEpoch(msecs).toString(Qt::ISODate);
+}
+
+// 把 AlarmFilter 翻成 WHERE 片段。
+// 铁律：条件文本里不出现任何取值，取值一律走 bindValue。列名全是写死的字面量，
+// 所以这里不存在注入面；将来加条件也得照这个形状加，别拼字符串。
+FilterSql buildFilterWhere(const AlarmFilter &f)
+{
+    FilterSql out;
+    QStringList parts;
+
+    auto eq = [&parts, &out](const char *column, const char *name, const QVariant &value) {
+        parts << QStringLiteral("%1 = :%2").arg(QLatin1String(column), QLatin1String(name));
+        out.binds.append(qMakePair(QString::fromLatin1(name), value));
+    };
+
+    if (f.startTime > 0 && f.endTime > 0) {
+        // alarm_time 是定宽 ISO 文本（"yyyy-MM-ddTHH:mm:ss"，实测 35383 行全是 19 字符、
+        // 分隔符统一是 T、无小数秒），所以字典序 == 时间序，BETWEEN 可以直接比文本，
+        // 并且吃 idx_alarms_time。写入端 currentDateTimeStr() 用的就是 Qt::ISODate，
+        // 这条等价关系的前提在写入口上，不在查询里。
+        parts << QStringLiteral("alarm_time BETWEEN :t_start AND :t_end");
+        out.binds.append(qMakePair(QStringLiteral("t_start"), isoOf(f.startTime)));
+        out.binds.append(qMakePair(QStringLiteral("t_end"), isoOf(f.endTime)));
+    }
+    if (f.channel >= 0) eq("channel", "channel", f.channel);
+    if (!f.className.isEmpty()) eq("class_name", "class_name", f.className);
+    if (!f.workerName.isEmpty()) eq("worker_name", "worker_name", f.workerName);
+
+    if (f.status.isEmpty()) {
+        parts << QStringLiteral("status <> 'false_alarm'");
+    } else {
+        eq("status", "status", f.status);
+    }
+
+    if (!f.constructionId.isEmpty()) {
+        // 用 instr 而不是 json_extract：本机构建用的 Qt QSQLITE 插件内嵌的是
+        // SQLite 3.31.1 且**没有编入 JSON1**（插件里搜不到任何 json_* 函数名），
+        // json_extract 会直接 "no such function" 把整条查询打死。
+        // 也不用 LIKE：LIKE 的 needle 里 % 和 _ 是通配符，施工id 带下划线就会过度匹配
+        // （本项目的键名恰恰是 construction_id 这种下划线风格）。
+        // needle 是整段 "..." 带引号一起 bind 的，序列化形状由 ConstructionInfo::toJson
+        // 固定（QJsonDocument::Compact，无空格），所以这个子串匹配是精确的。
+        parts << QStringLiteral("instr(construction_info, :cid_needle) > 0");
+        out.binds.append(qMakePair(QStringLiteral("cid_needle"),
+                                   QStringLiteral("\"construction_id\":\"%1\"")
+                                       .arg(f.constructionId)));
+    }
+
+    // 围栏与类别两张表的分流：alarm_type 前缀，与 recordFromQuery 还原
+    // isFenceAlarm 用的是同一条规则，两边不会漂。
+    if (f.scope == AlarmFilter::ClassOnly) {
+        parts << QStringLiteral("alarm_type NOT LIKE 'fence%'");
+    } else if (f.scope == AlarmFilter::FenceOnly) {
+        parts << QStringLiteral("alarm_type LIKE 'fence%'");
+    }
+
+    // 围栏角色：只有"离岗"是明确的 alarm_type，其余（fence_in 与老库的 fence）都算闯入禁区。
+    // 用 <'' 而不是 IN ('fence','fence_in')，将来多一种围栏角色也不会在这里漏一条。
+    if (f.fenceRole == AlarmFilter::RoleLeave) {
+        parts << QStringLiteral("alarm_type = 'fence_out'");
+    } else if (f.fenceRole == AlarmFilter::RoleIntrusion) {
+        parts << QStringLiteral("alarm_type <> 'fence_out'");
+    }
+
+    out.where = QStringLiteral("WHERE ") + (parts.isEmpty() ? QStringLiteral("1=1")
+                                                            : parts.join(QStringLiteral(" AND ")));
+    return out;
+}
+
+void bindAll(QSqlQuery &query, const QVector<QPair<QString, QVariant>> &binds)
+{
+    for (const auto &b : binds) {
+        query.bindValue(QLatin1Char(':') + b.first, b.second);
+    }
+}
+
+} // namespace
+
+QVector<AlarmRecord> AlarmDAO::queryByFilter(const AlarmFilter &filter)
+{
+    QVector<AlarmRecord> results;
+    QSqlDatabase db = DatabaseManager::instance().database();
+    if (!db.isOpen()) return results;
+
+    const FilterSql fs = buildFilterWhere(filter);
+
+    QSqlQuery query(db);
+    // 排序必须带唯一列兜底：alarm_time 只到秒，同秒多条是常态（30fps 检测 + 2s 限流），
+    // 只按它排则 OFFSET 翻页时同一行可能在两页都出现、或整页漏掉一行。
+    query.prepare(QStringLiteral(
+        "SELECT * FROM alarms %1 ORDER BY alarm_time DESC, id ASC LIMIT :__limit OFFSET :__offset")
+        .arg(fs.where));
+    bindAll(query, fs.binds);
+    query.bindValue(":__limit", filter.limit);
+    query.bindValue(":__offset", filter.offset);
+
+    if (query.exec()) {
+        while (query.next()) {
+            results.append(recordFromQuery(query));
+        }
+    } else {
+        qWarning() << "AlarmDAO::queryByFilter failed:" << query.lastError().text();
+    }
+
+    return results;
+}
+
+int AlarmDAO::countByFilter(const AlarmFilter &filter)
+{
+    QSqlDatabase db = DatabaseManager::instance().database();
+    if (!db.isOpen()) return 0;
+
+    const FilterSql fs = buildFilterWhere(filter);
+
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral("SELECT COUNT(*) FROM alarms %1").arg(fs.where));
+    bindAll(query, fs.binds);
+
+    if (query.exec() && query.next()) {
+        return query.value(0).toInt();
+    }
+    qWarning() << "AlarmDAO::countByFilter failed:" << query.lastError().text();
+    return 0;
+}
+
+// ----------------------------------------------------------------------------
+// facets：筛选下拉的候选值 + 条数
+// ----------------------------------------------------------------------------
+// facet SQL 只带时间档和 scope，故意不带其它已选条件（理由见 alarm_dao.h 的声明注释）。
+// 时间档为 0 时整条时间条件消失，退化成"全部历史"。
+namespace {
+
+QString andTimeRangeClause(long startTime, long endTime, QVector<QPair<QString, QVariant>> &binds)
+{
+    if (startTime <= 0 || endTime <= 0) return QString();
+    binds.append(qMakePair(QStringLiteral("t_start"), isoOf(startTime)));
+    binds.append(qMakePair(QStringLiteral("t_end"), isoOf(endTime)));
+    return QStringLiteral(" AND alarm_time BETWEEN :t_start AND :t_end");
+}
+
+QString facetScopeClause(AlarmFilter::Scope scope)
+{
+    if (scope == AlarmFilter::ClassOnly) return QStringLiteral(" AND alarm_type NOT LIKE 'fence%'");
+    if (scope == AlarmFilter::FenceOnly) return QStringLiteral(" AND alarm_type LIKE 'fence%'");
+    return QString();
+}
+
+QVector<QPair<QString, int>> runFacet(const QString &sql,
+                                      const QVector<QPair<QString, QVariant>> &binds,
+                                      const char *who)
+{
+    QVector<QPair<QString, int>> out;
+    QSqlDatabase db = DatabaseManager::instance().database();
+    if (!db.isOpen()) return out;
+
+    QSqlQuery query(db);
+    query.prepare(sql);
+    bindAll(query, binds);
+
+    if (query.exec()) {
+        while (query.next()) {
+            const QString value = query.value(0).toString();
+            if (value.isEmpty()) continue;      // 老行没有施工信息，不配当候选项
+            out.append(qMakePair(value, query.value(1).toInt()));
+        }
+    } else {
+        qWarning() << "AlarmDAO facet" << who << "failed:" << query.lastError().text();
+    }
+    return out;
+}
+
+} // namespace
+
+QVector<QPair<QString, int>> AlarmDAO::classFacets(long startTime, long endTime,
+                                                   AlarmFilter::Scope scope)
+{
+    QVector<QPair<QString, QVariant>> binds;
+    const QString sql = QStringLiteral(
+        "SELECT class_name, COUNT(*) FROM alarms "
+        "WHERE status <> 'false_alarm'%1%2 "
+        "GROUP BY class_name ORDER BY COUNT(*) DESC LIMIT 60")
+        .arg(andTimeRangeClause(startTime, endTime, binds), facetScopeClause(scope));
+    return runFacet(sql, binds, "class");
+}
+
+QVector<QPair<QString, int>> AlarmDAO::workerFacets(long startTime, long endTime,
+                                                    AlarmFilter::Scope scope)
+{
+    QVector<QPair<QString, QVariant>> binds;
+    const QString sql = QStringLiteral(
+        "SELECT worker_name, COUNT(*) FROM alarms "
+        "WHERE status <> 'false_alarm' AND worker_name <> ''%1%2 "
+        "GROUP BY worker_name ORDER BY COUNT(*) DESC LIMIT 60")
+        .arg(andTimeRangeClause(startTime, endTime, binds), facetScopeClause(scope));
+    return runFacet(sql, binds, "worker");
+}
+
+// 施工id 藏在 construction_info 这段 JSON 文本里，SQLite 又没有 JSON1，
+// 所以候选值不在 SQL 里解，而是把 distinct 载荷取回来在 C++ 侧用 QJsonDocument 解。
+// distinct 的载荷数量 = 登录次数（同一时段所有报警共用同一份文本），是个个位数的量。
+QVector<QPair<QString, int>> AlarmDAO::constructionFacets(long startTime, long endTime,
+                                                          AlarmFilter::Scope scope)
+{
+    QVector<QPair<QString, QVariant>> binds;
+    const QString sql = QStringLiteral(
+        "SELECT construction_info, COUNT(*) FROM alarms "
+        "WHERE status <> 'false_alarm' AND construction_info <> ''%1%2 "
+        "GROUP BY construction_info ORDER BY COUNT(*) DESC LIMIT 60")
+        .arg(andTimeRangeClause(startTime, endTime, binds), facetScopeClause(scope));
+
+    QVector<QPair<QString, int>> out;
+    for (const auto &row : runFacet(sql, binds, "construction")) {
+        const QJsonDocument doc = QJsonDocument::fromJson(row.first.toUtf8());
+        if (!doc.isObject()) continue;
+        const QString id = doc.object()
+                               .value(QLatin1String(session::ConstructionInfo::kKeyConstructionId))
+                               .toString();
+        if (!id.isEmpty()) out.append(qMakePair(id, row.second));
+    }
+    return out;
+}
+
 /**
  * @brief 按状态查询报警记录
  *
@@ -517,6 +760,30 @@ bool AlarmDAO::updateStatus(const QString &id, const QString &status)
     }
 
     return query.numRowsAffected() > 0;
+}
+
+// ============================================================================
+// acknowledgeAllPending: 一条 UPDATE 把所有未确认置为已确认
+// ============================================================================
+// 「全部确认」这个按钮的语义就是全部，所以它必须落在库上而不是落在内存那 1000 行窗口上。
+int AlarmDAO::acknowledgeAllPending()
+{
+    QSqlDatabase db = DatabaseManager::instance().database();
+    if (!db.isOpen()) return 0;
+
+    QSqlQuery query(db);
+    query.prepare(R"(
+        UPDATE alarms SET status = 'rectified', update_time = :update_time
+        WHERE status <> 'rectified'
+    )");
+    query.bindValue(":update_time", currentDateTimeStr());
+
+    if (!query.exec()) {
+        qWarning() << "AlarmDAO::acknowledgeAllPending failed:" << query.lastError().text();
+        return 0;
+    }
+
+    return query.numRowsAffected();
 }
 
 bool AlarmDAO::dispose(const QString &id, const QString &result,
@@ -775,11 +1042,14 @@ QMap<int, int> AlarmDAO::channelStatistics(long startTime, long endTime)
     QSqlDatabase db = DatabaseManager::instance().database();
     if (!db.isOpen()) return stats;
 
+    // 时间范围必须真的进 WHERE：这三条统计原先收了 startTime/endTime 却裸 GROUP BY，
+    // 于是界面无论选哪个时间档，拿到的都是全历史数字 —— 比"没有统计"更糟，因为它看起来是对的。
+    QVector<QPair<QString, QVariant>> binds;
     QSqlQuery query(db);
-    query.prepare(R"(
-        SELECT channel, COUNT(*) as cnt FROM alarms
-        GROUP BY channel ORDER BY channel
-    )");
+    query.prepare(QStringLiteral(
+        "SELECT channel, COUNT(*) as cnt FROM alarms WHERE 1=1%1 "
+        "GROUP BY channel ORDER BY channel").arg(andTimeRangeClause(startTime, endTime, binds)));
+    bindAll(query, binds);
 
     if (query.exec()) {
         while (query.next()) {
@@ -796,11 +1066,12 @@ QMap<QString, int> AlarmDAO::classStatistics(long startTime, long endTime)
     QSqlDatabase db = DatabaseManager::instance().database();
     if (!db.isOpen()) return stats;
 
+    QVector<QPair<QString, QVariant>> binds;
     QSqlQuery query(db);
-    query.prepare(R"(
-        SELECT class_name, COUNT(*) as cnt FROM alarms
-        GROUP BY class_name ORDER BY cnt DESC
-    )");
+    query.prepare(QStringLiteral(
+        "SELECT class_name, COUNT(*) as cnt FROM alarms WHERE 1=1%1 "
+        "GROUP BY class_name ORDER BY cnt DESC").arg(andTimeRangeClause(startTime, endTime, binds)));
+    bindAll(query, binds);
 
     if (query.exec()) {
         while (query.next()) {
@@ -817,11 +1088,12 @@ QMap<QString, int> AlarmDAO::typeStatistics(long startTime, long endTime)
     QSqlDatabase db = DatabaseManager::instance().database();
     if (!db.isOpen()) return stats;
 
+    QVector<QPair<QString, QVariant>> binds;
     QSqlQuery query(db);
-    query.prepare(R"(
-        SELECT alarm_type, COUNT(*) as cnt FROM alarms
-        GROUP BY alarm_type ORDER BY cnt DESC
-    )");
+    query.prepare(QStringLiteral(
+        "SELECT alarm_type, COUNT(*) as cnt FROM alarms WHERE 1=1%1 "
+        "GROUP BY alarm_type ORDER BY cnt DESC").arg(andTimeRangeClause(startTime, endTime, binds)));
+    bindAll(query, binds);
 
     if (query.exec()) {
         while (query.next()) {

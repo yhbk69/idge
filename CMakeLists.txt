@@ -505,6 +505,9 @@ add_executable(test_database
     src/biz/db/database_manager.cpp
     src/biz/db/detection_dao.cpp
     src/biz/db/alarm_dao.cpp
+    # alarm_dao 的 constructionFacets 要用 ConstructionInfo 的键名常量，
+    # 而测试目标显式列源文件（不像主目标那样 GLOB），漏了就链接期 undefined reference。
+    src/biz/session/construction_session.cpp
 )
 
 target_include_directories(test_database PRIVATE

@@ -22,8 +22,102 @@
 #include <QFileInfo>
 #include <QShowEvent>
 #include <QPushButton>
+#include <QAbstractButton>
+#include <QButtonGroup>
+#include <QComboBox>
+#include <QAbstractItemView>
+#include <QCursor>
 
-/* 
+namespace {
+
+// 每页 200 行。
+// 这个数字以前的含义是"总共只画 500 行，其余看不见"，那是性能妥协不是产品设计；
+// 现在它是"一页"，剩下的用翻页到达。为什么是 200 而不是 500：
+// 触屏上没人会用手指滑过 500 行（一屏约 9 行，等于要连滑五十多下），
+// 而每行的 8 个 QTableWidgetItem + 一个 setCellWidget 是 GUI 线程上唯一还能感知到帧的开销
+// ——上一轮实测 500 行 ×5 列重建就是 45~61ms，那正是当时 GUI 卡顿的元凶之一。
+constexpr int kPageSize = 200;
+
+enum TabIndex { TabClass = 0, TabFence = 1, TabDetection = 2 };
+
+// 状态码 → 界面中文。库里只有 pending/rectified/false_alarm 三种，
+// 列表以前把非 rectified 一律显示"未确认"，误报于是和未确认撞成同一个词。
+QString statusLabel(const QString &status)
+{
+    if (status == QLatin1String("rectified")) return QStringLiteral("已确认");
+    if (status == QLatin1String("false_alarm")) return QStringLiteral("误报");
+    return QStringLiteral("未确认");
+}
+
+QColor statusColor(const QString &status)
+{
+    if (status == QLatin1String("rectified")) return QColor(76, 175, 80);   // 绿
+    if (status == QLatin1String("false_alarm")) return QColor(158, 158, 158); // 灰
+    return QColor(255, 152, 0);                                              // 橙
+}
+
+// 触屏档：这一页的检索条是"主要操作"，控件一律给到能按准的尺寸。
+// 表头/Tab 的内联 QSS 特异性高于 blacksoft.css，皮肤层放大的 padding 会被打回原形，
+// 所以下拉与弹出列表的高度必须在这里一起给。
+QString comboQss()
+{
+    return QStringLiteral(
+        "QComboBox { background: %1; color: %2; border: 1px solid %3; border-radius: 4px;"
+        "  min-height: %4px; padding: 6px 10px; }"
+        "QComboBox::drop-down { width: 30px; }"
+        "QComboBox QAbstractItemView { background: %1; color: %2; border: 1px solid %3;"
+        "  selection-background-color: %5; }"
+        "QComboBox QAbstractItemView::item { min-height: %4px; }")
+        .arg(theme::FIELD, theme::TEXT, theme::BORDER)
+        .arg(theme::TOUCH_FIELD_MIN_H)
+        .arg(theme::BTN_SECONDARY);
+}
+
+QString chipQss(bool checked)
+{
+    return QStringLiteral(
+        "QPushButton { color: %1; background: %2; border: 1px solid %3; border-radius: 4px;"
+        "  min-height: %4px; padding: 6px 14px; }")
+        .arg(checked ? theme::TEXT : theme::TEXT_MUTED,
+             checked ? theme::ACCENT : theme::FIELD,
+             theme::BORDER)
+        .arg(theme::TOUCH_MAIN_MIN_H);
+}
+
+// 把候选值灌进下拉，并按 data 找回原来的选择。
+// blockSignals 是必需的：灌值会触发 currentIndexChanged → onFilterChanged → 重查库 →
+// 而 rebuildFacets 正是被这次条件变化叫起来的，于是无限递归。
+void fillCombo(QComboBox *combo, const QString &allText,
+               const QVector<QPair<QString, int>> &facets)
+{
+    const QVariant wanted = combo->currentData();
+    combo->blockSignals(true);
+    combo->clear();
+    combo->addItem(allText, QString());
+    for (const auto &f : facets) {
+        // 带上条数：用户点之前就知道这一项有多少东西，比点了才知道空强。
+        combo->addItem(QStringLiteral("%1 (%2)").arg(f.first).arg(f.second), f.first);
+    }
+
+    int target = 0;
+    if (!wanted.toString().isEmpty()) {
+        const int found = combo->findData(wanted);
+        // 找回不到就退回"全部"：留着选一个当前时间档里不存在的值，
+        // 结果是零行而原因藏在看不见的那行小字里，这是自找的困惑。
+        target = (found >= 0) ? found : 0;
+    }
+    combo->setCurrentIndex(target);
+    combo->blockSignals(false);
+}
+
+QVariant comboData(const QComboBox *combo)
+{
+    return (combo && combo->currentIndex() >= 0) ? combo->currentData() : QVariant();
+}
+
+} // namespace
+
+/*
 ====================================================
 作用：告警列表构造函数
 说明：初始化界面，连接信号槽，设置防抖机制
@@ -33,8 +127,8 @@ AlarmListWidget::AlarmListWidget(QWidget *parent)
     : QWidget(parent)
 {
     setupUi();  // 初始化UI组件
-    
-    /* 
+
+    /*
     ====================================================
     防抖刷新机制
     说明：避免频繁刷新导致界面卡顿
@@ -46,7 +140,7 @@ AlarmListWidget::AlarmListWidget(QWidget *parent)
     refreshTimer_->setInterval(300);     // 300ms防抖间隔
     connect(refreshTimer_, &QTimer::timeout, this, &AlarmListWidget::onDebouncedRefresh);
 
-    /* 
+    /*
     ====================================================
     信号槽连接
     说明：监听告警管理器的事件，及时更新界面
@@ -61,11 +155,11 @@ AlarmListWidget::AlarmListWidget(QWidget *parent)
     // 统计更新信号 -> 处理函数
     connect(&AlarmManager::instance(), &AlarmManager::statsUpdated,
             this, &AlarmListWidget::onStatsUpdated);
-    
-    refreshTable();  // 初始刷新
+
+    // 首屏数据在 showEvent 里拉：构造期数据库不一定已经打开。
 }
 
-/* 
+/*
 ====================================================
 作用：防抖刷新槽函数
 说明：执行实际的表格刷新操作
@@ -74,59 +168,45 @@ AlarmListWidget::AlarmListWidget(QWidget *parent)
 void AlarmListWidget::onDebouncedRefresh()
 {
     QElapsedTimer probe; probe.start();
-    refreshTable();
-    refreshFenceTable();
+    reloadCurrentTab();
     if (perfProbe() && probe.elapsed() > 5) {
         qWarning() << "[PROBE] alarmList refreshTable" << probe.elapsed() << "ms";
     }
 }
 
-/* 
+/*
 ====================================================
 作用：统计更新槽函数
-说明：仅更新顶部统计数字，不重建表格
-说明：避免频繁刷新时打断用户筛选操作
+说明：只做一件事 —— 让**可见时**的页面在 300ms 内重查一次。
+      这里刻意一个数字都不写：这一页所有计数现在都以库为准，而查库只能发生在
+      reloadCurrentTab() 那一次防抖里。若在这里也写一遍（还是内存队列那 1000 条的口径），
+      "未确认"与"命中"就会各说各话 —— 一个是最近 1000 条里的未确认，一个是全部历史里的命中。
 ====================================================
 */
 void AlarmListWidget::onStatsUpdated()
 {
-    AlarmManager &mgr = AlarmManager::instance();  // 获取告警管理器
-    
-    // 更新总数显示（包含误报数）
-    QVector<AlarmRecord> alarms = mgr.alarms();
-    int fpCount = 0;
-    for (const auto &a : alarms) {
-        if (a.status == "false_alarm") fpCount++;
-    }
-    QString statsText = QString("共 %1 条").arg(alarms.size());
-    if (fpCount > 0) statsText += QString(" (误报 %1)").arg(fpCount);
-    lblTotal_->setText(statsText);
-    
-    // 更新未确认数显示
-    int unack = mgr.unacknowledgedCount();
-    lblUnack_->setText(QString("未确认: %1 条").arg(unack));
-    
-    // 根据未确认数设置不同颜色
-    lblUnack_->setStyleSheet(unack > 0
-        ? theme::text(theme::WARNING, theme::FS_BODY)   // 橙色（有未确认）
-        : theme::text(theme::SUCCESS, theme::FS_BODY)); // 绿色（全部已确认）
+    if (isVisible()) refreshTimer_->start();
 }
 
-/* 
+/*
 ====================================================
 作用：页面显示事件处理
-说明：页面重新可见时刷新一次数据
+说明：页面重新可见时刷新一次数据，并在此第一次拉取筛选候选值
 说明：因为不可见期间只更新了统计数字，需要完整刷新表格
 ====================================================
 */
 void AlarmListWidget::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
-    refreshTable();      // 完整刷新类别报警表格
-    refreshFenceTable(); // 完整刷新围栏报警表格
+
+    if (!facetsReady_) {
+        facetsReady_ = true;
+        rebuildFacets();     // 依赖数据库已打开，所以放在首次可见时做
+    }
+    reloadCurrentTab();      // 完整刷新当前 Tab 那张表
 }
 
-/* 
+/*
 ====================================================
 作用：设置用户界面
 说明：创建告警列表的所有UI组件和布局
@@ -144,14 +224,14 @@ void AlarmListWidget::setupUi()
     header->setStyleSheet(theme::text(theme::TEXT, theme::FS_PAGE, true));
     mainLay->addWidget(header);
 
-    /* 
+    /*
     ====================================================
     统计信息区域
-    说明：显示告警总数和未确认数
+    说明：显示当前检索条件的命中数与未确认数
     ====================================================
     */
     QHBoxLayout *statsLay = new QHBoxLayout();
-    lblTotal_ = new QLabel("共 0 条");  // 总数标签
+    lblTotal_ = new QLabel("共 0 条");  // 命中数标签（当前条件）
     lblTotal_->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
     statsLay->addWidget(lblTotal_);
 
@@ -162,7 +242,9 @@ void AlarmListWidget::setupUi()
     statsLay->addStretch();  // 弹性空间
     mainLay->addLayout(statsLay);
 
-    /* 
+    setupFilterBar(mainLay);
+
+    /*
     ====================================================
     工具栏
     ====================================================
@@ -199,7 +281,7 @@ void AlarmListWidget::setupUi()
     connect(btnOpenDir, &QPushButton::clicked, this, &AlarmListWidget::onOpenDir);
     toolLay->addWidget(btnOpenDir);
 
-    /* 
+    /*
     ====================================================
     截图开关按钮
     说明：控制是否为新告警自动截图
@@ -215,7 +297,7 @@ void AlarmListWidget::setupUi()
               .arg(theme::TEXT, theme::SUCCESS)
         : QString("color: %1; background: %2; border-radius: 4px; padding: 6px 16px;")  // 灰色（关闭）
               .arg(theme::TEXT_MUTED, theme::HOVER));
-    
+
     // 截图开关切换处理
     connect(snapBtn_, &QPushButton::toggled, this, [this](bool on) {
         AlarmManager::instance().setScreenshotsEnabled(on);  // 保存设置
@@ -230,9 +312,9 @@ void AlarmListWidget::setupUi()
 
     mainLay->addLayout(toolLay);
 
-    /* 
+    /*
     ====================================================
-    Tab 切换（类别报警 / 电子围栏）
+    Tab 切换（类别报警 / 电子围栏 / 检测明细）
     ====================================================
     */
     tabWidget_ = new QTabWidget(this);
@@ -245,7 +327,15 @@ void AlarmListWidget::setupUi()
                 "QTabBar::tab:selected { background: %2; color: %5; }")
             .arg(theme::BORDER, theme::BG, theme::PANEL, theme::TEXT_MUTED, theme::TEXT));
 
-    /* 
+    const QString tableQss =
+        QString("QTableWidget { background: %1; color: %2; gridline-color: %3; }"
+                "QTableWidget::item:selected { background: %4; }"
+                "QHeaderView::section { background: %5; color: %6; padding: 10px 12px;"
+                "  border: 1px solid %3; }")
+            .arg(theme::BG, theme::TEXT, theme::BORDER, theme::BTN_SECONDARY, theme::PANEL,
+                 theme::TEXT_MUTED);
+
+    /*
     ====================================================
     告警表格（类别报警 Tab）
     ====================================================
@@ -258,22 +348,20 @@ void AlarmListWidget::setupUi()
     table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setAlternatingRowColors(true);
-    table_->setStyleSheet(
-        QString("QTableWidget { background: %1; color: %2; gridline-color: %3; }"
-                "QTableWidget::item:selected { background: %4; }"
-                "QHeaderView::section { background: %5; color: %6; padding: 10px 12px;"
-                "  border: 1px solid %3; }")
-            .arg(theme::BG, theme::TEXT, theme::BORDER, theme::BTN_SECONDARY, theme::PANEL,
-                 theme::TEXT_MUTED));
+    table_->setStyleSheet(tableQss);
     table_->verticalHeader()->setVisible(false);
     // 表格行高不吃 CSS 的 ::item padding（那是 item delegate 的内边距，不改 section 高度），
     // 只能在这里设 default section size —— 56px ≈ 6.3mm，指肚能按准一行。
     table_->verticalHeader()->setDefaultSectionSize(theme::TOUCH_TABLE_ROW);
     connect(table_, &QTableWidget::cellDoubleClicked,
             this, &AlarmListWidget::onRowDoubleClicked);
+    // 表头筛选这条连线以前不存在：onHeaderSectionClicked 整个函数是死代码，
+    // 于是"通道/类别可筛选"只写在注释里，点列头永远没反应。
+    connect(table_->horizontalHeader(), &QHeaderView::sectionClicked,
+            this, &AlarmListWidget::onHeaderSectionClicked);
     tabWidget_->addTab(table_, "类别报警");
 
-    /* 
+    /*
     ====================================================
     围栏报警表格（电子围栏 Tab）
     ====================================================
@@ -285,98 +373,319 @@ void AlarmListWidget::setupUi()
     fenceTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     fenceTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     fenceTable_->setAlternatingRowColors(true);
-    fenceTable_->setStyleSheet(
-        QString("QTableWidget { background: %1; color: %2; gridline-color: %3; }"
-                "QTableWidget::item:selected { background: %4; }"
-                "QHeaderView::section { background: %5; color: %6; padding: 10px 12px;"
-                "  border: 1px solid %3; }")
-            .arg(theme::BG, theme::TEXT, theme::BORDER, theme::BTN_SECONDARY, theme::PANEL,
-                 theme::TEXT_MUTED));
+    fenceTable_->setStyleSheet(tableQss);
     fenceTable_->verticalHeader()->setVisible(false);
     fenceTable_->verticalHeader()->setDefaultSectionSize(theme::TOUCH_TABLE_ROW);
+    connect(fenceTable_, &QTableWidget::cellDoubleClicked, this,
+            [this](int row, int) {
+                // 围栏行也能看详情：以前只有类别表接了双击，围栏报警点开无门。
+                if (row >= 0 && row < pageFenceAlarms_.size()) {
+                    showAlarmDetail(pageFenceAlarms_.at(row));
+                }
+            });
+    connect(fenceTable_->horizontalHeader(), &QHeaderView::sectionClicked,
+            this, &AlarmListWidget::onHeaderSectionClicked);
     tabWidget_->addTab(fenceTable_, "电子围栏");
+
+    /*
+    ====================================================
+    检测明细表格（检测明细 Tab）
+    说明：detections 表以前是**只写不读**的 —— DetectionDAO 的查询接口全仓零调用，
+          配置项 database.storeDetections 打开后落了几万行，没有任何界面能看到它们。
+    ====================================================
+    */
+    detTable_ = new QTableWidget();
+    detTable_->setColumnCount(5);
+    detTable_->setHorizontalHeaderLabels({"时间", "通道", "类别", "置信度", "检测框"});
+    detTable_->horizontalHeader()->setStretchLastSection(true);
+    detTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    detTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    detTable_->setAlternatingRowColors(true);
+    detTable_->setStyleSheet(tableQss);
+    detTable_->verticalHeader()->setVisible(false);
+    detTable_->verticalHeader()->setDefaultSectionSize(theme::TOUCH_TABLE_ROW);
+    tabWidget_->addTab(detTable_, "检测明细");
+
+    connect(tabWidget_, &QTabWidget::currentChanged, this, &AlarmListWidget::onTabChanged);
 
     mainLay->addWidget(tabWidget_, 1);
 }
 
-/* 
+/*
+====================================================
+作用：检索条
+说明：两行 —— 上行时间档位（主操作档 54px），下行五个下拉 + 翻页。
+      没有任何文字输入框：本机不做虚拟键盘（见 src/ui/core/README.md 触屏口径），
+      所以"检索"在这一页只能是点选，关键字框要等虚拟键盘落地才有意义。
+====================================================
+*/
+void AlarmListWidget::setupFilterBar(QVBoxLayout *mainLay)
+{
+    QHBoxLayout *timeLay = new QHBoxLayout();
+    timeLay->setSpacing(10);
+
+    QLabel *lblTime = new QLabel("时间");
+    lblTime->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
+    timeLay->addWidget(lblTime);
+
+    timeGroup_ = new QButtonGroup(this);
+    timeGroup_->setExclusive(true);
+    // fromUtf8 而不是 latin1：档位名是中文，QLatin1String 会把 UTF-8 的每个字节当成
+    // 一个 Latin-1 字符，实测按钮上印出来的是 "ä»Šå¤©"。
+    const char *presetNames[] = {"今天", "近3天", "近7天", "全部"};
+    for (int i = 0; i < 4; ++i) {
+        QPushButton *b = new QPushButton(QString::fromUtf8(presetNames[i]));
+        b->setCheckable(true);
+        b->setStyleSheet(chipQss(i == 0));
+        timeGroup_->addButton(b, i);
+        timeLay->addWidget(b);
+    }
+    timeGroup_->button(0)->setChecked(true);   // 默认今天：现场问的第一句话就是"今天出了什么"
+    timeLay->addStretch();
+
+    btnClearFilter_ = new QPushButton("清除筛选");
+    btnClearFilter_->setStyleSheet(
+        QString("QPushButton { color: %1; background: %2; border: 1px solid %3; border-radius: 4px;"
+                "  min-height: %4px; padding: 6px 14px; }")
+            .arg(theme::TEXT, theme::BTN_SECONDARY, theme::BORDER)
+            .arg(theme::TOUCH_MAIN_MIN_H));
+    connect(btnClearFilter_, &QPushButton::clicked, this, [this]() {
+        // 清除 = 回到"今天 + 无附加条件 + 第一页"。档位与下拉一起复位：
+        // 只复位下拉却留着"近7天"，或者反过来，按下之后按钮一个没动而数字变了，
+        // 那就是又造出一个"看不见的条件"。
+        QAbstractButton *today = timeGroup_->button(0);
+        if (today) {
+            today->setChecked(true);
+            onTimePresetChanged();   // 直接调而不绕信号：下面还要清下拉，分两次触发会查两遍库
+        }
+        for (QComboBox *c : {comboChannel_, comboClass_, comboStatus_,
+                             comboWorker_, comboConstruction_}) {
+            if (c) { c->blockSignals(true); c->setCurrentIndex(0); c->blockSignals(false); }
+        }
+        fenceRole_ = AlarmFilter::RoleAll;
+        page_ = 0;
+        reloadCurrentTab();
+    });
+    timeLay->addWidget(btnClearFilter_);
+
+    mainLay->addLayout(timeLay);
+
+    connect(timeGroup_, QOverload<int>::of(&QButtonGroup::buttonClicked), this,
+            [this](int) { onTimePresetChanged(); });
+
+    QHBoxLayout *comboLay = new QHBoxLayout();
+    comboLay->setSpacing(10);
+
+    auto makeCombo = [this, comboLay](const QString &allText) {
+        QComboBox *c = new QComboBox();
+        c->setStyleSheet(comboQss());
+        c->addItem(allText, QString());
+        connect(c, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [this](int) { onFilterChanged(); });
+        comboLay->addWidget(c);
+        return c;
+    };
+
+    comboChannel_ = makeCombo("全部通道");
+    // "全部"这一档的 data 必须是 -1 而不是 makeCombo 给的 QString()：
+    // 空 QString 走 toInt() 得到 0，而 0 是**通道 1**，默认视图会莫名只出第一路。
+    comboChannel_->setItemData(0, -1);
+    for (int i = 0; i < 4; ++i) {
+        comboChannel_->addItem(QString("通道 %1").arg(i + 1), i);   // 与表格"通道 N"同一 0 基口径
+    }
+    comboClass_ = makeCombo("全部类别");
+    comboStatus_ = makeCombo("全部（不含误报）");
+    comboStatus_->addItem("未确认", QStringLiteral("pending"));
+    comboStatus_->addItem("已确认", QStringLiteral("rectified"));
+    comboStatus_->addItem("误报", QStringLiteral("false_alarm"));
+    comboWorker_ = makeCombo("全部负责人");
+    comboConstruction_ = makeCombo("全部施工id");
+
+    comboLay->addStretch();
+
+    btnPrevPage_ = new QPushButton("◀ 上一页");
+    btnNextPage_ = new QPushButton("下一页 ▶");
+    for (QPushButton *b : {btnPrevPage_, btnNextPage_}) {
+        b->setStyleSheet(
+            QString("QPushButton { color: %1; background: %2; border: 1px solid %3; border-radius: 4px;"
+                    "  min-height: %4px; padding: 6px 14px; }"
+                    "QPushButton:disabled { color: %5; }")
+                .arg(theme::TEXT, theme::FIELD, theme::BORDER)
+                .arg(theme::TOUCH_FIELD_MIN_H)
+                .arg(theme::TEXT_MUTED));
+        comboLay->addWidget(b);
+    }
+    connect(btnPrevPage_, &QPushButton::clicked, this, [this]() { onPageStep(-1); });
+    connect(btnNextPage_, &QPushButton::clicked, this, [this]() { onPageStep(1); });
+
+    lblPage_ = new QLabel("第 1 / 1 页");
+    lblPage_->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
+    comboLay->insertWidget(comboLay->indexOf(btnNextPage_) + 1, lblPage_);
+
+    mainLay->addLayout(comboLay);
+}
+
+/*
+====================================================
+作用：当前时间档位对应的毫秒区间
+说明：档位而不是日历控件 —— 手输日期要虚拟键盘。近3天=含今天在内 3 个自然日，
+      所以起点是那天的 00:00:00，不是"现在减 72 小时"（后者会让人以为
+      昨天凌晨的记录被漏掉了，其实没有）。
+====================================================
+*/
+void AlarmListWidget::timeRange(long *startTime, long *endTime) const
+{
+    const int preset = timeGroup_ && timeGroup_->checkedButton()
+                           ? timeGroup_->id(timeGroup_->checkedButton()) : 0;
+    if (preset == 3) {
+        *startTime = 0;      // "全部"档：0/0 在 DAO 里就是不加时间条件
+        *endTime = 0;
+        return;
+    }
+    const int backDays = (preset == 0) ? 0 : (preset == 1 ? 2 : 6);
+    const QDate day = QDate::currentDate().addDays(-backDays);
+    *startTime = QDateTime(day, QTime(0, 0, 0)).toMSecsSinceEpoch();
+    *endTime = QDateTime::currentDateTime().toMSecsSinceEpoch();
+}
+
+AlarmFilter AlarmListWidget::currentAlarmFilter(AlarmFilter::Scope scope) const
+{
+    AlarmFilter f;
+    timeRange(&f.startTime, &f.endTime);
+    f.channel = comboChannel_ ? comboChannel_->currentData().toInt() : -1;
+    f.className = comboData(comboClass_).toString();
+    f.status = comboData(comboStatus_).toString();
+    f.workerName = comboData(comboWorker_).toString();
+    f.constructionId = comboData(comboConstruction_).toString();
+    f.fenceRole = fenceRole_;
+    f.scope = scope;
+    f.limit = kPageSize;
+    f.offset = page_ * kPageSize;
+    return f;
+}
+
+DetectionFilter AlarmListWidget::currentDetectionFilter() const
+{
+    DetectionFilter f;
+    timeRange(&f.startTime, &f.endTime);
+    f.channel = comboChannel_ ? comboChannel_->currentData().toInt() : -1;
+    f.className = comboData(comboClass_).toString();
+    f.limit = kPageSize;
+    f.offset = page_ * kPageSize;
+    return f;
+}
+
+/*
+====================================================
+作用：重建筛选下拉的候选值
+说明：候选值与条数按**当前时间档**收敛，不跟随其它已选条件（见 alarm_dao.h 的
+      facets 说明）。负责人/施工id 只在报警两张表有意义，检测明细 Tab 不重新拉。
+====================================================
+*/
+void AlarmListWidget::rebuildFacets()
+{
+    AlarmDAO dao;
+    long start = 0, end = 0;
+    timeRange(&start, &end);
+
+    const bool fenceTab = (tabWidget_ && tabWidget_->currentIndex() == TabFence);
+    const AlarmFilter::Scope scope =
+        fenceTab ? AlarmFilter::FenceOnly : AlarmFilter::ClassOnly;
+
+    fillCombo(comboClass_, QStringLiteral("全部类别"), dao.classFacets(start, end, scope));
+
+    if (fenceTab || (tabWidget_ && tabWidget_->currentIndex() == TabClass)) {
+        fillCombo(comboWorker_, QStringLiteral("全部负责人"),
+                  dao.workerFacets(start, end, scope));
+        fillCombo(comboConstruction_, QStringLiteral("全部施工id"),
+                  dao.constructionFacets(start, end, scope));
+    }
+}
+
+/*
+====================================================
+作用：只重建当前可见的那张表
+说明：三张表同时查是三次代价而屏幕同时只放得下一张；页面隐藏时一律不查，
+      切回来由 showEvent 补 —— 这是这一轮唯一的性能纪律，别再破它。
+====================================================
+*/
+void AlarmListWidget::reloadCurrentTab()
+{
+    if (!isVisible()) return;   // 页面不在眼前就一次库都不查，切回来由 showEvent 补
+
+    switch (tabWidget_ ? tabWidget_->currentIndex() : TabClass) {
+    case TabFence:      refreshFenceTable();     break;
+    case TabDetection:  refreshDetectionTable(); break;
+    default:            refreshTable();          break;
+    }
+
+    // 未确认数也从库里取（覆盖索引计数，实测 27858 条 pending 上 11ms），
+    // 和表格同一次刷新里出，两个数字因此永远同时点。
+    const int unack = AlarmDAO().unacknowledgedCount();
+    lblUnack_->setText(QStringLiteral("未确认: %1 条").arg(unack));
+    lblUnack_->setStyleSheet(unack > 0
+        ? theme::text(theme::WARNING, theme::FS_BODY)
+        : theme::text(theme::SUCCESS, theme::FS_BODY));
+}
+
+void AlarmListWidget::clampPageToTotal()
+{
+    const int pages = qMax(1, (totalRows_ + kPageSize - 1) / kPageSize);
+    page_ = qBound(0, page_, pages - 1);
+}
+
+/*
+====================================================
+作用：更新命中数、分页标签与翻页按钮可用态
+====================================================
+*/
+void AlarmListWidget::updatePagingLabel()
+{
+    const QString status = comboData(comboStatus_).toString();
+    lblTotal_->setText(status.isEmpty()
+        ? QStringLiteral("命中 %1 条（不含误报）").arg(totalRows_)
+        : QStringLiteral("命中 %1 条（%2）").arg(totalRows_).arg(statusLabel(status)));
+
+    const int pages = qMax(1, (totalRows_ + kPageSize - 1) / kPageSize);
+    lblPage_->setText(QStringLiteral("第 %1 / %2 页").arg(page_ + 1).arg(pages));
+
+    btnPrevPage_->setEnabled(page_ > 0);
+    btnNextPage_->setEnabled(page_ < pages - 1);
+}
+
+/*
 ====================================================
 作用：刷新表格数据
-说明：从AlarmManager获取告警数据，应用筛选，填充表格
+说明：查数据库（当前条件 + 当前页），填类别报警表
 ====================================================
 */
 void AlarmListWidget::refreshTable()
 {
-    AlarmManager &mgr = AlarmManager::instance();
+    if (!isVisible()) return;   // 不可见时不查库也不重建，见 reloadCurrentTab 的同一道门
 
-    /* 
-    ====================================================
-    可见性检查
-    说明：如果页面不可见，只更新统计数字，不重建表格
-    原因：避免频繁刷新导致界面卡顿
-    ====================================================
-    */
-    if (!isVisible()) {
-        onStatsUpdated();
-        return;
-    }
+    AlarmDAO dao;
+    AlarmFilter filter = currentAlarmFilter(AlarmFilter::ClassOnly);
+    totalRows_ = dao.countByFilter(filter);
+    clampPageToTotal();          // 先钳页再取行：反过来的话"第 3 / 2 页"这种自相矛盾真会出现
+    filter.offset = page_ * kPageSize;
+    pageAlarms_ = dao.queryByFilter(filter);
+    updatePagingLabel();
 
-    // 获取所有告警记录，过滤掉误报
-    // 围栏事件不进这个表：本页是"类别报警"，围栏另有"电子围栏"Tab（refreshFenceTable）。
-    // 不区分会让 COCO 的 person 围栏侵入显示成"person 检测到报警"，
-    // 而该模型的 alarm_class 明明是空（只画框不报警）。
-    QVector<AlarmRecord> alarms = mgr.alarms();
-    QVector<AlarmRecord> filtered;
-    for (const auto &a : alarms) {
-        if (a.isFenceAlarm) continue;
-        if (a.status == "false_alarm") continue;
-        if (filterChannel_ >= 0 && a.channel != filterChannel_) continue;
-        if (!filterClass_.isEmpty() && a.className != filterClass_) continue;
-        filtered.append(a);
-    }
-
-    // 更新统计信息（总数包含误报）
-    int totalAll = alarms.size();
-    int totalFiltered = filtered.size();
-    int unack = 0;
-    int fpCount = 0;
-    for (const auto &a : alarms) {
-        if (a.status == "false_alarm") fpCount++;
-        else if (a.status != "rectified") unack++;
-    }
-    QString statsText = QString("共 %1 条").arg(totalAll);
-    if (fpCount > 0) statsText += QString(" (误报 %1)").arg(fpCount);
-    lblTotal_->setText(statsText);
-    lblUnack_->setText(QString("未确认: %1 条").arg(unack));
-    lblUnack_->setStyleSheet(unack > 0
-        ? theme::text(theme::WARNING, theme::FS_BODY)
-        : theme::text(theme::SUCCESS, theme::FS_BODY));
-
-    /* 
-    ====================================================
-    填充表格
-    说明：只显示最近500条，避免大量数据导致界面卡顿
-    说明：倒序显示，最新告警在前
-    ====================================================
-    */
-    const int kMaxRows = 500;  // 最大显示行数
-    int total = filtered.size();
-    int shown = qMin(total, kMaxRows);  // 实际显示的行数
-
-    table_->setRowCount(shown);  // 设置行数
-    for (int i = 0; i < shown; i++) {
-        const AlarmRecord &a = filtered[total - 1 - i];  // 倒序获取
+    const int shown = pageAlarms_.size();
+    table_->setRowCount(shown);
+    for (int i = 0; i < shown; ++i) {
+        const AlarmRecord &a = pageAlarms_.at(i);
 
         // 时间列
         QDateTime dt = QDateTime::fromString(a.alarmTime, Qt::ISODate);
         QTableWidgetItem *timeItem = new QTableWidgetItem(dt.toString("yyyy-MM-dd HH:mm:ss"));
         timeItem->setData(Qt::UserRole, a.imagePath);  // 存储截图路径
-        timeItem->setData(Qt::UserRole + 2, a.id);  // 存储报警ID（用于精确定位）
+        timeItem->setData(Qt::UserRole + 2, a.id);     // 存储报警ID（用于精确定位）
         table_->setItem(i, 0, timeItem);
-        
+
         // 通道列
         table_->setItem(i, 1, new QTableWidgetItem(QString("通道 %1").arg(a.channel + 1)));
-        
+
         // 类别列
         table_->setItem(i, 2, new QTableWidgetItem(a.className));
 
@@ -391,21 +700,12 @@ void AlarmListWidget::refreshTable()
             session::ConstructionInfo::display(a.workerName)));
 
         // 状态列
-        QTableWidgetItem *statusItem;
-        if (a.status == "false_alarm") {
-            statusItem = new QTableWidgetItem("误报");
-            statusItem->setForeground(QColor(158, 158, 158));  // 灰色
-        } else if (a.status == "rectified") {
-            statusItem = new QTableWidgetItem("已确认");
-            statusItem->setForeground(QColor(76, 175, 80));   // 绿色
-        } else {
-            statusItem = new QTableWidgetItem("未确认");
-            statusItem->setForeground(QColor(255, 152, 0));   // 橙色
-        }
+        QTableWidgetItem *statusItem = new QTableWidgetItem(statusLabel(a.status));
+        statusItem->setForeground(statusColor(a.status));
         table_->setItem(i, 5, statusItem);
 
-        // 操作列（详情按钮）：触屏档 T3。这条也是报警详情的**唯一可靠入口** ——
-        // 表格双击（cellDoubleClicked）在触屏上不可靠，但那是手势问题，本轮不动。
+        // 操作列（详情按钮）：触屏档 T3。这条是报警详情的**唯一可靠入口** ——
+        // 表格双击在触屏上不可靠，但那是手势问题，本轮不动。
         QPushButton *btnDetail = new QPushButton("详情");
         btnDetail->setStyleSheet(
             QString("QPushButton { color: %1; background: %2; border-radius: 4px;"
@@ -414,7 +714,7 @@ void AlarmListWidget::refreshTable()
                 .arg(theme::TEXT, theme::BTN_SECONDARY, theme::BTN_SECONDARY_HOVER)
                 .arg(theme::TOUCH_ROW_MIN_H));
         connect(btnDetail, &QPushButton::clicked, this, [this, i]() {
-            showAlarmDetail(i);
+            if (i < pageAlarms_.size()) showAlarmDetail(pageAlarms_.at(i));
         });
         table_->setCellWidget(i, 6, btnDetail);
 
@@ -423,112 +723,33 @@ void AlarmListWidget::refreshTable()
     }
 }
 
-/* 
+/*
 ====================================================
-作用：手动刷新槽函数
-说明：响应用户点击刷新按钮
-====================================================
-*/
-void AlarmListWidget::onRefresh()
-{
-    refreshTable();
-}
-
-/* 
-====================================================
-作用：全部确认槽函数
-说明：将所有未确认的告警标记为已确认
+作用：刷新围栏报警表格
 ====================================================
 */
-void AlarmListWidget::onAcknowledge()
-{
-    AlarmManager::instance().acknowledgeAll();  // 确认所有告警
-    refreshTable();  // 刷新表格
-}
-
-/* 
-====================================================
-作用：清空告警槽函数
-说明：清空所有告警记录（需要用户确认）
-====================================================
-*/
-void AlarmListWidget::onClear()
-{
-    // 弹出确认对话框
-    if (QtHelper::askConfirm(this, QStringLiteral("清空报警记录"),
-                             QStringLiteral("确定要清空所有报警记录吗？"))
-        == QMessageBox::Ok) {
-        AlarmManager::instance().clearAlarms();  // 清空告警
-        refreshTable();  // 刷新表格
-    }
-}
-
-/* 
-====================================================
-作用：打开截图目录槽函数
-说明：用系统文件管理器打开告警截图保存目录
-====================================================
-*/
-void AlarmListWidget::onOpenDir()
-{
-    // 获取告警截图目录路径
-    QDir dir(RuntimePaths::alarmsDir());
-    if (!dir.exists()) dir.mkpath(".");  // 如果目录不存在则创建
-    QString path = dir.absolutePath();
-
-    // 尝试打开文件管理器
-    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path))) {
-        QMessageBox::information(this, "截图目录",
-                                 QString("无法打开文件管理器，截图目录：\n%1").arg(path));
-    }
-}
-
-/* 
-====================================================
-作用：表格行双击槽函数
-说明：双击行时打开告警详情Dialog
-====================================================
-*/
-void AlarmListWidget::onRowDoubleClicked(int row, int)
-{
-    showAlarmDetail(row);
-}
-
-/**
- * @brief 刷新电子围栏报警表格
- *
- * 流程：
- *   1. 从 AlarmManager 获取所有报警记录
- *   2. 过滤出 isFenceAlarm=true 的记录（围栏触发的报警）
- *   3. 最多显示 500 条，倒序排列（最新在前）
- *   4. 填充表格：时间、通道、类别、置信度、围栏标记
- */
 void AlarmListWidget::refreshFenceTable()
 {
-    // 与 refreshTable 不同，这里原先没有可见性门控：本页隐藏时它仍在重建最多 500 行
-    // ×5 个 QTableWidgetItem（2500 次堆分配），实测 45~61ms，且被 400ms 节流器反复触发，
-    // 是 GUI 线程除报警面板缩略图解码外的另一处主要占用。页面切回来时 showEvent 会补刷。
+    // 与 refreshTable 同一道可见性门控：本页隐藏时不重建、不查库。
     if (!isVisible()) return;
 
-    AlarmManager &mgr = AlarmManager::instance();
-    QVector<AlarmRecord> alarms = mgr.alarms();
+    AlarmDAO dao;
+    AlarmFilter filter = currentAlarmFilter(AlarmFilter::FenceOnly);
+    totalRows_ = dao.countByFilter(filter);
+    clampPageToTotal();
+    filter.offset = page_ * kPageSize;
+    pageFenceAlarms_ = dao.queryByFilter(filter);
+    updatePagingLabel();
 
-    QVector<AlarmRecord> fenceAlarms;
-    for (const auto &a : alarms) {
-        if (a.isFenceAlarm) fenceAlarms.append(a);
-    }
-
-    const int kMaxRows = 500;
-    int total = fenceAlarms.size();
-    int shown = qMin(total, kMaxRows);
-
+    const int shown = pageFenceAlarms_.size();
     fenceTable_->setRowCount(shown);
-    for (int i = 0; i < shown; i++) {
-        const AlarmRecord &a = fenceAlarms[total - 1 - i];
+    for (int i = 0; i < shown; ++i) {
+        const AlarmRecord &a = pageFenceAlarms_.at(i);
 
         QDateTime dt = QDateTime::fromString(a.alarmTime, Qt::ISODate);
         QTableWidgetItem *timeItem = new QTableWidgetItem(dt.toString("yyyy-MM-dd HH:mm:ss"));
         timeItem->setData(Qt::UserRole, a.imagePath);
+        timeItem->setData(Qt::UserRole + 2, a.id);
         fenceTable_->setItem(i, 0, timeItem);
 
         fenceTable_->setItem(i, 1, new QTableWidgetItem(QString("通道 %1").arg(a.channel + 1)));
@@ -551,127 +772,298 @@ void AlarmListWidget::refreshFenceTable()
     }
 }
 
-/* 
+/*
 ====================================================
-作用：显示告警详情Dialog
-说明：打开详情对话框，支持误报标记
-参数：row - 表格行号
+作用：刷新检测明细表格
+说明：时间带毫秒 —— 同一秒内落多条是常态（实测同一秒 3 条），只到秒的话
+      相邻几行看起来一模一样，没法分辨。
 ====================================================
 */
-/**
- * @brief 显示报警详情对话框
- *
- * 流程：
- *   1. 通过报警 ID（非索引）精确查找报警记录
- *   2. 创建 AlarmDetailDialog 显示详情（截图、时间、通道、状态等）
- *   3. 连接对话框的误报/确认信号，更新报警状态
- *
- * @param row: 表格行号（从 0 开始）
- */
-void AlarmListWidget::showAlarmDetail(int row)
+void AlarmListWidget::refreshDetectionTable()
 {
-    QTableWidgetItem *timeItem = table_->item(row, 0);
-    if (!timeItem) return;
+    if (!isVisible()) return;
 
-    // 使用 id 而不是索引来定位报警（索引不稳定）
-    QString alarmId = timeItem->data(Qt::UserRole + 2).toString();
-    QVector<AlarmRecord> alarms = AlarmManager::instance().alarms();
+    DetectionDAO dao;
+    DetectionFilter filter = currentDetectionFilter();
+    totalRows_ = dao.countByFilter(filter);
+    clampPageToTotal();
+    filter.offset = page_ * kPageSize;
+    pageDetections_ = dao.queryByFilter(filter);
+    updatePagingLabel();
 
-    AlarmRecord alarm;
-    bool found = false;
-    for (const auto &a : alarms) {
-        if (a.id == alarmId) {
-            alarm = a;
-            found = true;
-            break;
-        }
+    const int shown = pageDetections_.size();
+    detTable_->setRowCount(shown);
+    for (int i = 0; i < shown; ++i) {
+        const DetectionRecord &d = pageDetections_.at(i);
+
+        detTable_->setItem(i, 0, new QTableWidgetItem(
+            QDateTime::fromMSecsSinceEpoch(d.timestamp).toString("yyyy-MM-dd HH:mm:ss.zzz")));
+        detTable_->setItem(i, 1, new QTableWidgetItem(QString("通道 %1").arg(d.channel + 1)));
+        detTable_->setItem(i, 2, new QTableWidgetItem(d.className));
+
+        QTableWidgetItem *confItem =
+            new QTableWidgetItem(QString("%1%").arg(d.confidence * 100, 0, 'f', 1));
+        confItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        detTable_->setItem(i, 3, confItem);
+
+        detTable_->setItem(i, 4, new QTableWidgetItem(
+            QStringLiteral("(%1,%2)-(%3,%4)")
+                .arg(d.bboxLeft).arg(d.bboxTop).arg(d.bboxRight).arg(d.bboxBottom)));
     }
-    if (!found) return;
+}
 
+/*
+====================================================
+作用：手动刷新槽函数
+说明：响应用户点击刷新按钮 —— 保留条件与页码，重查一次
+====================================================
+*/
+void AlarmListWidget::onRefresh()
+{
+    reloadCurrentTab();
+}
+
+/*
+====================================================
+作用：确认告警槽函数
+说明：现在「全部确认」是真的全部：库里 27858 条 pending 一次性 UPDATE，
+      而不是遍历内存那 1000 条逐条改。因为动作范围跨几万行，先给确认框并报出条数。
+====================================================
+*/
+void AlarmListWidget::onAcknowledge()
+{
+    // 条数取库不取内存队列：这个按钮现在改的是库里全部未确认，
+    // 确认框报出的数字必须是它将要影响的行数，不能是内存那 1000 条里的零头。
+    const int unack = AlarmDAO().unacknowledgedCount();
+    if (QtHelper::askConfirm(this, QStringLiteral("全部确认"),
+                             QStringLiteral("当前未确认 %1 条，全部标记为已确认？").arg(unack))
+        != QMessageBox::Ok) {
+        return;
+    }
+    AlarmManager::instance().acknowledgeAll();  // 一条 UPDATE 收掉库里全部未确认
+    rebuildFacets();      // 候选值里的条数随之变化
+    reloadCurrentTab();   // 刷新表格
+}
+
+/*
+====================================================
+作用：清空告警槽函数
+说明：清空所有告警记录（需要用户确认）
+====================================================
+*/
+void AlarmListWidget::onClear()
+{
+    // 弹出确认对话框
+    if (QtHelper::askConfirm(this, QStringLiteral("清空报警记录"),
+                             QStringLiteral("确定要清空所有报警记录吗？"))
+        == QMessageBox::Ok) {
+        AlarmManager::instance().clearAlarms();  // 清空告警
+        rebuildFacets();                         // 候选值随之消失
+        reloadCurrentTab();  // 刷新表格
+    }
+}
+
+/*
+====================================================
+作用：打开截图目录槽函数
+说明：用系统文件管理器打开告警截图保存目录
+====================================================
+*/
+void AlarmListWidget::onOpenDir()
+{
+    // 获取告警截图目录路径
+    QDir dir(RuntimePaths::alarmsDir());
+    if (!dir.exists()) dir.mkpath(".");  // 如果目录不存在则创建
+    QString path = dir.absolutePath();
+
+    // 尝试打开文件管理器
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path))) {
+        QMessageBox::information(this, "截图目录",
+                                 QString("无法打开文件管理器，截图目录：\n%1").arg(path));
+    }
+}
+
+/*
+====================================================
+作用：表格行双击槽函数
+说明：双击行时打开告警详情Dialog
+====================================================
+*/
+void AlarmListWidget::onRowDoubleClicked(int row, int)
+{
+    if (row >= 0 && row < pageAlarms_.size()) {
+        showAlarmDetail(pageAlarms_.at(row));
+    }
+}
+
+/*
+====================================================
+作用：显示告警详情Dialog
+说明：记录直接来自当前页缓存（pageAlarms_/pageFenceAlarms_）。
+      以前是拿 id 去 AlarmManager 的内存队列里找 —— 队列只有最近 1000 条，
+      列表现在能翻到几万条之外，那条路径对老报警必然返回"找不到"然后什么都不发生。
+====================================================
+*/
+void AlarmListWidget::showAlarmDetail(const AlarmRecord &alarm)
+{
     AlarmDetailDialog dlg(alarm, this);
     connect(&dlg, &AlarmDetailDialog::alarmMarkedFalsePositive, this, [this](const QString &id) {
         AlarmManager::instance().markAsFalsePositiveById(id);
-        refreshTable();
+        reloadCurrentTab();
     });
     connect(&dlg, &AlarmDetailDialog::alarmAcknowledged, this, [this](const QString &id) {
         AlarmManager::instance().acknowledgeAlarmById(id);
-        refreshTable();
+        reloadCurrentTab();
     });
     dlg.exec();
 }
 
-/* 
+/*
 ====================================================
 作用：表格标题行点击槽函数
-说明：点击标题时弹出筛选菜单
-参数：logicalIndex - 列号
+说明：点列头 = 打开该列的筛选菜单，选完写回检索条上的对应下拉
+参数：logicalIndex - 列号（含义由当前 Tab 决定）
 ====================================================
 */
 /**
  * @brief 表格标题行点击槽函数（弹出筛选菜单）
  *
- * 支持的筛选列：
- *   - 列 1（通道）：按通道号筛选（全部/1/2/3/4）
- *   - 列 2（类别）：按检测类别筛选（动态生成菜单项）
+ * 支持的筛选列（类别报警表）：
+ *   - 列 1（通道）、列 2（类别）、列 4（负责人）、列 5（状态）
+ * 支持的筛选列（电子围栏表）：
+ *   - 列 1、列 2、列 4，外加列 5（围栏类型：闯入禁区 / 离岗）
  *
- * 筛选逻辑：
- *   - 设置 filterChannel_/filterClass_ 成员变量
- *   - 调用 refreshTable() 重新填充表格
- *
- * @param logicalIndex: 被点击的列号
+ * 菜单只改下拉，不另存一份条件：条件只有检索条那一套，表头是它的第二个入口。
  */
 void AlarmListWidget::onHeaderSectionClicked(int logicalIndex)
 {
-    // 只处理通道列(1)和类别列(2)
-    if (logicalIndex != 1 && logicalIndex != 2) return;
+    const bool fenceTab = (tabWidget_ && tabWidget_->currentIndex() == TabFence);
+
+    QComboBox *target = nullptr;
+    switch (logicalIndex) {
+    case 1: target = comboChannel_; break;
+    case 2: target = comboClass_; break;
+    case 4: target = comboWorker_; break;
+    case 5: target = fenceTab ? nullptr : comboStatus_; break;
+    default: return;   // 时间/置信度/操作/ID 这几列没有可筛的取值
+    }
+
+    // 围栏表的第 5 列是"围栏类型"，检索条上没有对应下拉，单独走角色菜单
+    if (fenceTab && logicalIndex == 5) {
+        QMenu menu(this);
+        menu.setStyleSheet(
+            QString("QMenu { background: %1; color: %2; border: 1px solid %3; }"
+                    "QMenu::item { padding: 14px 24px; }"
+                    "QMenu::item:selected { background: %4; }")
+                .arg(theme::PANEL, theme::TEXT, theme::BORDER, theme::BTN_SECONDARY));
+        menu.addAction(QStringLiteral("全部围栏类型"), this, [this]() {
+            fenceRole_ = AlarmFilter::RoleAll; onFilterChanged(); });
+        menu.addAction(QStringLiteral("闯入禁区"), this, [this]() {
+            fenceRole_ = AlarmFilter::RoleIntrusion; onFilterChanged(); });
+        menu.addAction(QStringLiteral("离岗"), this, [this]() {
+            fenceRole_ = AlarmFilter::RoleLeave; onFilterChanged(); });
+        menu.exec(QCursor::pos());
+        return;
+    }
+
+    if (!target) return;
 
     QMenu menu(this);
     menu.setStyleSheet(
         QString("QMenu { background: %1; color: %2; border: 1px solid %3; }"
+                "QMenu::item { padding: 14px 24px; }"
                 "QMenu::item:selected { background: %4; }")
             .arg(theme::PANEL, theme::TEXT, theme::BORDER, theme::BTN_SECONDARY));
 
-    if (logicalIndex == 1) {
-        // 通道筛选
-        menu.addAction("全部通道", this, [this]() {
-            filterChannel_ = -1;
-            refreshTable();
+    // 菜单项直接来自那个下拉：候选值、计数、"全部"都在下拉里，这里不重算一遍。
+    for (int i = 0; i < target->count(); ++i) {
+        const QString text = target->itemText(i);
+        const QVariant data = target->itemData(i);
+        menu.addAction(text, this, [target, data]() {
+            const int idx = target->findData(data);
+            if (idx >= 0) target->setCurrentIndex(idx);   // 触发 onFilterChanged
         });
-        menu.addAction("通道 1", this, [this]() {
-            filterChannel_ = 0;
-            refreshTable();
-        });
-        menu.addAction("通道 2", this, [this]() {
-            filterChannel_ = 1;
-            refreshTable();
-        });
-        menu.addAction("通道 3", this, [this]() {
-            filterChannel_ = 2;
-            refreshTable();
-        });
-        menu.addAction("通道 4", this, [this]() {
-            filterChannel_ = 3;
-            refreshTable();
-        });
-    } else if (logicalIndex == 2) {
-        // 类别筛选
-        QSet<QString> classes;
-        QVector<AlarmRecord> alarms = AlarmManager::instance().alarms();
-        for (const auto &a : alarms) {
-            if (a.status != "false_alarm") classes.insert(a.className);
-        }
-
-        menu.addAction("全部类别", this, [this]() {
-            filterClass_.clear();
-            refreshTable();
-        });
-        for (const auto &cls : classes) {
-            menu.addAction(cls, this, [this, cls]() {
-                filterClass_ = cls;
-                refreshTable();
-            });
-        }
     }
 
     menu.exec(QCursor::pos());
+}
+
+/*
+====================================================
+作用：时间档位切换
+说明：档位变了要重新拉候选值（候选按时间档收敛）并回到第一页
+====================================================
+*/
+void AlarmListWidget::onTimePresetChanged()
+{
+    for (int i = 0; i < timeGroup_->buttons().size(); ++i) {
+        QAbstractButton *b = timeGroup_->buttons().at(i);
+        b->setStyleSheet(chipQss(b->isChecked()));   // 选中态换色，皮肤层管不到这里
+    }
+    page_ = 0;
+    rebuildFacets();
+    reloadCurrentTab();
+}
+
+/*
+====================================================
+作用：任一筛选条件变化
+说明：条件变了必须回到第一页，否则会停在一个新结果集里不存在的页码上
+====================================================
+*/
+void AlarmListWidget::onFilterChanged()
+{
+    page_ = 0;
+    reloadCurrentTab();
+}
+
+/*
+====================================================
+作用：翻页
+====================================================
+*/
+void AlarmListWidget::onPageStep(int delta)
+{
+    page_ = qMax(0, page_ + delta);
+    reloadCurrentTab();
+}
+
+/*
+====================================================
+作用：Tab 切换
+说明：检测明细表没有状态/负责人/施工id 这些列，切过去时把这三个下拉**置灰**，
+      而不是留着让用户选了然后静默无效 —— 静默无效正是这一页以前的毛病。
+====================================================
+*/
+void AlarmListWidget::onTabChanged()
+{
+    const bool detectionTab =
+        (tabWidget_ && tabWidget_->currentIndex() == TabDetection);
+
+    for (QComboBox *c : {comboStatus_, comboWorker_, comboConstruction_}) {
+        if (!c) continue;
+        c->setEnabled(!detectionTab);
+        c->setToolTip(detectionTab
+                          ? QStringLiteral("检测明细表没有这个字段")
+                          : QString());
+    }
+    if (detectionTab) {
+        // 这三个条件在检测明细里问不到，切过去就替用户清掉，避免"看不见的条件"限制着结果
+        for (QComboBox *c : {comboStatus_, comboWorker_, comboConstruction_}) {
+            if (c && c->currentIndex() != 0) {
+                c->blockSignals(true);
+                c->setCurrentIndex(0);
+                c->blockSignals(false);
+            }
+        }
+        DetectionDAO dao;
+        long start = 0, end = 0;
+        timeRange(&start, &end);
+        fillCombo(comboClass_, QStringLiteral("全部类别"), dao.classFacets(start, end));
+    } else {
+        rebuildFacets();
+    }
+
+    page_ = 0;
+    reloadCurrentTab();
 }

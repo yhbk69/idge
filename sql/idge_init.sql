@@ -46,6 +46,9 @@ CREATE INDEX IF NOT EXISTS idx_alarms_level ON alarms(alarm_level);
 CREATE INDEX IF NOT EXISTS idx_alarms_status ON alarms(status);
 CREATE INDEX IF NOT EXISTS idx_alarms_time ON alarms(alarm_time);
 CREATE INDEX IF NOT EXISTS idx_alarms_channel ON alarms(channel);
+-- 检索用复合索引，必须与 database_manager.cpp 的建表段保持一致（建表语句有两份这条老规矩）
+CREATE INDEX IF NOT EXISTS idx_alarms_channel_time ON alarms(channel, alarm_time);
+CREATE INDEX IF NOT EXISTS idx_alarms_worker ON alarms(worker_name);
 
 -- ============================================================================
 -- 检测信息表 (detections)

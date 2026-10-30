@@ -154,144 +154,115 @@ int64_t DetectionDAO::insertFromDetectResult(int channel,
 }
 
 // ============================================================================
-// queryByTimeRange: 按时间范围查询
+// queryByFilter / countByFilter / classFacets: 检测明细的组合条件检索
 // ============================================================================
-QVector<DetectionRecord> DetectionDAO::queryByTimeRange(long startTime, long endTime,
-                                                         int limit, int offset)
+//
+// WHERE 只在这里生成一次，queryByFilter 与 countByFilter 共用：
+// 列表行数与"共 N 条 / 第 x 页"只要有一次口径不一致，分页标签就开始骗人。
+// ============================================================================
+namespace {
+
+QString detectionWhere(const DetectionFilter &f)
+{
+    QStringList parts;
+    if (f.startTime > 0 && f.endTime > 0) {
+        parts << QStringLiteral("timestamp BETWEEN :start AND :end");
+    }
+    if (f.channel >= 0) parts << QStringLiteral("channel = :channel");
+    if (!f.className.isEmpty()) parts << QStringLiteral("class_name = :class_name");
+
+    return QStringLiteral("WHERE ") + (parts.isEmpty() ? QStringLiteral("1=1")
+                                                       : parts.join(QStringLiteral(" AND ")));
+}
+
+void bindDetection(QSqlQuery &query, const DetectionFilter &f)
+{
+    if (f.startTime > 0 && f.endTime > 0) {
+        query.bindValue(":start", static_cast<qlonglong>(f.startTime));
+        query.bindValue(":end", static_cast<qlonglong>(f.endTime));
+    }
+    if (f.channel >= 0) query.bindValue(":channel", f.channel);
+    if (!f.className.isEmpty()) query.bindValue(":class_name", f.className);
+}
+
+} // namespace
+
+QVector<DetectionRecord> DetectionDAO::queryByFilter(const DetectionFilter &filter)
 {
     QVector<DetectionRecord> results;
     QSqlDatabase db = DatabaseManager::instance().database();
     if (!db.isOpen()) return results;
 
     QSqlQuery query(db);
-    query.prepare(R"(
-        SELECT * FROM detections
-        WHERE timestamp BETWEEN :start AND :end
-        ORDER BY timestamp DESC
-        LIMIT :limit OFFSET :offset
-    )");
-    query.bindValue(":start", static_cast<qlonglong>(startTime));
-    query.bindValue(":end", static_cast<qlonglong>(endTime));
-    query.bindValue(":limit", limit);
-    query.bindValue(":offset", offset);
+    // id 兜底：同毫秒的多条检测很常见，只按 timestamp 排会让 OFFSET 翻页重复/漏行。
+    query.prepare(QStringLiteral(
+        "SELECT * FROM detections %1 ORDER BY timestamp DESC, id ASC LIMIT :limit OFFSET :offset")
+        .arg(detectionWhere(filter)));
+    bindDetection(query, filter);
+    query.bindValue(":limit", filter.limit);
+    query.bindValue(":offset", filter.offset);
 
     if (query.exec()) {
         while (query.next()) {
             results.append(recordFromQuery(query));
         }
     } else {
-        qWarning() << "Query by time range failed:" << query.lastError().text();
+        qWarning() << "DetectionDAO::queryByFilter failed:" << query.lastError().text();
     }
 
     return results;
 }
 
-// ============================================================================
-// queryByChannel: 按通道查询
-// ============================================================================
-QVector<DetectionRecord> DetectionDAO::queryByChannel(int channel,
-                                                       long startTime, long endTime,
-                                                       int limit, int offset)
+int DetectionDAO::countByFilter(const DetectionFilter &filter)
 {
-    QVector<DetectionRecord> results;
     QSqlDatabase db = DatabaseManager::instance().database();
-    if (!db.isOpen()) return results;
+    if (!db.isOpen()) return 0;
 
     QSqlQuery query(db);
-    query.prepare(R"(
-        SELECT * FROM detections
-        WHERE channel = :channel AND timestamp BETWEEN :start AND :end
-        ORDER BY timestamp DESC
-        LIMIT :limit OFFSET :offset
-    )");
-    query.bindValue(":channel", channel);
-    query.bindValue(":start", static_cast<qlonglong>(startTime));
-    query.bindValue(":end", static_cast<qlonglong>(endTime));
-    query.bindValue(":limit", limit);
-    query.bindValue(":offset", offset);
+    query.prepare(QStringLiteral("SELECT COUNT(*) FROM detections %1")
+                      .arg(detectionWhere(filter)));
+    bindDetection(query, filter);
 
-    if (query.exec()) {
-        while (query.next()) {
-            results.append(recordFromQuery(query));
-        }
-    } else {
-        qWarning() << "Query by channel failed:" << query.lastError().text();
+    if (query.exec() && query.next()) {
+        return query.value(0).toInt();
     }
-
-    return results;
+    qWarning() << "DetectionDAO::countByFilter failed:" << query.lastError().text();
+    return 0;
 }
 
-// ============================================================================
-// queryByClass: 按类别查询
-// ============================================================================
-QVector<DetectionRecord> DetectionDAO::queryByClass(const QString &className,
-                                                    long startTime, long endTime,
-                                                    int limit, int offset)
+QVector<QPair<QString, int>> DetectionDAO::classFacets(long startTime, long endTime)
 {
-    QVector<DetectionRecord> results;
+    QVector<QPair<QString, int>> out;
     QSqlDatabase db = DatabaseManager::instance().database();
-    if (!db.isOpen()) return results;
+    if (!db.isOpen()) return out;
 
     QSqlQuery query(db);
-    query.prepare(R"(
-        SELECT * FROM detections
-        WHERE class_name = :class_name AND timestamp BETWEEN :start AND :end
-        ORDER BY timestamp DESC
-        LIMIT :limit OFFSET :offset
-    )");
-    query.bindValue(":class_name", className);
-    query.bindValue(":start", static_cast<qlonglong>(startTime));
-    query.bindValue(":end", static_cast<qlonglong>(endTime));
-    query.bindValue(":limit", limit);
-    query.bindValue(":offset", offset);
+    if (startTime > 0 && endTime > 0) {
+        query.prepare(R"(
+            SELECT class_name, COUNT(*) FROM detections
+            WHERE timestamp BETWEEN :start AND :end
+            GROUP BY class_name ORDER BY COUNT(*) DESC LIMIT 60
+        )");
+        query.bindValue(":start", static_cast<qlonglong>(startTime));
+        query.bindValue(":end", static_cast<qlonglong>(endTime));
+    } else {
+        query.prepare(R"(
+            SELECT class_name, COUNT(*) FROM detections
+            GROUP BY class_name ORDER BY COUNT(*) DESC LIMIT 60
+        )");
+    }
 
     if (query.exec()) {
         while (query.next()) {
-            results.append(recordFromQuery(query));
+            const QString name = query.value(0).toString();
+            if (name.isEmpty()) continue;
+            out.append(qMakePair(name, query.value(1).toInt()));
         }
     } else {
-        qWarning() << "Query by class failed:" << query.lastError().text();
+        qWarning() << "DetectionDAO::classFacets failed:" << query.lastError().text();
     }
 
-    return results;
-}
-
-// ============================================================================
-// queryByChannelAndClass: 按通道+类别查询
-// ============================================================================
-QVector<DetectionRecord> DetectionDAO::queryByChannelAndClass(int channel,
-                                                               const QString &className,
-                                                               long startTime, long endTime,
-                                                               int limit, int offset)
-{
-    QVector<DetectionRecord> results;
-    QSqlDatabase db = DatabaseManager::instance().database();
-    if (!db.isOpen()) return results;
-
-    QSqlQuery query(db);
-    query.prepare(R"(
-        SELECT * FROM detections
-        WHERE channel = :channel AND class_name = :class_name
-              AND timestamp BETWEEN :start AND :end
-        ORDER BY timestamp DESC
-        LIMIT :limit OFFSET :offset
-    )");
-    query.bindValue(":channel", channel);
-    query.bindValue(":class_name", className);
-    query.bindValue(":start", static_cast<qlonglong>(startTime));
-    query.bindValue(":end", static_cast<qlonglong>(endTime));
-    query.bindValue(":limit", limit);
-    query.bindValue(":offset", offset);
-
-    if (query.exec()) {
-        while (query.next()) {
-            results.append(recordFromQuery(query));
-        }
-    } else {
-        qWarning() << "Query by channel and class failed:" << query.lastError().text();
-    }
-
-    return results;
+    return out;
 }
 
 // ============================================================================

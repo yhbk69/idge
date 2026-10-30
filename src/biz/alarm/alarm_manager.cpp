@@ -564,23 +564,20 @@ int AlarmManager::unacknowledgedCount() const
 // 确认所有报警（将所有报警标记为已确认）
 void AlarmManager::acknowledgeAll()
 {
-    QVector<QString> ids;
     {
         QMutexLocker lock(&mutex_);
         for (auto &a : alarms_) {
             if (a.status != "rectified") {
                 a.status = "rectified";
                 a.updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
-                ids.append(a.id);
             }
         }
     }
-    // 写入数据库
-    if (dbInitialized_ && !ids.isEmpty()) {
+    // 一条 UPDATE 收掉库里全部未确认。原先这里是"遍历内存 1000 条 → 逐条 UPDATE"：
+    // 实测库里 27858 条 pending，按钮点下去只改了 1000 条，其余照旧弹未确认角标。
+    if (dbInitialized_) {
         AlarmDAO dao;
-        for (const QString &id : ids) {
-            dao.updateStatus(id, "rectified");
-        }
+        dao.acknowledgeAllPending();
     }
     emit statsUpdated();
 }
@@ -668,25 +665,28 @@ bool AlarmManager::markAsFalsePositive(int index)
 bool AlarmManager::acknowledgeAlarmById(const QString &id)
 {
     if (id.isEmpty()) return false;
-    bool found = false;
+    bool foundInRam = false;
     {
         QMutexLocker lock(&mutex_);
         for (auto &a : alarms_) {
             if (a.id == id) {
                 a.status = "rectified";
                 a.updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
-                found = true;
+                foundInRam = true;
                 break;
             }
         }
     }
-    // 写入数据库
-    if (dbInitialized_ && found) {
+    // 库是权威，所以写库**不以"内存里找得到"为前提**：alarms_ 只留最近 1000 条，
+    // 而报警列表现在能翻到几万条之外的历史行。沿用旧的 `if (found)` 闸门，
+    // 结果就是点老报警的「已确认」什么都没发生、界面重载后状态照旧 —— 静默失效。
+    bool dbOk = false;
+    if (dbInitialized_) {
         AlarmDAO dao;
-        dao.updateStatus(id, "rectified");
+        dbOk = dao.updateStatus(id, "rectified");
     }
     emit statsUpdated();
-    return found;
+    return foundInRam || dbOk;
 }
 
 // 删除单条报警（按ID）
@@ -716,25 +716,26 @@ bool AlarmManager::removeAlarmById(const QString &id)
 bool AlarmManager::markAsFalsePositiveById(const QString &id)
 {
     if (id.isEmpty()) return false;
-    bool found = false;
+    bool foundInRam = false;
     {
         QMutexLocker lock(&mutex_);
         for (auto &a : alarms_) {
             if (a.id == id) {
                 a.status = "false_alarm";
                 a.updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
-                found = true;
+                foundInRam = true;
                 break;
             }
         }
     }
-    // 写入数据库
-    if (dbInitialized_ && found) {
+    // 与 acknowledgeAlarmById 同理：内存窗口外的历史行也要能标误报。
+    bool dbOk = false;
+    if (dbInitialized_) {
         AlarmDAO dao;
-        dao.markFalseAlarm(id);
+        dbOk = dao.markFalseAlarm(id);
     }
     emit statsUpdated();
-    return found;
+    return foundInRam || dbOk;
 }
 
 // 获取各类别检测统计
