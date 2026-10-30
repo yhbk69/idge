@@ -106,7 +106,7 @@ warning 不认领任何东西。
 
 | type | 什么时候发 | `data` 关键字段 |
 | --- | --- | --- |
-| `alarm_info` | 报警产生那一刻 | `alarm_id`、`alarm_ids`（共用这份媒体的批次）、`alarm_type`、`alarm_level`、`alarm_time`、`channel`（**1-based**）、`class_id`、`class_name`、`confidence`、`is_fence_alarm`、`status`，外加 `snapshot` / `clip` 两个 `MediaRef` 子对象 |
+| `alarm_info` | 报警产生那一刻 | `alarm_id`、`alarm_ids`（共用这份媒体的批次）、`alarm_type`、`alarm_level`、`alarm_time`、`channel`（**1-based**）、`class_id`、`class_name`、`confidence`、`is_fence_alarm`、`status`，外加 `snapshot` / `clip` 两个 `MediaRef` 子对象与 `construction` 子对象（见下） |
 | `media_begin` | 媒体真的可取了 | `media_id`、`alarm_id`、`kind`、`name`（落盘后的真实名）、`mime`、`total_bytes`、`transfer`；`http` 档加 `url`（`sha256` 算得出就带），`binary_chunks` 档加 `chunk_size`/`total_chunks` |
 | `media_end` | **仅 `ws_binary` 档**：块发完 | `media_id`、`seqs_sent`、`total_chunks`、`sha256`。url 档没有帧序列要收尾，**不发这条** |
 | `media_failed` | 承诺落空（两档都发） | `media_id`、`alarm_id`、`kind`、`reason`（人能读的一句话，绝不含字节内容） |
@@ -117,6 +117,32 @@ warning 不认领任何东西。
 
 下行 `uplink_ack` 的字段是 `message_id`/`media_id`/`phase`/`status`/`error`，
 `phase=="media"` 用 `media_id` 认领队首、否则用 `message_id`。
+
+### `construction` 子对象（本轮新增，**键名待接口方确认**）
+
+`alarm_info.data.construction` = 该报警产生时**登录会话里的整份施工信息**，
+一个嵌套 JSON 对象，内容由 `src/biz/session` 的 `ConstructionInfo` 决定（当前五个键：
+`construction_id`/`worker_name`/`worker_phone`/`worker_id`/`work_content`，外加码里自带的未知键原样透传）。
+
+实测（板端 loopback，`ws://127.0.0.1:8765`）一条真实 `alarm_info` 的 `data` 键集：
+
+```
+['alarm_id','alarm_ids','alarm_level','alarm_time','alarm_type','channel','class_id',
+ 'class_name','confidence','construction','is_fence_alarm','snapshot','status']
+construction = {"construction_id":"SG-2026-11","work_content":"隧道道床修补",
+                "worker_id":"GZ-0042","worker_name":"张三","worker_phone":"13800001111"}
+```
+
+三条口径，改动前先看清为什么这么定：
+
+- **嵌套而不是平铺**：平铺进 `data{}` 会和 `alarm_id`/`status`/`channel`/`class_name` 抢键，
+  而且现场码的字段一改，线上协议就跟着漂。嵌套后协议里多一个稳定的容器键，字段增减都在容器内。
+  ⚠ **这个容器键名要接口方点头**，本轮先按 `construction` 落。
+- **未登录不发这个键**（不是发空对象）：`AlarmInfoInput::constructionJson` 为空时
+  `buildAlarmInfoMessage()` 整个跳过，对端"键不存在"= 没有归属，比"键存在但全空"更好判。
+- **取的是报警产生时的那一份**：字段在 `makeAlarmRecord()` 就固化进 `AlarmRecord`，
+  `onAlarmGenerated` 只是搬运，发送时不回查会话。所以退出登录/重新扫码之后仍在队列里补发的报警，
+  带的仍是它自己产生时的负责人。`constructionJson` 里是脏 JSON 时也只跳过这个键，不影响整条报文。
 
 ### `media_failed` 的落空来源（五条路径，四条跑得出来）
 闭合的洞是"对端手里攥着一条永远兑现不了的 `planned`"。四条落空路径：

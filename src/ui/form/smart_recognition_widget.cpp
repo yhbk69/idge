@@ -4,11 +4,12 @@
  * @file smart_recognition_widget.cpp
  * @brief 智能识别页实现 —— 二维码 + OCR 铭牌 + 人员点名 + 设备盘点（四卡片入口）
  *
- * 页面本身只是一张四卡片的入口页（setupUi）。前两张是识别工具，交互都在本文件的
- * 模态对话框里：
- *   1. 二维码：openQrScanner() 开一台独立 FFmpegVideoDecoder 做预览，用户点
- *      CaptureButton 拍照，对拍到的帧跑 ZBar 解码。单码直接弹结果框，
- *      多码在冻结图上叠箭头按钮让用户选一个查看。
+ * 页面本身只是一张四卡片的入口页（setupUi）。前两张是识别工具：
+ *   1. 二维码：本文件只剩一行 `QrScanDialog::openFullScanner(this)`。
+ *      预览、取帧、ZBar 解码、结果框（单码直显、多码在冻结图上叠箭头按钮点选）
+ *      都在共用模块 src/ui/widgets/qr_scan_dialog.cpp 里 —— **登录页扫码调的是同一
+ *      个模块的 scan()**，因为摄像头设备节点不能同时被两处打开，两处也不该解出不同结果。
+ *      解码本身在 src/biz/qrcode/qr_decoder.cpp（无 GUI 依赖，可离线自测）。
  *   2. OCR：openOcrScanner() → showOcrPhotoDialog()（拍照存临时 jpg）→
  *      showOcrRegionDialog()（跑 det 拿文本框、smartGroupBoxes() 合并成可选区、
  *      用户可拖拽调框）→ showOcrResultDialog()（跑 system 输出 CTC 解码文本）。
@@ -21,7 +22,8 @@
  *   - 二维码能力取决于编译期有没有 HAS_ZBAR（cmake 找到 3rdparty/zbar 才定义），
  *     没有则该卡片直接禁用，页面其余部分照常。
  *   - 两个对话框各开一台解码器，取流地址都读 config.json 的
- *     smartRecognition.camera，与监控页/国标推流的设备之间没有互斥。
+ *     smartRecognition.camera；**同一设备节点不能被开两次**，所以扫码期间别同时
+ *     再开登录页的扫码框（两者都是模态框，天然不会重叠）。
  *   - 二维码识别在拍照后对单帧做 ZBar 解码，不再有实时扫描线程，
  *     因此无需线程同步与稳定性检测。
  *
@@ -30,8 +32,10 @@
  */
 
 #include "smart_recognition_widget.h"
+#include "capture_button.h"        // uiwidgets::CaptureButton：与扫码对话框共用的快门按钮
 #include "ffmpeg_video_decoder.h"
 #include "gl_video_widget.h"
+#include "qr_scan_dialog.h"        // 共用扫码流程（登录页用的是同一套）
 #include "theme.h"
 #include "qthelper.h"   // enableTouchScroll：按需 new 的对话框扫描不到，要在创建处显式挂
 #include "ConfigManager.h"
@@ -68,10 +72,6 @@
 #include <cstdio>
 #include <limits>
 
-#ifdef HAS_ZBAR
-#include <zbar.h>
-#endif
-
 namespace {
 
 void ocrTrace(const QString& step) {
@@ -89,87 +89,6 @@ QLabel* textLabel(const QString& text, int size, const char* color, QWidget* par
     label->setStyleSheet(theme::text(color, size, bold));
     return label;
 }
-
-// ============================================================================
-// 帧捕获辅助：从 FFmpegVideoDecoder 的映射指针读取 RGBA 帧数据
-// ============================================================================
-
-// 从解码器映射指针获取 RGBA 帧，转为 QImage（RGB888）
-QImage captureFrameAsImage(FFmpegVideoDecoder* decoder) {
-    const uint8_t* ptr = decoder->captureCurrentFramePtr();
-    if (!ptr) return {};
-    int w, h, stride;
-    if (!decoder->getCurrentFrameInfo(w, h, stride)) return {};
-
-    QImage img(w, h, QImage::Format_RGB888);
-    for (int y = 0; y < h; ++y) {
-        const uint8_t* srcRow = ptr + y * stride;
-        uint8_t* dstRow = img.scanLine(y);
-        for (int x = 0; x < w; ++x) {
-            dstRow[x * 3 + 0] = srcRow[x * 4 + 0];
-            dstRow[x * 3 + 1] = srcRow[x * 4 + 1];
-            dstRow[x * 3 + 2] = srcRow[x * 4 + 2];
-        }
-    }
-    return img;
-}
-
-#ifdef HAS_ZBAR
-// ============================================================================
-// QR 码扫描相关（需要 ZBar 库）
-// ============================================================================
-
-struct QRCodeDetection {
-    cv::Rect rect;
-    QString content;
-};
-
-// 从 RGBA 原始数据直接转灰度并扫描（避免 OpenCV Mat 的 stride 问题）
-std::vector<QRCodeDetection> scanQRCodeFromRGBA(const uint8_t* rgba, int width, int height, int stride) {
-    std::vector<QRCodeDetection> results;
-    if (!rgba || width <= 0 || height <= 0) return results;
-
-    // RGBA → 灰度（ITU-R BT.601 系数）
-    std::vector<uint8_t> gray(width * height);
-    for (int y = 0; y < height; ++y) {
-        const uint8_t* srcRow = rgba + y * stride;
-        uint8_t* dstRow = gray.data() + y * width;
-        for (int x = 0; x < width; ++x) {
-            int r = srcRow[x * 4];
-            int g = srcRow[x * 4 + 1];
-            int b = srcRow[x * 4 + 2];
-            dstRow[x] = static_cast<uint8_t>((r * 77 + g * 150 + b * 29) >> 8);
-        }
-    }
-
-    zbar::ImageScanner scanner;
-    scanner.set_config(zbar::ZBAR_QRCODE, zbar::ZBAR_CFG_ENABLE, 1);
-
-    zbar::Image zbar_image(width, height, "Y800", gray.data(), width * height);
-    scanner.scan(zbar_image);
-
-    for (zbar::Image::SymbolIterator symbol = zbar_image.symbol_begin();
-         symbol != zbar_image.symbol_end(); ++symbol) {
-        QRCodeDetection detection;
-
-        std::string rawData = symbol->get_data();
-        detection.content = QString::fromUtf8(rawData.c_str(), rawData.size());
-
-        int minX = width, minY = height, maxX = 0, maxY = 0;
-        for (int i = 0; i < symbol->get_location_size(); ++i) {
-            minX = std::min(minX, symbol->get_location_x(i));
-            maxX = std::max(maxX, symbol->get_location_x(i));
-            minY = std::min(minY, symbol->get_location_y(i));
-            maxY = std::max(maxY, symbol->get_location_y(i));
-        }
-        detection.rect = cv::Rect(minX, minY, maxX - minX, maxY - minY);
-        results.push_back(detection);
-    }
-
-    return results;
-}
-
-#endif // HAS_ZBAR
 
 // ============================================================================
 // UI 辅助控件
@@ -300,55 +219,8 @@ private:
     const ResizableRectItem* selection_;
 };
 
-// 拍照按钮（圆形快门）
-class CaptureButton : public QPushButton {
-public:
-    explicit CaptureButton(QWidget* parent = nullptr) : QPushButton(parent) {
-        setFixedSize(88, 88);
-        setCursor(Qt::PointingHandCursor);
-        setAttribute(Qt::WA_Hover);
-    }
-
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing);
-        const QRectF outer = rect().adjusted(2, 2, -2, -2);
-        painter.setPen(QPen(QColor(255, 255, 255, 190), 5));
-        painter.setBrush(Qt::white);
-        painter.drawEllipse(outer);
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(theme::BG));
-        painter.drawEllipse(outer.adjusted(20, 20, -20, -20));
-    }
-};
-
-#ifdef HAS_ZBAR
-// 多码标记：箭头按钮
-class ArrowButton : public QPushButton {
-public:
-    explicit ArrowButton(QWidget* parent = nullptr) : QPushButton(parent) {
-        setFixedSize(72, 72);
-        setCursor(Qt::PointingHandCursor);
-        setStyleSheet(QString(
-            "QPushButton { background: %1; border: 5px solid white; border-radius: 36px; }"
-            "QPushButton:hover { background: %2; }")
-            .arg(theme::SUCCESS, theme::SUCCESS_HOVER));
-    }
-
-protected:
-    void paintEvent(QPaintEvent*) override {
-        QPushButton::paintEvent(nullptr);
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing);
-        painter.setPen(QPen(Qt::white, 5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-        const int cx = width() / 2;
-        const int cy = height() / 2;
-        painter.drawLine(cx - 12, cy - 14, cx + 10, cy);
-        painter.drawLine(cx + 10, cy, cx - 12, cy + 14);
-    }
-};
-#endif // HAS_ZBAR
+// 拍照按钮（圆形快门）与扫码流程用的同一个定义，见 src/ui/widgets/capture_button.h
+using uiwidgets::CaptureButton;
 
 // 卡片点击事件过滤器
 class CardClickFilter : public QObject {
@@ -529,175 +401,10 @@ bool SmartRecognitionWidget::ocrModelsReady() const {
 // ============================================================================
 
 void SmartRecognitionWidget::openQrScanner() {
-#ifndef HAS_ZBAR
-    // 不是"板子上没装 zbar"，而是这次 cmake 没找到 3rdparty/zbar：
-    // 新克隆只带头文件和 zbar.pc，libzbar.so/.a 被 .gitignore 挡住，需照
-    // 3rdparty/README.md 的流程补进 3rdparty/zbar/lib/ 后重新 configure。
-    QMessageBox::information(this, QStringLiteral("不可用"),
-                             QStringLiteral("本次构建未找到 ZBar（3rdparty/zbar/lib 缺库），"
-                                            "补齐后重新编译才能扫码。"));
-    return;
-#else
-    QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("二维码识别 - 拍照"));
-    dialog.resize(960, 640);
-    dialog.setStyleSheet(QStringLiteral("QDialog { background:%1; }").arg(theme::BG));
-
-    auto* root = new QVBoxLayout(&dialog);
-    root->setContentsMargins(0, 0, 0, 0);
-    root->setSpacing(0);
-
-    auto* previewContainer = new QWidget(&dialog);
-    previewContainer->setStyleSheet(QStringLiteral("background:#000000;"));
-    auto* previewLayout = new QVBoxLayout(previewContainer);
-    previewLayout->setContentsMargins(0, 0, 0, 0);
-    previewLayout->setSpacing(0);
-
-    auto* previewWidget = new GLVideoWidget(previewContainer);
-    previewWidget->setMinimumSize(960, 540);
-    previewLayout->addWidget(previewWidget);
-
-    root->addWidget(previewContainer, 1);
-
-    auto* captureBtn = new CaptureButton(previewWidget);
-    auto positionCapture = [captureBtn, previewWidget]() {
-        captureBtn->move((previewWidget->width() - captureBtn->width()) / 2,
-                         previewWidget->height() - captureBtn->height() - 24);
-        captureBtn->raise();
-    };
-    positionCapture();
-    QTimer::singleShot(0, positionCapture);
-    captureBtn->setToolTip(QStringLiteral("拍照识别"));
-
-    const QString cameraUrl = ConfigManager::instance().smartRecognitionCamera();
-    // 只取画面帧给 ZBar / OCR，不参与级联推理：PreviewOnly 不加载任何 RKNN 模型
-    auto* decoder = new FFmpegVideoDecoder(
-        nullptr, FFmpegVideoDecoder::InferenceMode::PreviewOnly);
-    QObject::connect(decoder, &FFmpegVideoDecoder::frameReady,
-                     previewWidget, &GLVideoWidget::onFrameReady, Qt::DirectConnection);
-    decoder->start(cameraUrl);
-
-    QImage capturedImage;
-
-    connect(captureBtn, &QPushButton::clicked, [&dialog, decoder, &capturedImage]() {
-        capturedImage = captureFrameAsImage(decoder);
-        if (capturedImage.isNull()) {
-            QMessageBox::warning(&dialog, QStringLiteral("错误"), QStringLiteral("无法获取相机画面"));
-            return;
-        }
-        decoder->stop();
-        dialog.accept();
-    });
-
-    dialog.exec();
-    decoder->stop();
-    delete decoder;
-
-    if (capturedImage.isNull()) return;
-
-    QImage rgbaImage = capturedImage.convertToFormat(QImage::Format_RGBA8888);
-    auto detections = scanQRCodeFromRGBA(rgbaImage.constBits(), rgbaImage.width(),
-                                         rgbaImage.height(), rgbaImage.bytesPerLine());
-
-    if (detections.empty()) {
-        QMessageBox::information(this, QStringLiteral("识别结果"),
-                                 QStringLiteral("未检测到二维码，请重新拍照"));
-        return;
-    }
-
-    QDialog resultDialog(this);
-    resultDialog.setWindowTitle(QStringLiteral("二维码识别结果"));
-    resultDialog.resize(960, 640);
-    resultDialog.setStyleSheet(QStringLiteral("QDialog { background:%1; }").arg(theme::BG));
-
-    auto* resultRoot = new QVBoxLayout(&resultDialog);
-    resultRoot->setContentsMargins(0, 0, 0, 0);
-    resultRoot->setSpacing(0);
-
-    auto* resultPreviewContainer = new QWidget(&resultDialog);
-    resultPreviewContainer->setStyleSheet(QStringLiteral("background:#000000;"));
-    auto* resultPreviewLayout = new QVBoxLayout(resultPreviewContainer);
-    resultPreviewLayout->setContentsMargins(0, 0, 0, 0);
-    resultPreviewLayout->setSpacing(0);
-
-    auto* frozenImageLabel = new QLabel(resultPreviewContainer);
-    frozenImageLabel->setMinimumSize(960, 540);
-    frozenImageLabel->setAlignment(Qt::AlignCenter);
-    resultPreviewLayout->addWidget(frozenImageLabel);
-
-    resultRoot->addWidget(resultPreviewContainer, 1);
-
-    auto* hintLabel = new QLabel(&resultDialog);
-    hintLabel->setAlignment(Qt::AlignCenter);
-    hintLabel->setStyleSheet(QString(
-        "color:%1; font-size:%2px; font-weight:500; background:%3; padding:14px;"
-        "border-top:2px solid %4;")
-        .arg(theme::TEXT)
-        .arg(theme::FS_BODY)
-        .arg(theme::PANEL, theme::BORDER));
-    hintLabel->hide();
-    resultRoot->addWidget(hintLabel);
-
-    auto* closeBtn = new QPushButton(QStringLiteral("关闭"), &resultDialog);
-    closeBtn->setMinimumHeight(50);
-    closeBtn->setStyleSheet(QString(
-        "QPushButton { background:%1; color:%2; border:none; font-size:%3px; font-weight:600; }"
-        "QPushButton:hover { background:%4; } QPushButton:pressed { background:%5; }")
-        .arg(theme::HOVER, theme::TEXT)
-        .arg(theme::FS_BODY)
-        .arg(theme::BORDER, theme::PANEL));
-    resultRoot->addWidget(closeBtn);
-    connect(closeBtn, &QPushButton::clicked, &resultDialog, &QDialog::reject);
-
-    QPixmap pixmap = QPixmap::fromImage(capturedImage);
-    auto scaledPixmap = pixmap.scaled(resultPreviewContainer->minimumSize(),
-                                      Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    frozenImageLabel->setPixmap(scaledPixmap);
-
-    resultDialog.show();
-    QApplication::processEvents();
-
-    const QSize labelSize = frozenImageLabel->size();
-    const double scaleX = static_cast<double>(scaledPixmap.width()) / capturedImage.width();
-    const double scaleY = static_cast<double>(scaledPixmap.height()) / capturedImage.height();
-
-    if (detections.size() == 1) {
-        QMessageBox msgBox(&resultDialog);
-        msgBox.setWindowTitle(QStringLiteral("识别结果"));
-        msgBox.setText(detections[0].content);
-        msgBox.setStandardButtons(QMessageBox::Ok);
-        msgBox.exec();
-    } else {
-        auto* overlayWidget = new QWidget(resultPreviewContainer);
-        overlayWidget->setGeometry(0, 0, labelSize.width(), labelSize.height());
-        overlayWidget->setStyleSheet(QStringLiteral("background:rgba(0, 0, 0, 0.5);"));
-        overlayWidget->raise();
-        overlayWidget->show();
-
-        hintLabel->setText(QStringLiteral("识别到 %1 个二维码，请点击查看")
-                               .arg(detections.size()));
-        hintLabel->show();
-
-        for (const auto& det : detections) {
-            int centerX = static_cast<int>((det.rect.x + det.rect.width / 2.0) * scaleX);
-            int centerY = static_cast<int>((det.rect.y + det.rect.height / 2.0) * scaleY);
-
-            auto* arrowBtn = new ArrowButton(overlayWidget);
-            arrowBtn->move(centerX - 36, centerY - 36);
-            arrowBtn->show();
-
-            connect(arrowBtn, &QPushButton::clicked, [&resultDialog, det]() {
-                QMessageBox msgBox(&resultDialog);
-                msgBox.setWindowTitle(QStringLiteral("识别结果"));
-                msgBox.setText(det.content);
-                msgBox.setStandardButtons(QMessageBox::Ok);
-                msgBox.exec();
-            });
-        }
-    }
-
-    resultDialog.exec();
-#endif // HAS_ZBAR
+    // 预览取帧 → ZBar 解码 → 结果框，整条流程在共用模块里（src/ui/widgets/qr_scan_dialog.cpp）。
+    // 登录页调的是同一个模块的 scan()，所以任何时刻只有一个 /dev/videoNN 持有者，
+    // 两处也不会解出不一样的结果。
+    QrScanDialog::openFullScanner(this);
 }
 
 // ============================================================================

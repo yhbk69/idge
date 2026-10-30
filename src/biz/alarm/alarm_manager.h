@@ -83,6 +83,14 @@ struct AlarmRecord {
     QString createTime;       // 入库时间
     QString updateTime;       // 更新时间
 
+    // 施工信息（扫码登录时定死，报警产生那一刻打戳；未登录/历史行为空）
+    //   workerName: 列表那一列按它显示，也是将来按人筛选的落点
+    //   constructionJson: 整份载荷（含电话/工号/工作内容/施工id），详情框按 JSON 逐键渲染、
+    //                     WebSocket 上行作为 data["construction"] 子对象——
+    //                     **字段增删只改 ConstructionInfo，这两列与这两处显示都不用动**
+    QString workerName;
+    QString constructionJson;
+
     // 兼容旧字段
     long timestamp = 0;       // 时间戳(毫秒)
     bool isFenceAlarm = false;
@@ -283,6 +291,12 @@ public:
 
     // 清理N天前的数据库数据
     void cleanOldData(int daysToKeep = 30);
+
+    // 清空去重限流的内存窗口（检测 2 秒窗口与围栏窗口共用同一张表）。
+    // 退出登录时必须调：限流键是"通道:类别"，与施工信息无关，不清的话
+    // 重新扫码登录后**第一个窗口期内**的报警会被静默吞掉，界面一条都不出。
+    // 不动 DB 历史、不动报警列表本身。
+    void resetThrottles();
 
 signals:
     // 报警生成信号（通知界面显示新报警）

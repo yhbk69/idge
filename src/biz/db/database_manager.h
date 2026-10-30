@@ -110,6 +110,14 @@ private:
     // 创建所有表
     bool createTables();
 
+    // 给**已存在**的表补列（本仓没有版本表/迁移框架，这是唯一的一处补列入口）。
+    // CREATE TABLE IF NOT EXISTS 对老库是空操作，老库不会因为改了建表语句就长出新列，
+    // 所以新增列必须走这里。按 PRAGMA table_info 逐列判断，缺哪列 ALTER 哪列，
+    // 已存在则跳过 ⇒ 幂等，每次启动重复执行都无害。
+    // columnDefs 每项是 "列名 类型"（如 "worker_name TEXT"），只加可空、无默认、无外键的列。
+    // 调用方须持有 mutex_（与 executeSQL 同口径），table 只传代码里的字面量。
+    bool ensureColumns(const QString &table, const QStringList &columnDefs);
+
     // 执行SQL语句（调用线程自己的连接；须在持有 mutex_ 的路径上调用）
     bool executeSQL(const QString &sql);
 

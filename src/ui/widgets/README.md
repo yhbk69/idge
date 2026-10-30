@@ -16,9 +16,11 @@
 | gl_video_widget.h/.cpp | GLVideoWidget：QOpenGLWidget 双缓冲零拷贝视频控件（含 FPS 叠加） |
 | player_widget.h/.cpp | PlayerWidget：视频 + OSD + 围栏叠加 + 放大按钮的通道窗体，持有解码器 |
 | dashboard_widget.h/.cpp | DashboardWidget：统计卡片、/proc 系统监控（CPU/内存/温度）、类别排行条 |
-| alarm_list_widget.h/.cpp | AlarmListWidget：类别/围栏双 Tab 报警表，300ms 防抖刷新与筛选；围栏 Tab 第 4 列「围栏类型」区分**闯入禁区/离岗** |
-| video_alarm_widget.h/.cpp | VideoAlarmWidget：视频监控页右侧报警卡片列表（QScrollArea），点击跳转详情 |
-| alarm_detail_dialog.h/.cpp | AlarmDetailDialog：报警详情对话框，支持误报标记与单条确认；"视频"行展示片段文件名/大小与网页副本是否随行 |
+| alarm_list_widget.h/.cpp | AlarmListWidget：类别/围栏双 Tab 报警表，300ms 防抖刷新与筛选；围栏 Tab 第 4 列「围栏类型」区分**闯入禁区/离岗**；两个 Tab 各有**负责人**列（类别表 8 列、围栏表 6 列），空值显示 `—` |
+| video_alarm_widget.h/.cpp | VideoAlarmWidget：视频监控页右侧报警卡片列表（QScrollArea），点击跳转详情；卡片第二行是「通道N · 负责人」（复用 `alarmChannel` 的 objectName，卡片高度不变） |
+| alarm_detail_dialog.h/.cpp | AlarmDetailDialog：报警详情对话框，支持误报标记与单条确认；"视频"行展示片段文件名/大小与网页副本是否随行；施工信息**按 `construction_info` 的键逐行渲染**（不是按固定字段），所以 `ConstructionInfo` 加字段这里不用改 |
+| qr_scan_dialog.h/.cpp | **全程序唯一的摄像头扫码对话框**：`available()` / `captureFrame()` / `scan()`（登录页，取第一个命中）/ `openFullScanner()`（智能识别页，含多码点选结果框）。四步（取址、PreviewOnly 解码、抓帧、解码）三个入口共用同一段代码——`smartRecognition.camera` 那个设备节点**不能被开两次**，两处各写一套就是抢摄像头。全局函数 `captureFrameAsImage()` 也从智能识别页搬到这里，OCR 与扫码共用一份取帧实现 |
+| capture_button.h | `uiwidgets::CaptureButton`：88x88 圆形快门（header-only）。原先长在智能识别页的 `.cpp` 里，扫码与 OCR 都要用才提出来，避免同一个控件两份定义 |
 
 ## 核心类与数据流
 帧流：解码线程 dup(RGBA fd) → `RenderFrame` 经 `QueuedConnection` 投递 → GLVideoWidget::onFrameReady（互斥锁保护，prev/pending 两级 fd 管理）→ paintGL 中 `importRGBA → bindToTexture` 写入后台缓冲 → 双缓冲交换 drawQuad。EGL 引用计数保证"fd 已 close、画面仍可读"的重叠窗口。fd 生命周期：每个副本恰好一次 close（帧更替或析构）。界面流：AlarmManager 信号 → 防抖定时器 → 全表重建；QTimer 2s → DashboardWidget::refreshStats。

@@ -55,6 +55,7 @@ test_*.cpp
 #   test_channel_reload           —— 通道热更新（停→releaseTasks→重建）离线自测
 #   test_alarm_uplink             —— 报警上行报文组装/队列/水位/ack/退避 十八条离线契约
 #   test_geofence_role            —— 电子围栏每形状角色（禁区/岗区域）判定八条离线契约
+#   test_construction_qr          —— 施工信息解析/校验/会话 + 二维码离线解码（登录门的全部契约）
 !tests/test_database.cpp
 !tests/test_equipment.cpp
 !tests/test_rollcall.cpp
@@ -62,6 +63,7 @@ test_*.cpp
 !tests/test_channel_reload.cpp
 !tests/test_alarm_uplink.cpp
 !tests/test_geofence_role.cpp
+!tests/test_construction_qr.cpp
 
 # 测试素材（*.jpg/*.mp4 全局忽略，此处显式放行；*_faces.json 等为运行产物不放行）
 !assets/test/1.mp4

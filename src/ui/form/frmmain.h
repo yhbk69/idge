@@ -43,6 +43,7 @@ class QWidget;
 class RollCallWidget;
 class EquipmentInventoryWidget;
 class SmartRecognitionWidget;
+class LoginWidget;
 class RollCallService;
 class EquipmentInventoryService;
 struct EquipmentModelConfig;   // 完整定义见 equipment_inventory_service.h（仅 .cpp 用到）
@@ -95,6 +96,8 @@ private:
     std::shared_ptr<EquipmentInventoryService> equipmentService_;
     SmartRecognitionWidget *smartRecognitionWidget_ = nullptr; ///< 智能识别页（QR + OCR + 点名 + 盘点）
     QWidget *smartPage_ = nullptr;   ///< 智能识别页容器
+    LoginWidget *login_ = nullptr;   ///< 扫码登录页（stackedWidget 的第 0 页，未登录时唯一可见页）
+    bool streamsRunning_ = false;    ///< 四路是否已在跑（start/stopAllStreams 的幂等守卫）
     std::string workspace_;          ///< 业务资源根目录（model/face、roll_call_data 等）
 
 private:
@@ -163,6 +166,14 @@ private slots:
     void leftMainClick();          ///< 视频监控页左侧按钮点击
     void systemExit();             ///< 系统退出确认
     void initDebugPage();          ///< 初始化调试帮助页（从 config.json 读取配置）
+
+    // ========== 扫码登录门（frmMain 只构造一次，登录态是 stackedWidget 的一个页面）==========
+    // 门挡的是"检测与报警产生"，不是整个进程的网络出口（GB28181/WS 在门外，见 README）
+    void startAllStreams();        ///< 按通道配置开四路；已开则只记日志不重复开（幂等守卫）
+    void stopAllStreams();         ///< 停看板刷新 + 两阶段停四路解码（退出登录与关窗共用同一段）
+    void showLoginGate();          ///< 合门：显示登录页、收起顶部导航（含角标）、清会话显示
+    void onLoginSucceeded();       ///< 开门：恢复导航、进视频监控页、startAllStreams()
+    void onLogoutRequested();      ///< 导航「退出登录」：确认 → 停流 → 清限流窗口 → 登出 → 合门
     void appendLog(const QString &msg);  ///< 追加日志到文本框
 
     // ========== 人员点名 / 设备盘点业务模块 ==========

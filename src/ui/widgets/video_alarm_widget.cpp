@@ -1,5 +1,6 @@
 #include "video_alarm_widget.h"
 #include "alarm_detail_dialog.h"
+#include "construction_session.h"   // ConstructionInfo::display()：空负责人显示 "—"
 #include "theme.h"
 #include "qt_image_utils.h"
 #include "perf_probe.h"
@@ -199,7 +200,11 @@ QWidget *VideoAlarmWidget::createAlarmItem(const AlarmRecord &alarm)
     classLabel->setObjectName("alarmClass");
     infoLayout->addWidget(classLabel);
 
-    QLabel *channelLabel = new QLabel(QString("通道%1").arg(alarm.channel + 1));
+    // 负责人并到通道那一行：卡片是 setFixedHeight(104)，多塞一行会被裁掉，
+    // 而沿用 alarmChannel 的对象名正好复用同一套字号/颜色，不动高度也不动样式。
+    QLabel *channelLabel = new QLabel(
+        QString("通道%1 · %2").arg(alarm.channel + 1)
+            .arg(session::ConstructionInfo::display(alarm.workerName)));
     channelLabel->setObjectName("alarmChannel");
     infoLayout->addWidget(channelLabel);
 

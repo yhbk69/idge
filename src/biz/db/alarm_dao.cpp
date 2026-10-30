@@ -74,12 +74,12 @@ int64_t AlarmDAO::insertAlarm(const AlarmRecord &alarm)
                            class_id, class_name, confidence, image_path, video_path,
                            status, dispose_result, dispose_user_id, dispose_user_name,
                            dispose_time, dispose_photo, remark, read_time,
-                           create_time, update_time)
+                           create_time, update_time, worker_name, construction_info)
         VALUES (:id, :alarm_type, :alarm_level, :alarm_time, :channel,
                 :class_id, :class_name, :confidence, :image_path, :video_path,
                 :status, :dispose_result, :dispose_user_id, :dispose_user_name,
                 :dispose_time, :dispose_photo, :remark, :read_time,
-                :create_time, :update_time)
+                :create_time, :update_time, :worker_name, :construction_info)
     )");
 
     query.bindValue(":id", id);
@@ -104,6 +104,9 @@ int64_t AlarmDAO::insertAlarm(const AlarmRecord &alarm)
     query.bindValue(":read_time", alarm.readTime);
     query.bindValue(":create_time", createTime);
     query.bindValue(":update_time", alarm.updateTime);
+    // 施工信息：未登录时为空串，入库即 NULL 语义（显示侧统一成 "—"）
+    query.bindValue(":worker_name", alarm.workerName);
+    query.bindValue(":construction_info", alarm.constructionJson);
 
     if (!query.exec()) {
         qWarning() << "Insert alarm failed:" << query.lastError().text();
@@ -149,12 +152,12 @@ int64_t AlarmDAO::insertAlarms(const QVector<AlarmRecord> &alarms)
                            class_id, class_name, confidence, image_path, video_path,
                            status, dispose_result, dispose_user_id, dispose_user_name,
                            dispose_time, dispose_photo, remark, read_time,
-                           create_time, update_time)
+                           create_time, update_time, worker_name, construction_info)
         VALUES (:id, :alarm_type, :alarm_level, :alarm_time, :channel,
                 :class_id, :class_name, :confidence, :image_path, :video_path,
                 :status, :dispose_result, :dispose_user_id, :dispose_user_name,
                 :dispose_time, :dispose_photo, :remark, :read_time,
-                :create_time, :update_time)
+                :create_time, :update_time, :worker_name, :construction_info)
     )");
 
     for (const AlarmRecord &alarm : alarms) {
@@ -183,6 +186,8 @@ int64_t AlarmDAO::insertAlarms(const QVector<AlarmRecord> &alarms)
         query.bindValue(":read_time", alarm.readTime);
         query.bindValue(":create_time", createTime);
         query.bindValue(":update_time", alarm.updateTime);
+        query.bindValue(":worker_name", alarm.workerName);
+        query.bindValue(":construction_info", alarm.constructionJson);
 
         if (query.exec()) {
             inserted++;
@@ -907,6 +912,9 @@ AlarmRecord AlarmDAO::recordFromQuery(QSqlQuery &query)
     record.readTime = query.value("read_time").toString();
     record.createTime = query.value("create_time").toString();
     record.updateTime = query.value("update_time").toString();
+    // 施工信息：老行是 NULL → 空串，显示侧成 "—"，不回填（历史上确实没有这份信息）
+    record.workerName = query.value("worker_name").toString();
+    record.constructionJson = query.value("construction_info").toString();
 
     // 兼容旧字段
     record.timestamp = QDateTime::fromString(record.alarmTime, Qt::ISODate).toMSecsSinceEpoch();

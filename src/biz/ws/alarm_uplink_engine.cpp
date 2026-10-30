@@ -149,6 +149,16 @@ QJsonObject buildAlarmInfoMessage(const AlarmInfoInput &alarm,
         qRound(static_cast<double>(alarm.confidence) * 1000.0) / 1000.0;
     data[QStringLiteral("is_fence_alarm")] = alarm.isFenceAlarm;
     data[QStringLiteral("status")] = alarm.status;
+    // 施工信息走**嵌套子对象**，不把码里的键平铺进 data{}：
+    // 平铺会和 alarm_id/channel/class_name 撞键，且码字段一改线上协议就跟着漂。
+    // 空串（未登录）或不是对象（脏数据）时整个键省略，对端用"有没有 construction"
+    // 直接判断这条报警有没有施工归属，比收到一个空对象更不容易搞错。
+    if (!alarm.constructionJson.isEmpty()) {
+        const QJsonDocument doc = QJsonDocument::fromJson(alarm.constructionJson.toUtf8());
+        if (doc.isObject()) {
+            data[QStringLiteral("construction")] = doc.object();
+        }
+    }
     if (snapshot) {
         data[QStringLiteral("snapshot")] = mediaRefToJson(*snapshot, transfer);
     }

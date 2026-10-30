@@ -166,6 +166,9 @@ void AlarmUplink::onAlarmGenerated(const AlarmRecord &alarm)
     input.status = alarm.status;
     input.imagePath = alarm.imagePath;
     input.videoPath = alarm.videoPath;
+    // 施工信息在报警产生时就固化在记录里了，这里只搬运、不回查会话态：
+    // 退出登录后重传的那条，仍带它产生当时的施工信息。
+    input.constructionJson = alarm.constructionJson;
 
     const uplink::SubmitResult result = engine_.submit(input);
     // 第二段（截图）：只有批次首次登记时才去读盘。同一张图可能被 N 条报警行共享，

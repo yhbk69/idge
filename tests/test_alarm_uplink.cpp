@@ -22,6 +22,9 @@
 //      退避梯子 min(2^n×2s, 30s) 与 uplink_ack 的 ok/retry/reject/迟到四种对账结果
 //  1~11 全建在 Settings 的默认值 mediaViaUrl=false（=ws_binary）之上，那一条链路是
 //  "保留代码但默认关"的回归保护，改它们等于把旧链路失去验证。
+//  18) 施工信息：作为 data["construction"] **嵌套子对象**原样上行，不平铺进 data{}
+//      （平铺会和 alarm_id/channel/class_name 撞键，且码字段一改线上协议就跟着漂）；
+//      未登录（空串）或脏数据（不是对象）时这个键**整个缺席**，不是给一个空对象。
 // 仓库根运行：./build/build_rk3588_linux/test_alarm_uplink，rc 0=PASS 1=FAIL
 // ============================================================================
 
@@ -209,6 +212,44 @@ int main() try
     check(clip["name"].toString() == QStringLiteral("ch1_un_helmet_101112_345"), "片段 name 用同前缀无扩展名");
     check(clip["available_in_ms"].toInt() == uplink::kClipAvailableInMs, "片段应带就绪时间预告");
     check(!clip.contains("expected_bytes"), "片段字节数此刻无从得知");
+    // 未登录（或改动前的历史报警回填出来的行）没有施工信息，键必须整个缺席：
+    // 给一个空对象会让对端把"没有归属"和"归属是空"当成同一件事
+    check(!data.contains("construction"), "未带施工信息时 construction 键必须整个缺席");
+
+    // ---- 1b) 施工信息：嵌套子对象，不平铺 ----------------------------------
+    {
+        FakeTransport peer;
+        AlarmUplinkEngine engineC;
+        engineC.setTransport(&peer);
+        AlarmInfoInput c = makeAlarm("AC", "/data/alarms/20261029/ch1_un_helmet_101112_345.jpg");
+        c.constructionJson = QStringLiteral(
+            "{\"construction_id\":\"SG-2026-11\",\"worker_name\":\"张三\",\"team\":\"甲班\"}");
+        engineC.submit(c);
+        engineC.pumpOut();
+        check(peer.textCount() == 1, "带施工信息的报警照常只发一条");
+        const QJsonObject d = peer.jsonAt(0)["data"].toObject();
+        check(d.contains("construction") && d["construction"].isObject(),
+              "施工信息必须是 data 里的嵌套对象");
+        const QJsonObject cobj = d["construction"].toObject();
+        check(cobj["construction_id"].toString() == QStringLiteral("SG-2026-11"), "施工id 丢失");
+        check(cobj["worker_name"].toString() == QStringLiteral("张三"), "负责人姓名丢失");
+        check(cobj["team"].toString() == QStringLiteral("甲班"),
+              "码里的未知键要原样透传（改字段时不动上行代码就是靠这条）");
+        check(!d.contains("construction_id") && !d.contains("worker_name"),
+              "不许把码里的键平铺进 data —— 会和 alarm_id/channel/class_name 撞键");
+
+        // 脏数据（DB 里存着的旧值不是 JSON 对象）也不能把整条报警带崩
+        FakeTransport dirtyPeer;
+        AlarmUplinkEngine engineD;
+        engineD.setTransport(&dirtyPeer);
+        AlarmInfoInput dirty = makeAlarm("AD", "/data/alarms/20261029/ch1_un_helmet_101112_345.jpg");
+        dirty.constructionJson = QStringLiteral("不是 JSON");
+        engineD.submit(dirty);
+        engineD.pumpOut();
+        const QJsonObject dd = dirtyPeer.jsonAt(0)["data"].toObject();
+        check(dd["alarm_id"].toString() == QStringLiteral("AD"), "脏施工信息不该影响报文其余部分");
+        check(!dd.contains("construction"), "解不出对象时 construction 必须缺席");
+    }
 
     // ---- 2) 按 imagePath 合流 --------------------------------------------
     AlarmUplinkEngine joined;

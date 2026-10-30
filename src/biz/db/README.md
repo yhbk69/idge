@@ -135,3 +135,34 @@ sqlite3 data/idge.db "select count(*) from alarms where video_path<>''"
   互不相干的数据库层；勿混用连接。
 - 检测数据是否落库受 `storeDetections` 开关控制（对应提交 fc7ae46"仅存报警相关"）。
 - 建表语句在 `initialize()` 内幂等执行；修改表结构需同步 tests/test_database.cpp。
+
+### 表结构演进：`ensureColumns()`（本轮新增，此前全仓没有任何迁移机制）
+
+`alarms` 新增两列，都是 `TEXT`、可空、无默认、无外键：
+
+| 列 | 装什么 | 为什么只有这一列不行 |
+| --- | --- | --- |
+| `worker_name` | 负责人姓名 | 列表那一列每帧都要显示它，不该为一段文本去解析 JSON |
+| `construction_info` | **整份施工信息 JSON**（详情框与 WebSocket 上行都从它渲染） | 见下 |
+
+**为什么是 2 列而不是 5 列**：施工信息的字段还没定稿，5 列意味着改一次字段要动
+5 次 `ALTER` + 2 处 INSERT 列表 + `recordFromQuery` 5 行；2 列意味着只改
+`src/biz/session/construction_session.h` 里的 `ConstructionInfo` 一处，详情框与上行自动跟。
+代价：**不能直接按 SQL 过滤电话/工作内容**（要过滤得先 `json_extract`，本轮不做）。
+
+**为什么必须新增机制**：建表语句有**两份**且都是 `CREATE TABLE IF NOT EXISTS`
+（`sql/idge_init.sql` 与 `database_manager.cpp`），已部署的库不会自动长列。
+所以两份建表**同时补上这两列**（新库根本不需要 ALTER，但两份必须一致），
+老库由 `DatabaseManager::ensureColumns(table, columnDefs)` 补：`PRAGMA table_info` 逐行取列名，
+缺哪列补哪列 `ALTER TABLE … ADD COLUMN`，在 `initialize()` 里紧跟建表之后、
+纳秒转毫秒那段之前调用。
+
+- **幂等**（实测）：第一次启动日志两条 `Migrated: "ALTER TABLE alarms ADD COLUMN …"`，
+  第二次启动**零条**且不报错。
+- **补列失败只 warn，不中断初始化**：在老库上因一条 ALTER 失败就把整个报警库关掉，
+  比少两列严重得多。
+- **老行不回填**：`worker_name`/`construction_info` 为 NULL → `recordFromQuery` 读成空串 →
+  界面统一显示 `—`。历史上确实没有施工信息，编一个值填进去比留空更坏。
+- **写入侧无覆盖风险**：两处 INSERT 都是显式列名 + `bindValue`；`recordFromQuery` 按**列名**取
+  （不是位置索引），所以加列不影响既有解析。报警的更新全走显式 `UPDATE alarms SET …`，
+  没有"读-改-写回"，批量插入的 `INSERT OR REPLACE` 也就不会把施工信息冲空（逐条核过）。

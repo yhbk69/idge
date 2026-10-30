@@ -48,6 +48,13 @@ C++ 测试源码目录。含七个测试程序与一个人工联调工具：
   逐位一致（守 letterbox + 射线法，同时证明多边形没被降级成 `toRect`）、
   `roleFromString` 对缺键/空串/垃圾一律回落 `forbidden`（迁移的安全失效方向）。
   只链 `Qt5::Core`、无 GUI、与 cwd 无关，任意机器可跑。
+- `test_construction_qr.cpp`：扫码登录门的**全部契约**离线自检（11 组）。施工信息的
+  解析/校验/会话状态机（`ConstructionInfo::fromJson`/`fromQrText` + `ConstructionSession`）
+  加上真解一张码图：用 `segno` 生成含中文的 PNG → `qrcode::scanQrFromImageFile()` → 喂给
+  与登录页完全同一条 `startLogin()` 路径。另钉住三条易塌的口径：失败**不动**会话（不存在半登录）、
+  `toJson()` 往返保留未知键（字段没定稿，加字段不许吃掉多余键）、图片读不到时给**原因**而不是
+  返回空列表（空列表与"没有码"同形，会把路径错判成码印坏）。
+  只链 `Qt5::Core` + `Qt5::Gui` + zbar，不开摄像头、不起 GUI 线程。
 - `ws_sink.cpp`：**不是自检，是人工对拍的接收端**（`QWebSocketServer`）。板子出网受限，联调只能走
   loopback：`./ws_sink 8765 /tmp/sink_out` 起一个假对端，把 `websocket.server_url` 指到
   `ws://127.0.0.1:8765`。`ws_binary` 档它按 `media_id` 把二进制分块拼回文件并与报文里的 sha256 对拍；
@@ -66,6 +73,7 @@ C++ 测试源码目录。含七个测试程序与一个人工联调工具：
 | `test_channel_reload.cpp` | 通道热更新板端离线自测（停→releaseTasks→重建 ×4 轮，槽位集合/线程数/RSS 三项断言），须在 build 目录下跑 |
 | `test_alarm_uplink.cpp` | 报警上行离线自检（18 组：两种 transport 报文形状 / 帧序 / 地址换算与路径逃逸 / 队列·ack·退避），纯 Qt Core，任意机器可跑 |
 | `test_geofence_role.cpp` | 围栏角色判定离线自检（8 组：禁区优先 / 无岗区域守卫 / 任一岗区域内 / shapeIndex 口径 / 凹多边形回归 / role 回落），纯 Qt Core，任意机器可跑 |
+| `test_construction_qr.cpp` | 扫码登录门离线自检（11 组：施工信息解析/校验/会话状态机 + 真解一张含中文的码图），Qt Core+Gui+zbar，无摄像头无 GUI |
 | `ws_sink.cpp` | 人工联调用的假对端（`QWebSocketServer`）：收 text+binary、按 media_id 拼文件对拍 sha256，url 档只打印地址 |
 
 ## 使用方法
@@ -81,6 +89,13 @@ C++ 测试源码目录。含七个测试程序与一个人工联调工具：
 # 围栏判定自检只链 fence_checker.cpp，改判定逻辑时优先跑它（目标级构建，不整树重编）
 cmake --build build/build_rk3588_linux --target test_geofence_role -j"$(nproc)"
 ./build/build_rk3588_linux/test_geofence_role       # 同上；无 GUI、与 cwd 无关
+
+# 登录门自检：解一张真码 + 校验/会话状态机。第 9 组要一张码图，缺了只 SKIP 那一组并打出命令：
+#   /home/ubuntu/miniconda3/bin/python -m segno -o /tmp/idge_test_qr.png --scale 8 --border 4 \
+#     '{"worker_name":"张三","worker_phone":"13800001111","worker_id":"GZ-0042",
+#       "work_content":"隧道道床修补","construction_id":"SG-2026-11"}'
+cmake --build build/build_rk3588_linux --target test_construction_qr -j"$(nproc)"
+./build/build_rk3588_linux/test_construction_qr [码图路径...]   # 无 GUI、与 cwd 无关；路径含 "bad" 的按坏码处理
 
 # 盘点/点名自测必须在仓库根运行（依赖 assets/test/ + model/library/yolo11n-coco +
 # model/face/ 两件套权重；点名对照还需 model/face/face_recognition）；
@@ -130,10 +145,16 @@ curl -o /tmp/x.jpg '<sink 打出的 snapshot/media_begin url>' && sha256sum /tmp
 - `test_geofence_role` 只链 `Qt5::Core`，源 = `fence_checker.cpp` 一个文件：它只依赖
   `fence_shape.h` 与 `common.hpp` 里的 `image_rect_t` 字段，不碰 OpenCV/RKNN 符号，
   所以围栏判定改动能在不链主程序的前提下验证
+- `test_construction_qr` 链 `Qt5::Core` + `Qt5::Gui` + `${ZBAR_LIBRARIES}`，源 =
+  `construction_session.cpp` + `qr_decoder.cpp` 两个文件：解码器刻意只用 `QImage`/`QRect`
+  （不拖 OpenCV/RKNN 头），这是它能脱离摄像头与 GUI 线程自测的前提
 - `ws_sink` 链 `Qt5::Core` + `Qt5::WebSockets`，`QCoreApplication` 无 GUI 依赖
 - `test_channel_reload` 链的是主流水线的依赖闭包：`ffmpeg_video_decoder` + `video_recorder` +
   `ppe_task`/`base_task` + `model_registry` + `ConfigManager`/`parse_config` +
   DMA 缓冲 + `alarm_manager`/`alarm_dao`/`detection_dao`/`database_manager` + 围栏两件 +
+  `construction_session.cpp`（`makeAlarmRecord()` 给每条报警盖施工信息戳，于是
+  `alarm_manager.cpp` 多了一个 TU 依赖——手写源列表漏它就是三个 undefined reference，
+  而链接错误比编译错误更难归因）+
   `src/base/imaging`，库侧与主目标同一套（FFmpeg-rkmpp / rknnrt / rga / sqlite3 / jsoncpp / OpenCV /
   GLES/EGL），并同样带 `ZERO_COPY` 与 `--allow-shlib-undefined`；库搜索目录要单独
   `target_link_directories` 一遍——主目标那份是 target 级的，不会传给别的 target

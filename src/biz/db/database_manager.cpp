@@ -25,6 +25,7 @@
 #include "database_manager.h"
 #include <QSqlQuery>
 #include <QSqlError>
+#include <QSet>
 #include <QDateTime>
 #include <QFileInfo>
 #include <QFile>
@@ -101,6 +102,15 @@ bool DatabaseManager::initialize(const QString &dbPath)
     if (!createTables()) {
         qCritical() << "Failed to create tables";
         return false;
+    }
+
+    // 补列：CREATE TABLE IF NOT EXISTS 对已部署的老库是空操作，新加的
+    // 施工信息两列（worker_name / construction_info）只有在这里 ALTER 才存在。
+    // 失败不致命（只影响报警带施工信息，不影响其余功能），所以只告警不返回 false。
+    if (!ensureColumns(QStringLiteral("alarms"),
+                       {QStringLiteral("worker_name TEXT"),
+                        QStringLiteral("construction_info TEXT")})) {
+        qWarning() << "Alarms construction columns not fully ensured";
     }
 
     // 一次性单位迁移：旧版本把 detections.timestamp 写成了 epoch 纳秒，
@@ -291,7 +301,9 @@ bool DatabaseManager::createTables()
             remark          TEXT,
             read_time       TEXT,
             create_time     TEXT NOT NULL,
-            update_time     TEXT
+            update_time     TEXT,
+            worker_name     TEXT,
+            construction_info TEXT
         );
     )";
 
@@ -308,6 +320,54 @@ bool DatabaseManager::createTables()
 
     qInfo() << "Database tables created successfully";
     return true;
+}
+
+// ============================================================================
+// ensureColumns: 给已存在的表补列（本仓唯一的迁移手段）
+// ============================================================================
+// 为什么必须存在：两份 CREATE TABLE 都是 IF NOT EXISTS，已部署的库不会自动长列，
+// 只改建表语句 ⇒ 老库上 INSERT 直接 "no such column" 静默失败。
+// 判断用 PRAGMA table_info（内建 SQLite 3.49.1 支持），列名取第 2 个字段。
+// 只加可空、无默认、无外键的列，所以 ALTER 在已有数据上永远合法。
+// 调用方须持有 mutex_（initialize() 内部就是这样）。
+// ============================================================================
+bool DatabaseManager::ensureColumns(const QString &table, const QStringList &columnDefs)
+{
+    QSqlDatabase db = currentConnection();
+    if (!db.isOpen()) {
+        return false;
+    }
+
+    QSet<QString> existing;
+    {
+        QSqlQuery pragma(db);
+        // table 是代码里的字面量（alarms/detections），不来自用户输入，无注入面
+        if (!pragma.exec(QStringLiteral("PRAGMA table_info(%1)").arg(table))) {
+            qWarning() << "PRAGMA table_info failed for" << table << ":"
+                       << pragma.lastError().text();
+            return false;
+        }
+        while (pragma.next()) {
+            existing.insert(pragma.value(1).toString().toLower());
+        }
+    }
+
+    bool ok = true;
+    for (const QString &def : columnDefs) {
+        const QString name = def.section(QLatin1Char(' '), 0, 0).toLower();
+        if (name.isEmpty() || existing.contains(name)) {
+            continue;   // 已有该列：幂等，第二次启动就是走这条
+        }
+        QSqlQuery alter(db);
+        const QString sql = QStringLiteral("ALTER TABLE %1 ADD COLUMN %2").arg(table, def);
+        if (!alter.exec(sql)) {
+            qWarning() << "Add column failed:" << sql << ":" << alter.lastError().text();
+            ok = false;
+            continue;
+        }
+        qInfo() << "Migrated:" << sql;
+    }
+    return ok;
 }
 
 // ============================================================================

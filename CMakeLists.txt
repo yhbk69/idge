@@ -244,7 +244,9 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/biz/alarm               # 报警管理（去重、限流）
     ${CMAKE_SOURCE_DIR}/src/biz/db                  # 数据持久层（业务 sqlite3 + 报警 QtSQL 两套）
     ${CMAKE_SOURCE_DIR}/src/biz/geofence            # 电子围栏（形状、检测、覆盖层）
+    ${CMAKE_SOURCE_DIR}/src/biz/qrcode              # 二维码解码（ZBar 封装，登录与智能识别共用）
     ${CMAKE_SOURCE_DIR}/src/biz/service             # 点名/盘点业务服务
+    ${CMAKE_SOURCE_DIR}/src/biz/session             # 施工信息与登录会话
     ${CMAKE_SOURCE_DIR}/src/biz/sip                 # GB28181 国标视频推流（SIP/RTP/PS）
     ${CMAKE_SOURCE_DIR}/src/biz/ws                  # WebSocket 客户端（Pad↔Aibox 通信）
 
@@ -685,6 +687,31 @@ target_link_libraries(test_geofence_role
 target_compile_definitions(test_geofence_role PRIVATE ZERO_COPY)
 
 # ============================================================================
+# 施工信息 + 二维码离线自检（解析/校验/会话状态机 + 真解一张码图）
+# 只编 construction_session.cpp 与 qr_decoder.cpp：两头都只用 Qt，不开摄像头、
+# 不碰 GUI 线程，所以本目标不链 AlarmManager/DAO/ConfigManager，也不需要 X11。
+# 为什么值得单独钉：登录门的全部正确性压在"码里原文 → 校验 → 会话"这条短链上，
+# 而它在板端只靠肉眼验证一次就会定型（契约清单见 tests/test_construction_qr.cpp 头）。
+# 仓库根运行：./build/build_rk3588_linux/test_construction_qr，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_construction_qr
+    tests/test_construction_qr.cpp
+    src/biz/session/construction_session.cpp
+    src/biz/qrcode/qr_decoder.cpp
+)
+
+target_include_directories(test_construction_qr PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/biz/session
+    ${CMAKE_SOURCE_DIR}/src/biz/qrcode
+)
+
+target_link_libraries(test_construction_qr
+    Qt5::Core
+    Qt5::Gui
+    ${ZBAR_LIBRARIES}
+)
+
+# ============================================================================
 # 报警上行接收端（人工对拍，不是自检）
 # QWebSocketServer 收 text + binary：ws_binary 档按 media_id 拼成文件落 outdir 并比 sha256；
 # url 档只打印 media_begin 里的地址与 sha256，一个字节都不落盘（对拍改用 curl 取回）。
@@ -720,6 +747,10 @@ add_executable(test_channel_reload
     src/base/buffer/dma_alloc.cpp
     src/base/buffer/DmaFrameBuffer.cpp
     src/biz/alarm/alarm_manager.cpp
+    # alarm_manager.cpp 的 makeAlarmRecord() 现在给每条报警盖施工信息戳，
+    # 于是本目标的依赖闭包里多了一个会话实现。漏了它就是三个 undefined reference
+    # （instance / snapshot / toJson），而链接错误比编译错误更难归因到这里。
+    src/biz/session/construction_session.cpp
     src/biz/db/alarm_dao.cpp
     src/biz/db/detection_dao.cpp
     src/biz/db/database_manager.cpp

@@ -21,6 +21,21 @@
 - **AlarmManager**（`QObject` 单例）：全局唯一。
 - **AlarmRecord**：一条报警（时间戳、通道、类别、置信度、确认位、截图路径、视频片段路径、是否围栏报警）。
   围栏报警的 `alarmType` 是 `fence_in`/`fence_out`（闯入禁区/离岗），普通检测报警是 `"detection"`。
+  本轮加两个字段承载施工信息：`workerName`（列表那一列直接显示）与 `constructionJson`（整份载荷，
+  详情框与上行都从它渲染）。**为什么只有两个**见 `src/biz/session/README.md`：字段还没定稿，
+  两列的形状让"加字段只动 `ConstructionInfo` 一处"成立。
+
+### 施工信息打戳（`makeAlarmRecord`）与 `resetThrottles`
+
+`makeAlarmRecord()`（静态自由函数，**跑在解码线程上**）里向 `ConstructionSession::snapshot()`
+取一次值塞进记录 —— **产生时固化，不在发送/显示时回查会话**。这是两条正确性的前提：
+退出登录后重传的那条报警仍带着它产生时的归属；解码线程不持任何跨数据库写的锁。
+未登录 ⇒ `snapshot()` 返回空对象 ⇒ 两个字段都空 ⇒ 界面 `—`、上行不带 `construction` 键。
+
+`resetThrottles()`（新）只做一件事：`lastAlarmTime_.clear()`。**退出登录时必须调**——
+限流态是这个内存 map（检测与围栏共用键空间），不清的话重登后 2s（类别）/10s（围栏）窗口内的
+第一条报警会被静默吞掉，表现为"换了个人扫码，头一条报警没了"。实测日志：
+`AlarmManager: throttle windows cleared ( 7 keys)`。
 
 数据流：
 ```

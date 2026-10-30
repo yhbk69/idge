@@ -11,6 +11,7 @@
 - **报警查询页**：数据看板（`dashboard_widget`）与报警记录列表（`alarm_list_widget`），本目录仅负责挂载与角标/toast 联动；
 - **人员点名页**（caichao 合入）：任务列表 + 拍照选图 + 登记识别 + 注销匹配全流程；
 - **设备盘点页**（caichao 合入）：复用点名选图界面做设备检测登记/注销与详情查看；
+- **扫码登录页（门禁，本轮新增）**：`LoginWidget`，程序启动后**第一个页面**，未登录不放行主界面；
 - **智能识别页**：二维码（ZBar）/ 铭牌文字（PP-OCRv4）/ 人员点名 / 设备盘点 四张卡片。
   前两张点击弹本文件内的模态取流对话框；后两张只 `emit rollCallRequested/equipmentRequested`，
   由 `frmMain` 把对应业务页装进窗口级模态 `QDialog` 弹出。页面本身无常驻任务。
@@ -35,7 +36,8 @@
 | equipment_inventory_widget.h/.cpp | 设备盘点任务列表页（双服务注入） | caichao 合入 |
 | equipment_recognition_dialog.h/.cpp | 设备识别结果对话框（Registration/Cancellation 两阶段共用） | caichao 合入 |
 | equipment_detail_dialog.h/.cpp | 设备盘点任务详情对话框（只读快照） | caichao 合入 |
-| smart_recognition_widget.h/.cpp | 智能识别页（二维码 + OCR 铭牌文字 + 人员点名 + 设备盘点）：四卡片入口，前两张自带模态对话框，后两张只发请求信号；含匿名 namespace 里的 OCR 选区控件 | 新增 |
+| login_widget.h/.cpp | **扫码登录页（门禁）**：标题+操作说明+状态行+三个大按钮（扫码登录 / 测试登录 / 退出程序）。只发信号 `loginSucceeded/loginFailed(reason)/exitProgramRequested`，不碰 `frmMain` 内部；解析校验全交给 `ConstructionSession` | 新增 |
+| smart_recognition_widget.h/.cpp | 智能识别页（二维码 + OCR 铭牌文字 + 人员点名 + 设备盘点）：四卡片入口，前两张自带模态对话框，后两张只发请求信号；含匿名 namespace 里的 OCR 选区控件。**二维码那三行现在只是转调 `uiwidgets` 的 `QrScanDialog::openFullScanner()`**（与登录页共用同一个扫码器） | 新增 |
 | photo_selection_dialog.h | **遗留未使用**旧版选图对话框声明（仅头文件，无实现无引用，含已修正的乱码注释），与 photo_selection_widget.h 同名类互斥 | caichao 合入（废弃版本） |
 
 ## 页面与导航结构
@@ -47,9 +49,13 @@
   - index1 插入 `DashboardWidget`（数据看板）、index2 插入 `AlarmListWidget`（报警数据）；
   - 末尾 `addWidget(smartPage_)`（智能识别，代码创建的容器页）。设备盘点不再有独立页，
     `EquipmentInventoryWidget` 直接装进 `equipmentDialog_`。
-- 顶部导航共 6 项，`buttonClick()` 按按钮文本分发：视频监控 / 数据看板 / 报警数据 / 智能识别 / 调试设置 / 退出。
+- 顶部导航共 6 项，`buttonClick()` 按按钮文本分发：视频监控 / 数据看板 / 报警数据 / 智能识别 / 调试设置 / **退出登录**。
   其中 **智能识别 `btnSmart` 是 `.ui` 里直接新增的按钮**（图标 `:/image/main_smart.png`）；
   导航图标在 `initNewPages()` 里与文本成对重设（`.ui` 里的原始图标语义已与现文本不符），字号统一取 `theme::FS_NAV`。
+- ⚠ **`btnExit` 是按对象身份分发的**（`if (b == ui->btnExit)`，放在文字链之前），并且被排除在
+  `setChecked` 循环外。原因：`buttonClick()` 整条链按**按钮文本**匹配，把"退出"改成"退出登录"
+  会让老的 `name == "退出"` 分支静默失配——按钮看着在、点了没反应，是最难查的一类坏法。
+  不参与 `setChecked` 是因为它不"选中某个页"，否则退出登录之后它一直高着。
 - **切换按控件指针**（`setCurrentWidget`）而非索引，避免插页导致索引漂移；`buttonClick()` 按按钮文本分发。
 - **点名/盘点入口**：`initBusinessPages()` 把两个业务页各装进一个 `QDialog`（`rollCallDialog_`/`equipmentDialog_`，
   窗口级模态 `Qt::WindowModal`），智能识别页卡片经信号触发 `showRollCallDialog()`/`showEquipmentDialog()`，
@@ -58,6 +64,54 @@
 - 业务对话框均为**模态**（`exec()`）嵌套：点名创建 = 输入名 → PhotoSelectionDialog → RecognitionResultDialog；自定义返回码 `done(2)` 约定"用户取消且任务已删"，外层据此只提示不重复删除。
   点名/盘点的**任务列表页**是唯一的例外：宿主 `QDialog` 用 `show()` + `Qt::WindowModal`（见上条）。
 - 任务详情页（点名）刻意用非模态 `QWidget + WA_DeleteOnClose + show()`，可与列表并行查看。
+
+## 登录门禁状态机
+
+**`frmMain` 只构造一次，登录态是 `stackedWidget` 的第 0 页**，不是"先弹框再建主窗"。
+否决过的替代方案（在 `main()` 里先 `exec` 一个登录框）有三个硬伤：`ConfigManager::load()`
+发生在 `initForm()` 第 9 步，登录框在那之前拿不到摄像头地址；GB28181 在 `main.cpp` 里已经起过，
+"登录前什么都不跑"这个不变量在那个方案下本来就不成立；而"退出登录要能回到登录页"就得反复构造
+`frmMain` ⇒ metaType 重复注册、报警信号重复连接、四路重复开。
+
+状态转移（`showLoginGate()` / `onLoginSucceeded()` / `onLogoutRequested()`）：
+
+```
+启动 ──► 登录页(0) ──测试登录/扫码成功──► 主页 + startAllStreams()
+             ▲                                    │
+             └────── 退出登录（btnExit）◄─────────┘
+                        │
+                        └─ stopAllStreams → resetThrottles → logout → showLoginGate
+```
+
+- **光切页面挡不住导航**：`.ui` 里 `widgetTitle{ widgetTop{btnMain…btnExit}, widgetMenu }`
+  与 `stackedWidget` 是**平级**的，登录页盖不住那一行。所以 `showLoginGate()` 必须
+  `ui->widgetTop->hide()`（报警角标是 `btnEquipCheck` 的子控件，跟着一起藏），登录成功再 `show()`。
+  这不只是外观问题：留着就能点「智能识别」，那一页会去开 `/dev/video22`，
+  与登录页的扫码器**抢同一个设备节点**。标题栏三钮（`widgetMenu`）留着——× 就是退出程序，
+  与登录页那颗按钮同义，不冲突。
+- **`startAllStreams()` / `stopAllStreams()` 是从 `initForm()` 第 11 步和 `closeEvent()` 里
+  抽出来的同一段代码**（纯搬运，不改行为），加 `streamsRunning_` 守卫：重复调用只记一条日志、
+  不动作。门要"不开"也要"停了再开"，所以必须先抽出来。实测：登录→退出→再登录，
+  日志里 `decoder pacer ch` 恰好 4+4 行，四路各被打开一次。
+- **退出登录清什么**：停四路、`AlarmManager::resetThrottles()`、`ConstructionSession::logout()`、
+  收掉 toast 与角标。**不清**：DB 历史、`FenceManager` 的围栏（配置态不是会话态）、
+  WsClient 连接与**待发上行队列**、备份/关机定时器。
+  `resetThrottles()` 不是可选的——限流态是一个内存 map，不清的话重登后 2s（类别）/10s（围栏）
+  窗口内的第一条报警会被静默吞掉。上行队列不清是对的：施工信息在 `makeAlarmRecord()` 就定死了，
+  发送时不再回查会话，所以重传的那条仍带着**它产生时**的归属。
+- **门挡的是"检测与报警产生"，不是整个进程的网络出口**：GB28181 在 `main.cpp` 里按配置启动、
+  WsClient 照连接、备份定时器照跑。它配置驱动、板上无 `gb28181` 段即静默跳过、不占摄像头、不产报警，
+  挪进门内要改 `main()` 的作用域与 `unique_ptr` 生命周期，风险大于收益。如实写在这里，别当成"登录后才联网"。
+- **测试登录与扫码是同一条路**：`plan/construction_qr.json`（gitignore，不入库）读进来后
+  喂给与扫码完全相同的 `startLogin(qrText, &err)`，没有第二套解析/校验分支。
+  载荷按 `$IDGE_PLAN_DIR` → `plan/` → `../plan/` → `../../plan/` → `../../../plan/` →
+  `data/construction_qr.json` 顺序找：`RuntimePaths` 全是相对 CWD 的，而 `run.sh` 会先 cd 进
+  `build/build_rk3588_linux`，所以仓库根的 `plan/` 在运行时是**够不着的**（实测命中 `../../plan/`），
+  最后那条 `data/` 才是部署机上的真正落点。一个都没找到就把**每个试过的路径**列在中文提示里，
+  不静默、不崩。
+- **登录页不常驻摄像头预览**：预览只在扫码对话框打开期间存在。实测停在登录页时
+  进程的 `/dev/video*` 句柄数为 0、CPU 0%、`alarms` 表 60s 不增；点「扫码登录」后为 1。
+  这也是"门挡着的时候不碰摄像头"能成立的前提。
 
 ## 使用方法
 

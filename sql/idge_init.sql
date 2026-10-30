@@ -35,7 +35,9 @@ CREATE TABLE IF NOT EXISTS alarms (
     remark          TEXT,                        -- 补充说明
     read_time       TEXT,                        -- 已读时间
     create_time     TEXT NOT NULL,               -- 入库时间
-    update_time     TEXT                         -- 更新时间
+    update_time     TEXT,                        -- 更新时间
+    worker_name     TEXT,                        -- 施工负责人姓名（扫码登录带入；历史行为 NULL）
+    construction_info TEXT                       -- 施工信息完整 JSON（详情框逐键渲染、上行 data["construction"]）
 );
 
 -- 索引

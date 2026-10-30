@@ -38,6 +38,8 @@
 #include "roll_call_widget.h"
 #include "equipment_inventory_widget.h"
 #include "smart_recognition_widget.h"
+#include "login_widget.h"        // 扫码登录页（stackedWidget 第 0 页 = 门）
+#include "construction_session.h"
 #include "roll_call_service.h"
 #include "equipment_inventory_service.h"
 #include "model_registry.h"
@@ -95,6 +97,11 @@ frmMain::frmMain(QWidget *parent) : QWidget(parent), ui(new Ui::frmMain)
     // availableGeometry()；全屏改由 main() 的 showFullScreen() 负责后它就成了冲突项
     // （构造里改 geometry 会打断全屏），见 Lane E 的说明。
     QtHelper::enableTouchScrollAll(this);
+
+    // 门在最上面：所有页面都建好了才合门，这样登录页是构造完成后唯一可见的页面。
+    // 四路视频此刻还没开（initForm 第 11 步已挪到 onLoginSucceeded），
+    // 所以登录期间不推流、不检测、不出报警。
+    showLoginGate();
 }
 
 frmMain::~frmMain()
@@ -329,14 +336,10 @@ void frmMain::initForm()
     }
     geofence::FenceManager::instance().loadFromConfig();
 
-    // 11. 按通道配置打开四路视频（必须在 config 加载之后）
+    // 11. 四路视频**不在这里开**。扫码登录前不推流、不检测、不出报警，
+    //     开流动作在 onLoginSucceeded() 里经 startAllStreams() 完成（幂等）。
     //     enabled=false 的通道留空，四宫格显示"未开流"。运行中改这个开关（以及
     //     模型列表）不需要重启：设置页会经 applyChannelConfigNow() 重开该路。
-    ConfigManager &cfg = ConfigManager::instance();
-    for (int ch = 0; ch < cfg.channelCount(); ++ch) {
-        if (cfg.channelEnabled(ch))
-            videoWindow->openVideo(ch, cfg.channelSource(ch));
-    }
 
     // 12. 初始化调试帮助页（从 config 读取配置填充 UI）
     initDebugPage();
@@ -381,7 +384,10 @@ void frmMain::initNewPages()
     ui->btnRoll->setText("数据看板");
     ui->btnEquipCheck->setText("报警数据");
     ui->btnHelp->setText("调试设置");
-    ui->btnExit->setText("退出");
+    // 「退出」改成「退出登录」：进程不死，只回到扫码页并停流。
+    // 真正的退出程序入口在登录页那颗按钮与标题栏 ×（buttonClick 里按对象身份分派，
+    // 不再按文字 —— 改文字不改分派会让这颗钮静默失效）。
+    ui->btnExit->setText("退出登录");
     // 隐藏多余的占位按钮（人员点名/设备盘点原义、报警查询、系统设置）
     // btnSmart（智能识别）的标签由 .ui 直接提供，无需在此处理
     ui->btnData->hide();
@@ -394,6 +400,18 @@ void frmMain::initNewPages()
     // 插入到 pageMonitor(视频监控) 之后：index 1=数据看板, 2=报警数据
     ui->stackedWidget->insertWidget(1, dashboardWidget_);
     ui->stackedWidget->insertWidget(2, alarmListWidget_);
+
+    // ===== 扫码登录页：stackedWidget 的第 0 页（门）=====
+    // 代码里 insertWidget，不碰 .ui（src/ui/form/README.md 的既有约定）。
+    // 页面切换全按控件指针（setCurrentWidget），所以插到 0 不会让别处的索引漂移。
+    login_ = new LoginWidget();
+    login_->setStyleSheet(QString("background: %1;").arg(theme::BG));
+    ui->stackedWidget->insertWidget(0, login_);
+    connect(login_, &LoginWidget::loginSucceeded, this, &frmMain::onLoginSucceeded);
+    connect(login_, &LoginWidget::loginFailed, this, [this](const QString &reason) {
+        appendLog(QString::fromUtf8("登录失败：%1").arg(reason));
+    });
+    connect(login_, &LoginWidget::exitProgramRequested, this, &frmMain::systemExit);
 
     // 设置背景
     dashboardWidget_->setStyleSheet(QString("background: %1;").arg(theme::BG));
@@ -550,10 +568,15 @@ void frmMain::showAlarmToast(const AlarmRecord &alarm)
     } else {
         head = QString("⚠ 通道%1 检测到 %2").arg(alarm.channel + 1).arg(alarm.className);
     }
-    alarmToast_->setText(QString("%1 (%2%%)  %3")
+    // 负责人挂在时间后面；为空就不拼（toast 是右下角那一块，多一段空格比少一段更难看，
+    // 而未登录期间根本不会有报警，这条只在旧历史回读之类的场景才空）
+    const QString worker = alarm.workerName.isEmpty()
+        ? QString()
+        : QString("  负责人 %1").arg(alarm.workerName);
+    alarmToast_->setText(QString("%1 (%2%%)  %3%4")
         .arg(head)
         .arg(alarm.confidence * 100, 0, 'f', 1)
-        .arg(dt.toString("HH:mm:ss")));
+        .arg(dt.toString("HH:mm:ss"), worker));
     alarmToast_->adjustSize();
     // 右下角悬浮显示
     int x = this->width() - alarmToast_->width() - 20;
@@ -788,25 +811,34 @@ void frmMain::reloadEquipmentService()
 
 /**
  * @brief 顶部导航按钮点击处理
- * 根据按钮文字切换 stackedWidget 页面（用 setCurrentWidget 按控件指针切换，避免索引漂移）：
+ * 页面切换用 setCurrentWidget 按控件指针（避免索引漂移）：
  *   - "视频监控" -> pageMonitor（视频监控页）
  *   - "数据看板" -> dashboardWidget_（数据看板）
  *   - "报警数据" -> alarmListWidget_（报警数据）
  *   - "智能识别" -> smartPage_（二维码 + OCR + 人员点名 + 设备盘点）
  *   - "调试设置" -> pageSettings（调试帮助页）
- *   - "退出"     -> 退出确认
+ *   - btnExit（"退出登录"）-> onLogoutRequested()，**按对象身份**分派，见下
  * 人员点名/设备盘点不是导航项：它们在智能识别页里以卡片入口 + 弹窗呈现。
  */
 void frmMain::buttonClick()
 {
     QAbstractButton *b = (QAbstractButton *)sender();
-    QString name = b->text();
 
-    // 更新按钮选中状态
+    // 更新按钮选中状态。「退出登录」不参与：它不对应任何页面，没有选中态可给，
+    // 点完就回登录页，留着高亮等于骗人说"当前在这一页"。
     QList<QAbstractButton *> tbtns = ui->widgetTop->findChildren<QAbstractButton *>();
     foreach (QAbstractButton *btn, tbtns) {
-        btn->setChecked(btn == b);
+        btn->setChecked(btn == b && btn != ui->btnExit);
     }
+
+    // 「退出登录」按**对象身份**而不是文字分派：文字这轮从"退出"改成了"退出登录"，
+    // 只改文字不改这条链，这颗钮就会静默失效（点了没反应，比报错难查得多）。
+    if (b == ui->btnExit) {
+        onLogoutRequested();
+        return;
+    }
+
+    const QString name = b->text();
 
     // 切换页面
     if (name == "视频监控") {
@@ -820,8 +852,6 @@ void frmMain::buttonClick()
         ui->stackedWidget->setCurrentWidget(smartPage_);
     } else if (name == "调试设置") {
         ui->stackedWidget->setCurrentWidget(ui->pageSettings);
-    } else if (name == "退出") {
-        systemExit();
     }
 }
 
@@ -958,19 +988,56 @@ void frmMain::systemExit()
     }
 }
 
-void frmMain::closeEvent(QCloseEvent *event)
+// ==========================================
+// 扫码登录门
+// ==========================================
+//
+// 门是 stackedWidget 的第 0 页，frmMain 只构造一次。为什么不做成
+// "main() 里先弹登录框再建主窗"：ConfigManager::load() 在 initForm() 里，
+// 登录框在那之前拿不到摄像头地址；而"退出登录要能回到登录页"在那个方案下
+// 就得反复构造 frmMain ⇒ metaType 重复注册、报警信号重复连接、四路重复开。
+//
+// 门挡的是"检测与报警产生"（四路解码器 + 报警限流），**不是整个进程的网络出口**：
+// GB28181 与 WebSocket 连接在门外照常按配置跑，详见 src/ui/form/README.md。
+
+void frmMain::startAllStreams()
+{
+    if (streamsRunning_) {
+        log("system", "四路已在运行，忽略重复的 startAllStreams()");
+        return;
+    }
+
+    // 必须在 config 加载之后（initForm 第 9 步）；登录成功时这个条件早已满足。
+    // enabled=false 的通道留空，四宫格显示"未开流"。运行中改这个开关（以及模型列表）
+    // 不需要重启：设置页会经 applyChannelConfigNow() 重开该路。
+    ConfigManager &cfg = ConfigManager::instance();
+    int opened = 0;
+    for (int ch = 0; ch < cfg.channelCount(); ++ch) {
+        if (!cfg.channelEnabled(ch))
+            continue;
+        videoWindow->openVideo(ch, cfg.channelSource(ch));
+        ++opened;
+    }
+    streamsRunning_ = true;
+    log("system", QString("登录后可用，已开流 %1 路（共 %2 路）")
+                      .arg(opened).arg(cfg.channelCount()));
+}
+
+void frmMain::stopAllStreams()
 {
     // 停止时序（两阶段并行停止，避免串行等待导致关闭时间叠加）：
     // 1. signalStop: 通知所有解码器退出（不阻塞）
     // 2. waitForStop: 等待所有解码线程实际退出
     // 这样 4 路解码器并行退出，总等待时间 ≈ max(单路) 而非 sum(4路)
+    if (!streamsRunning_) {
+        return;   // 没开过（或已停过）：关窗时 closeEvent 与本函数都会走到这里，重复停是无害但会打无谓日志
+    }
 
-    // 停止数据看板刷新定时器
+    // 停止数据看板刷新定时器（下次切到看板页 showEvent 会自行重启，无需显式 start）
     if (dashboardWidget_) {
         dashboardWidget_->stop();
     }
 
-    // 第一阶段：通知所有 4 路解码器退出
     if (videoWindow) {
         for (int ch = 0; ch < 4; ch++) {
             PlayerWidget *pw = videoWindow->playerWidget(ch);
@@ -978,7 +1045,6 @@ void frmMain::closeEvent(QCloseEvent *event)
                 pw->signalStop();
             }
         }
-        // 第二阶段：等待所有解码线程退出
         for (int ch = 0; ch < 4; ch++) {
             PlayerWidget *pw = videoWindow->playerWidget(ch);
             if (pw) {
@@ -986,6 +1052,86 @@ void frmMain::closeEvent(QCloseEvent *event)
             }
         }
     }
+    streamsRunning_ = false;
+}
+
+void frmMain::showLoginGate()
+{
+    if (!login_) {
+        return;
+    }
+    login_->resetStatus();
+
+    // 光切页面挡不住：.ui 里 widgetTitle{ widgetTop, widgetMenu } 与 stackedWidget
+    // **是平级的**，登录页盖不住导航行。不收起 widgetTop 的话，登录期间照样能点
+    // 「智能识别」，而那页一进去就开 smartRecognition.camera 的设备节点 ——
+    // 与登录页的扫码器抢同一个 /dev/videoNN（ConfigManager.h 明令禁止第二次打开）。
+    // 角标 alarmBadge_ 是 btnEquipCheck 的子件，跟着一起藏，不用单独处理。
+    // 标题栏三钮区 widgetMenu 留着：× 就是退出程序，与登录页那颗按钮同义、不冲突。
+    if (ui->widgetTop) {
+        ui->widgetTop->hide();
+    }
+
+    ui->stackedWidget->setCurrentWidget(login_);
+}
+
+void frmMain::onLoginSucceeded()
+{
+    if (ui->widgetTop) {
+        ui->widgetTop->show();
+    }
+
+    ui->stackedWidget->setCurrentWidget(ui->pageMonitor);
+    // 走按钮的既有分派（含 setChecked 归位与右侧报警面板刷新），和启动时同一条路径
+    ui->btnMain->click();
+
+    startAllStreams();
+    log("system", QString("扫码登录成功：%1")
+                      .arg(session::ConstructionSession::instance().summary()));
+}
+
+void frmMain::onLogoutRequested()
+{
+    QMessageBox box(QMessageBox::Question, tr("退出登录"),
+                    tr("退出登录后将停止视频检测，直到重新扫码登录。\n确认退出登录吗？"),
+                    QMessageBox::Ok | QMessageBox::Cancel, nullptr);
+    box.setWindowFlags(box.windowFlags() | Qt::WindowStaysOnTopHint);
+    QtHelper::localizeMessageBoxButtons(&box);
+    box.adjustSize();
+    // 与 systemExit() 同一条居中口径：按主窗所在屏，不是 primaryScreen（本机是双屏，
+    // primary 恰好是没触摸的那块，弹过去岗位上按不到）
+    if (QScreen *screen = QGuiApplication::screenAt(geometry().center())) {
+        QRect scr = screen->availableGeometry();
+        box.move(scr.center() - box.rect().center());
+    }
+    box.raise();
+    box.activateWindow();
+    if (box.exec() != QMessageBox::Ok) {
+        return;
+    }
+
+    stopAllStreams();
+    // 限流窗口是"通道:类别"键的纯内存态，与施工信息无关：不清的话重登后
+    // 2 秒（检测）/围栏窗口期内的第一条报警会被静默吞掉，界面一条都不出。
+    AlarmManager::instance().resetThrottles();
+    session::ConstructionSession::instance().logout();
+
+    // 悬浮提示收掉：它是 this 的子件、盖在整窗之上，不藏会在登录页右上角继续挂着上一班的报警
+    if (toastTimer_) {
+        toastTimer_->stop();
+    }
+    if (alarmToast_) {
+        alarmToast_->hide();
+    }
+
+    showLoginGate();
+    log("system", "已退出登录：四路已停、限流窗口已清、施工信息已作废");
+}
+
+void frmMain::closeEvent(QCloseEvent *event)
+{
+    // 停流序列抽到 stopAllStreams()（与"退出登录"共用同一段，见那边的说明）
+    stopAllStreams();
     event->accept();
     qApp->quit();
 }

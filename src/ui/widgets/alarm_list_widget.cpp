@@ -4,6 +4,7 @@
 #include <QDebug>
 #include "runtime_paths.h"
 #include "alarm_manager.h"
+#include "construction_session.h"   // ConstructionInfo::display()：空值统一成 "—" 的唯一口径
 #include "qthelper.h"
 #include "alarm_detail_dialog.h"
 #include "fence_manager.h"
@@ -250,8 +251,9 @@ void AlarmListWidget::setupUi()
     ====================================================
     */
     table_ = new QTableWidget();
-    table_->setColumnCount(7);
-    table_->setHorizontalHeaderLabels({"时间", "通道", "类别", "置信度", "状态", "操作", "ID"});
+    // 1920 宽下再加就必截字，所以列表**只这一列**负责人，其余施工信息进详情框。
+    table_->setColumnCount(8);
+    table_->setHorizontalHeaderLabels({"时间", "通道", "类别", "置信度", "负责人", "状态", "操作", "ID"});
     table_->horizontalHeader()->setStretchLastSection(true);
     table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -277,8 +279,8 @@ void AlarmListWidget::setupUi()
     ====================================================
     */
     fenceTable_ = new QTableWidget();
-    fenceTable_->setColumnCount(5);
-    fenceTable_->setHorizontalHeaderLabels({"时间", "通道", "类别", "置信度", "围栏类型"});
+    fenceTable_->setColumnCount(6);
+    fenceTable_->setHorizontalHeaderLabels({"时间", "通道", "类别", "置信度", "负责人", "围栏类型"});
     fenceTable_->horizontalHeader()->setStretchLastSection(true);
     fenceTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     fenceTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -383,6 +385,11 @@ void AlarmListWidget::refreshTable()
         confItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);  // 右对齐
         table_->setItem(i, 3, confItem);
 
+        // 负责人列：施工信息里唯一进列表的一项（1920 宽再加就截字）。
+        // 未登录/历史行为空 → 统一显示 "—"，与详情框、卡片、toast 同一个口径。
+        table_->setItem(i, 4, new QTableWidgetItem(
+            session::ConstructionInfo::display(a.workerName)));
+
         // 状态列
         QTableWidgetItem *statusItem;
         if (a.status == "false_alarm") {
@@ -395,7 +402,7 @@ void AlarmListWidget::refreshTable()
             statusItem = new QTableWidgetItem("未确认");
             statusItem->setForeground(QColor(255, 152, 0));   // 橙色
         }
-        table_->setItem(i, 4, statusItem);
+        table_->setItem(i, 5, statusItem);
 
         // 操作列（详情按钮）：触屏档 T3。这条也是报警详情的**唯一可靠入口** ——
         // 表格双击（cellDoubleClicked）在触屏上不可靠，但那是手势问题，本轮不动。
@@ -409,10 +416,10 @@ void AlarmListWidget::refreshTable()
         connect(btnDetail, &QPushButton::clicked, this, [this, i]() {
             showAlarmDetail(i);
         });
-        table_->setCellWidget(i, 5, btnDetail);
+        table_->setCellWidget(i, 6, btnDetail);
 
         // ID列
-        table_->setItem(i, 6, new QTableWidgetItem(a.id));
+        table_->setItem(i, 7, new QTableWidgetItem(a.id));
     }
 }
 
@@ -531,9 +538,13 @@ void AlarmListWidget::refreshFenceTable()
         confItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
         fenceTable_->setItem(i, 3, confItem);
 
-        // 第 4 列出角色：一条通道可以同时有禁区和岗区域，都写"围栏"就看不出
-        // 报的是"闯进来了"还是"人跑出去了"。老库里的 "fence" 归到闯入。
+        // 负责人列（与类别报警表同一列位、同一 "—" 口径）
         fenceTable_->setItem(i, 4, new QTableWidgetItem(
+            session::ConstructionInfo::display(a.workerName)));
+
+        // 第 5 列出角色：一条通道可以同时有禁区和岗区域，都写"围栏"就看不出
+        // 报的是"闯进来了"还是"人跑出去了"。老库里的 "fence" 归到闯入。
+        fenceTable_->setItem(i, 5, new QTableWidgetItem(
                 a.alarmType == QLatin1String("fence_out")
                     ? QStringLiteral("离岗")
                     : QStringLiteral("闯入禁区")));

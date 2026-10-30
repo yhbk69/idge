@@ -42,6 +42,7 @@
 #include "alarm_manager.h"
 #include "perf_probe.h"
 #include "ConfigManager.h"
+#include "construction_session.h"
 #include "database_manager.h"
 #include "alarm_dao.h"
 #include "detection_dao.h"
@@ -51,6 +52,7 @@
 #include <QElapsedTimer>
 #include <QDir>
 #include <QFileInfo>
+#include <QJsonDocument>
 #include <QUuid>
 #include <chrono>
 #include <condition_variable>
@@ -212,6 +214,17 @@ AlarmRecord makeAlarmRecord(int channel, const object_detect_result &det,
     alarm.alarmTime = dt.toString(Qt::ISODate);
 
     alarm.status = "pending";
+
+    // 施工信息在**产生这一刻**固化（不等到显示/上行时再回查会话）：
+    // 退出登录后重传的那条报警，仍带着它产生时的施工信息。
+    // 未登录时 snapshot 是空对象，两列都留空 ⇒ 门挡住的正是这里。
+    const session::ConstructionInfo construction =
+        session::ConstructionSession::instance().snapshot();
+    alarm.workerName = construction.workerName;
+    if (!construction.raw.isEmpty() || !construction.constructionId.isEmpty()) {
+        alarm.constructionJson = QString::fromUtf8(
+            QJsonDocument(construction.toJson()).toJson(QJsonDocument::Compact));
+    }
     return alarm;
 }
 
@@ -937,4 +950,15 @@ void AlarmManager::cleanOldData(int daysToKeep)
     DatabaseManager::instance().cleanOldDetections(daysToKeep);
     DatabaseManager::instance().cleanOldAlarms(daysToKeep);
     qInfo() << "AlarmManager: Cleaned data older than" << daysToKeep << "days";
+}
+
+// ============================================================================
+// resetThrottles: 退出登录时清空限流窗口（只动内存，不动 DB 与报警列表）
+// ============================================================================
+void AlarmManager::resetThrottles()
+{
+    QMutexLocker lock(&mutex_);
+    const int keys = lastAlarmTime_.size();
+    lastAlarmTime_.clear();
+    qInfo() << "AlarmManager: throttle windows cleared (" << keys << "keys)";
 }
