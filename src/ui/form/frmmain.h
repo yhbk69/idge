@@ -97,6 +97,7 @@ private:
     SmartRecognitionWidget *smartRecognitionWidget_ = nullptr; ///< 智能识别页（QR + OCR + 点名 + 盘点）
     QWidget *smartPage_ = nullptr;   ///< 智能识别页容器
     LoginWidget *login_ = nullptr;   ///< 扫码登录页（stackedWidget 的第 0 页，未登录时唯一可见页）
+    QPushButton *sessionBadge_ = nullptr;  ///< 标题栏右上角的登录人角标（未登录时隐藏），点开=施工详情
     bool streamsRunning_ = false;    ///< 四路是否已在跑（start/stopAllStreams 的幂等守卫）
     std::string workspace_;          ///< 业务资源根目录（model/face、roll_call_data 等）
 
@@ -174,6 +175,8 @@ private slots:
     void showLoginGate();          ///< 合门：显示登录页、收起顶部导航（含角标）、清会话显示
     void onLoginSucceeded();       ///< 开门：恢复导航、进视频监控页、startAllStreams()
     void onLogoutRequested();      ///< 导航「退出登录」：确认 → 停流 → 清限流窗口 → 登出 → 合门
+    void updateSessionBadge();     ///< 按当前会话刷新右上角登录人角标（未登录则隐藏）
+    void openSessionDetail();      ///< 点登录人角标：弹出当前施工信息详情框
     void appendLog(const QString &msg);  ///< 追加日志到文本框
 
     // ========== 人员点名 / 设备盘点业务模块 ==========

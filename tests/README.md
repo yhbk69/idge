@@ -48,12 +48,14 @@ C++ 测试源码目录。含七个测试程序与一个人工联调工具：
   逐位一致（守 letterbox + 射线法，同时证明多边形没被降级成 `toRect`）、
   `roleFromString` 对缺键/空串/垃圾一律回落 `forbidden`（迁移的安全失效方向）。
   只链 `Qt5::Core`、无 GUI、与 cwd 无关，任意机器可跑。
-- `test_construction_qr.cpp`：扫码登录门的**全部契约**离线自检（11 组）。施工信息的
+- `test_construction_qr.cpp`：扫码登录门的**全部契约**离线自检（12 组）。施工信息的
   解析/校验/会话状态机（`ConstructionInfo::fromJson`/`fromQrText` + `ConstructionSession`）
   加上真解一张码图：用 `segno` 生成含中文的 PNG → `qrcode::scanQrFromImageFile()` → 喂给
-  与登录页完全同一条 `startLogin()` 路径。另钉住三条易塌的口径：失败**不动**会话（不存在半登录）、
+  与登录页完全同一条 `startLogin()` 路径。另钉住四条易塌的口径：失败**不动**会话（不存在半登录）、
   `toJson()` 往返保留未知键（字段没定稿，加字段不许吃掉多余键）、图片读不到时给**原因**而不是
-  返回空列表（空列表与"没有码"同形，会把路径错判成码印坏）。
+  返回空列表（空列表与"没有码"同形，会把路径错判成码印坏）、
+  `fields()` 逐键渲染的形状（已知键按声明顺序给中文名、空值成行显示 `—`、未知键用键名排在后面
+  —— 报警详情框与施工详情框共用这一份，渲染口径散成两处就等于字段契约也有两处）。
   只链 `Qt5::Core` + `Qt5::Gui` + zbar，不开摄像头、不起 GUI 线程。
 - `ws_sink.cpp`：**不是自检，是人工对拍的接收端**（`QWebSocketServer`）。板子出网受限，联调只能走
   loopback：`./ws_sink 8765 /tmp/sink_out` 起一个假对端，把 `websocket.server_url` 指到
@@ -73,7 +75,7 @@ C++ 测试源码目录。含七个测试程序与一个人工联调工具：
 | `test_channel_reload.cpp` | 通道热更新板端离线自测（停→releaseTasks→重建 ×4 轮，槽位集合/线程数/RSS 三项断言），须在 build 目录下跑 |
 | `test_alarm_uplink.cpp` | 报警上行离线自检（18 组：两种 transport 报文形状 / 帧序 / 地址换算与路径逃逸 / 队列·ack·退避），纯 Qt Core，任意机器可跑 |
 | `test_geofence_role.cpp` | 围栏角色判定离线自检（8 组：禁区优先 / 无岗区域守卫 / 任一岗区域内 / shapeIndex 口径 / 凹多边形回归 / role 回落），纯 Qt Core，任意机器可跑 |
-| `test_construction_qr.cpp` | 扫码登录门离线自检（11 组：施工信息解析/校验/会话状态机 + 真解一张含中文的码图），Qt Core+Gui+zbar，无摄像头无 GUI |
+| `test_construction_qr.cpp` | 扫码登录门离线自检（12 组：施工信息解析/校验/会话状态机/逐键渲染 + 真解一张含中文的码图），Qt Core+Gui+zbar，无摄像头无 GUI |
 | `ws_sink.cpp` | 人工联调用的假对端（`QWebSocketServer`）：收 text+binary、按 media_id 拼文件对拍 sha256，url 档只打印地址 |
 
 ## 使用方法
@@ -90,7 +92,7 @@ C++ 测试源码目录。含七个测试程序与一个人工联调工具：
 cmake --build build/build_rk3588_linux --target test_geofence_role -j"$(nproc)"
 ./build/build_rk3588_linux/test_geofence_role       # 同上；无 GUI、与 cwd 无关
 
-# 登录门自检：解一张真码 + 校验/会话状态机。第 9 组要一张码图，缺了只 SKIP 那一组并打出命令：
+# 登录门自检：解一张真码 + 校验/会话状态机/逐键渲染。第 10 组要一张码图，缺了只 SKIP 那一组并打出命令：
 #   /home/ubuntu/miniconda3/bin/python -m segno -o /tmp/idge_test_qr.png --scale 8 --border 4 \
 #     '{"worker_name":"张三","worker_phone":"13800001111","worker_id":"GZ-0042",
 #       "work_content":"隧道道床修补","construction_id":"SG-2026-11"}'

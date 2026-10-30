@@ -8,18 +8,25 @@
 （落库、详情框、WebSocket 上行三处共用同一份 JSON）。
 
 **这个模块存在的真正理由是"字段还没定稿"**：施工信息的键名/键数大概率还要改，
-所以整套设计的目标是——**改字段只动 `construction_session.h` 一个文件里的三处**
-（`ConstructionInfo` 成员、`toJson()`、`fromJson()`），其余各处自动跟着走：
+所以整套设计的目标是——**改字段只动 `construction_session.h`/`.cpp` 里的四处**
+（`ConstructionInfo` 成员、`toJson()`、`fromJson()`、`.cpp` 里 `kPreferredFields[]` 那行
+"这个键在界面上叫什么、排第几"），其余各处自动跟着走：
 
 | 消费方 | 怎么拿到施工信息 | 加字段要不要改 |
 | --- | --- | --- |
 | 报警库 | `alarms.construction_info` 存**整份 JSON 文本**（外加 `worker_name` 一列供列表显示） | 不要 |
-| 报警详情框 | 把 `construction_info` 解析回来**逐键渲染成行**，不是按固定字段渲染 | 不要 |
+| 报警详情框 | `ConstructionInfo::fieldsFromJson()` 逐键渲染成行，不是按固定字段渲染 | 不要（要中文名才加一行 `kPreferredFields`） |
+| 施工详情框（右上角登录人点开） | `ConstructionInfo::fields(info.toJson())`，与上面同一个函数 | 同上 |
+| 标题栏登录人角标 | 只读 `worker_name` + `construction_id` 两项（标题栏抢不起横向空间） | 只有改名时要 |
 | WebSocket 上行 | `alarm_info` 的 `data["construction"]` = 解析后的**嵌套子对象** | 不要 |
 | 报警列表 / 侧栏卡片 / toast | 只读 `worker_name` 一个字段 | 只有改名时要 |
 
 代价说清楚：**不能直接按 SQL 过滤电话/工作内容**（那要先 `json_extract`，本轮不做）。
 `worker_name` 之所以单独成列，是因为列表那一列每帧都要显示它，不该为了一列文本去解析 JSON。
+
+`fields()` 为什么放在 biz 层而不是某个对话框的 `.cpp` 里：键→中文名 + 显示顺序**本身就是字段契约
+的一部分**，写进 UI 文件就等于契约有两处。它只依赖 QtCore（`QVector`/`QPair` 级别的纯数据），
+不碰任何 widget，所以放这层不破坏"biz 不依赖 src/ui"的方向。
 
 不做的事（明确非目标）：服务端登录、token、账号体系、按人/按施工id 的检索统计、
 登录页手输施工信息（本机不做虚拟键盘，见 `src/ui/core/README.md` 触屏口径）。
@@ -28,8 +35,8 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `construction_session.h` | `ConstructionInfo`（字段契约的唯一真值源，键名以 `kKey*` 常量集中列出）+ `ConstructionSession` 单例声明 |
-| `construction_session.cpp` | 解析与校验（`fromJson`/`fromQrText`）、读写锁保护的会话状态、`toJson` 规范化 |
+| `construction_session.h` | `ConstructionInfo`（字段契约的唯一真值源，键名以 `kKey*` 常量集中列出）+ `ConstructionField`（一行的 label/value）+ `ConstructionSession` 单例声明 |
+| `construction_session.cpp` | 解析与校验（`fromJson`/`fromQrText`）、读写锁保护的会话状态、`toJson` 规范化、`fields()` 逐键渲染（`kPreferredFields[]` = 键的中文名与顺序） |
 
 ## 核心契约
 

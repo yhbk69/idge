@@ -6,9 +6,10 @@
  *
  * 页面本身只是一张四卡片的入口页（setupUi）。前两张是识别工具：
  *   1. 二维码：本文件只剩一行 `QrScanDialog::openFullScanner(this)`。
- *      预览、取帧、ZBar 解码、结果框（单码直显、多码在冻结图上叠箭头按钮点选）
- *      都在共用模块 src/ui/widgets/qr_scan_dialog.cpp 里 —— **登录页扫码调的是同一
- *      个模块的 scan()**，因为摄像头设备节点不能同时被两处打开，两处也不该解出不同结果。
+ *      预览、实时扫描（窗格打开即扫，没有快门键）、ZBar 解码、结果区（单码直显内容、
+ *      多码在冻结图上叠圆点按钮点选）都在共用模块 src/ui/widgets/qr_scan_dialog.cpp 里
+ *      —— **登录页扫码调的是同一个模块的 scan()**，因为摄像头设备节点不能同时被两处打开，
+ *      两处也不该解出不同结果。用户点「确认」才关窗格。
  *      解码本身在 src/biz/qrcode/qr_decoder.cpp（无 GUI 依赖，可离线自测）。
  *   2. OCR：openOcrScanner() → showOcrPhotoDialog()（拍照存临时 jpg）→
  *      showOcrRegionDialog()（跑 det 拿文本框、smartGroupBoxes() 合并成可选区、
@@ -32,7 +33,7 @@
  */
 
 #include "smart_recognition_widget.h"
-#include "capture_button.h"        // uiwidgets::CaptureButton：与扫码对话框共用的快门按钮
+#include "capture_button.h"        // uiwidgets::CaptureButton：圆形快门，现在只有 OCR 拍照流程在用
 #include "ffmpeg_video_decoder.h"
 #include "gl_video_widget.h"
 #include "qr_scan_dialog.h"        // 共用扫码流程（登录页用的是同一套）
@@ -219,7 +220,8 @@ private:
     const ResizableRectItem* selection_;
 };
 
-// 拍照按钮（圆形快门）与扫码流程用的同一个定义，见 src/ui/widgets/capture_button.h
+// 拍照按钮（圆形快门）的定义在 src/ui/widgets/capture_button.h —— 二维码已改实时扫描、
+// 不再用快门，本页的 OCR 流程是当前唯一使用者
 using uiwidgets::CaptureButton;
 
 // 卡片点击事件过滤器
@@ -401,9 +403,9 @@ bool SmartRecognitionWidget::ocrModelsReady() const {
 // ============================================================================
 
 void SmartRecognitionWidget::openQrScanner() {
-    // 预览取帧 → ZBar 解码 → 结果框，整条流程在共用模块里（src/ui/widgets/qr_scan_dialog.cpp）。
-    // 登录页调的是同一个模块的 scan()，所以任何时刻只有一个 /dev/videoNN 持有者，
-    // 两处也不会解出不一样的结果。
+    // 实时扫描 → 解出即冻结画面显示内容 → 用户点「确认」关窗格，整条流程在共用模块里
+    // （src/ui/widgets/qr_scan_dialog.cpp）。登录页调的是同一个模块的 scan()，所以任何时刻
+    // 只有一个 /dev/videoNN 持有者，两处也不会解出不一样的结果。
     QrScanDialog::openFullScanner(this);
 }
 

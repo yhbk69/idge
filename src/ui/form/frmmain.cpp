@@ -40,6 +40,7 @@
 #include "smart_recognition_widget.h"
 #include "login_widget.h"        // 扫码登录页（stackedWidget 第 0 页 = 门）
 #include "construction_session.h"
+#include "construction_detail_dialog.h"  // 点右上角登录人弹出的施工详情
 #include "roll_call_service.h"
 #include "equipment_inventory_service.h"
 #include "model_registry.h"
@@ -313,6 +314,28 @@ void frmMain::initForm()
     // .ui 不手改（见 src/ui/form/README.md 的既有约定），这里用代码覆盖上下限。
     ui->widgetMenu->setMinimumWidth(160);
     ui->widgetMenu->setMaximumWidth(160);
+
+    // 6.5 登录人角标：插在 spacer 与三钮区之间 ⇒ 贴着标题栏右上角，未登录时整颗隐藏。
+    //     它是 widgetTitle 的直接子件、不在 widgetTop 里，所以第 6 步那句
+    //     findChildren<QAbstractButton*> 的导航批量设置和 buttonClick() 的文字分派
+    //     都不会碰到它 —— 挂进 widgetTop 反而会被当成导航项去切页面。
+    sessionBadge_ = new QPushButton(ui->widgetTitle);
+    sessionBadge_->setCursor(Qt::PointingHandCursor);
+    sessionBadge_->setMinimumHeight(theme::TOUCH_MAIN_MIN_H);
+    sessionBadge_->setMaximumHeight(theme::TOUCH_MAIN_MIN_H);
+    sessionBadge_->setStyleSheet(
+        QString("QPushButton { color:%1; background:%2; border:1px solid %3; border-radius:6px;"
+                "padding:0 16px; font-size:%4px; }"
+                "QPushButton:hover { background:%5; }"
+                "QPushButton:pressed { background:%6; }")
+            .arg(theme::TEXT, theme::FIELD, theme::BORDER)
+            .arg(theme::FS_NAV_TOUCH)
+            .arg(theme::HOVER, theme::PANEL));
+    connect(sessionBadge_, &QPushButton::clicked, this, &frmMain::openSessionDetail);
+    sessionBadge_->hide();
+    // 落在"倒数第一项"= 三钮区 widgetMenu 之前，比写死下标 4 稳：`.ui` 万一在标题栏
+    // 加装东西，这里也不会把角标插到错误位置。
+    ui->horizontalLayout_2->insertWidget(ui->horizontalLayout_2->count() - 1, sessionBadge_);
 
     // 默认选中"视频监控"
     ui->btnMain->click();
@@ -1071,8 +1094,36 @@ void frmMain::showLoginGate()
     if (ui->widgetTop) {
         ui->widgetTop->hide();
     }
+    // 登录人角标也一起收：它不在 widgetTop 里（是 widgetTitle 的直接子件），
+    // 不单独处理的话未登录时右上角会挂着一颗"登录人 —"，看着像还登着。
+    updateSessionBadge();
 
     ui->stackedWidget->setCurrentWidget(login_);
+}
+
+void frmMain::updateSessionBadge()
+{
+    if (!sessionBadge_) {
+        return;
+    }
+    const session::ConstructionInfo info = session::ConstructionSession::instance().snapshot();
+    if (!session::ConstructionSession::instance().isLoggedIn()) {
+        sessionBadge_->hide();
+        return;
+    }
+    // 只放"这一班是谁 + 哪块施工"，其余四项进详情框看：标题栏是 1920 宽里跟导航行
+    // 抢横向空间的一方，全字段铺开就会截字（截了字就等于没有这个提示）。
+    sessionBadge_->setText(QString::fromUtf8("登录人 %1 · %2")
+                               .arg(session::ConstructionInfo::display(info.workerName),
+                                    session::ConstructionInfo::display(info.constructionId)));
+    sessionBadge_->show();
+    sessionBadge_->raise();
+}
+
+void frmMain::openSessionDetail()
+{
+    ConstructionDetailDialog dialog(this);
+    dialog.exec();
 }
 
 void frmMain::onLoginSucceeded()
@@ -1080,6 +1131,7 @@ void frmMain::onLoginSucceeded()
     if (ui->widgetTop) {
         ui->widgetTop->show();
     }
+    updateSessionBadge();
 
     ui->stackedWidget->setCurrentWidget(ui->pageMonitor);
     // 走按钮的既有分派（含 setChecked 归位与右侧报警面板刷新），和启动时同一条路径

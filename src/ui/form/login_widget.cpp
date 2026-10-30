@@ -40,33 +40,56 @@ void applyBigButton(QPushButton *button)
     button->setCursor(Qt::PointingHandCursor);
 }
 
+// 右侧按钮列的宽度：480px ≈ 54mm，竖排三颗在这个宽度上文字不挤、命中区也够；
+// 再宽就要吃掉左侧品牌块的空间，1920 宽下两边都不好看。
+constexpr int kButtonColumnWidth = 480;
+
 } // namespace
 
 LoginWidget::LoginWidget(QWidget *parent) : QWidget(parent)
 {
-    auto *root = new QVBoxLayout(this);
+    auto *root = new QHBoxLayout(this);
     root->setContentsMargins(64, 48, 64, 48);
-    root->setSpacing(22);
+    root->setSpacing(56);
 
-    root->addStretch(1);
+    // ── 左：设备身份 + 状态 ─────────────────────────────────
+    auto *left = new QVBoxLayout;
+    left->setSpacing(14);
+    left->addStretch(1);
 
-    auto *title = new QLabel(QString::fromUtf8("扫码登录"), this);
-    title->setStyleSheet(theme::text(theme::TEXT, theme::FS_KPI, true));
-    root->addWidget(title);
+    auto *kicker = new QLabel(QString::fromUtf8("IDGE"), this);
+    kicker->setStyleSheet(QString("QLabel { color:%1; font-size:%2px; font-weight:700; }")
+                              .arg(theme::ACCENT)
+                              .arg(theme::FS_PAGE));
+    left->addWidget(kicker);
 
-    auto *subtitle = new QLabel(
-        QString::fromUtf8("请用本机摄像头扫描现场张贴的施工二维码，"
-                          "登录成功后才开始视频检测与报警。"),
-        this);
-    subtitle->setWordWrap(true);
-    subtitle->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
-    root->addWidget(subtitle);
+    // 品牌块：与顶部标题同源文案（frmmain.cpp 里 labTitle 写的是"施工行为监测与分析"）。
+    // theme 字阶最高一档是 FS_KPI=30，落地页要能隔着一两米认出这是哪台设备，
+    // 所以这里按 52px 写死——它不是通用文字档，别处不要照抄。
+    auto *brand = new QLabel(QString::fromUtf8("施工行为监测与分析"), this);
+    brand->setStyleSheet(QString("QLabel { color:%1; font-size:52px; font-weight:700; }")
+                             .arg(theme::TEXT));
+    left->addWidget(brand);
 
-    // 取景说明框：把"怎么扫"写在页面上，岗位上没人教也能自己试对
+    auto *tagline = new QLabel(
+        QString::fromUtf8("边缘智能视频分析终端 · 登录成功后才开始视频检测与报警"), this);
+    tagline->setWordWrap(true);
+    tagline->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
+    left->addWidget(tagline);
+
+    left->addSpacing(24);
+
+    statusLabel_ = new QLabel(this);
+    statusLabel_->setWordWrap(true);
+    statusLabel_->setTextInteractionFlags(Qt::NoTextInteraction);
+    left->addWidget(statusLabel_);
+
+    // 取景说明：把"怎么扫"写在页面上，岗位上没人教也能自己试对。
+    // 口径已改成实时扫描——窗格打开即扫，没有快门键。
     auto *hint = new QLabel(
-        QString::fromUtf8("操作：点击「扫码登录」→ 把二维码放进预览画面中央、占满取景区"
-                         "→ 点画面下方的圆形快门键 → 解出即自动登录。\n"
-                         "码上信息不全（缺施工id 或负责人姓名）会被拒绝，页面下方会写明缺哪一项。"),
+        QString::fromUtf8("操作：点「扫码登录」→ 窗格打开即开始扫描，把二维码放进画面中央的取景框"
+                          "→ 解出后下方显示码内内容，点「确认登录」即完成登录。\n"
+                          "码上信息不全（缺施工id 或负责人姓名）会被拒绝，这一行会写明缺哪一项。"),
         this);
     hint->setWordWrap(true);
     hint->setStyleSheet(QString("QLabel { color:%1; font-size:%2px; background:%3;"
@@ -74,36 +97,40 @@ LoginWidget::LoginWidget(QWidget *parent) : QWidget(parent)
                             .arg(theme::TEXT)
                             .arg(theme::FS_CARD)
                             .arg(theme::PANEL, theme::BORDER));
-    root->addWidget(hint);
+    left->addWidget(hint);
 
-    statusLabel_ = new QLabel(this);
-    statusLabel_->setWordWrap(true);
-    root->addWidget(statusLabel_);
+    left->addStretch(2);
 
-    auto *buttons = new QHBoxLayout;
-    buttons->setSpacing(20);
+    // ── 右：三个操作，竖排 ─────────────────────────────────
+    auto *rightColumn = new QWidget(this);
+    rightColumn->setFixedWidth(kButtonColumnWidth);
+    auto *right = new QVBoxLayout(rightColumn);
+    right->setContentsMargins(0, 0, 0, 0);
+    right->setSpacing(20);
+    right->addStretch(1);
 
-    scanButton_ = new QPushButton(QString::fromUtf8("扫码登录"), this);
+    scanButton_ = new QPushButton(QString::fromUtf8("扫码登录"), rightColumn);
     applyBigButton(scanButton_);
     scanButton_->setStyleSheet(bigButtonQss(theme::ACCENT, theme::BG, theme::BTN_SECONDARY_HOVER));
     connect(scanButton_, &QPushButton::clicked, this, &LoginWidget::onScanClicked);
 
-    testButton_ = new QPushButton(QString::fromUtf8("测试登录"), this);
+    testButton_ = new QPushButton(QString::fromUtf8("测试登录"), rightColumn);
     applyBigButton(testButton_);
     testButton_->setStyleSheet(bigButtonQss(theme::PANEL, theme::TEXT, theme::HOVER));
     connect(testButton_, &QPushButton::clicked, this, &LoginWidget::onTestLoginClicked);
 
-    exitButton_ = new QPushButton(QString::fromUtf8("退出程序"), this);
+    exitButton_ = new QPushButton(QString::fromUtf8("退出程序"), rightColumn);
     applyBigButton(exitButton_);
     exitButton_->setStyleSheet(bigButtonQss(theme::DANGER, "#FFFFFF", theme::DANGER_PRESSED));
     connect(exitButton_, &QPushButton::clicked, this, &LoginWidget::exitProgramRequested);
 
-    buttons->addWidget(scanButton_);
-    buttons->addWidget(testButton_);
-    buttons->addWidget(exitButton_);
-    root->addLayout(buttons);
+    right->addWidget(scanButton_);
+    right->addWidget(testButton_);
+    right->addWidget(exitButton_);
+    right->addStretch(1);
 
-    root->addStretch(2);
+    root->addLayout(left, 1);
+    root->addWidget(rightColumn, 0);
 
     resetStatus();
 }

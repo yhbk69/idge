@@ -8,7 +8,7 @@
 图片根本读不到），两处必须一致地把层次告诉用户，否则现场只会看到"扫不上"三个字。
 所以提取成模块。
 
-**本目录只有解码，没有摄像头**。扫码对话框（预览+快门+取帧）在
+**本目录只有解码，没有摄像头**。扫码对话框（预览 + 实时扫描 + 确认）在
 `src/ui/widgets/qr_scan_dialog.{h,cpp}`——它要 `GLVideoWidget` 与 `FFmpegVideoDecoder`，
 放进 biz 就是 **biz → ui 的反向依赖**（biz 层不许 include `src/ui`），所以按依赖方向留在 ui。
 本目录因此可以不带 OpenCV/RKNN 头、脱离摄像头离线自测。
@@ -32,8 +32,12 @@ scanQrFromRGBA        ← 真正做 ZBar 的唯一一处（解码器映射指针
 - **`HAS_ZBAR` 没编进来时不静默返回空**：`decodeAvailable()` 为 false，
   所有入口返回 false 且 `err` 给出中文原因（`unavailableReason()`，含补齐路径），
   调用点共用这一份文案，不许各写一份。
-- **命中矩形用 `QRect` 而不是 `cv::Rect`**：唯一消费者是结果框上画箭头定位中心点，
+- **命中矩形用 `QRect` 而不是 `cv::Rect`**：唯一消费者是扫码窗格冻结图上定位点选圆点的中心，
   换掉可让本模块不拖进 OpenCV 头（这是它能离线自测的前提）。
+- **谁在调 `scanQrFromRGBA`**：窗格打开即扫，解码挂在 `FFmpegVideoDecoder::frameReady` 上、
+  用 `DirectConnection` 跑在**解码线程**里（放 GUI 线程会直接卡住画面，智能识别页是四路都在跑时进来的）。
+  每 250ms 最多解一帧——实测 150ms 会把预览从 7.7fps 打到 5.1fps，而现场码是静止张贴的，
+  识别延迟多 100ms 没人感觉得到。指针就在生产它的线程上读，双缓冲覆盖竞态天然不存在。
 - `scanQrFromImageFile` 读不到文件时报**原因**而不是返回空列表——空列表与"没有码"同形，
   会把"路径错了"误判成"码印坏了"（单测里钉了这条契约）。
 

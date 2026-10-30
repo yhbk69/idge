@@ -8,7 +8,7 @@
 // 短链上，而它在板端只靠肉眼验证一次就会定型。缺字段被放过 = 未登录也能出报警；
 // 校验写歪一个键名 = 现场每张码都登不上，且提示会说"缺的是另一个字段"。
 //
-// 覆盖十条契约：
+// 覆盖十一条契约：
 //   1) 完整 JSON：五个具名字段各归其位，raw 原样留着全部键
 //   2) 缺 construction_id → 拒绝登录，且中文原因点名 construction_id
 //   3) 缺 worker_name → 拒绝登录，且中文原因点名 worker_name
@@ -17,10 +17,12 @@
 //   6) toJson 往返：未知键不丢，五个具名字段以结构体为准
 //   7) 会话：startLogin 失败**不动**当前会话（不许出现半登录状态）
 //   8) logout 后 snapshot 为空、isLoggedIn 为假；display 把空值统一成 "—"
-//   9) 离线解码：把 /tmp/idge_test_qr.png 解回原文 → 同一条 startLogin 路径通过
-//   10) HAS_ZBAR 没编进来时 scanQrFromImage 返回 false 且给出原因，而不是"解出 0 个码"
+//   9) fields() 逐键渲染：已知键给中文名并按声明顺序排，空值成行显示 "—"，
+//      未知键用键名排在后面（报警详情与施工详情共用这一份，见 src/ui/widgets）
+//   10) 离线解码：把 /tmp/idge_test_qr.png 解回原文 → 同一条 startLogin 路径通过
+//   11) HAS_ZBAR 没编进来时 scanQrFromImage 返回 false 且给出原因，而不是"解出 0 个码"
 //
-// 第 9 条需要一张码图（本文件不改写它，缺了就 SKIP 并打出重新生成的命令）：
+// 第 10 条需要一张码图（本文件不改写它，缺了就 SKIP 并打出重新生成的命令）：
 //   python -m segno -o /tmp/idge_test_qr.png --scale 8 --border 4 \
 //     '{"worker_name":"张三","worker_phone":"13800001111","worker_id":"GZ-0042",\
 //      "work_content":"隧道道床修补","construction_id":"SG-2026-11"}'
@@ -44,6 +46,7 @@
 #include <string>
 #include <vector>
 
+using session::ConstructionField;
 using session::ConstructionInfo;
 using session::ConstructionSession;
 
@@ -206,7 +209,38 @@ void testSessionStateMachine()
           "有值时 display 不该改内容");
 }
 
-// 契约 9：离线解码（真解一张码）
+// 契约 9：逐键渲染（两个详情框共用的那一份口径）
+void testDisplayFields()
+{
+    ConstructionInfo info;
+    QString err;
+    check(ConstructionInfo::fromQrText(
+              QStringLiteral("{\"work_content\":\"隧道道床修补\",\"worker_name\":\"张三\","
+                             "\"construction_id\":\"SG-1\",\"team\":\"甲班\"}"),
+              &info, &err),
+          "渲染用例的载荷本身应能登录");
+
+    const QVector<ConstructionField> rows = ConstructionInfo::fields(info.toJson());
+    // worker_phone / worker_id 在场但为空 → 也要各占一行显示 "—"，
+    // 否则界面上"没这个字段"和"这个字段空着"看起来一模一样。
+    check(rows.size() == 6, "五个具名键（含空的）+ 未知键 team 都要成行");
+
+    check(rows.at(0).label == QString::fromUtf8("施工id") &&
+              rows.at(0).value == QStringLiteral("SG-1"),
+          "第一行必须是施工id（顺序就是界面上的阅读顺序）");
+    check(rows.at(1).label == QString::fromUtf8("负责人"), "第二行必须是负责人");
+    check(rows.at(2).value == QString::fromUtf8("—"), "空值必须渲染成破折号");
+    check(rows.last().label == QStringLiteral("team") &&
+              rows.last().value == QStringLiteral("甲班"),
+          "未知键要用键名当标签排在最后（协议先加字段、界面后给中文名，中间这步不能看不见值）");
+
+    check(ConstructionInfo::fields(QJsonObject()).isEmpty(), "空对象不该渲染出任何行");
+    check(ConstructionInfo::fieldsFromJson(QString()).isEmpty(), "空 JSON 文本渲染成空表");
+    check(ConstructionInfo::fieldsFromJson(QStringLiteral("not json")).isEmpty(),
+          "解不开的 JSON 文本渲染成空表而不是崩");
+}
+
+// 契约 10：离线解码（真解一张码）
 void testDecodeFromFile(const QString &path, const QString &expectedWorker)
 {
     std::vector<qrcode::QrHit> hits;
@@ -227,7 +261,7 @@ void testDecodeFromFile(const QString &path, const QString &expectedWorker)
     s.logout();
 }
 
-// 契约 10：解不出的码给出原因而不是静默
+// 契约 11：解不出的码给出原因而不是静默
 void testBadQrRejected(const QString &path)
 {
     if (!qrcode::decodeAvailable()) {
@@ -294,11 +328,14 @@ int main(int argc, char **argv)
         testSessionStateMachine();
         std::puts("ok  7/8  登录失败不动会话，登出清空");
 
+        testDisplayFields();
+        std::puts("ok  9  逐键渲染：已知键按序给中文名、空值成行、未知键排后面");
+
         if (QFileInfo(qrPath).exists()) {
             testDecodeFromFile(qrPath, expectedWorker);
-            std::puts("ok  9  离线解码 → 登录（真解了一张码）");
+            std::puts("ok  10 离线解码 → 登录（真解了一张码）");
         } else {
-            std::printf("SKIP 9  码图不存在：%s\n"
+            std::printf("SKIP 10 码图不存在：%s\n"
                         "      生成：python -m segno -o %s --scale 8 --border 4 "
                         "'<施工信息 JSON>'\n",
                         qrPath.toUtf8().constData(), qrPath.toUtf8().constData());
@@ -306,13 +343,13 @@ int main(int argc, char **argv)
 
         if (QFileInfo(badQrPath).exists()) {
             testBadQrRejected(badQrPath);
-            std::puts("ok  10 缺字段的码：解得出内容、过不了校验");
+            std::puts("ok  11 缺字段的码：解得出内容、过不了校验");
         } else {
-            std::printf("SKIP 10 缺字段的码图不存在：%s\n", badQrPath.toUtf8().constData());
+            std::printf("SKIP 11 缺字段的码图不存在：%s\n", badQrPath.toUtf8().constData());
         }
 
         testMissingFileGivesReason();
-        std::puts("ok  11 图片读不到时给出原因而不是静默空结果");
+        std::puts("ok  12 图片读不到时给出原因而不是静默空结果");
     } catch (const std::exception &e) {
         std::printf("FAIL: %s\n", e.what());
         return 1;

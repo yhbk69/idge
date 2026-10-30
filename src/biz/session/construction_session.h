@@ -10,9 +10,9 @@
 //   3. 保存当前登录会话的施工信息（单例 + QReadWriteLock）
 //
 // **改字段只动这个文件**：加/减/改键名，只需改 ConstructionInfo 的成员、
-// toJson()、fromJson() 三处。落库（construction_info 那一列存的是整份 JSON）、
-// 报警详情框（按 JSON 逐键渲染）、WebSocket 上行（data["construction"] 子对象）
-// 都不需要跟着改。
+// toJson()、fromJson()、fields() 里的四处（fields() 是那个键的界面中文名与显示顺序）。
+// 落库（construction_info 那一列存的是整份 JSON）、报警详情框、施工详情框、
+// WebSocket 上行（data["construction"] 子对象）都不需要跟着改。
 //
 // 使用方式：
 //   ConstructionSession::instance().startLogin(qrText, &err);   // 登录页
@@ -28,8 +28,17 @@
 #include <QJsonObject>
 #include <QReadWriteLock>
 #include <QString>
+#include <QVector>
 
 namespace session {
+
+// 一行显示用的字段：label 是界面用中文名（未知键就是键名本身），value 已过 display()。
+// 之所以放在这层：详情框按 JSON 逐键渲染的"键→中文名 + 顺序"也是字段契约的一部分，
+// 放在某个对话框的 .cpp 里就等于契约有两处。
+struct ConstructionField {
+    QString label;
+    QString value;
+};
 
 // 一条施工信息。空对象表示"未登录"。
 struct ConstructionInfo {
@@ -64,6 +73,14 @@ struct ConstructionInfo {
 
     // 界面用的显示文本：空串统一成 "—"，避免出现空白行。
     static QString display(const QString &value);
+
+    // 逐键渲染成显示行：已知键按 fields() 的声明顺序排在前面并给中文名，
+    // 未知键原样用键名排在后面（码里多带什么都不碍显示）。空对象返回空表。
+    // 两个详情框（报警详情、施工详情）都从这里出，加字段时两边自动跟着多一行。
+    static QVector<ConstructionField> fields(const QJsonObject &obj);
+
+    // 落库/上行里存的那段 JSON 文本 → fields()。解析失败或空串返回空表，不报错。
+    static QVector<ConstructionField> fieldsFromJson(const QString &json);
 };
 
 class ConstructionSession {

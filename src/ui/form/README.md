@@ -26,7 +26,7 @@
 
 | 文件 | 职责 | 来源 |
 |---|---|---|
-| frmmain.h/.cpp/.ui | 主窗口：导航、页面装配、config.json 编辑、级联模型配置、日志、报警 toast/角标、业务服务初始化与注入 | main |
+| frmmain.h/.cpp/.ui | 主窗口：导航、页面装配、config.json 编辑、级联模型配置、日志、报警 toast/角标、**标题栏右上角登录人角标**、业务服务初始化与注入 | main |
 | frmvideowindow.h/.cpp/.ui | 4 路视频 2x2 网格窗口 + 围栏绘制工具栏（**角色：禁区/岗区域**、矩形/多边形、删除、清空） | main |
 | video_decoder.h/.cpp | FFmpeg 软解码器（录像回放），独立线程 + PTS 帧同步；**当前无实例化点** | main |
 | roll_call_widget.h/.cpp | 人员点名任务列表页（创建/查看/注销/删除/导出报告） | caichao 合入 |
@@ -36,7 +36,7 @@
 | equipment_inventory_widget.h/.cpp | 设备盘点任务列表页（双服务注入） | caichao 合入 |
 | equipment_recognition_dialog.h/.cpp | 设备识别结果对话框（Registration/Cancellation 两阶段共用） | caichao 合入 |
 | equipment_detail_dialog.h/.cpp | 设备盘点任务详情对话框（只读快照） | caichao 合入 |
-| login_widget.h/.cpp | **扫码登录页（门禁）**：标题+操作说明+状态行+三个大按钮（扫码登录 / 测试登录 / 退出程序）。只发信号 `loginSucceeded/loginFailed(reason)/exitProgramRequested`，不碰 `frmMain` 内部；解析校验全交给 `ConstructionSession` | 新增 |
+| login_widget.h/.cpp | **扫码登录页（门禁）**：**左品牌块 + 右操作列**两栏（2026-10-30 触屏复核后改）——左边 IDGE/「施工行为监测与分析」+ 状态行 + 取景说明，右边只有三颗竖排大按钮（扫码登录 / 测试登录 / 退出程序，480px 宽 × 72px 高）。只发信号 `loginSucceeded/loginFailed(reason)/exitProgramRequested`，不碰 `frmMain` 内部；解析校验全交给 `ConstructionSession` | 新增 |
 | smart_recognition_widget.h/.cpp | 智能识别页（二维码 + OCR 铭牌文字 + 人员点名 + 设备盘点）：四卡片入口，前两张自带模态对话框，后两张只发请求信号；含匿名 namespace 里的 OCR 选区控件。**二维码那三行现在只是转调 `uiwidgets` 的 `QrScanDialog::openFullScanner()`**（与登录页共用同一个扫码器） | 新增 |
 | photo_selection_dialog.h | **遗留未使用**旧版选图对话框声明（仅头文件，无实现无引用，含已修正的乱码注释），与 photo_selection_widget.h 同名类互斥 | caichao 合入（废弃版本） |
 
@@ -89,6 +89,18 @@
   这不只是外观问题：留着就能点「智能识别」，那一页会去开 `/dev/video22`，
   与登录页的扫码器**抢同一个设备节点**。标题栏三钮（`widgetMenu`）留着——× 就是退出程序，
   与登录页那颗按钮同义，不冲突。
+- **右上角那颗「登录人」是唯一的常驻登录态显示**：`sessionBadge_` 是 `widgetTitle` 的直接子件，
+  用 `insertWidget(count()-1, …)` 插到三钮区**之前**（贴着右上角，且不写死下标）。
+  它刻意**不在** `widgetTop` 里：进了 `widgetTop` 就会被第 6 步那句
+  `findChildren<QAbstractButton*>` 批量设成导航项、并被 `buttonClick()` 的文字分派接管，
+  点一下就会去切页面。文本只放「负责人 + 施工id」两项，其余三项进
+  `uiwidgets` 的 `ConstructionDetailDialog`——标题栏是跟导航行抢横向空间的一方，
+  五项全铺在 1920 宽下必截字。
+  可见性由 `updateSessionBadge()` 按会话决定（未登录整颗隐藏），在 `showLoginGate()` 与
+  `onLoginSucceeded()` 两处各调一次；`widgetTop` 的 `hide()` 盖不到它，所以必须单独处理，
+  否则登录页右上角会挂着一颗"登录人 —"，看着像还登着。
+  **为什么非要有这颗**：报警的归属是在 `makeAlarmRecord()` 定死的，换班没点「退出登录」就会
+  继续记到上一班名下，而此前界面上没有任何地方能看出"现在登的是谁"——只有一行会滚走的日志。
 - **`startAllStreams()` / `stopAllStreams()` 是从 `initForm()` 第 11 步和 `closeEvent()` 里
   抽出来的同一段代码**（纯搬运，不改行为），加 `streamsRunning_` 守卫：重复调用只记一条日志、
   不动作。门要"不开"也要"停了再开"，所以必须先抽出来。实测：登录→退出→再登录，
@@ -109,8 +121,16 @@
   `build/build_rk3588_linux`，所以仓库根的 `plan/` 在运行时是**够不着的**（实测命中 `../../plan/`），
   最后那条 `data/` 才是部署机上的真正落点。一个都没找到就把**每个试过的路径**列在中文提示里，
   不静默、不崩。
-- **登录页不常驻摄像头预览**：预览只在扫码对话框打开期间存在。实测停在登录页时
-  进程的 `/dev/video*` 句柄数为 0、CPU 0%、`alarms` 表 60s 不增；点「扫码登录」后为 1。
+- **验证扫码只认真摄像头，测试数据只走「测试登录」**：不要把 `smartRecognition.camera` 临时指到
+  一个含二维码的视频文件来"验扫码"——那是虚拟摄像头，验的是"解码器读文件"那条路，
+  摄像头 + 光照 + 对焦 + 取景这一整条现场链路一步都没走到。要喂假数据就用登录页那颗
+  「测试登录」按钮（与扫码同一条 `startLogin()`），要验扫码就用真摄像头对真码。
+  板端因此有一条**留给现场**的未验项：真码举到 CSI 摄像头前能否在 1~2 秒内解出
+  （取决于码的尺寸与光照，开发侧无法代验）。
+- **登录页不常驻摄像头预览**：预览只在扫码窗格打开期间存在，窗格本身是**打开即实时扫描**
+  （没有快门键；解出码后冻结画面显示内容，点「确认登录」才关窗格）。实测停在登录页时
+  进程的 `/dev/video*` 句柄数为 0、CPU 0%、`alarms` 表 60s 不增；点「扫码登录」后为 1，
+  点「取消」或「确认登录」关窗格后又回到 0（本轮板端复测过一遍）。
   这也是"门挡着的时候不碰摄像头"能成立的前提。
 
 ## 使用方法
@@ -140,7 +160,10 @@
 
 - **线程**：三个识别对话框的析构 `quit()+wait()` 会等待不可中断的 NPU 识别结束，关窗可能卡顿数秒（已知取舍）；`frameReady→GLVideoWidget::onFrameReady` 的 `DirectConnection` 仅在解码线程做"加锁换帧 + update()"，GL 绘制仍在 GUI 线程 paintGL；`video_decoder.cpp` 中 QImage 浅封装 FFmpeg 缓冲的覆写/悬垂风险见该文件警示注释。
 - **智能识别页的对话框延时**：`smart_recognition_widget.cpp` 里若用 `QTimer::singleShot` 延时弹窗，都必须带 `&dialog` 作上下文对象——回调按引用捕获了 dialog 的栈上成员，缺上下文时"识别成功到弹窗之间关掉对话框"会解引用野指针直接 SIGSEGV（实测复现过）。
-  二维码链路已改为"拍照后对单帧解码"，不再有常驻扫描线程，因此也就没有"先停线程再停解码器"的收尾顺序约束；OCR 仍走 `QProcess` 起外部 demo。
+  二维码链路是"窗格打开即实时扫描"：解码跑在**解码线程**上（`frameReady` 直连 + 250ms 限流），
+  没有第二条扫描线程，但收尾顺序仍然不能调——**先断扫描回调 → `decoder->stop()`（join 解码线程）
+  → `QCoreApplication::sendPostedEvents(&dialog, QEvent::MetaCall)` 把已投递但没派发的结果就地跑完**，
+  因为 dialog 与它回调捕获的栈上成员在函数返回后就没了；OCR 仍走 `QProcess` 起外部 demo。
 - **MOC**：带 `Q_OBJECT` 的 Worker 类定义在 .cpp 中时，尾部 `#include "xxx.moc"` 不可删除，否则 vtable 链接失败。
 - **.ui 文件**：`frmmain.ui`/`frmvideowindow.ui` 一律不手改；布局微调全部通过代码 `addWidget/insertWidget/moveTo` 实现。
 - **遗留文件**：`photo_selection_dialog.h` 未被引用且与 `photo_selection_widget.h` 声明同名类，二者绝不可同时 include；`recognition_result_dialog` 的 `drawFaceBoxes()`（仅声明）与 `drawBoxesOnImage()`（有定义无调用）为死代码，`equipment_detail_dialog` 的 `photoCell()` 同样无调用点，均已加警示注释，清理前需再次全工程检索。

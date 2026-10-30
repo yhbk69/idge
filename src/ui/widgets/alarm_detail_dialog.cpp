@@ -1,4 +1,5 @@
 #include "alarm_detail_dialog.h"
+#include "construction_session.h"
 #include "qthelper.h"
 #include "theme.h"
 #include <QVBoxLayout>
@@ -11,74 +12,7 @@
 #include <QPixmap>
 #include <QScreen>
 #include <QGuiApplication>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QJsonValue>
-#include <QPair>
-#include <QStringList>
 #include <QVector>
-
-namespace {
-
-// 施工信息在详情框里是**按 JSON 的键逐行渲染**的，不是按固定字段渲染：
-// 将来 ConstructionInfo 加一个键，这里不改一行就会多出一行（字段契约唯一真值
-// 在 src/biz/session/construction_session.h）。
-struct ConstructionRow {
-    QString key;
-    QString label;
-    QString value;
-};
-
-// 已知键给中文名并按规定顺序排前面；未知键原样用键名排在后面（码里多带什么都不碍显示）
-QVector<ConstructionRow> constructionRows(const QString &json)
-{
-    QVector<ConstructionRow> rows;
-    if (json.trimmed().isEmpty()) {
-        return rows;
-    }
-
-    const QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8());
-    if (!doc.isObject()) {
-        return rows;
-    }
-    const QJsonObject obj = doc.object();
-
-    static const QVector<QPair<QString, QString>> kPreferred = {
-        {QStringLiteral("construction_id"), QString::fromUtf8("施工id")},
-        {QStringLiteral("worker_name"),     QString::fromUtf8("负责人")},
-        {QStringLiteral("worker_phone"),    QString::fromUtf8("负责人电话")},
-        {QStringLiteral("worker_id"),       QString::fromUtf8("负责人工号")},
-        {QStringLiteral("work_content"),    QString::fromUtf8("施工内容")},
-    };
-
-    QStringList emitted;
-    for (const auto &pair : kPreferred) {
-        if (!obj.contains(pair.first)) {
-            continue;
-        }
-        ConstructionRow row;
-        row.key = pair.first;
-        row.label = pair.second;
-        row.value = obj.value(pair.first).toVariant().toString().trimmed();
-        rows.append(row);
-        emitted << pair.first;
-    }
-    const QStringList rest = obj.keys();
-    for (const QString &key : rest) {
-        if (emitted.contains(key)) {
-            continue;
-        }
-        ConstructionRow row;
-        row.key = key;
-        row.label = key;
-        row.value = obj.value(key).toVariant().toString().trimmed();
-        rows.append(row);
-    }
-    return rows;
-}
-
-} // namespace
 
 AlarmDetailDialog::AlarmDetailDialog(const AlarmRecord &alarm, QWidget *parent)
     : QDialog(parent), alarm_(alarm)
@@ -155,19 +89,20 @@ void AlarmDetailDialog::setupUi()
     }
     addRow(6, "视频:", clipText);
 
-    // 施工信息：负责人姓名/电话/工号 + 施工内容 + 施工id，按 JSON 里有什么就列什么。
+    // 施工信息：按 JSON 里有什么就列什么，键→中文名与顺序由 ConstructionInfo::fields()
+    // 给（与「施工详情」框同一个口径，见 src/biz/session/construction_session.h）。
     // 未登录时产生的报警（以及本轮之前的全部历史行）这里是空的 —— 不回填，
     // 历史上确实没有这份信息，显示成一行说明比留白或假数据诚实。
-    const QVector<ConstructionRow> construction = constructionRows(alarm_.constructionJson);
+    const QVector<session::ConstructionField> construction =
+        session::ConstructionInfo::fieldsFromJson(alarm_.constructionJson);
     int nextRow = 7;
     if (construction.isEmpty()) {
         QLabel *val = addRow(nextRow++, QString::fromUtf8("施工信息:"),
                              QString::fromUtf8("— （该报警产生时未登录，无施工信息）"));
         val->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
     } else {
-        for (const ConstructionRow &row : construction) {
-            addRow(nextRow++, row.label + QStringLiteral("："),
-                   row.value.isEmpty() ? QStringLiteral("—") : row.value);
+        for (const session::ConstructionField &row : construction) {
+            addRow(nextRow++, row.label + QStringLiteral("："), row.value);
         }
     }
 

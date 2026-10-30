@@ -104,7 +104,7 @@ getter 的默认值兜住。要显式改必须手改 JSON 并重启——报警�
 ### smartRecognition 段（智能识别取流）
 | 键 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `camera` | string | 探测摄像头节点（MJPEG 优先，其次 NV12/YUYV），探测不到取 `/dev/video0` | 二维码/OCR 拍照与人员点名/设备盘点预览共用的取流地址 |
+| `camera` | string | 探测摄像头节点（MJPEG 优先，其次 NV12/YUYV），探测不到取 `/dev/video0` | 二维码实时扫描与 OCR 拍照、人员点名/设备盘点预览共用的取流地址 |
 
 只有 getter（`smartRecognitionCamera()`），没有 setter：该页每次打开对话框才读一次，
 运行中改内存值没有意义。值直接交给 `FFmpegVideoDecoder::start()` /

@@ -18,9 +18,10 @@
 | dashboard_widget.h/.cpp | DashboardWidget：统计卡片、/proc 系统监控（CPU/内存/温度）、类别排行条 |
 | alarm_list_widget.h/.cpp | AlarmListWidget：类别/围栏双 Tab 报警表，300ms 防抖刷新与筛选；围栏 Tab 第 4 列「围栏类型」区分**闯入禁区/离岗**；两个 Tab 各有**负责人**列（类别表 8 列、围栏表 6 列），空值显示 `—` |
 | video_alarm_widget.h/.cpp | VideoAlarmWidget：视频监控页右侧报警卡片列表（QScrollArea），点击跳转详情；卡片第二行是「通道N · 负责人」（复用 `alarmChannel` 的 objectName，卡片高度不变） |
-| alarm_detail_dialog.h/.cpp | AlarmDetailDialog：报警详情对话框，支持误报标记与单条确认；"视频"行展示片段文件名/大小与网页副本是否随行；施工信息**按 `construction_info` 的键逐行渲染**（不是按固定字段），所以 `ConstructionInfo` 加字段这里不用改 |
-| qr_scan_dialog.h/.cpp | **全程序唯一的摄像头扫码对话框**：`available()` / `captureFrame()` / `scan()`（登录页，取第一个命中）/ `openFullScanner()`（智能识别页，含多码点选结果框）。四步（取址、PreviewOnly 解码、抓帧、解码）三个入口共用同一段代码——`smartRecognition.camera` 那个设备节点**不能被开两次**，两处各写一套就是抢摄像头。全局函数 `captureFrameAsImage()` 也从智能识别页搬到这里，OCR 与扫码共用一份取帧实现 |
-| capture_button.h | `uiwidgets::CaptureButton`：88x88 圆形快门（header-only）。原先长在智能识别页的 `.cpp` 里，扫码与 OCR 都要用才提出来，避免同一个控件两份定义 |
+| alarm_detail_dialog.h/.cpp | AlarmDetailDialog：报警详情对话框，支持误报标记与单条确认；"视频"行展示片段文件名/大小与网页副本是否随行；施工信息**按 `construction_info` 的键逐行渲染**（不是按固定字段），渲染口径来自 `ConstructionInfo::fields()`（与 ConstructionDetailDialog 同一份），所以 `ConstructionInfo` 加字段这里不用改 |
+| construction_detail_dialog.h/.cpp | ConstructionDetailDialog：**当前登录的施工信息**详情框，只读、无信号无槽（不需要 moc），入口是标题栏右上角那颗登录人角标（`frmMain::sessionBadge_`）。打开时读一次 `snapshot()`，之后不回查会话。逐键渲染同样走 `ConstructionInfo::fields()`。值标签挂了 `TextSelectableByMouse`——现场要照着抄电话号码 |
+| qr_scan_dialog.h/.cpp | **全程序唯一的摄像头扫码窗格**：`available()` / `scan()`（登录页，确认键文案「确认登录」）/ `openFullScanner()`（智能识别页，含多码点选）。口径是**打开即实时扫描**（2026-10-30 从"点快门拍照"改回来）：解码挂在 `frameReady` 上、跑在解码线程、每 250ms 限流一次；解出即冻结画面并在下方显示码内内容，**用户点「确认」才关窗格并返回内容**，「重新扫描」继续扫、「取消」直接关。取址、PreviewOnly 解码、实时扫描、冻结确认四步两个入口共用同一段代码——`smartRecognition.camera` 那个设备节点**不能被开两次**，两处各写一套就是抢摄像头。误码的兜底就是这颗确认键，所以不再要旧版"连续多帧一致"的判定。全局函数 `captureFrameAsImage()` 也从智能识别页搬到这里，OCR 拍照与扫码冻结帧共用一份取帧实现 |
+| capture_button.h | `uiwidgets::CaptureButton`：88x88 圆形快门（header-only）。原先长在智能识别页的 `.cpp` 里，扫码与 OCR 都要用才提出来；二维码改回实时扫描后**当前只有 OCR 拍照流程在用**，定义仍留在这里（智能识别页的 `.cpp` 带 moc，控件定义越少越好） |
 
 ## 核心类与数据流
 帧流：解码线程 dup(RGBA fd) → `RenderFrame` 经 `QueuedConnection` 投递 → GLVideoWidget::onFrameReady（互斥锁保护，prev/pending 两级 fd 管理）→ paintGL 中 `importRGBA → bindToTexture` 写入后台缓冲 → 双缓冲交换 drawQuad。EGL 引用计数保证"fd 已 close、画面仍可读"的重叠窗口。fd 生命周期：每个副本恰好一次 close（帧更替或析构）。界面流：AlarmManager 信号 → 防抖定时器 → 全表重建；QTimer 2s → DashboardWidget::refreshStats。
