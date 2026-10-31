@@ -1288,8 +1288,18 @@ void frmMain::initDebugPage()
         grp->setTitle("视频通道（源 / 备注 / 启用 / 级联模型）");
 
     // ========== 检测配置（从 config.json 读取） ==========
+    // 触屏够得着的最低值必须就是安全下限：不钉这一颗，长按 ▼ 能一路按到 0.00，
+    // 而阈值归 0 会让量化模型的后处理预筛整体失效（见 ConfigManager::setConfThreshold）。
+    ui->spinBoxConfThresh->setMinimum(0.05);
+    // 初值必须屏蔽信号：这两颗 spinbox 的 valueChanged 会 setConfThreshold + save()，
+    // 而 save() 是持锁把整份 JSON 截断重写（非原子）。.ui 里的默认值是 0.25、板上的
+    // 实际值是 0.30，于是"开机进设置页"本身就会白写两次盘——崩溃时机不巧就损坏配置。
+    ui->spinBoxConfThresh->blockSignals(true);
+    ui->spinBoxNmsThresh->blockSignals(true);
     ui->spinBoxConfThresh->setValue(cfg.confThreshold());
     ui->spinBoxNmsThresh->setValue(cfg.nmsThreshold());
+    ui->spinBoxConfThresh->blockSignals(false);
+    ui->spinBoxNmsThresh->blockSignals(false);
     // 类别数量 / 输入尺寸 / 模型类型不再显示：V2 里这些都是每个模型库条目的属性
     // （见"模型库管理"表的 类别数/输入 两列），全局值会误导。
     // 推理线程数同理不是配置项：一个槽位一个 PpeTask 线程，
@@ -1606,47 +1616,87 @@ void frmMain::applyChannelConfigNow(int channel)
 }
 
 // ============================================================
-// applyAlarmClassNow: 报警类别改动即时生效
+// pushSlotParamsToChannel: 把当前配置解析出的槽位运行期参数推给某一路
 // ============================================================
-// 报警类别只是一个字符串，不动模型、不动槽位数，可以在解码线程继续跑的同时换掉：
-// 解码器每帧在锁内拷一份 slotAlarmClasses_ 去构造报警上下文，下一帧起就是新值。
+// 报警类别与置信度是同一类东西：都是"不改槽位数、下一帧就该生效"的每槽参数，
+// 所以走同一条在线换通路（一次 resolveChannelSlots + 一次 updateSlotParams），
+// 不是一个改动一个函数——两套快照早晚各说各话。
+// 返回 false 有两种含义：该路没在跑、或形状不符已转整路重开，调用方按日志区分。
+// ============================================================
+bool frmMain::pushSlotParamsToChannel(int ch)
+{
+    PlayerWidget *pw = videoWindow ? videoWindow->playerWidget(ch) : nullptr;
+    FFmpegVideoDecoder *dec = pw ? pw->decoder() : nullptr;
+    if (!dec)
+        return false;
+
+    std::vector<SlotRuntimeParam> params;
+    // 变量名不能叫 slots：Qt 把 slots 定义成宏（qobjectdefs.h）
+    const QList<ResolvedSlot> resolved = ModelRegistry::resolveChannelSlots(ch);
+    params.reserve(resolved.size());
+    for (const ResolvedSlot &s : resolved) {
+        SlotRuntimeParam p;
+        p.alarmClass = s.alarmClass;
+        p.confThreshold = s.confThreshold;
+        p.nmsThreshold = s.nmsThreshold;
+        params.push_back(p);
+    }
+    if (dec->updateSlotParams(params))
+        return true;
+
+    if (dec->isLoopAlive()) {
+        log("system", QStringLiteral("通道%1 的槽位数与配置不一致，本路按新配置重开").arg(ch + 1));
+        applyChannelConfigNow(ch);
+        return false;
+    }
+    // 该路当前没在跑。注意这里**不等于**"下次开流自然读新配置"：stop() 不清 tasks_，
+    // 而 buildCascadeTasks() 见 tasks_ 非空就早退，所以"停过但没释放"的路会带着
+    // 旧参数重跑。本轮不改变这个行为（重开一次要漏一份 NPU 上下文，见 plan/roadmap 遗留项）。
+    return false;
+}
+
+// ============================================================
+// applyModelParamsNow: 某模型的报警类别 / 置信度改动即时生效
+// ============================================================
+// 两者都不动模型、不动槽位数，可以在解码线程继续跑的同时换掉：解码器每帧在锁内
+// 拷一份运行期参数，既构造报警上下文、也填进 TaskData 的阈值，下一帧起就是新值。
 // 只碰"引用该模型的通道"，其余路与本条改动无关。
-// 若某路的槽位数已与配置对不上（该路模型列表也改过，或它走的是默认回退模型），
-// 在线换做不了，该路退回整路重开。
 // ============================================================
-void frmMain::applyAlarmClassNow(const QString &libId)
+void frmMain::applyModelParamsNow(const QString &libId)
 {
     ConfigManager &cfg = ConfigManager::instance();
     const QList<int> users = cfg.modelParamUsers(libId);
     if (users.isEmpty()) {
-        log("system", QStringLiteral("模型 %1 当前没有通道引用，报警类别将在它被勾上时生效").arg(libId));
+        log("system", QStringLiteral("模型 %1 当前没有通道引用，参数将在它被勾上时生效").arg(libId));
         return;
     }
 
     QStringList live;
     for (int ch : users) {
-        PlayerWidget *pw = videoWindow ? videoWindow->playerWidget(ch) : nullptr;
-        FFmpegVideoDecoder *dec = pw ? pw->decoder() : nullptr;
-        if (!dec)
-            continue;
-        std::vector<QString> cls;
-        // 变量名不能叫 slots：Qt 把 slots 定义成宏（qobjectdefs.h）
-        const QList<ResolvedSlot> resolved = ModelRegistry::resolveChannelSlots(ch);
-        cls.reserve(resolved.size());
-        for (const ResolvedSlot &s : resolved)
-            cls.push_back(s.alarmClass);
-        if (dec->updateSlotAlarmClasses(cls)) {
+        if (pushSlotParamsToChannel(ch))
             live << QString::number(ch + 1);
-            continue;
-        }
-        if (dec->isLoopAlive()) {
-            log("system", QStringLiteral("通道%1 的槽位数与配置不一致，本路按新配置重开").arg(ch + 1));
-            applyChannelConfigNow(ch);
-        }
-        // 没在跑的路不用管：下次开流本来就会按新配置建任务
     }
     if (!live.isEmpty())
-        log("system", QStringLiteral("报警类别已即时生效（无需重开流）: 通道%1").arg(live.join(QStringLiteral("、"))));
+        log("system", QStringLiteral("模型参数（报警类别/置信度）已即时生效（无需重开流）: 通道%1")
+                      .arg(live.join(QStringLiteral("、"))));
+}
+
+// ============================================================
+// applyGlobalThresholdNow: 全局阈值改动推给所有通道
+// ============================================================
+// 改的是回落链的底座，所以受影响的是"所有没做每模型覆盖的槽位"——范围按模型枚举
+// 数不出来（缺键的模型根本没有条目），只能整通道推。
+// ============================================================
+void frmMain::applyGlobalThresholdNow()
+{
+    QStringList live;
+    for (int ch = 0; ch < ConfigManager::instance().channelCount(); ++ch) {
+        if (pushSlotParamsToChannel(ch))
+            live << QString::number(ch + 1);
+    }
+    if (!live.isEmpty())
+        log("system", QStringLiteral("检测阈值已即时生效（无需重开流）: 通道%1")
+                      .arg(live.join(QStringLiteral("、"))));
 }
 
 // ============================================================
@@ -1662,11 +1712,32 @@ static QVBoxLayout *settingsContentLayout(QWidget *page)
     return sa ? qobject_cast<QVBoxLayout *>(sa->widget()->layout()) : nullptr;
 }
 
+// 置信度下拉的两个特殊项（存的是 QComboBox 的 itemData）：
+constexpr int kConfFollowGlobal = -1;   ///< 「(跟随全局)」= 删掉 conf_threshold 这个键
+constexpr int kConfCustom = -2;         ///< 手改 JSON 得到的非档位值：只显示，不是动作
+
+// ============================================================
+// touchComboQss: 表格内下拉的**本体**样式（弹层行高不在这里，见 theme::makeComboTouch）
+//   ⚠ 一条 QSS 里同一个占位符编号只会被 QString::arg 替换**一次**（每次替换编号最低的
+//   那一个出现），所以重复用到的值一律编号，别指望 %4 写两遍能替两处。
+// ============================================================
+static QString touchComboQss()
+{
+    return QStringLiteral(
+        "QComboBox { background: %1; color: %2; border: 1px solid %3; border-radius: 4px;"
+        "  min-height: %4px; padding: 4px 8px; font-size: %5px; }"
+        "QComboBox::drop-down { width: 28px; }")
+        .arg(theme::FIELD, theme::TEXT, theme::BORDER)
+        .arg(theme::TOUCH_FIELD_MIN_H)
+        .arg(theme::FS_BODY);
+}
+
 // ============================================================
 // initModelParamsUi: "模型参数"分组框（一行一个模型库 id）
-//   报警类别是**模型的参数**而不是槽位的参数：同一个模型不管挂在哪个通道、
-//   哪个槽位，触发的都是同一个类别。旧 schema 把它写在 cascade.models[i] 上，
-//   换个槽位就换行为，语义不成立。
+//   报警类别与置信度都是**模型的参数**而不是槽位的参数：同一个模型不管挂在哪个通道、
+//   哪个槽位，触发的都是同一个类别、用的都是同一个阈值。旧 schema 把它写在
+//   cascade.models[i] 上，换个槽位就换行为，语义不成立。
+//   ⚠ "每模型"≠"每通道"：键是库 id，两个通道都挂同一个模型就共用同一个阈值。
 //   备注只写在这里（video.models[<id>].note），路径/标签一律不出现——
 //   那些是 model/library 的事。
 // ============================================================
@@ -1687,20 +1758,21 @@ void frmMain::initModelParamsUi()
     }
     if (insertAt < 0) return;
 
-    QGroupBox *group = new QGroupBox("模型参数（报警类别按模型配置）");
+    QGroupBox *group = new QGroupBox("模型参数（报警类别 / 置信度按模型配置）");
     group->setStyleSheet(theme::field(theme::PANEL));
     QVBoxLayout *v = new QVBoxLayout(group);
 
     QLabel *hint = new QLabel(
-        "报警类别留空 = 这个模型只画框不报警；改动对已引用它的通道即时生效"
-        "（槽位数没变则在线换，否则自动重开那一路）");
+        "报警类别留空 = 这个模型只画框不报警；置信度选「(跟随全局)」= 用上方全局阈值。"
+        "改动对已引用它的通道即时生效（槽位数没变则在线换，否则自动重开那一路）。"
+        "阈值按**模型**配置：同一个模型挂在几路就几路共用这一个值，看『被引用通道』列。");
     hint->setWordWrap(true);
     hint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
     v->addWidget(hint);
 
-    modelParamTable_ = new QTableWidget(0, 5);
+    modelParamTable_ = new QTableWidget(0, 6);
     modelParamTable_->setHorizontalHeaderLabels(
-        {"模型库id", "报警类别", "备注", "被引用通道", "操作"});
+        {"模型库id", "报警类别", "置信度", "备注", "被引用通道", "操作"});
     modelParamTable_->verticalHeader()->setVisible(false);
     // 行高只能在这里设：CSS 的 ::item padding 是 delegate 内边距，撑不起 section 高度
     modelParamTable_->verticalHeader()->setDefaultSectionSize(theme::TOUCH_TABLE_ROW);
@@ -1708,11 +1780,15 @@ void frmMain::initModelParamsUi()
     modelParamTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     modelParamTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     modelParamTable_->setShowGrid(false);
+    // 只有"备注"这一列吃 Stretch：新插入的置信度列在 2，后面三列顺次挪位。
+    // 这几处索引必须与 refreshModelParamsTable() 里的 setCellWidget 列号同步改，
+    // 漏一处就是 Stretch 落到下拉上、"移除"按钮被挤没。
     modelParamTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     modelParamTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-    modelParamTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
-    modelParamTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    modelParamTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    modelParamTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
     modelParamTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    modelParamTable_->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
     // 行高 56 后按"表头 48 + 4 行"重算上限，否则可见行数会被行长挤没
     modelParamTable_->setMaximumHeight(300);
     modelParamTable_->setStyleSheet(QString(
@@ -1751,6 +1827,11 @@ void frmMain::refreshModelParamsTable()
         const int r = modelParamTable_->rowCount();
         modelParamTable_->insertRow(r);
         const bool inLib = reg.contains(id);
+        // 引用名单在建列之前取一次：列 2 的 tooltip 要说清"这个值会 fan 到哪几路"，
+        // 列 4 显示的也是它，两处必须同一个来源。
+        const QList<int> users = cfg.modelParamUsers(id);
+        QStringList chs;
+        for (int ch : users) chs << QString::number(ch + 1);
 
         // --- 列 0：库 id（只读） ---
         QTableWidgetItem *idItem = new QTableWidgetItem(id);
@@ -1763,6 +1844,7 @@ void frmMain::refreshModelParamsTable()
 
         // --- 列 1：报警类别 ---
         QComboBox *clsCombo = new QComboBox;
+        theme::makeComboTouch(clsCombo);   // 这一列与置信度同表，弹层行高必须一起给
         clsCombo->addItem(QStringLiteral("(不报警)"), QString());
         const QStringList classes = inLib ? reg.meta(id).classes : QStringList{};
         for (const QString &c : classes)
@@ -1783,11 +1865,68 @@ void frmMain::refreshModelParamsTable()
                     c.save();
                     log("system", QString("模型 %1 报警类别: %2")
                             .arg(id, cls.isEmpty() ? QStringLiteral("(不报警)") : cls));
-                    applyAlarmClassNow(id);
+                    applyModelParamsNow(id);
                 });
         modelParamTable_->setCellWidget(r, 1, clsCombo);
 
-        // --- 列 2：备注 ---
+        // --- 列 2：置信度（档位点选） ---
+        // 为什么是档位下拉而不是输入框：本轮不做虚拟键盘，任何输入框在 10 寸触屏上
+        // 都落不了地（隔壁那两颗全局 QDoubleSpinBox 现在就是这个状态：0.25→0.95 要按 14 下 ▲）。
+        // 首项「(跟随全局)」对应**删掉这个键**而不是写一个 0.25 进去——写死之后这个模型
+        // 就再也不跟全局档走了，那恰恰是这一项要避免的事。
+        QComboBox *confCombo = new QComboBox;
+        confCombo->setStyleSheet(touchComboQss());
+        theme::makeComboTouch(confCombo);
+        confCombo->addItem(QStringLiteral("(跟随全局)"), kConfFollowGlobal);
+        for (int step = 1; step <= 19; ++step)              // 0.05 … 0.95
+            confCombo->addItem(QString::number(step / 20.0, 'f', 2), step);
+        // 档位值用 step/20.0 而不是 step*0.05：后者在 double 里 3*0.05 = 0.15000000000000002，
+        // 与存盘再读回来的 0.15 不是同一个数，任何按值比对的写法都会当场判成"没配"。
+        const float storedConf = cfg.modelConfThreshold(id);   // 负数 = 未配置
+        int confIdx = 0;
+        if (storedConf >= 0.f) {
+            const int step = qRound(storedConf * 20.f);
+            confIdx = confCombo->findData(step);
+            if (confIdx < 0 || qAbs(step / 20.0 - static_cast<double>(storedConf)) > 1e-3) {
+                // 手改 JSON 改出了一个非档位值：如实列出来，不吸附到最近的档位，
+                // 否则界面写着 0.35、实际跑的是 0.333，现场只会认为阈值没生效。
+                confCombo->addItem(QStringLiteral("自定义 %1")
+                                   .arg(QString::number(storedConf, 'f', 3)), kConfCustom);
+                confIdx = confCombo->count() - 1;
+            }
+        }
+        confCombo->setCurrentIndex(confIdx);
+        confCombo->setToolTip(QStringLiteral(
+            "越高框越少、漏检越多；本模型当前生效 %1（%2）。\n按模型配置：改动会同时作用于引用它的通道 %3")
+            .arg(QString::number(ModelRegistry::resolveConfThreshold(id), 'f', 3))
+            .arg(storedConf >= 0.f ? QStringLiteral("每模型覆盖")
+                                   : QStringLiteral("来自全局 %1")
+                                         .arg(cfg.confThreshold(), 0, 'f', 2))
+            .arg(chs.isEmpty() ? QStringLiteral("（当前无通道引用）") : chs.join(QStringLiteral("、"))));
+        connect(confCombo, QOverload<int>::of(&QComboBox::activated), this,
+                [this, id, confCombo](int) {
+                    const int item = confCombo->currentData().toInt();
+                    if (item == kConfCustom)
+                        return;      // 「自定义」只是显示项，不是一个可执行的动作
+                    ConfigManager &c = ConfigManager::instance();
+                    if (item == kConfFollowGlobal)
+                        c.clearModelConfThreshold(id);
+                    else
+                        c.setModelConfThreshold(id, item / 20.0);
+                    c.save();
+                    log("system", QStringLiteral("模型 %1 置信度: %2（生效 %3）")
+                            .arg(id,
+                                 item == kConfFollowGlobal
+                                     ? QStringLiteral("(跟随全局)")
+                                     : QString::number(item / 20.0, 'f', 2))
+                            .arg(ModelRegistry::resolveConfThreshold(id), 0, 'f', 3));
+                    // 只 apply 不 refresh：refreshModelParamsTable() 里的 reg.rescan()
+                    // 会在 GUI 线程重扫整库（含逐模型哈希），阈值这颗不能带上它。
+                    applyModelParamsNow(id);
+                });
+        modelParamTable_->setCellWidget(r, 2, confCombo);
+
+        // --- 列 3：备注 ---
         QLineEdit *noteEdit = new QLineEdit(cfg.modelParam(id).note);
         noteEdit->setPlaceholderText(QStringLiteral("备注"));
         noteEdit->setStyleSheet(theme::field(theme::PANEL));
@@ -1796,19 +1935,16 @@ void frmMain::refreshModelParamsTable()
             c.setModelNote(id, noteEdit->text().trimmed());
             c.save();
         });
-        modelParamTable_->setCellWidget(r, 2, noteEdit);
+        modelParamTable_->setCellWidget(r, 3, noteEdit);
 
-        // --- 列 3：被引用通道（显示 1~4，内部 0-based） ---
-        QStringList chs;
-        const QList<int> users = cfg.modelParamUsers(id);
-        for (int ch : users) chs << QString::number(ch + 1);
+        // --- 列 4：被引用通道（显示 1~4，内部 0-based） ---
         QTableWidgetItem *refItem =
             new QTableWidgetItem(chs.isEmpty() ? QStringLiteral("-") : chs.join(QStringLiteral(",")));
         refItem->setFlags(refItem->flags() & ~Qt::ItemIsEditable);
         refItem->setToolTip(QStringLiteral("该模型被这些通道的级联列表引用；无引用时才可删除模型"));
-        modelParamTable_->setItem(r, 3, refItem);
+        modelParamTable_->setItem(r, 4, refItem);
 
-        // --- 列 4：移除该模型的配置 ---
+        // --- 列 5：移除该模型的配置 ---
         QPushButton *removeBtn = new QPushButton(QStringLiteral("移除"));
         removeBtn->setMinimumWidth(88);   // 上限 56 + 新 padding 会截掉"移除"二字
         removeBtn->setStyleSheet(theme::miniButton(theme::DANGER));
@@ -1832,7 +1968,7 @@ void frmMain::refreshModelParamsTable()
             for (int ch : affected)
                 applyChannelConfigNow(ch);
         });
-        modelParamTable_->setCellWidget(r, 4, removeBtn);
+        modelParamTable_->setCellWidget(r, 5, removeBtn);
     }
 }
 
@@ -2397,7 +2533,11 @@ void frmMain::testSelectedModel()
         }
 
         object_detect_result_list results;
-        model.detect(&img, &results);   // infer 内部先 memset 再填充
+        // 阈值按该库 id 走同一条回落链：这里若还用 detect() 的形参默认值，
+        // 现场就会看到"测试页框一堆、监控页一个不见"，然后怀疑设置没生效。
+        const float testConf = ModelRegistry::resolveConfThreshold(id);
+        const float testNms = ModelRegistry::resolveNmsThreshold();
+        model.detect(&img, &results, false, testConf, testNms);   // infer 内部先 memset 再填充
         free(img.virt_addr);            // read_image 用 malloc/stbi 分配，成对释放
 
         const std::vector<std::string> &names = model.getClassNames();
@@ -2405,6 +2545,7 @@ void frmMain::testSelectedModel()
         QStringList lines;
         lines << QString("模型: %1").arg(id)
               << QString("测试图: %1 (%2x%3)").arg(testImage).arg(img.width).arg(img.height)
+              << QString("阈值: conf %1 / nms %2").arg(testConf, 0, 'f', 3).arg(testNms, 0, 'f', 3)
               << QString("检出目标: %1 个").arg(results.count);
         for (int i = 0; i < results.count && i < 15; ++i) {
             const object_detect_result &r = results.results[i];
@@ -2494,29 +2635,35 @@ void frmMain::on_btnBrowseCh4_clicked() { browseChannelSource(3, ui->lineEditCh4
 // ==========================================
 
 /**
- * @brief 置信度阈值变化槽
- * 当用户在 spinBox 中修改置信度时：
- *   1. 保存到 config.json
- *   2. 输出日志
+ * @brief 置信度阈值变化槽（全局档 = 回落链的底座）
+ * 值没变就直接返回：save() 是持锁把整份 JSON 截断重写，而 valueChanged 是**每一步**
+ * 触发一次（触屏上长按 ▼ 会连发）。隔壁通道地址编辑器同样是这个防抖口径。
+ * 生效范围是所有"跟随全局"的槽位，所以推给全部通道，改动不需要重开流。
  */
 void frmMain::on_spinBoxConfThresh_valueChanged(double value)
 {
-    ConfigManager::instance().setConfThreshold(value);
-    ConfigManager::instance().save();
-    log("system", QString("置信度阈值已更新: %1").arg(value, 0, 'f', 2));
+    ConfigManager &cfg = ConfigManager::instance();
+    if (qFuzzyCompare(cfg.confThreshold(), value))
+        return;
+    cfg.setConfThreshold(value);
+    cfg.save();
+    log("system", QString("置信度阈值已更新: %1").arg(cfg.confThreshold(), 0, 'f', 2));
+    applyGlobalThresholdNow();
 }
 
 /**
  * @brief NMS 阈值变化槽
- * 当用户在 spinBox 中修改 NMS 阈值时：
- *   1. 保存到 config.json
- *   2. 输出日志
+ * @brief 同上：只有全局一档（NMS 是跨模型的 IoU 合并口径，每模型再配一列不值）。
  */
 void frmMain::on_spinBoxNmsThresh_valueChanged(double value)
 {
-    ConfigManager::instance().setNmsThreshold(value);
-    ConfigManager::instance().save();
-    log("system", QString("NMS阈值已更新: %1").arg(value, 0, 'f', 2));
+    ConfigManager &cfg = ConfigManager::instance();
+    if (qFuzzyCompare(cfg.nmsThreshold(), value))
+        return;
+    cfg.setNmsThreshold(value);
+    cfg.save();
+    log("system", QString("NMS阈值已更新: %1").arg(cfg.nmsThreshold(), 0, 'f', 2));
+    applyGlobalThresholdNow();
 }
 
 // ==========================================

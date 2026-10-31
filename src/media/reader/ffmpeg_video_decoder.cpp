@@ -629,7 +629,7 @@ void FFmpegVideoDecoder::buildCascadeTasks()
 {
     if (!tasks_.empty())
         return;  // 任务集合只在 tasks_ 为空时建立。改模型列表请先 releaseTasks()
-                 // 再 start()（设置页「模型…」即走这条路）；只改报警类别用 updateSlotAlarmClasses()。
+                 // 再 start()（设置页「模型…」即走这条路）；只改报警类别或阈值用 updateSlotParams()。
 
     ConfigManager &cfg = ConfigManager::instance();
     // 正常启动时 frmmain 早已 load()；这里只兜"直接 new 解码器"这种用法下配置还没读进来。
@@ -654,6 +654,10 @@ void FFmpegVideoDecoder::buildCascadeTasks()
         fb.modelPath = fbModel;
         fb.labelPath = ModelRegistry::instance().labelPath(fbId);
         fb.alarmClass = cfg.modelAlarmClass(fbId);
+        // 兜底槽也必须走同一条阈值链：不填的话它拿的是 ResolvedSlot 的类内默认 0.25，
+        // 于是"这一路没配模型"的通道会静默无视 config 里的阈值——正是最难查的那种不一致。
+        fb.confThreshold = ModelRegistry::resolveConfThreshold(fbId);
+        fb.nmsThreshold = ModelRegistry::resolveNmsThreshold();
         qWarning() << "[decoder] 通道" << channel_ << "未配置可用模型，回退库内默认:" << fbId;
         resolved.append(fb);
     }
@@ -701,21 +705,34 @@ void FFmpegVideoDecoder::buildCascadeTasks()
         // 类名表：画框用 std 版，报警侧用 QString 版（同一数据源，同下标）
         slotClassNames_.push_back(readLabelNames(lp));
 
-        // 报警类别是"模型的参数"（video.models[<id>].alarm_class），空 = 只画框不报警。
-        // 存在本解码器里而非 AlarmManager 单例：按通道配置后，通道 0 的槽位 1 与
-        // 通道 2 的槽位 1 是两个不同模型，写进同一张全局表会互相覆盖。
-        // 加锁是因为运行期 GUI 可以经 updateSlotAlarmClasses() 改写这张表（槽位数不变时）。
+        // 报警类别与生效阈值都是"模型的参数"（video.models[<id>]），存在本解码器里
+        // 而非 AlarmManager 单例：按通道配置后，通道 0 的槽位 1 与通道 2 的槽位 1
+        // 是两个不同模型，写进同一张全局表会互相覆盖。
+        // 加锁是因为运行期 GUI 可以经 updateSlotParams() 改写这张表（槽位数不变时）。
         {
-            std::lock_guard<std::mutex> lk(alarmClsMtx_);
-            slotAlarmClasses_.push_back(s.alarmClass);
+            SlotRuntimeParam p;
+            p.alarmClass = s.alarmClass;
+            p.confThreshold = s.confThreshold;
+            p.nmsThreshold = s.nmsThreshold;
+            std::lock_guard<std::mutex> lk(slotParamMtx_);
+            slotParams_.push_back(p);
         }
     }
+
+    // 每槽的**生效**阈值单独一行：回落链（每模型→全局→默认）算完才是这个数，
+    // 现场核对"我配的 0.30 到底进没进去"必须靠它，不能靠猜。
+    // 前缀刻意与上面那句 "cascade slot ch …" 不同——tests/test_channel_reload.cpp
+    // 拿那句的最后一个 token 当模型路径，往里加字段会把那条契约解析弄坏。
+    for (size_t k = 0; k < slotParams_.size(); ++k)
+        qInfo().noquote() << "slot params ch" << channel_ << "slot" << (int)k
+                          << "conf" << QString::number(slotParams_[k].confThreshold, 'f', 3)
+                          << "nms" << QString::number(slotParams_[k].nmsThreshold, 'f', 3);
 
     qDebug() << "Cascade tasks channel" << channel_ << ":" << tasks_.size();
     for (size_t k = 0; k < tasks_.size(); ++k) {
         qDebug() << "  slot" << k << "->" << QString::fromStdString(tasks_[k]->getModelPath())
                  << "labels:" << (int)slotClassNames_[k].size()
-                 << "alarm_class:" << slotAlarmClasses_[k];
+                 << "alarm_class:" << slotParams_[k].alarmClass;
     }
 
     // 围栏前置条件：围栏是通道级判定，需要本通道至少有一个模型能产出围栏类别。
@@ -779,25 +796,25 @@ void FFmpegVideoDecoder::releaseTasks()
     slotQueues_.clear();
     slotClassNames_.clear();
     {
-        std::lock_guard<std::mutex> lk(alarmClsMtx_);
-        slotAlarmClasses_.clear();
+        std::lock_guard<std::mutex> lk(slotParamMtx_);
+        slotParams_.clear();
     }
     qInfo() << "[decoder] 通道" << channel_ << "推理任务已释放" << freed << "个，等待按新配置重建";
 }
 
 // ============================================================================
-// updateSlotAlarmClasses: 在线换报警类别（不换模型、不动槽位数）
+// updateSlotParams: 在线换槽位运行期参数（报警类别 / 置信度 / NMS）
 // ============================================================================
-// 只改写 slotAlarmClasses_：解码线程每帧在锁内拷一份去构造 SlotContext，
-// 所以下一帧起报警判定就是新值。画框、类名表、推理任务一概不受影响。
-bool FFmpegVideoDecoder::updateSlotAlarmClasses(const std::vector<QString> &cls)
+// 只改写 slotParams_：解码线程每帧在锁内拷一份，报警侧拿去构造 SlotContext、
+// 推理侧随 TaskData 带走，所以下一帧起就是新值。画框、类名表、推理任务一概不受影响。
+bool FFmpegVideoDecoder::updateSlotParams(const std::vector<SlotRuntimeParam> &params)
 {
-    std::lock_guard<std::mutex> lk(alarmClsMtx_);
-    if (cls.size() != slotAlarmClasses_.size()) {
+    std::lock_guard<std::mutex> lk(slotParamMtx_);
+    if (params.size() != slotParams_.size()) {
         // 槽位数变了 = 模型列表改过，这条路做不了，交回调用方走 releaseTasks+重开
         return false;
     }
-    slotAlarmClasses_ = cls;
+    slotParams_ = params;
     return true;
 }
 
@@ -1549,6 +1566,19 @@ void FFmpegVideoDecoder::decodeLoop()
                 ds.stage.restart();
                 mark("B rga");
 
+                // ===== 4.5b 运行期参数快照（每帧一次，推理侧与报警侧共用）=====
+                //
+                // 槽位的报警类别与生效阈值都是 GUI 可以在运行期改的（updateSlotParams），
+                // 所以每帧取一份拷贝：4.6 用它把阈值塞进 TaskData，4.9b 用它构造报警上下文。
+                // 一次锁、两侧同一时刻的值——分成两次取就会出现"这一帧按新阈值过滤、
+                // 却按旧类别报警"这种解释不了的组合。
+                // PreviewOnly（智能识别 QR/OCR）既不做推理也不产报警，跳过。
+                std::vector<SlotRuntimeParam> slotParamSnap;
+                if (inferenceEnabled_) {
+                    std::lock_guard<std::mutex> lk(slotParamMtx_);
+                    slotParamSnap = slotParams_;
+                }
+
                 if (ok)
                 {
                     // ===== 4.6 每 3 帧做一次推理（降频处理） =====
@@ -1630,6 +1660,13 @@ void FFmpegVideoDecoder::decodeLoop()
                             long ts = now.time_since_epoch().count();
                             for (size_t k = 0; k < tasks_.size(); ++k) {
                                 auto td = std::make_shared<TaskData>(ts, image, slotQueues_[k]);
+                                // 本帧的阈值取 4.5b 那份快照；下标对不上（理论上不会发生，
+                                // 两者都来自同一批槽位）就保留 TaskData 的类内默认值，
+                                // 宁可回到 0.25 也不要拿未初始化的数去过滤。
+                                if (k < slotParamSnap.size()) {
+                                    td->confThreshold = slotParamSnap[k].confThreshold;
+                                    td->nmsThreshold = slotParamSnap[k].nmsThreshold;
+                                }
                                 tasks_[k]->put(td);  // 非阻塞放入，如果队列满则丢弃旧帧
                             }
                         }
@@ -1668,16 +1705,11 @@ void FFmpegVideoDecoder::decodeLoop()
                     // 由解码器构造、随结果传进 AlarmManager，单例里不再存全局槽表——
                     // 按通道配置之后，通道 0 的槽位 1 与通道 2 的槽位 1 是两个不同模型。
                     std::vector<AlarmManager::SlotContext> slotCtxs(slotQueues_.size());
-                    // 报警类别每帧现取一份快照：设置页改 alarm_class 时不重启、不重开本路
-                    // 也能生效（槽位数不变的前提下）。锁只覆盖这一次 ≤5 元素的拷贝。
-                    std::vector<QString> alarmClassSnap;
-                    {
-                        std::lock_guard<std::mutex> lk(alarmClsMtx_);
-                        alarmClassSnap = slotAlarmClasses_;
-                    }
+                    // 直接复用 4.5b 那份快照（≤5 元素的拷贝，锁只在那一次覆盖）：
+                    // 设置页改报警类别或阈值都不需要重启、不需要重开本路。
                     for (size_t k = 0; k < slotQueues_.size(); ++k) {
                         slotCtxs[k].alarmClass =
-                            (k < alarmClassSnap.size()) ? alarmClassSnap[k] : QString();
+                            (k < slotParamSnap.size()) ? slotParamSnap[k].alarmClass : QString();
                         slotCtxs[k].classNames.reserve((int)slotClassNames_[k].size());
                         for (const auto &n : slotClassNames_[k])
                             slotCtxs[k].classNames << QString::fromStdString(n);

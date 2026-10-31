@@ -21,10 +21,17 @@
 // 预处理相关常量定义
 // ============================================================
 // 审查注记（各常量的作用域）：
-//   - 下列阈值仅作为"文档性默认值"存在；推理链路上真正生效的是
-//     YoloBaseDetector::detect / YOLO11Model::detect 的形参默认值
-//     (conf 0.25 / nms 0.45)，两者数值口径保持一致（0.25=YOLO 官方
-//     验证集召回/误报平衡点，0.45=密集行人场景下避免误抑制的经验值）。
+//   - BOX_THRESH / NMS_THRESH 是**死宏**：全仓零引用（2026-10-31 复核，除本定义与注释外
+//     没有任何 C++ 代码读它们；python/yolo11.py 里同名的那份是离线导出侧的独立常量，
+//     与板端运行期无关）。改这两个数**不会**改变任何检测行为，别把它们当开关。
+//   - 真正生效的阈值有两条来源，按优先级：
+//       1) 调用方传入的实参 —— 生产主链路上是 ModelRegistry::resolveConfThreshold()
+//          解析出的配置值（video.models[库id].conf_threshold → detect.conf_threshold → 0.25，
+//          夹在 [0.05, 1.0]；nms 只有全局一档，无每模型覆盖)，随帧带进
+//          TaskData::confThreshold / nmsThreshold；
+//       2) 调用方没传时，才是 YoloBaseDetector::detect / YOLO11Model::detect 的形参默认值
+//          (conf 0.25 / nms 0.45；0.25=YOLO 官方验证集召回/误报平衡点，
+//          0.45=密集行人场景下避免误抑制的经验值)。这里的宏数值与形参默认值口径一致，仅作参照。
 //   - OBJ_CLASS_NUM 固定 80 参与后处理得分通道遍历（见 yolo11_model.hpp
 //     process_i8 的 c 循环），训练自定义模型若类别数≠80，得分通道会错位，
 //     需同步改此宏或换用带 score_sum 的导出。
@@ -33,8 +40,8 @@
                                    // 128 × 24B ≈ 3KB/帧，队列深 8~12 时仍为定长
                                    // 无堆分配设计，跨线程拷贝即整结构体赋值）
 #define OBJ_CLASS_NUM 80           // COCO数据集类别数
-#define NMS_THRESH 0.45            // NMS（非极大值抑制）默认IoU阈值
-#define BOX_THRESH 0.25            // 置信度默认阈值
+#define NMS_THRESH 0.45            // 死宏：零引用，真值见上方注记
+#define BOX_THRESH 0.25            // 死宏：零引用，真值见上方注记
 
 // ============================================================
 // BoundingBox 结构体 - 表示图像中边界框

@@ -58,7 +58,10 @@ QColor statusColor(const QString &status)
 
 // 触屏档：这一页的检索条是"主要操作"，控件一律给到能按准的尺寸。
 // 表头/Tab 的内联 QSS 特异性高于 blacksoft.css，皮肤层放大的 padding 会被打回原形，
-// 所以下拉与弹出列表的高度必须在这里一起给。
+// 所以下拉本体的高度必须在这里一起给。
+// ⚠ 弹出来的那一层**不在这条 QSS 的管辖范围内**：`QComboBox QAbstractItemView::item
+//    { min-height }` 无论写在 combo 上还是写在 view() 上都不生效（2026-10-31 独立探针实测：
+//    两种写法弹层行高都停在字体算出的尺寸），行高只能由 item delegate 给 —— 见 makeCombo。
 QString comboQss()
 {
     return QStringLiteral(
@@ -67,10 +70,11 @@ QString comboQss()
         "QComboBox::drop-down { width: 30px; }"
         "QComboBox QAbstractItemView { background: %1; color: %2; border: 1px solid %3;"
         "  selection-background-color: %5; }"
-        "QComboBox QAbstractItemView::item { min-height: %4px; }")
+        "QComboBox QAbstractItemView::item { min-height: %7px; }")
         .arg(theme::FIELD, theme::TEXT, theme::BORDER)
         .arg(theme::TOUCH_FIELD_MIN_H)
-        .arg(theme::BTN_SECONDARY);
+        .arg(theme::BTN_SECONDARY)
+        .arg(theme::TOUCH_FIELD_MIN_H);
 }
 
 QString chipQss(bool checked)
@@ -486,6 +490,7 @@ void AlarmListWidget::setupFilterBar(QVBoxLayout *mainLay)
     auto makeCombo = [this, comboLay](const QString &allText) {
         QComboBox *c = new QComboBox();
         c->setStyleSheet(comboQss());
+        theme::makeComboTouch(c);
         c->addItem(allText, QString());
         connect(c, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, [this](int) { onFilterChanged(); });

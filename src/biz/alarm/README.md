@@ -74,11 +74,25 @@ ClipWriter 后台线程(报警 +2s 到点) → dump 裸流/MP4 → attachVideoCl
 （历史：早期实现寄生在级联里且无限流，40 秒出 200~340 条；改成节流窗口后仍是"每 10 秒一条"的电平语义，
 人不动就一直报。`bypassThrottle` 形参已删除，不存在"豁免限流"的调用路径。）
 
+## 报警频率有三层旋钮，只有一层可配
+
+现场问"报警太频繁，怎么让它多少秒报一次"时，别把话指错层：
+
+1. **置信度**（✅ 可配）：`video.models[<库id>].conf_threshold` → `detect.conf_threshold` → 0.25。
+   它决定"有没有这个框"，是**减少误报**的那颗旋钮。每模型一份、改完约 1 秒内生效、不用重开流。
+2. **同签名节流**（❌ 编译期）：`kAlarmThrottleNs = 2e9`（2 秒），同通道同类别同帧的重复报警丢弃。
+   它是 `const`、不是配置键；做成可配要先把"谁能改、改了要不要落盘"想清楚，本轮刻意没动。
+3. **抽帧与围栏沿**（❌ 编译期）：`frame_count % 3` 决定推理频率；围栏是**进入沿**事件
+   （人不动不再报）+ 它之下的 `throttleSeconds` 窗口。
+
+⇒ 想"少报"就拧第 1 层；第 2、3 层要改得动代码。
+
 ## 使用方法
 ```cpp
-// 解码线程中：上下文每帧按通道局部组装一次，槽循环内逐槽传入
+// 解码线程中：上下文每帧按通道局部组装一次（与阈值共用同一份 slotParams_ 快照），
+// 槽循环内逐槽传入
 AlarmManager::SlotContext ctx;                 // alarmClass 空 = 该模型只画框不报警
-ctx.alarmClass = slotAlarmClasses_[k];
+ctx.alarmClass = slotParamSnap[k].alarmClass;
 for (const auto &n : slotClassNames_[k]) ctx.classNames << QString::fromStdString(n);
 
 QVector<AlarmRecord> news = AlarmManager::instance().ingest(ch, od, ctx);

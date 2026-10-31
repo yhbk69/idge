@@ -45,6 +45,11 @@ struct ResolvedSlot
     QString labelPath;   ///< 该模型的 labels.txt（参数表覆盖 > 库内默认）
     QString libId;       ///< 模型库目录名，config 里就是这个键
     QString alarmClass;  ///< 该模型的报警类别（video.models[<id>].alarm_class），空=不报警
+    // 该槽位的**生效**阈值：回落链（每模型 conf_threshold → detect.conf_threshold → 0.25）
+    // 已在 resolveChannelSlots() 里走完并夹过下限，调用方拿到的就是最终值，不必再判缺键。
+    // 类内默认值等于 detect() 的形参默认值，语义是"谁都没配 ⇒ 行为与接通阈值前逐字节相同"。
+    float confThreshold = 0.25f;
+    float nmsThreshold = 0.45f;
 };
 
 /**
@@ -137,6 +142,30 @@ public:
      *         库里不存在的 id 被跳过并打告警，不占下标
      */
     static QList<ResolvedSlot> resolveChannelSlots(int ch);
+
+    /**
+     * @brief 某模型在本进程的**生效**置信度阈值（回落链的唯一实现处）
+     *
+     * `video.models[<libId>].conf_threshold` → `detect.conf_threshold` → 0.25，
+     * 结果夹到 [0.05, 1.0]。缺键与"配了 0"是两件事：前者跟随全局，后者会被夹回 0.05。
+     *
+     * 为什么单独暴露：四个表面要用同一个数——级联槽位解析、解码器的"库内默认模型"兜底槽、
+     * 设置页「模型测试」、装备盘点。让它们各自读 config 就必然出现
+     * "测试页框一堆、监控页一个不见"，而现场只会怀疑阈值没生效。
+     */
+    static float resolveConfThreshold(const QString &libId);
+
+    /** @brief 生效 NMS 阈值（只有全局一档，见 ConfigManager::nmsThreshold 的说明） */
+    static float resolveNmsThreshold();
+
+    /**
+     * @brief 按**模型文件路径**解析生效置信度（入参不是库 id）
+     *
+     * 给不经过通道槽位的旁路检测面用：设置页「模型测试」、装备盘点、摄像头预览对话框。
+     * 这些表面只手里拿着一个 rknn 路径，反查不到库 id 就是"该模型没有覆盖"，
+     * 回落链自动落到全局值——与级联槽位用的是同一个函数，不会出现两套数。
+     */
+    static float resolveConfThresholdByPath(const QString &modelPath);
 
 private:
     ModelRegistry() {}

@@ -80,6 +80,16 @@ public:
     std::shared_ptr<image_buffer_t> image;              // 图像数据
     std::shared_ptr<PriorityQueue<object_detect_result_list>> resultQueue;  // 结果队列
 
+    // 本帧用的检测阈值。为什么不放进 TaskConfig 而是随帧传递：
+    //   TaskConfig 是"构造期值语义快照，init 后不再变更"（见 task_config.hpp 的声明），
+    //   而阈值要求设置页改完**下一帧就生效**、不重开流也不重加载模型。
+    //   解码线程每帧在 slotParamMtx_ 内拷一次运行期参数，填到这里——于是这一帧
+    //   用的就是"采它那一刻"的阈值，比任何共享可变状态都更少一种竞态。
+    // 类内默认值 == YOLO11Model::detect() 的形参默认值：任何忘记填这条路的调用点
+    // 表现与接通之前逐字节相同，而不会像一个没初始化的垃圾那样把过滤整个关掉。
+    float confThreshold = 0.25f;
+    float nmsThreshold = 0.45f;
+
     ~TaskData()
     {
 

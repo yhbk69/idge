@@ -27,8 +27,11 @@ ModelRegistry::instance().deleteModel(id, err); // 被引用则拒绝，否则�
 ModelRegistry::instance().findIdByModelFile(p); // 模型文件反查库内 id（迁移/排障用）
 ```
 
-`ResolvedSlot{modelPath, labelPath, libId, alarmClass}` 的字段来源：
-`modelPath`/`labelPath` 取自库目录，`alarmClass` 取自 `video.models[<libId>].alarm_class`。
+`ResolvedSlot{modelPath, labelPath, libId, alarmClass, confThreshold, nmsThreshold}` 的字段来源：
+`modelPath`/`labelPath` 取自库目录，`alarmClass` 取自 `video.models[<libId>].alarm_class`，
+`confThreshold` 走回落链 `video.models[<libId>].conf_threshold` → `detect.conf_threshold` → 0.25
+（唯一实现点 `resolveConfThreshold()`，**UI 显示与推理用的是同一个函数**，不存在"页面上一个数、
+跑起来另一个数"），`nmsThreshold` 只有全局一档。
 列表**下标即紧凑槽位号（= `result_id`，画面上的 M1/M2/…）**；库里找不到的 id 被跳过并打告警，
 不占下标——所以"某个模型没入库"只会让后面的槽位前移，不会留下永久空槽。
 
@@ -38,8 +41,9 @@ ModelRegistry::instance().findIdByModelFile(p); // 模型文件反查库内 id�
 ## 依赖关系 / 使用方
 
 - `src/media/reader/ffmpeg_video_decoder.cpp`：`buildCascadeTasks()` 在 `start()` 里按
-  **本通道**解析槽位建任务，`taskConfig.result_id = 槽下标`；每槽的类别名与报警类留在解码器
-  （`slotClassNames_` / `slotAlarmClasses_`），随结果组成 `AlarmManager::SlotContext` 传入 `ingest()`；
+  **本通道**解析槽位建任务，`taskConfig.result_id = 槽下标`；每槽的类别名与运行期参数
+  （报警类 + 生效阈值）留在解码器（`slotClassNames_` / `slotParams_`），前者随结果组成
+  `AlarmManager::SlotContext` 传入 `ingest()`，后者随 `TaskData` 传进推理线程；
 - `src/ui/form/frmmain.cpp`：`initEquipmentService()` 设备盘点模型清单的单一来源
   （coco 槽固定取 `yolo11n-coco`；明火按 id 含 "fire" 探测，入库即自动生效）；
   设置页"模型参数表/通道配置区"以 `ids()` + `resolveChannelSlots()` 为数据源；
@@ -59,8 +63,10 @@ ModelRegistry::instance().findIdByModelFile(p); // 模型文件反查库内 id�
 - 线程安全：`entries_` 由内部 `std::mutex` 保护；`rescan` 期间并发查询只可能读到新旧混合快照，
   约定在启动与配置页操作时调用，避免与高频推理路径同瞬时重建。
   `resolveChannelSlots()` 是**静态**方法且会取 `ConfigManager` 的锁
-  （`channelModelIds` / `modelParam` / `modelParamUsers`），而 `ConfigManager::load()` 持锁期间
+  （`channelModelIds` / `modelParam` / `modelParamUsers`，每槽的阈值再套一层
+  `modelConfThreshold`/`confThreshold`——都是**取完就放**的独立调用，不是递归加锁），而 `ConfigManager::load()` 持锁期间
   做 schema 迁移——`std::mutex` 不可重入，故 ConfigManager 内部**绝不能**回调本类，
   迁移里的路径→id 反查另有一份不依赖注册表的纯字符串实现。
+  同理 `resolveConfThreshold()` 也**不能**被 ConfigManager 的任何路径调用。
 - 槽位类别名表由解码器持有、按通道独立，`AlarmManager` 不再维护全局槽表；
   跨通道改动槽位配置不需要通知报警模块。

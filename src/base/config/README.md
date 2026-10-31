@@ -191,10 +191,29 @@ CLI：`./app -m model/yolo11n.rknn -i video.mp4 -t 3 -c true`
   （一个模型一个任务线程），所以 `detect.class_num`/`detect.threads` 的 getter 已删除、
   默认配置块也不再写入；老配置里残留的这两个键程序根本不读（`migrateSchemaV2` 只删
   `model`/`cascade`/`alarm`/`video.channelN`/`video.notes`，不清理 `detect` 段内的多余键）。
-  `detect.conf_threshold`/`nms_threshold` 仍有 getter/setter，但是**假开关**：写进 JSON、
-  设置页可改，推理侧不传参，实际用编译期 `BOX_THRESH`/`NMS_THRESH`。
   同理 `video.render.sampleInterval` **不存在**，推理间隔是 `ffmpeg_video_decoder.cpp` 里
   写死的 `frame_count % 3`。
+- **阈值是真开关（2026-10-31 接通）**，但生效值不来自编译期宏：`common.hpp` 的
+  `BOX_THRESH`/`NMS_THRESH` 全仓零引用，历史上真正起作用的是 `YOLO11Model::detect()` 的
+  **形参默认值** `0.25f/0.45f`。现在的回落链是
+  `video.models[<库id>].conf_threshold` → `detect.conf_threshold` → `0.25`，
+  唯一解析点 `ModelRegistry::resolveConfThreshold()`，UI 与推理读的是同一个函数。
+  - `conf_threshold` 有**每模型覆盖**，`nms_threshold` **只有全局**：NMS 是 IoU 合并口径，
+    跨模型基本一致，不再为它加一列控件。
+  - "没覆盖"= 这个键**不存在**，不是 0.0。所以解析用 `QJsonObject::contains()` 而不是
+    `toDouble()`（后者对缺键返回 0.0，分不清"没配"和"配了 0"），`VideoModelParam::confThreshold`
+    的未配置哨兵是 `-1.f`。清掉覆盖用 `clearModelConfThreshold()`（只删这一个键），
+    **不要**用 `removeModelParam()`——它删整个条目并把该 id 从所有通道列表里摘掉。
+  - **下限 0.05 是安全闸，不是审美**：`conf=0` 会让量化模型的 `score_sum` 预筛失效、
+    候选数爆到网格上限，接着是递归快排 + O(N²) NMS，表现是画面冻死且没有看门狗。
+    `setConfThreshold()`/`setModelConfThreshold()` 与 `resolveConfThreshold()` **两处都夹**
+    （setter 挡 UI，resolver 挡手改 JSON 后直接 load 的路径）。
+  - `migrateSchemaV2()` 不给老配置回填 `conf_threshold`：回填等于把"跟随全局"变成"钉死"，
+    从此这个模型再也不跟全局档走。
+- **阈值改了不用重开流**：解码器每帧在 `slotParamMtx_` 里取一次槽位运行期参数快照
+  （报警类别 + conf + nms 同一份），随 `TaskData` 进推理线程。形状不符时
+  `updateSlotParams()` 返回 false，调用方必须退回重开那一路 —— 这个 bool 是"该重开"的
+  唯一信号，做成静默 no-op 会让每次模型列表改动都变成"老阈值永远留着"。
 - **recording 段刻意只有 getter、没有 setter**：编码器在解码线程打开流时
   按参数一次性创建，运行期改值不会重建它，提供 setter 只会造出
   "改了不生效"的假接口；要换参数请改文件后重启。

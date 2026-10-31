@@ -20,7 +20,7 @@
 | `appinit.h/.cpp` | 单例初始化类，`start()` 向 qApp 安装全局事件过滤器，实现 `canMove` 窗体鼠标拖动（仅 `main.cpp` 用） |
 | `iconhelper.h/.cpp` | 图标字体核心：懒加载 4 套字体、Unicode 码点自动路由、`setIcon/getPixmap/setStyle` 导航栏换肤（仅 `frmmain` 用） |
 | `qthelper.h/.cpp` | 通用静态工具类（屏幕信息/居中/字体/编码/OpenGL/QSS/进程/对话框/校验/格式化等） |
-| `theme.h/.cpp` | `theme::` 命名空间的配色/尺寸取值，form×10 + widgets×4 共 300 余处调用——本目录被依赖最广的一件 |
+| `theme.h/.cpp` | `theme::` 命名空间的配色/尺寸取值，form×10 + widgets×4 共 300 余处调用——本目录被依赖最广的一件；唯一的非纯字符串构造器是 `makeComboTouch()`（改的是控件本身，见「触屏命中区设计令牌」第 4 条） |
 | `singleton.h` | `SINGLETON_DECL/IMPL` 宏：QScopedPointer + QMutex 双重检查锁单例 |
 | `qss.qrc` | 皮肤资源脚本，prefix=`/`，注册 `qss/blacksoft.css` 与 `qss/blacksoft/` 下 24 个 PNG |
 | `qss/blacksoft.css` | 主样式表（约 21.6 KB）。首行 `QPalette{background:#RRGGBB;}` 为约定格式，代码用 `qss.mid(20,7)` 提取背景色；**尺寸声明的写法受"注意事项"里 `getStyle` 拆行一条约束** |
@@ -80,15 +80,14 @@ if (!qss.isEmpty()) {
 | 档 | 总高 | mm | 常量 | 用在 |
 | --- | --- | --- | --- | --- |
 | T1 主操作 | 72 | 8.1 | `TOUCH_MAIN_MIN_H=54`（+2×8 padding +2×1 border） | 全局 `.QPushButton/.QToolButton`、顶部导航钮、围栏工具栏钮 |
-| T2 输入件 | 56 | 6.3 | `TOUCH_FIELD_MIN_H=42` | `QLineEdit/QComboBox/QSpinBox/QDoubleSpinBox` 及 `theme::field()` |
+| T2 输入件 | 56 | 6.3 | `TOUCH_FIELD_MIN_H=42` | `QLineEdit/QComboBox/QSpinBox/QDoubleSpinBox` 及 `theme::field()`；下拉**弹层**另见下方第 4 条 `theme::makeComboTouch()` |
 | T3 表格内 | 48 | 5.4 | `TOUCH_ROW_MIN_H=30` | `详情`/`查看`/`注销`/`移除` 等行内次级钮、`theme::miniButton()` |
 | T4 图标钮 | 48x48 | 5.4 | `TOUCH_ICON_BTN` | 画面放大钮、标题栏 min/max/close、照片删除 × |
 | 指示器 | 40x40 | 4.5 | — | `QCheckBox/QRadioButton::indicator`（Qt 里 indicator 尺寸**就是**命中区，只能真放大） |
 | 步进/下拉 | 宽 44 | — | — | `::up-button/::down-button`、`::drop-down`（原 10px/15px 指肚按不到） |
 | 滚动条 | 厚 26 | 2.9 | — | `QScrollBar`（原 12px 且无翻页钮） |
 
-三条容易踩的口径，都是这一轮量出来的：
-
+四条容易踩的口径，都是这一轮量出来的：
 1. **字号基本不动**。全局正文仍是 `font-size:16px`（css 尾部），唯一上调的一档是导航 `FS_NAV_TOUCH=18`——
    因为导航钮去掉了 icon，横向纵向都腾出了空间。"按钮小"的解法是长命中区，不是长字号；
    动字号必然截字，本轮用探针验过 5 个页面 626 个可见控件 0 截字才收工。
@@ -97,6 +96,17 @@ if (!qss.isEmpty()) {
 3. **皮肤层会被内联样式打穿**。`theme::field()/miniButton()/chip()` 是全仓 300 余处内联 QSS 的集中生成器，
    只改 css 不改它们等于没改；反过来，凡是固定宽 `setFixedSize` 的按钮在新 padding 下会截字，
    该轮把角色钮等处的固定宽换成了 `setMinimumHeight` + `setMinimumSize`。
+4. **`QComboBox` 的弹层行高 QSS 完全管不到，只能换 item delegate**（2026-10-31 用独立探针程序
+   `/tmp/thr/qctest.cpp` 实测，不是推测）：`QComboBox QAbstractItemView::item { min-height }`
+   **写在 combo 自己的样式表里、还是写在 `combo->view()` 的样式表里，都不生效**，
+   行高一律停在字体算出的 ~32px。原因是弹层行高由 `QComboBoxListView::sizeHintForRow()` 决定，
+   它只认 delegate 给的尺寸。后果有两层：十寸屏上按不准；更糟的是**项多时首项会被顶到屏幕外**
+   —— 20 项 × 32px 的下拉，`(跟随全局)` 那一档根本点不到。
+   ⇒ 统一走 `theme::makeComboTouch(combo, rowH = TOUCH_TABLE_ROW)`，它做两件事：
+   装一个只抬行高的 `QStyledItemDelegate` 子类，**并吞掉滚轮事件**。
+   吞滚轮不是洁癖：QComboBox 在滚动区里被滚一下就会改当前项并触发 `activated`，
+   而 `activated` 的槽是"写配置 + 落盘"——板上实测一次无意的滚动把某模型的
+   「跟随全局」改成了 0.15 并写进了 `config.json`。真触屏没有滚轮，会踩到的是鼠标/触控板与自动化。
 
 顶部导航已从"图标+文字（`ToolButtonTextUnderIcon`）"改为**纯文字**，`IconHelper` 只留给标题栏三钮的 glyph；
 `labIco`（日历 glyph）隐藏。顺带删掉了"双击标题栏切最大化"——触屏上是误触源。

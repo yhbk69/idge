@@ -174,6 +174,30 @@
   （原先附带的第二条理由"窗口尺寸一变围栏像素坐标就漂"2026-10-30 起已不成立，围栏顶点改存归一化坐标。）
   报警角标 `alarmBadge_` 与导航钮是耦合的：导航从"图上字下"变纯文字后文字矩形上移，
   `refreshAlarmBadge()` 必须按新钮尺寸重算 `move()`，否则角标压字（实测过，探针看不见这种重叠）。
+- **「模型参数」表是一行一个**库 id，不是一行一个通道：6 列 = `模型库id / 报警类别 / 置信度 /
+  备注 / 被引用通道 / 操作`。这张表是 `QTableWidget(0, 6)`，**每个格子按绝对列号写**、
+  resize 模式也按列索引设，加一列要把后面的列顺次挪位（漏一处就是 `Stretch` 落到错的列上）。
+  - 「置信度」是 `QComboBox` 档位点选（`(跟随全局)` + 0.05…0.95 共 20 项）。**为什么不是输入框**：
+    本轮不做虚拟键盘，任何输入框在十寸触屏上落不了地 —— 隔壁那两颗全局 `QDoubleSpinBox`
+    现在就是"0.25→0.95 要按 14 下 ▲"的状态，所以全局值实际上是手改 JSON 的底座。
+  - 手改 JSON 改出的非档位值会多出一条「自定义 X」项**如实显示**，不吸附到最近档位 ——
+    否则界面写 0.35、实际跑 0.333，现场只会认为阈值没生效。
+  - ⚠ **改阈值不能调 `refreshModelParamsTable()`**：它里面 `reg.rescan()` 会在 GUI 线程重扫
+    整库（逐模型 sha256）。`alarm_class` 与 `conf_threshold` 的 handler 都只 apply 不 refresh，跟它。
+  - 「被引用通道」那一列不是装饰：阈值按**模型**配而不是按**通道**配，同一个模型挂在几路
+    就几路共用一个值，这一列告诉你改动会 fan 到哪几路。
+- **改完就生效的那条链路只有一个入口**：`applyModelParamsNow(libId)` → 遍历
+  `ConfigManager::modelParamUsers(libId)` → 每路 `pushSlotParamsToChannel(ch)` →
+  `FFmpegVideoDecoder::updateSlotParams()`。它内部一次 `resolveChannelSlots(ch)` 同时组出
+  报警类与阈值并推下去 —— **一个函数、一次解析、不可能漂移**，别再拆成"类别一条、阈值一条"。
+  `updateSlotParams()` 返回 false（槽位数与配置不符）时它退回 `applyChannelConfigNow(ch)` 重开那一路，
+  日志会说"通道N 的槽位数与配置不一致，本路按新配置重开"。
+  ⚠ 重开有代价（漏一份 NPU 上下文，见 `src/media/reader/README.md`），别在验证时反复走。
+- **设置页的落盘纪律**：`ConfigManager::save()` 是**持锁整份 JSON 截断重写**（非原子），
+  所以 ① `on_spinBoxConfThresh_valueChanged` 这类 handler 第一句必须是
+  `if (qFuzzyCompare(现值, 新值)) return;`（隔壁通道地址编辑器就是这么防的）；
+  ② `initDebugPage()` 里给控件灌初值的 `setValue()` 必须 `blockSignals` 包住 ——
+  否则"开机进设置页"就白写两次盘。两条都在 2026-10-31 板上用 `config.json` 的 mtime 验过。
 - **item-view 的勾选态在 QSS 下不能靠换底色表达**（2026-10-30 逐像素核对，本目录最反直觉的一条）：
   `QListWidget` 一旦挂了 `theme::field()` 的样式表，`QListWidgetItem::setBackground()` 的 brush **被样式表忽略**，
   而 `setForeground()` **仍然生效** —— 于是"选中行底色没变、字却成了黑的"，深底深字直接读不了。

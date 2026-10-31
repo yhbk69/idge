@@ -204,15 +204,25 @@ private:
      */
     void applyChannelConfigNow(int channel);
     /**
-     * @brief 让某模型的报警类别改动即时生效（不动模型、不重开流）
+     * @brief 让某模型的运行期参数改动即时生效（报警类别 + 置信度，不动模型、不重开流）
      *
-     * 只覆盖 video.models[<id>].alarm_class：槽位数没变就能在线换字符串，
-     * 解码线程下一帧起按新类别判定报警。若某路的槽位数已与配置不符（模型列表
-     * 也改过），这条路走不通，该路退回 applyChannelConfigNow()。
+     * 覆盖 video.models[<id>].alarm_class 与 .conf_threshold：两者都是"槽位的运行期参数"，
+     * 解码线程每帧在锁内拷一份去构造报警上下文并塞进 TaskData，下一帧起就是新值。
+     * 槽位数没变才可能在线换；若某路的槽位数已与配置不符（模型列表也改过），
+     * 这条路走不通，该路退回 applyChannelConfigNow()。
      */
-    void applyAlarmClassNow(const QString &libId);
+    void applyModelParamsNow(const QString &libId);
+    /**
+     * @brief 把当前 config 解析出的槽位参数推给某一路；true = 已在线生效
+     *
+     * applyModelParamsNow() 与「全局阈值」两个入口共用，避免"两处各自拼一份快照"漂移。
+     * false 包含两种情况：该路没在跑（下次开流自然读新配置）、形状不符已转整路重开。
+     */
+    bool pushSlotParamsToChannel(int channel);
+    /// @brief 全局 conf/nms 改动推给所有通道（回落链底座变了，所有"跟随全局"的槽位都受影响）
+    void applyGlobalThresholdNow();
 
-    // ========== 模型参数表（报警类别是"模型的参数"，键 = 模型库目录名） ==========
+    // ========== 模型参数表（报警类别与置信度都是"模型的参数"，键 = 模型库目录名） ==========
     QTableWidget *modelParamTable_ = nullptr;
     void initModelParamsUi();       ///< 在通道分组框后插入"模型参数"表格区
     void refreshModelParamsTable(); ///< 重建表格行（库内模型 + config 里残留的键）

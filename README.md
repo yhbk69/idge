@@ -73,9 +73,9 @@ $IDGE_WORKSPACE/
 
 | 配置节 | 说明 |
 |--------|------|
-| `video.models` | 模型参数表，**以库目录名为键**：`{"yolo11n-ppe": {"alarm_class": "un_helmet", "note": "…"}}`。`alarm_class` 是**这个模型的参数**（不是槽位、不是通道），留空 = 只画框不报警；设置页"模型参数"表按行编辑 |
+| `video.models` | 模型参数表，**以库目录名为键**：`{"yolo11n-ppe": {"alarm_class": "un_helmet", "conf_threshold": 0.3, "note": "…"}}`。`alarm_class` 与 `conf_threshold` 都是**这个模型的参数**（不是槽位、不是通道）：类别留空 = 只画框不报警，`conf_threshold` **缺键 = 跟随 `detect.conf_threshold`**（不是 0）。设置页"模型参数"表按行编辑，改完**即时生效**、不重开流 |
 | `video.channels` | 数组，**下标即通道号（0-based）**，条目里的 `channel` 字段只给人看。每路 = `source`/`note`/`enabled`/`models`。`models` 的顺序就是级联槽位顺序（画面上 `M1/M2/…` 前缀、报警 `result_id`），重排会改号；`enabled=false` 表示这一路不开流。两者在设置页改完都会**重开该路**（见 §八 第 10 条），只有手改 config 文件需要自己点「浏览」或勾一下「启用」 |
-| `detect` | 检测参数。⚠ 整节当前都不生效：`conf_threshold`/`nms_threshold` 是**假开关**（推理侧不传参，实际用 `common.hpp` 的编译期 `BOX_THRESH`/`NMS_THRESH`）；`class_num`/`threads` 已连 getter 一起删掉（类别数属于每个模型，推理线程数 = 各通道模型数之和，设置页显示的是真实值），老配置里残留的这两个键程序不再读取 |
+| `detect` | `conf_threshold`/`nms_threshold` 是**全局底座**（默认 0.25/0.45），推理侧真的读：回落链 `video.models[id].conf_threshold` → `detect.conf_threshold` → 形参默认值，唯一解析点 `ModelRegistry::resolveConfThreshold()`。conf 有**下限 0.05**（`conf=0` 会打穿量化模型的预筛、把推理线程跑死），nms 没有下限。⚠ `class_num`/`threads` 是**假开关**：已连 getter 一起删掉（类别数属于每个模型，推理线程数 = 各通道模型数之和，设置页显示的是真实值），老配置里残留的这两个键程序不再读取 |
 | （无 `video.render`） | 推理间隔是编译期的 `frame_count % 3`（`ffmpeg_video_decoder.cpp` 的 4.6 节），**没有配置键**，别在 JSON 里加 `render.sampleInterval`——它只会变成一个改了不生效的假开关 |
 | `geofence` | 围栏**不属于级联**：复用该通道已有的检测结果、只做几何判定，不额外占用 NPU。`enabled` 总开关、`alarmClass` **单值触发类别**（默认 `person`，必须是该通道某个模型 `labels.txt` 里的叫法）、`throttleSeconds` 报警**节流下限**（默认 10 秒，每通道**每角色**每类别窗口内只留一条）、`channels` 每路的矩形/多边形顶点（overlay 像素坐标，随存 `overlay_w`/`overlay_h`，改窗口布局会偏移），**每个形状自带 `role`**——`forbidden` 禁区（进去就报）/ `workzone` 岗区域（待在外面就报），同一通道可混用。`mode`（`inside_alarm`/`outside_alarm`）**已退役**：唯一读者是 `FenceManager::loadFromConfig` 里给无 `role` 键的老形状补角色的迁移分支。报警语义是**进入沿**：走进禁区报 1 条、站在里面不动不再报；人在所有岗区域之外报 1 条「离岗」、回岗待 >1.5 秒再出来才算新事件（事件表在解码器 `fenceTracks_`，按角色分池，见 `src/biz/geofence/README.md`） |
 | `database` | `storeDetections`（报警相关检测明细是否入 `detections` 表）与 `detectionRetentionDays`（保留天数）；写成 `null` 等于吃默认值 true/30 |
@@ -470,8 +470,9 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
    `src/ai/task/base_task.*` 都在 GLOB 里被编译但无实例化点（清单见 roadmap §六；
    其余零调用文件已分两批删除——第一批 helmet_task/task_pool/frame_queue/ModelPool/ThreadPool/xml_utils，
    第二批（结构调整时顺带）core_helper 的 appdata/customstyle/delegate/base64helper 四对 + base/utils 的 logging/path_utils）
-4. `detect.conf_threshold` / `detect.nms_threshold` 是**假开关**：写进 JSON、设置页可改，
-   但 `ppe_task.cpp` 调 `model_->detect()` 不传参，实际生效的是编译期 `BOX_THRESH/NMS_THRESH`
+4. **阈值只到"每模型"这一层**：`conf_threshold` 的键是**库 id**，同一个模型挂在几路就几路共用
+   一个值（设置页"被引用通道"列显示会 fan 到哪几路）；要按通道分得把 `channels[].models[]`
+   从字符串数组变成对象 + schema 迁移，没做。`nms_threshold` **只有全局一档**，也没有每模型覆盖
 5. `YOLO11Model::output_mems[9]` 固定长度，换多于 9 个输出头的模型（分割/姿态）会越界
 6. **GB28181 MANSCDP 编码声明与实际不符**：XML 头写 `encoding="GB2312"`，实际发出的是 UTF-8 字节
    且 `Content-Length` 也按 UTF-8 长度算（`gb28181_manager.cpp` 心跳/应答处）。宽容平台无感，
@@ -485,8 +486,10 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
 9. **扫码无去重/冷却**：窗格打开即扫，每 250ms 解一帧，解出即冻结画面等用户点「确认」。
     同一颗码举在镜头前时点「重新扫描」会立刻再解出同一内容（"重扫就是要它"，不是 bug）；
     跨会话也不去重，换一班次的码照样立刻解出
-10. **通道配置改完就生效，但"生效"分两种**：报警类别（`video.models[<id>].alarm_class`）是**在线换**
-    ——解码线程每帧在锁内拷一份 `slotAlarmClasses_` 去构造报警上下文，下一帧起按新值判定，这一路不重连；
+10. **通道配置改完就生效，但"生效"分两种**：报警类别（`video.models[<id>].alarm_class`）与
+    每模型阈值（`video.models[<id>].conf_threshold`）是**在线换**
+    ——解码线程每帧在 `slotParamMtx_` 下拷一份 `slotParams_`（报警类别 + conf + nms 同一个快照），
+    既构造报警上下文、也填进这一帧的 `TaskData`，下一帧起就按新值走，这一路不重连；
     通道 `models` 与通道 `enabled` 则**重开该路**：停解码 → `releaseTasks()` → 按新配置重建任务集合。
     重开的代价要认：该路重新拉流（本地文件回到开头、RTSP/国标是重连），GUI 正常停顿 <1 秒，
     最坏被驱动卡住时按 `waitForStop()` 的有界等待走。出口只有 `frmMain::applyChannelConfigNow()` 一个。
@@ -495,13 +498,16 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
     **设置页各改动的生效时机**（"改了没反应"先对这段口径）：
     即时生效——围栏形状与角色（`FenceManager` 内存态，解码线程每帧现取；角色只能在画之前选，
     画完要改只能删了重画）、围栏类别、围栏报警最小间隔、
-    WebSocket 地址（重连）、通道备注/模型备注、模型 `alarm_class`、模型库导入与删除
+    WebSocket 地址（重连）、通道备注/模型备注、模型 `alarm_class`、**模型 `conf_threshold` 与
+    全局 `detect.conf_threshold`/`nms_threshold`**（阈值随帧走：解码器每帧取一次槽位参数快照
+    塞进 `TaskData`，下一帧的 `detect()` 就用新值，约 1 秒内可见；前提是该路槽位数没变，
+    变了就退回重开那一路）、模型库导入与删除
     （盘点服务 `reloadEquipmentService()` 热更）；
     重开该路——通道 `models`、通道 `enabled`、移除模型条目（槽位数变了，只能重建任务集合）；
     只落盘——手输的视频源地址，要点「浏览」重开本路（或把「启用」勾掉再勾回）；
     `geofence.enabled` 设置页里没有，手改 config 后要么重启、要么在页面上动一次「围栏类别」触发 `loadFromConfig()` 顺带重载；
     `geofence.mode` 已退役——手改它不会改变任何判定，形状的角色只认 `channels/*/shapes[]` 里的 `role` 键；
-    `detect.conf_threshold`/`nms_threshold` 是假开关，改到重启都不生效（见 `src/base/config/README.md`）。
+    `detect.class_num`/`detect.threads` 是假开关，程序根本不读（见 `src/base/config/README.md`）。
     热更新的离线自测：`./build/build_rk3588_linux/test_channel_reload`（必须在 build 目录下跑，
     它驱动真解码器 + 真推理任务做 4 轮"停→释放→重建"，并检查线程数与 RSS 不涨）。
 11. **WS 走明文 `ws://`，`wss://` 本机不可用**：`/opt/qt5.12.8` 的 QtNetwork 按 OpenSSL 3 编译但符号表仍找

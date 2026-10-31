@@ -464,7 +464,42 @@ QList<ResolvedSlot> ModelRegistry::resolveChannelSlots(int ch)
             qWarning() << "[ModelRegistry] 通道" << ch << "标签文件读不到，回落库内默认:" << s.labelPath;
             s.labelPath = instance().labelPath(libId);
         }
+        // ===== 置信度回落链：每模型覆盖 → 全局 detect.conf_threshold → 0.25 =====
+        // 走 resolveConfThreshold()，本函数与解码器兜底槽/模型测试/盘点共用同一条链。
+        s.confThreshold = resolveConfThreshold(libId);
+        s.nmsThreshold = resolveNmsThreshold();
         resolved.append(s);
     }
     return resolved;
+}
+
+// ============================================================================
+// 阈值回落链（唯一实现处）
+// ============================================================================
+// 下限夹在这里而不是夹在 ConfigManager 的 getter 里，是因为配置文件也是用户输入：
+// 手改一个 0 进去同样要拦住——量化模型把阈值打到 u8 网格上比较，阈值归 0 会让
+// score_sum 预筛整体失效、候选爆到上限，接着是 O(N²) 的 NMS，推断线程卡死、
+// 画面冻住，而且没有任何看门狗会把它拉起来（OBJ_NUMB_MAX_SIZE 只截输出，不救线程）。
+float ModelRegistry::resolveConfThreshold(const QString &libId)
+{
+    ConfigManager &cfg = ConfigManager::instance();
+    const float override_ = cfg.modelConfThreshold(libId);   // 负数 = 未配置
+    const qreal base = override_ >= 0.f ? static_cast<qreal>(override_)
+                                        : cfg.confThreshold();
+    return static_cast<float>(qBound(0.05, base, 1.0));
+}
+
+float ModelRegistry::resolveNmsThreshold()
+{
+    // NMS 不设下限：调低是"更激进地合并重叠框"，方向上是变少而不是变多，
+    // 没有置信度那种候选爆炸的失败模式，所以不给它编一个假护栏。
+    return static_cast<float>(ConfigManager::instance().nmsThreshold());
+}
+
+// 路径反查不到库 id（未入库的临时模型）时，传空串给 resolveConfThreshold：
+// modelConfThreshold("") 恒为负数 = "没有覆盖"，回落链自己就落到全局值上了，
+// 所以这里不需要额外的"查不到"分支。
+float ModelRegistry::resolveConfThresholdByPath(const QString &modelPath)
+{
+    return resolveConfThreshold(instance().findIdByModelFile(modelPath));
 }

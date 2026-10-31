@@ -38,9 +38,13 @@
  * 派生类只需实现平台特定的模型加载、推理和后处理。
  *
  * 现状说明（审查注记）：
- *   - detect() 形参默认值 conf=0.25 / nms=0.45 是全项目统一口径的
- *     "代码级默认阈值"（common.hpp 的 BOX_THRESH/NMS_THRESH 仅为宏定义
- *     参考值，实际生效的是这里）；
+ *   - detect() 形参默认值 conf=0.25 / nms=0.45 是"调用方什么都不传"时的兜底，
+ *     **不是**运行期生效值：生产主链路（PPETask / 设备盘点 / 预览）都按调用传 5 个实参，
+ *     值来自 ModelRegistry::resolveConfThreshold()（每模型覆盖 → 全局 detect.conf_threshold
+ *     → 0.25，夹 [0.05, 1.0]）与 resolveNmsThreshold()（只有全局）。common.hpp 的
+ *     BOX_THRESH/NMS_THRESH 是零引用的死宏，改它们不影响任何判定；
+ *   - 传参而非读全局的理由：阈值随帧走（解码线程每帧取一次槽位快照塞进 TaskData），
+ *     推理线程不回头查 ConfigManager，改配置不用重开流、也不用重加载模型；
  *   - 本类的 letterBox/resizeImage/scaleCoords 是 CPU/调试路径的参考实现；
  *     生产主链路（RKNN 零拷贝）不经过它们——预处理由解码线程的 RGA 硬件
  *     letterbox 完成，坐标还原由 YOLO11Model::post_process 内联完成，
@@ -49,7 +53,8 @@
  * 使用方式：
  *   std::unique_ptr<YoloBaseDetector> detector = std::make_unique<RKNNYoloDetector>();
  *   detector->init(modelPath, labelsPath);
- *   detector->detect(image, &results);
+ *   detector->detect(image, &results);                 // 走形参默认 0.25 / 0.45
+ *   detector->detect(image, &results, true, conf, nms);  // 主链路写法：阈值由调用方给定
  */
 class YoloBaseDetector
 {

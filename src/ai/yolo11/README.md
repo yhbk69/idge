@@ -10,7 +10,7 @@ YOLO11 目标检测的 RKNN NPU 推理与后处理实现（anchor-free + DFL）�
 
 | 文件 | 职责 |
 |---|---|
-| `common.hpp` | 公共类型：`image_buffer_t`、`object_detect_result(_list)`（含 ⚠ time 单位隐患警示）、rknn app 上下文、阈值/尺寸宏、`OBJ_NUMB_MAX_SIZE` 定长设计 |
+| `common.hpp` | 公共类型：`image_buffer_t`、`object_detect_result(_list)`（含 ⚠ time 单位隐患警示）、rknn app 上下文、阈值/尺寸宏（阈值那两个是死宏，见下"阈值的真实优先级"）、`OBJ_NUMB_MAX_SIZE` 定长设计 |
 | `yolo_base_detector.hpp` | 检测器基类：CPU 参考实现 `letterBox`/`scaleCoords`（与生产 RGA 路径公式互为对照）、`loadClassNames`、`PreprocessType` |
 | `yolo11_model.hpp` | 核心实现：`init_yolo11_model`（UINT8 输入 + `rknn_create_mem/set_io_mem` 零拷贝）、`infer`、`post_process`、`process_i8/process_u8`、`compute_dfl`、`nms`/`quick_sort_indice_inverse`、量化四件套、`detect` |
 
@@ -19,7 +19,7 @@ YOLO11 目标检测的 RKNN NPU 推理与后处理实现（anchor-free + DFL）�
 ```
 YOLO11Model : YoloBaseDetector
   构造: loadClassNames + init_yolo11_model(.rknn, core_mask)   // 失败 throw
-  detect(img, results, want_float)
+  detect(img, results, want_float, conf, nms)   // conf/nms 是实参；不传才落到形参默认 0.25/0.45
     → infer(): 输入字节流直接写入 input_mems[0]（RGA 已产出 letterbox 640x640
        RGB888；UINT8 输入使归一化/量化在 NPU 片上融合）→ rknn_run
        → 输出取 outputs[i].buf（want_float=true 时驱动侧反量化为 float）
@@ -45,7 +45,9 @@ auto model = std::make_shared<YOLO11Model>(
 
 image_buffer_t img{ ... };               // RGA letterbox 后的 640x640 RGB888
 object_detect_result_list results;
-model->detect(&img, &results, true);     // want_float=true：反量化浮点输出
+model->detect(&img, &results, true, 0.30f, 0.40f);   // want_float=true：反量化浮点输出
+                                                      // 末两参是 conf/nms，省略才用 0.25/0.45；
+                                                      // 主链路上它们来自 TaskData（阈值随帧走）
 for (int i = 0; i < results.count; ++i) {
     auto& r = results.results[i];
     // r.box.left/top/right/bottom 已还原为原图坐标
@@ -64,4 +66,12 @@ for (int i = 0; i < results.count; ++i) {
 - **输出内存所有权**：`infer` 已改用官方 `rknn_outputs_release` 归还 runtime 分配的输出缓冲。板端实测（librknnrt 2.3.2，2026-09-24）：旧写法 `free(outputs[i].buf)` 与 release 行为完全一致（buf 即 runtime malloc 堆指针，800 轮 RSS 平稳、destroy 正常）——历史上并非 bug，但 release 才是 API 契约。
 - **线程纪律**：单实例 `detect` 非线程安全（共享 `app_ctx` 输出缓冲），一个 `YOLO11Model` 只允许一个线程串行调用；共享同一个 `.rknn` 文件也不代表可以共用实例——当前每个通道槽位各自加载一份（跨通道共享上下文是 roadmap 待办）。
 - **泄漏登记**：类无析构函数，`release_yolo11_model`（`rknn_destroy`）无调用点，长驻进程模型加载即泄漏 NPU 上下文。
-- 阈值以 `detect()` 形参默认值（conf 0.25 / nms 0.45）为准，宏仅为文档性默认。
+- **阈值的真实优先级**：`postProcess` 用的是 `detect()` 的**形参**，不是 `common.hpp` 的
+  `BOX_THRESH`/`NMS_THRESH`（那两个宏是**零引用死宏**，改它们不改变任何行为）。调用方传参 →
+  每模型 `video.models[id].conf_threshold` → 全局 `detect.conf_threshold` → 形参默认 0.25/0.45，
+  中间三档由 `ModelRegistry::resolveConfThreshold()` 收敛成一个数，`ppe_task.cpp` 只认
+  `TaskData` 里那两个 float。
+- **量化模型的阈值会被打到 u8 网格上**：`process_stride` 里 `qnt_f32_to_affine_u8(threshold, …)`
+  把 float 阈值量化成 `uint8_t` 再比较，所以 conf 的**实际分辨率约 0.4%**（score 量子 ≈ 1/255），
+  不是"只能选 5% 一档"——设置页给 0.05 档位是为了**触屏点选**，不是为了跨过量化网格。
+  FP16/FP32 模型没有这个网格，同一档位的表现与量化模型不完全一致，别按其中一个去推断另一个。

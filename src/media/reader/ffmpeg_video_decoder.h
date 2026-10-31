@@ -52,6 +52,24 @@ extern "C" {
 #include "video_recorder.h"
 #include "fence_shape.h"
 
+/**
+ * @brief 一个级联槽位在运行期可换的模型参数
+ *
+ * 为什么合成一个结构体而不是每样一个 vector：这三样都是"模型的参数"，
+ * 都由设置页在解码器跑着的时候改，都必须让解码线程每帧取一份快照才能生效。
+ * 分成三个容器就是三条锁、三种可能各自漂移的状态——本仓已有过"两处各读一份配置"
+ * 导致显示与行为不符的教训，这里从形状上堵掉。
+ *
+ * 阈值不在这里做"缺键判定"：回落链已在 ModelRegistry::resolveConfThreshold() 走完，
+ * 到这里就是最终值。
+ */
+struct SlotRuntimeParam
+{
+    QString alarmClass;            ///< 报警类别，空 = 只画框不报警
+    float confThreshold = 0.25f;   ///< 生效置信度（与 detect() 形参默认值同数）
+    float nmsThreshold = 0.45f;    ///< 生效 NMS 阈值
+};
+
 class FFmpegVideoDecoder : public QObject
 {
     Q_OBJECT
@@ -98,14 +116,15 @@ public:
     void releaseTasks();
 
     /**
-     * @brief 在线替换各槽位的报警类别（video.models[<id>].alarm_class）
-     * @param cls 下标 = 槽位，空串 = 只画框不报警；长度必须等于当前槽位数
+     * @brief 在线替换各槽位的运行期模型参数（报警类别 + 置信度 + NMS）
+     * @param params 下标 = 槽位；长度必须等于当前槽位数
      * @return false 表示槽位数不匹配（模型列表变了），调用方应改走 releaseTasks+重开
      *
-     * 这是唯一允许在解码器运行期从 GUI 线程调的接口：只换字符串，不动任务、
-     * 不动队列、不碰 NPU 上下文。报警类别本就在每帧的 SlotContext 里现取。
+     * 这是唯一允许在解码器运行期从 GUI 线程调的接口：只换这几个值，不动任务、
+     * 不动队列、不碰 NPU 上下文。报警类别本就在每帧的 SlotContext 里现取，
+     * 阈值则随每帧的 TaskData 交给推理线程——同一次快照，同一个锁。
      */
-    bool updateSlotAlarmClasses(const std::vector<QString> &cls);
+    bool updateSlotParams(const std::vector<SlotRuntimeParam> &params);
 
     /**
      * @brief 报警片段录制器（硬件编码环形缓冲区）
@@ -190,14 +209,15 @@ private:
     // 级联各模型类别不同（coco80 / helmet 2类 / vest 2类…），共用一张表会把
     // helmet 的 cls_id 套用 coco 类名导致报警类别错标（2026-09-24 修复）。
     std::vector<std::vector<std::string>> slotClassNames_;
-    // 每槽位模型的报警类别（config 的 video.models[<id>].alarm_class），空=只画框不报警。
-    // 与 slotClassNames_ 同下标；随结果一起传进 AlarmManager::ingest 的 SlotContext，
-    // 不再写进 AlarmManager 单例的全局槽表（按通道配置后那张表会被别的通道覆盖）。
-    // **唯一允许运行期改写的槽位向量**：写方是 GUI 线程的 updateSlotAlarmClasses()，
-    // 读方是解码线程每帧的 SlotContext 构造，故由 alarmClsMtx_ 保护（只锁这一次拷贝，
+    // 每槽位模型的运行期参数（报警类别 + 生效阈值），与 slotClassNames_ 同下标。
+    // 报警类别随结果一起传进 AlarmManager::ingest 的 SlotContext，阈值随 TaskData
+    // 传进 PpeTask——两者都走"每帧一份快照"这一条路，所以共用一个容器而不是两个：
+    // 分开就是两条锁、两种漂移可能。按通道配置后也不再写任何全局单例的槽表。
+    // **唯一允许运行期改写的槽位容器**：写方是 GUI 线程的 updateSlotParams()，
+    // 读方是解码线程每帧一次的快照拷贝，故由 slotParamMtx_ 保护（只锁这一次拷贝，
     // 与模型加载/NPU 调用完全不重叠）。其余三个向量运行期只读。
-    std::vector<QString> slotAlarmClasses_;
-    std::mutex alarmClsMtx_;                 ///< 只保护 slotAlarmClasses_ 的读写
+    std::vector<SlotRuntimeParam> slotParams_;
+    std::mutex slotParamMtx_;              ///< 只保护 slotParams_ 的读写
 
     // releaseTasks() 里"推理线程未确认退出所以不敢 delete"的任务转入这里（见其注释）。
     // 只在 NPU 卡死导致 stopBestEffort 超时 detach 的异常路径上增长，每次一条告警。

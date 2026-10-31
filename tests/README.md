@@ -25,11 +25,15 @@ C++ 测试源码目录。含七个测试程序与一个人工联调工具：
   模型集合依次是 1 个 → 2 个 → 换 1 个 → 换回 2 个。断言三件事：`waitForStop()` 后
   `isLoopAlive()` 必须为 false；重建出的槽位数与模型路径与配置一一对上（解析
   `cascade slot ch …` 日志，生产代码没有 `tasks_` 访问器也不该有）；反复重开后线程数
-  回到基线、RSS 增长有界。另外用 `updateSlotAlarmClasses()` 验证在线换报警类别的两条性质：
-  形状相符才接受改写（不符必须拒绝，设置页据此分流"在线换 / 整路重开"），且写入一个
-  不可能命中的类别名之后**仍要继续出帧**——这一步既确认没重连流，也确认那把
-  `alarmClsMtx_` 没被用成长临界区把解码循环锁死；选不存在的类别名是为了整轮不产报警、
-  不碰报警库。这条测试已经抓到过一个真回归：`start()` 里没有把
+  回到基线、RSS 增长有界。另外用 `updateSlotParams()` 验证在线换槽位运行期参数（报警类别 +
+  阈值）的两条性质：形状相符才接受改写（不符必须拒绝，设置页据此分流"在线换 / 整路重开"），
+  且写入一个不可能命中的类别名之后**仍要继续出帧**——这一步既确认没重连流，也确认那把
+  `slotParamMtx_` 没被用成长临界区把解码循环锁死；选不存在的类别名是为了整轮不产报警、
+  不碰报警库。**每槽生效阈值**由 `slot params ch N slot k conf X nms Y` 这行独立前缀的日志断言：
+  挂了 `conf_threshold` 覆盖的模型必须是覆盖值、其余槽位必须是全局值——回落链的两条分支
+  一次跑完。⚠ 新字段**不能**并进 `cascade slot ch …` 那一行：测试用 `find_last_of(' ')`
+  从行尾取模型路径，尾巴上多一个 token 会把路径解析坏。
+  这条测试已经抓到过一个真回归：`start()` 里没有把
   对象线程归属搬回 GUI 线程，第二次 `moveToThread` 被 Qt 拒绝，重开的那路一帧都不出。
 - `test_alarm_uplink.cpp`：报警上行（`src/biz/ws/alarm_uplink_engine`）的**离线契约自检**，
   用 `FakeTransport` 顶掉 `WsClient`，所以不链 WebSockets、不建线程、不要 GUI，纯 `Qt5::Core`。
@@ -72,7 +76,7 @@ C++ 测试源码目录。含七个测试程序与一个人工联调工具：
 | `test_equipment.cpp` | 设备盘点全链离线自测（模型加载→检测计数→画框→落库→回读→热更新原子性），逐项 `[ok]/[FAIL]` |
 | `test_rollcall.cpp` | 人员点名全链离线自测（exe 对照回归 + 注册/去重/注销匹配/落库回读），逐项 `[ok]/[FAIL]` |
 | `test_latest_frame_slot.cpp` | LatestFrameSlot 单槽广播契约自检（跳帧/生命周期/close 唤醒/reset），末行打印一行 PASS 说明 |
-| `test_channel_reload.cpp` | 通道热更新板端离线自测（停→releaseTasks→重建 ×4 轮，槽位集合/线程数/RSS 三项断言），须在 build 目录下跑 |
+| `test_channel_reload.cpp` | 通道热更新板端离线自测（停→releaseTasks→重建 ×4 轮，槽位集合/线程数/RSS/每槽生效阈值四项断言），须在 build 目录下跑 |
 | `test_alarm_uplink.cpp` | 报警上行离线自检（18 组：两种 transport 报文形状 / 帧序 / 地址换算与路径逃逸 / 队列·ack·退避），纯 Qt Core，任意机器可跑 |
 | `test_geofence_role.cpp` | 围栏角色判定离线自检（8 组：禁区优先 / 无岗区域守卫 / 任一岗区域内 / shapeIndex 口径 / 凹多边形回归 / role 回落），纯 Qt Core，任意机器可跑 |
 | `test_construction_qr.cpp` | 扫码登录门离线自检（12 组：施工信息解析/校验/会话状态机/逐键渲染 + 真解一张含中文的码图），Qt Core+Gui+zbar，无摄像头无 GUI |

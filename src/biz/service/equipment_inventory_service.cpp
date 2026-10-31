@@ -22,6 +22,7 @@
 
 #include "task_manager.h"
 #include "qt_image_utils.h"
+#include "model_registry.h"   // 阈值回落链的唯一解析点（与主检测流水线同源）
 #include "easy_timer.h"   // yolo11_model.hpp 依赖 TIMER（与 ppe_task/frmmain 同序）
 #include "yolo11_model.hpp"
 
@@ -141,7 +142,13 @@ bool EquipmentInventoryService::runDetector(
         return false;
     }
     object_detect_result_list results;
-    detector.detect(&img, &results);   // infer 内部先 memset 再填充
+    // 阈值与主检测流水线同源：按模型路径反查库 id 走同一条回落链。
+    // 刻意**不**放进 EquipmentModelConfig——那个结构体有 operator==，被
+    // 「模型清单没变就跳过重载」用作判据，加字段等于让缓存每次都比不相等。
+    const QString modelPath = QString::fromUtf8(models_[model_index].model_path.c_str());
+    const float conf = ModelRegistry::resolveConfThresholdByPath(modelPath);
+    const float nms = ModelRegistry::resolveNmsThreshold();
+    detector.detect(&img, &results, false, conf, nms);   // infer 内部先 memset 再填充
     free(img.virt_addr);
 
     const std::vector<std::string>& names = detector.getClassNames();

@@ -8,11 +8,13 @@
 //      （槽位数与模型路径都对得上；旧对象被真正 delete，不是继续沿用）。
 //   3. 反复重开不涨：线程数回到基线、RSS 增长有界。热更新若漏掉推理线程或
 //      旧 BlockingQueue，四路 × 若干次点击就会把进程撑大。
-// 顺带用 updateSlotAlarmClasses() 的返回值当"槽位数探针"：它只在形状相符时
-// 接受改写，正是设置页"报警类别即时生效 vs 整路重开"的分流判据；改写之后还要求
-// 继续出帧，等于确认"在线换类别"这条路既没重连流、也没把解码循环锁死。
+// 顺带用 updateSlotParams() 的返回值当"槽位数探针"：它只在形状相符时接受改写，
+// 正是设置页"报警类别/置信度即时生效 vs 整路重开"的分流判据；改写之后还要求
+// 继续出帧，等于确认"在线换运行期参数"这条路既没重连流、也没把解码循环锁死。
+// 另加一条阈值契约：config 里的 detect.conf_threshold 与某模型的 conf_threshold
+// 覆盖，必须原样出现在 buildCascadeTasks 打的 "slot params" 行里（回落链落地）。
 //
-// 测试配置里所有模型的 alarm_class 都是空、围栏不启用，在线换类别那步写的是
+// 测试配置里所有模型的 alarm_class 都是空、围栏不启用，在线换那步写的是
 // 一个不存在的类别名，所以整轮不产生报警，不会写报警库，也不截图/录片段。
 //
 // 运行（cwd 必须是 build 目录：模型库按 ./model/library 解析）：
@@ -105,6 +107,47 @@ static SlotLog collectCascadeSlots(int channel)
 }
 
 // ============================================================================
+// 每槽生效阈值：回落链落地的唯一可观测点
+// ============================================================================
+// buildCascadeTasks 里那句 "slot params ch 0 slot 0 conf 0.600 nms 0.400" 是
+// config → ModelRegistry 回落链 → 解码器槽位表 这三段的端到端证据。
+// 前缀与 "cascade slot ch …" 刻意不同：那句的**最后一个 token 是模型路径**，
+// 上面 collectCascadeSlots 就靠它，混用会把那条契约解析弄坏。
+struct SlotThresh
+{
+    std::vector<double> conf;
+    std::vector<double> nms;
+};
+
+static SlotThresh collectSlotParams(int channel)
+{
+    const std::string prefix = "slot params ch " + std::to_string(channel) + " slot ";
+    SlotThresh out;
+    std::lock_guard<std::mutex> lk(g_logMtx);
+    for (const std::string &line : g_logs) {
+        if (line.compare(0, prefix.size(), prefix) != 0)
+            continue;
+        const QStringList toks = QString::fromStdString(line).split(QLatin1Char(' '),
+                                                                    QString::SkipEmptyParts);
+        double conf = -1.0;
+        double nms = -1.0;
+        for (int i = 0; i + 1 < toks.size(); ++i) {
+            if (toks[i] == QLatin1String("conf"))
+                conf = toks[i + 1].toDouble();
+            else if (toks[i] == QLatin1String("nms"))
+                nms = toks[i + 1].toDouble();
+        }
+        // 认不出数字就当这行不存在：宁可让下面的"行数与槽位数不符"先炸，
+        // 也不要拿一个 0.0 去和期望值比出个莫名其妙的差值
+        if (conf < 0.0 || nms < 0.0)
+            continue;
+        out.conf.push_back(conf);
+        out.nms.push_back(nms);
+    }
+    return out;
+}
+
+// ============================================================================
 // 事件循环辅助
 // ============================================================================
 static void spinMs(int ms)
@@ -157,7 +200,15 @@ static long rssKb()
 // ============================================================================
 // 所有模型的 alarm_class 留空 = 只画框不报警；geofence.enabled=false。
 // 这样整轮测试不碰报警库，也不触发截图与片段录制。
+//
+// 阈值故意配成"两档都在"：全局 0.30 + 只给 yolo11n-ppe 挂一条 0.60 的每模型覆盖。
+// 于是回落链的两个分支同轮可验——ppe 的槽位必须打 0.600，其它槽位必须打 0.300。
 // ============================================================================
+static const char *kConfOverrideModel = "yolo11n-ppe";
+static const double kGlobalConf = 0.30;
+static const double kGlobalNms = 0.40;
+static const double kOverrideConf = 0.60;
+
 static void writeChannelConfig(const QString &path, const QStringList &models,
                                const QString &source)
 {
@@ -168,6 +219,8 @@ static void writeChannelConfig(const QString &path, const QStringList &models,
         QJsonObject one;
         one[QStringLiteral("alarm_class")] = QString();
         one[QStringLiteral("note")] = QStringLiteral("test_channel_reload");
+        if (id == QLatin1String(kConfOverrideModel))
+            one[QStringLiteral("conf_threshold")] = kOverrideConf;
         paramObj[id] = one;
     }
 
@@ -189,9 +242,15 @@ static void writeChannelConfig(const QString &path, const QStringList &models,
     QJsonObject geofence;
     geofence[QStringLiteral("enabled")] = false;
 
+    // 全局档 = 回落链的底座；没有每模型覆盖的槽位必须落在这一档上
+    QJsonObject detect;
+    detect[QStringLiteral("conf_threshold")] = kGlobalConf;
+    detect[QStringLiteral("nms_threshold")] = kGlobalNms;
+
     QJsonObject root;
     root[QStringLiteral("video")] = video;
     root[QStringLiteral("geofence")] = geofence;
+    root[QStringLiteral("detect")] = detect;
 
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
@@ -304,17 +363,42 @@ int main(int argc, char *argv[])
                                          + (got.empty() ? "(没有槽位日志)" : got));
             }
 
-            // 形状相符 → 报警类别可在线换；形状不符 → 必须拒绝（设置页据此改走重开）
+            // 契约 2b：阈值回落链真的把值送进了槽位表（每模型覆盖 > 全局 > 代码默认）
+            const SlotThresh thresh = collectSlotParams(0);
+            if (thresh.conf.size() != static_cast<size_t>(rebuilt.count))
+                throw std::runtime_error("slot params 行数与槽位数不符: "
+                                         + std::to_string(thresh.conf.size()) + " != "
+                                         + std::to_string(rebuilt.count));
+            for (int i = 0; i < rebuilt.count; ++i) {
+                const double wantConf = models[i].compare(QLatin1String(kConfOverrideModel)) == 0
+                    ? kOverrideConf : kGlobalConf;
+                const QString where = QStringLiteral("槽位%1(%2)").arg(i).arg(models[i]);
+                check(qAbs(thresh.conf[i] - wantConf) < 1e-3,
+                      ("生效置信度与回落链算出的不一致 " + where.toStdString()
+                       + ": 期望 " + std::to_string(wantConf)
+                       + " 实际 " + std::to_string(thresh.conf[i])).c_str());
+                check(qAbs(thresh.nms[i] - kGlobalNms) < 1e-3,
+                      ("生效 NMS 应等于全局档 " + where.toStdString()).c_str());
+            }
+
+            // 形状相符 → 运行期参数可在线换；形状不符 → 必须拒绝（设置页据此改走重开）
             // 写一个"不可能命中"的非空类别，而不是照抄配置里的空值：
             //   1) 这一步真的改到了状态（空→非空），不是在原地写同一份；
             //   2) 仍然不会产生报警——本测试全程不写报警库（见文件头）；
-            //   3) 换完必须继续出帧：解码线程每帧要在 alarmClsMtx_ 内拷一份，
+            //   3) 换完必须继续出帧：解码线程每帧要在 slotParamMtx_ 内拷一份，
             //      锁写歪（临界区盖住 NPU 调用）的表现就是这一路永久丢帧，
             //      而那正是"改完设置画面卡住"这类现场问题的形态。
-            std::vector<QString> cls(models.size(), QStringLiteral("__no_such_class__"));
-            check(dec.updateSlotAlarmClasses(cls), "槽位数相符时在线换报警类别应被接受");
-            std::vector<QString> wrongCls(models.size() + 1);
-            check(!dec.updateSlotAlarmClasses(wrongCls), "槽位数不符时 updateSlotAlarmClasses 必须拒绝");
+            // 阈值一并拧到 0.95：这一句同时验证"TaskData 带得动阈值"这条载体的形状，
+            // 至于框是否真的少了，属于板上肉眼判据（见 plan §六-2），不在无头测试里断言。
+            std::vector<SlotRuntimeParam> params(models.size());
+            for (SlotRuntimeParam &p : params) {
+                p.alarmClass = QStringLiteral("__no_such_class__");
+                p.confThreshold = 0.95f;
+                p.nmsThreshold = 0.45f;
+            }
+            check(dec.updateSlotParams(params), "槽位数相符时在线换运行期参数应被接受");
+            std::vector<SlotRuntimeParam> wrongParams(models.size() + 1);
+            check(!dec.updateSlotParams(wrongParams), "槽位数不符时 updateSlotParams 必须拒绝");
             waitFrames(frames, 10, 5000);
 
             std::cout << "轮[" << models.join(QStringLiteral(",")).toStdString()

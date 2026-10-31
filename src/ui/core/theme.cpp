@@ -4,6 +4,51 @@
 
 #include "theme.h"
 #include <QString>
+#include <QComboBox>
+#include <QEvent>
+#include <QStyledItemDelegate>
+
+namespace
+{
+
+// 只改高度，其余全部交给 QStyledItemDelegate（字体、对齐、图标位置都不动）。
+class TouchItemDelegate : public QStyledItemDelegate
+{
+public:
+    TouchItemDelegate(int rowH, QObject *parent)
+        : QStyledItemDelegate(parent), rowH_(rowH) {}
+
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
+    {
+        QSize s = QStyledItemDelegate::sizeHint(option, index);
+        s.setHeight(qMax(s.height(), rowH_));
+        return s;
+    }
+
+private:
+    int rowH_;
+};
+
+// 下拉不吃滚轮。滚动区里一次"想翻页"的滚轮手势会落在下拉上，当场改掉当前项并触发
+// activated —— 而 activated 的槽是"写配置 + 落盘"，于是配置被一次无意的滚动改了
+// （2026-10-31 板上实测：把某模型的「跟随全局」滚成了 0.15 并写进了 config.json）。
+class WheelGuard : public QObject
+{
+public:
+    explicit WheelGuard(QObject *parent) : QObject(parent) {}
+
+protected:
+    bool eventFilter(QObject *, QEvent *e) override
+    {
+        if (e->type() == QEvent::Wheel) {
+            e->ignore();
+            return true;
+        }
+        return false;
+    }
+};
+
+}  // namespace
 
 namespace theme
 {
@@ -43,6 +88,14 @@ QString miniButton(const char *bg)
                    "min-height:%3px;padding:8px 14px;")
         .arg(TEXT, bg)
         .arg(TOUCH_ROW_MIN_H);
+}
+
+void makeComboTouch(QComboBox *combo, int rowH)
+{
+    if (!combo)
+        return;
+    combo->setItemDelegate(new TouchItemDelegate(rowH, combo));
+    combo->installEventFilter(new WheelGuard(combo));
 }
 
 }  // namespace theme

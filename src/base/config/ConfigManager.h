@@ -57,6 +57,10 @@ struct VideoModelParam
     QString alarmClass;  ///< 触发报警的类别名；空 = 只画框不报警
     QString label;       ///< 标签文件覆盖（一般留空，用库内 labels.txt）
     QString note;        ///< 备注
+    // 该模型的置信度覆盖；**负数 = 未配置**（跟随全局 detect.conf_threshold）。
+    // 不能用 0.0 当"未配置"：0.0 在语义上是一个合法（虽然危险）的阈值，
+    // 而 QJsonValue::toDouble() 对缺键也返回 0.0，所以解析时必须先 contains() 判键。
+    float confThreshold = -1.f;
 };
 
 /**
@@ -132,6 +136,23 @@ public:
     void setModelNote(const QString &libId, const QString &note);
 
     /**
+     * @brief 该模型的置信度覆盖（video.models[<id>].conf_threshold）
+     * @return 负数 = 未配置，表示该模型跟随全局 detect.conf_threshold
+     */
+    float modelConfThreshold(const QString &libId) const;
+
+    /** @brief 写该模型的置信度覆盖；控件档位之外仍在此夹到 [0.05, 1.0] */
+    void setModelConfThreshold(const QString &libId, qreal val);
+
+    /**
+     * @brief 删掉该模型的置信度覆盖键（回到"跟随全局"）
+     * 说明：不能拿 setModelConfThreshold(-1) 表达"未配置"——那会把 -1 写进 JSON 存盘，
+     *       配置文件里出现负阈值比缺键更难解释；删除原语也只有这一个语义。
+     *       removeModelParam() 不能用：它连 alarm_class 和整条通道引用一起删。
+     */
+    void clearModelConfThreshold(const QString &libId);
+
+    /**
      * @brief 从参数表删除某模型的条目，并从所有通道的模型列表里一并剔除
      * @note 参数表条目 = 这个模型"要不要出现在配置里"，通道列表 = "哪几路在用"，
      *       两处分开改会让人留下悬空引用，所以这里一次做干净。
@@ -147,22 +168,27 @@ public:
     // ========== 检测参数配置 ==========
 
     /**
-     * @brief 获取置信度阈值（0.0 ~ 1.0）
+     * @brief 全局置信度阈值（0.05 ~ 1.0），默认 0.25
+     * 说明：它是回落链的**底座**——`video.models[<id>].conf_threshold` 缺键的模型都用它。
+     *       2026-10-31 之前这两个键是假开关（写盘、UI 可改、推理不读），现已接通，
+     *       生效路径见 `ModelRegistry::resolveChannelSlots()`（唯一解析点）。
      */
     double confThreshold() const;
 
     /**
-     * @brief 设置置信度阈值
+     * @brief 设置全局置信度阈值（在此夹到 [0.05, 1.0]）
      */
     void setConfThreshold(double val);
 
     /**
-     * @brief 获取 NMS 阈值（0.0 ~ 1.0）
+     * @brief 全局 NMS 阈值（0.0 ~ 1.0），默认 0.45；**只有全局档**，无每模型覆盖
+     * 说明：NMS 不设下限——阈值调低是"更激进地合并重叠框"，方向上是变少而不是变多，
+     *       不存在置信度那种"预筛失效→候选爆炸"的失败模式，所以不给它编一个假护栏。
      */
     double nmsThreshold() const;
 
     /**
-     * @brief 设置 NMS 阈值
+     * @brief 设置全局 NMS 阈值（夹到 [0.0, 1.0]）
      */
     void setNmsThreshold(double val);
 

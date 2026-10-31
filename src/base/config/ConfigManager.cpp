@@ -447,6 +447,8 @@ bool ConfigManager::migrateSchemaV2()
     }
     // 条目补齐：alarm_class/note 恒有键（空串也要写出来），现场才知道这是"配过的不报警"
     // 而不是"漏配"；label 只在覆盖时才出现。
+    // ⚠ conf_threshold 反过来——**缺键本身就是"跟随全局 detect.conf_threshold"的载体**，
+    //    所以这里绝不补齐：写一个 0.25 进去会让这个模型从此不再跟着全局档走。
     for (const QString &id : orderedIds) {
         QJsonObject o = params[id].toObject();
         if (!o.contains("alarm_class")) o["alarm_class"] = QString();
@@ -766,6 +768,10 @@ static VideoModelParam parseModelParam(const QJsonObject &models, const QString 
     p.alarmClass = o["alarm_class"].toString().trimmed();
     p.label = o["label"].toString().trimmed();
     p.note = o["note"].toString();
+    // 必须先判键：QJsonValue 缺键时 toDouble() 返回 0.0，而 0.0 在阈值上是"看得见的合法值"，
+    // 不判就会把"未配置"和"手滑写成 0"混成一件事（后者会让 NPU 后处理的预筛彻底失效）。
+    if (o.contains(QStringLiteral("conf_threshold")))
+        p.confThreshold = static_cast<float>(o["conf_threshold"].toDouble(-1.0));
     return p;
 }
 
@@ -780,6 +786,38 @@ static void patchModelParamField(QJsonObject &root, const QString &libId,
     QJsonObject models = video["models"].toObject();
     QJsonObject o = models[libId].toObject();
     o[key] = val;
+    models[libId] = o;
+    video["models"] = models;
+    root["video"] = video;
+}
+
+// 数值版：conf_threshold 这类键不能用上面那个只吃 QString 的 patch
+static void patchModelParamNumber(QJsonObject &root, const QString &libId,
+                                  const QString &key, qreal val)
+{
+    if (libId.trimmed().isEmpty())
+        return;
+    QJsonObject video = root["video"].toObject();
+    QJsonObject models = video["models"].toObject();
+    QJsonObject o = models[libId].toObject();
+    o[key] = val;
+    models[libId] = o;
+    video["models"] = models;
+    root["video"] = video;
+}
+
+// 只删一个键（「跟随全局」= 这个键不存在）。不能拿 removeModelParam 代替：
+// 那会连 alarm_class 一起抹掉，并把该 id 从每条通道列表里摘出去。
+static void eraseModelParamField(QJsonObject &root, const QString &libId, const QString &key)
+{
+    if (libId.trimmed().isEmpty())
+        return;
+    QJsonObject video = root["video"].toObject();
+    QJsonObject models = video["models"].toObject();
+    QJsonObject o = models[libId].toObject();
+    if (!o.contains(key))
+        return;                       // 本来就缺键：不建空条目，免得参数表多出幽灵行
+    o.remove(key);
     models[libId] = o;
     video["models"] = models;
     root["video"] = video;
@@ -818,6 +856,28 @@ void ConfigManager::setModelNote(const QString &libId, const QString &note)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     patchModelParamField(root_, libId, QStringLiteral("note"), note);
+}
+
+float ConfigManager::modelConfThreshold(const QString &libId) const
+{
+    return modelParam(libId).confThreshold;   // 负数 = 未配置
+}
+
+void ConfigManager::setModelConfThreshold(const QString &libId, qreal val)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    // 下限 0.05 是安全闸不是审美：量化输出的模型把阈值打到 u8 网格上比较
+    // （yolo11_model.hpp 的 process_u8/process_i8），阈值到 0 会让 score_sum 预筛
+    // 整体失效、validCount 爆到上限，随后是 O(N²) 的 NMS——推断线程冻死，
+    // 画面卡住且没有任何看门狗会拉它起来。
+    patchModelParamNumber(root_, libId, QStringLiteral("conf_threshold"),
+                          qBound(0.05, val, 1.0));
+}
+
+void ConfigManager::clearModelConfThreshold(const QString &libId)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    eraseModelParamField(root_, libId, QStringLiteral("conf_threshold"));
 }
 
 void ConfigManager::removeModelParam(const QString &libId)
@@ -883,7 +943,7 @@ double ConfigManager::confThreshold() const
 void ConfigManager::setConfThreshold(double val)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    val = qBound(0.0, val, 1.0);  // 限制范围 0.0 ~ 1.0
+    val = qBound(0.05, val, 1.0);  // 下限 0.05：0 会让量化模型的预筛整体失效（见 setModelConfThreshold）
     QJsonObject detect = root_["detect"].toObject();
     detect["conf_threshold"] = val;
     root_["detect"] = detect;

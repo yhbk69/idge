@@ -137,7 +137,11 @@ void PpeTask::run()
         //   4. 后处理：解析检测框、类别、置信度
         // 注意：detect 对同一 model_ 实例非线程安全，但本任务模型独占，
         //       仅本线程调用，满足"单实例单线程"纪律。
-        model_->detect(taskData->image, &od_results, true);
+        //
+        // 阈值取自 taskData 而不是 config：TaskConfig 是构造期快照、模型加载后不再变更，
+        // 而设置页改置信度要求"不重启、下一帧就生效"，所以阈值必须随帧进来（见 TaskData 注释）。
+        model_->detect(taskData->image, &od_results, true,
+                       taskData->confThreshold, taskData->nmsThreshold);
         
         // 添加时间戳（用于结果排序）
         // taskData->time 由解码线程在采集时刻写入（epoch 纳秒）；

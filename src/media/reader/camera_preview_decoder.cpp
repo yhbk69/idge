@@ -143,6 +143,9 @@ void CameraPreviewDecoder::start(const QString& device)
             delete task;
         }
         ppeTasks_.clear();
+        // 与 ppeTasks_ 同序的阈值表：clear 必须一起，否则下一次重建任务会读到上一批的长度/数值
+        taskConfThresh_.clear();
+        taskNmsThresh_.clear();
         faceDetectors_.clear();
         faceDetectors_.resize(detector_configs_.size());
         
@@ -192,6 +195,10 @@ void CameraPreviewDecoder::start(const QString& device)
             
             PpeTask* task = new PpeTask(taskConfig);
             ppeTasks_.push_back(task);
+            // 该检测器的生效阈值：与级联槽位同一条回落链（反查不到库 id 时自动落全局值）。
+            // 解析一次即可——本对话框每次打开都重建任务，不需要在线换。
+            taskConfThresh_.push_back(ModelRegistry::resolveConfThreshold(modelId));
+            taskNmsThresh_.push_back(ModelRegistry::resolveNmsThreshold());
             
             qDebug() << "Created PpeTask: model=" << QString::fromStdString(config.model_path)
                      << "core=" << config.npu_core_mask;
@@ -222,6 +229,8 @@ void CameraPreviewDecoder::stop()
         delete task;
     }
     ppeTasks_.clear();
+    taskConfThresh_.clear();
+    taskNmsThresh_.clear();
     faceDetectors_.clear();
 }
 
@@ -591,11 +600,18 @@ void CameraPreviewDecoder::decodeLoop()
                                 this->detectResultQueue_
                             );
                             
-                            // 提交到所有配置的推理任务
+                            // 提交到所有配置的推理任务。
+                            // 每任务一份 TaskData：阈值是按模型解析的，多个模型共用同一个
+                            // 对象的话，改给后一个任务的值会被前一个任务读到（同一对象、异线程）。
+                            // 拷贝只动两个 shared_ptr，图像与结果队列仍是共享的。
+                            // taskConfThresh_/taskNmsThresh_ 与 ppeTasks_ 同生同清，见上面两处。
                             {
                                 std::lock_guard<std::mutex> lock(detection_mutex_);
-                                for (auto* task : ppeTasks_) {
-                                    task->put(taskData);
+                                for (size_t i = 0; i < ppeTasks_.size(); ++i) {
+                                    auto td = std::make_shared<TaskData>(*taskData);
+                                    td->confThreshold = taskConfThresh_[i];
+                                    td->nmsThreshold = taskNmsThresh_[i];
+                                    ppeTasks_[i]->put(td);
                                 }
                             }
                         }

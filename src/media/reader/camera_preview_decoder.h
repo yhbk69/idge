@@ -115,6 +115,11 @@ private:
     std::shared_ptr<DmaBufferPool> dmaBufferPool_;
     std::vector<PpeTask*> ppeTasks_;  // 动态创建的推理任务（start()重建、stop()/析构 delete，
                                       // 与 FFmpegVideoDecoder 的"只停不删"策略不同）
+    // 与 ppeTasks_ **同序同清**的生效阈值（建任务时按模型解析一次，之后本对话框生命周期内不变）。
+    // 为什么不在帧循环里现取：那是把跨线程可变态引回预览解码线程，而这里根本没有"在线改阈值"
+    // 的需求（模态对话框，每次打开重建）；每帧给每个任务拷一份 TaskData 填这两格就够了。
+    std::vector<float> taskConfThresh_;
+    std::vector<float> taskNmsThresh_;
     // SCRFD 人脸检测器：与 ppeTasks_ 按槽位对齐（同一索引二选一），
     // 在解码线程内同步推理，无独立线程，因此不需要额外加锁保护其内部状态
     std::vector<std::unique_ptr<ScrfdFaceDetector>> faceDetectors_;

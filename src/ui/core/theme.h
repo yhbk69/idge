@@ -3,6 +3,8 @@
 
 #include <QString>
 
+class QComboBox;
+
 /**
  * @file theme.h
  * @brief 全站设计令牌（色板 + 字阶 + 常用样式构造器）—— 单一事实源
@@ -90,6 +92,20 @@ QString field(const char *bg = FIELD);
  * @brief 内联小按钮微样式（清空/浏览等）：主文字 + 指定底色
  */
 QString miniButton(const char *bg);
+
+/**
+ * @brief 把 QComboBox **弹出列表**的行高抬到触屏档（默认 T5 表格行 56px）。
+ *
+ * ⚠ 为什么不是 QSS：`QComboBox QAbstractItemView::item { min-height }` 写在 combo 自己的
+ *   样式表里、还是写在 `combo->view()` 的样式表里，**都不生效**（2026-10-31 用独立探针程序
+ *   实测：两种写法弹层行高都停在字体算出的 40px，只有换 item delegate 才变成 56px）。
+ *   弹层行高由 QComboBoxListView::sizeHintForRow 决定，它只认 delegate 给的尺寸。
+ *   后果是真实的：20 项 × 32px 的下拉在十寸屏上既按不准、首项还会被顶到屏幕外。
+ *
+ * 顺带把**滚轮**吃掉：下拉在滚动区里被滚一下就会改当前项并触发 activated，
+ * 而 activated 的槽是"写配置 + 落盘"，等于一次无意的手势改了配置。
+ */
+void makeComboTouch(QComboBox *combo, int rowH = TOUCH_TABLE_ROW);
 
 }  // namespace theme
 

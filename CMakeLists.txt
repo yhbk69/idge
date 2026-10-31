@@ -732,8 +732,9 @@ target_link_libraries(ws_sink
 
 # ============================================================================
 # 通道配置热更新自测（真解码器 + 真推理任务，无 GUI）
-# 覆盖三条契约：停止判据 isLoopAlive、releaseTasks 后按新配置重建槽位、
-# 反复重开线程数与 RSS 不涨；顺带用 updateSlotAlarmClasses 的返回值验证形状判据
+# 覆盖四条契约：停止判据 isLoopAlive、releaseTasks 后按新配置重建槽位、
+# 反复重开线程数与 RSS 不涨、每槽生效阈值（slot params 那行日志的 conf/nms）；
+# 其中第四条兼带用 updateSlotParams 的返回值验证形状判据——形状不符必须返回 false，不能静默 no-op
 # cwd 必须是 build 目录（模型库按 ./model/library 解析）：
 #   ./build/build_rk3588_linux/test_channel_reload，rc 0=PASS 1=FAIL
 # 源列表 = ffmpeg_video_decoder.cpp 的依赖闭包（平铺 include 与主目标同套库）

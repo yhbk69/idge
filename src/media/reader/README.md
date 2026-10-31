@@ -32,12 +32,14 @@ FFmpegVideoDecoder（QObject，独立 QThread）
   signalStop/waitForStop → releaseTasks()（清空四个并行向量，能删的 PpeTask 真删，
   推理线程未确认退出的转入 quarantine_ 不删）→ 重新 start()，下一次建任务即按新配置
   ModelRegistry::resolveChannelSlots(channel_) → 每槽一个 PpeTask（核掩码进程级轮转，
-  不是每通道各自 slotIdx%3）；槽的类别名/报警类留在解码器（slotClassNames_/slotAlarmClasses_）
+  不是每通道各自 slotIdx%3）；槽的类别名/运行期参数（报警类 + 生效阈值）留在解码器
+  （slotClassNames_/slotParams_）
   av_read_frame → AVPacket(h264) → avcodec(MPP) → AVFrame(DRM_PRIME NV12, fd)
       ├─ fd → RGA: NV12→RGBA（显示缓冲，双缓冲池借出）
       └─ fd → RGA: NV12→缩放 letterbox 640x640 RGB888（image_buffer_t，
                 dmaBuffer 借自 dmaBufferPool_）   // 仅 Cascade，每 3 帧一次
-                    → tasks_[k]->put(TaskData{time=epoch纳秒, image, resultQueue})
+                    → tasks_[k]->put(TaskData{time=epoch纳秒, image, resultQueue,
+                                              confThreshold, nmsThreshold})
                     → PpeTask 推理 → resultQueue.push(od_results)
   解码线程 tryPop 各任务结果 → 坐标还原/画框进 RGBA
       → 逐槽 AlarmManager::ingest(ch, od, SlotContext) + 收集围栏候选（通道级）
@@ -160,13 +162,24 @@ det.detectRgba(rgbaPixels, width, height, stride /*>=width*4*/,
   会把他随后的离岗命中续期掉，离岗永久静默。track 数量按角色翻倍是预期代价，不应无界增长。
   离岗仍以"本帧检到该类别的人"为前提——没人 = 岗位无人，本模块不做。
   `decodeLoop()` 开头与 `boxSmoother_` 一起清空（重开流即新的一段监控）。
-- **改模型列表 = 重开该路，不是重启程序**：设置页改 `channels[].models` / `enabled` 后走
-  `signalStop → waitForStop → releaseTasks() → start()`，任务集合按新配置重建；改
-  `models[].alarm_class` 更轻，`updateSlotAlarmClasses()` 在线换（只改写 `slotAlarmClasses_`，
-  解码线程每帧在 `alarmClsMtx_` 内拷一份去构造 `SlotContext`，画面不重连）。
-  判据是形状：槽位数与配置不符（例如该路走的是默认回退模型）时 `updateSlotAlarmClasses()`
-  返回 false，调用方据此退回整路重开。同数量原地换模型仍未接线（`PpeTask::reloadModel()`，
-  详见 `plan/roadmap.md` P1-2）。
+- **热更新分三级，改哪级决定代价**：
+  - **重开该路**——设置页改 `channels[].models` / `enabled` 后走
+    `signalStop → waitForStop → releaseTasks() → start()`，任务集合按新配置重建。
+    ⚠ 这条路有代价且今天仍在：`buildCascadeTasks()` 在 `tasks_` 非空时直接早退、`stop()` 不清
+    `tasks_`，只有 `releaseTasks()` 会清；而 `start()` 会在保留下来的任务上重跑
+    `PpeTask::start()→init()`，每次新建 `YOLO11Model` 与队列且不销毁（`rknn_destroy` 全仓零调用）
+    ⇒ **一次重开漏一份 NPU 上下文**。别在验证时反复走这条路。
+  - **在线换参数**——改模型参数表里的 `alarm_class` 或 `conf_threshold` 走
+    `updateSlotParams()`：只改写 `slotParams_`（`SlotRuntimeParam{报警类别, conf, nms}`），
+    解码线程每帧在 `slotParamMtx_` 内拷一份快照，一份快照同时喂 `TaskData`（阈值）与
+    `SlotContext`（报警类别），画面不重连、NPU 不重建。
+    判据是**形状**：槽位数与配置不符（例如该路走的是默认回退模型）时返回 false，
+    调用方据此退回整路重开——**这个 bool 不能做成静默 no-op**，否则每次模型列表改动都会
+    变成"老阈值永远留着"。
+    ⚠ 它只覆盖**正在跑**的路：已停但没 `releaseTasks()` 的路下次 `start()` 仍按建任务时的
+    配置走，所以 GUI 侧的兜底不是"下次开流自然生效"。
+  - **只落盘**——手输的视频源地址要点「浏览」重开本路才换。
+  同数量原地换模型仍未接线（`PpeTask::reloadModel()`，详见 `plan/roadmap.md` P1-2）。
 - **重开前必须把对象搬回 GUI 线程**：`start()` 里 `moveToThread(thread_)` 之后，本对象的线程归属
   就在解码线程上；那一轮 `QThread` 析构后归属仍挂在那条已不存在的线程上，下一次 `start()` 的
   `moveToThread` 会被 Qt 拒绝（`Current thread ... is not the object's thread`），于是
