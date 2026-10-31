@@ -16,7 +16,7 @@
 | gl_video_widget.h/.cpp | GLVideoWidget：QOpenGLWidget 双缓冲零拷贝视频控件（含 FPS 叠加） |
 | player_widget.h/.cpp | PlayerWidget：视频 + OSD + 围栏叠加 + 放大按钮的通道窗体，持有解码器 |
 | dashboard_widget.h/.cpp | DashboardWidget：统计卡片、/proc 系统监控（CPU/内存/温度）、类别排行条 |
-| alarm_list_widget.h/.cpp | AlarmListWidget：**三个** Tab（类别报警 / 电子围栏 / 检测明细），数据**全部来自数据库**（不再是 `AlarmManager` 的 RAM 窗口，所以 3.5 万条历史也翻得到）。检索条 = 时间档位 4 颗（今天/近3天/近7天/全部，**自然日**不是"现在减 72 小时"）+ 5 个下拉（通道/类别/状态/负责人/施工id）+ 清除筛选 + 上一页/下一页；下拉的候选值与计数来自 DAO 的 facet 查询，表头点击弹的菜单**读的就是这些下拉**（同一份状态，不会两处漂移）。一页 200 行（旧代码的 500 含义是"总共只画 500"）；围栏表 6 列、检测表 5 列、类别表 8 列，负责人列空值显示 `—` |
+| alarm_list_widget.h/.cpp | AlarmListWidget：**三个** Tab（类别报警 / 电子围栏 / 检测明细），数据**全部来自数据库**（不再是 `AlarmManager` 的 RAM 窗口，所以 3.5 万条历史也翻得到）。检索条 = 时间档位 4 颗（今天/近3天/近7天/全部，**自然日**不是"现在减 72 小时"）+ 5 个下拉（通道/类别/状态/负责人/施工id）+ 清除筛选 + 分页条（首页 / 上一页 / **第 N / M 页 ▾** / 下一页 / 末页，「第 N / M 页」点开是跳页菜单）；下拉的候选值与计数来自 DAO 的 facet 查询，表头点击弹的菜单**读的就是这些下拉**（同一份状态，不会两处漂移）。**一页 = 当前那张表一屏能显示几行**（`pageSize()` 按 viewport 高度现算，行高 56px 下实测 11 行；旧代码的 200/500 是"总共只画这么多"的性能妥协，56px 行高下要滑二十多屏才够一页，那不叫分页）；围栏表 6 列、检测表 5 列、类别表 8 列，负责人列空值显示 `—` |
 | video_alarm_widget.h/.cpp | VideoAlarmWidget：视频监控页右侧报警卡片列表（QScrollArea），点击跳转详情；卡片第二行是「通道N · 负责人」（复用 `alarmChannel` 的 objectName，卡片高度不变） |
 | alarm_detail_dialog.h/.cpp | AlarmDetailDialog：报警详情对话框，支持误报标记与单条确认；"视频"行展示片段文件名/大小与网页副本是否随行；施工信息**按 `construction_info` 的键逐行渲染**（不是按固定字段），渲染口径来自 `ConstructionInfo::fields()`（与 ConstructionDetailDialog 同一份），所以 `ConstructionInfo` 加字段这里不用改 |
 | construction_detail_dialog.h/.cpp | ConstructionDetailDialog：**当前登录的施工信息**详情框，只读、无信号无槽（不需要 moc），入口是标题栏右上角那颗登录人角标（`frmMain::sessionBadge_`）。打开时读一次 `snapshot()`，之后不回查会话。逐键渲染同样走 `ConstructionInfo::fields()`。值标签挂了 `TextSelectableByMouse`——现场要照着抄电话号码 |
@@ -82,14 +82,20 @@ GLuint tex = pool.acquire(fd, w, h, stride, DRM_FORMAT_ABGR8888);
 - **录制参数只在 `PlayerWidget::open()` 注入一次**：编码器在解码线程打开流后按真实宽高创建，
   运行期改 `config.json` 的 recording 段不会重建编码器，必须换流/重启才生效（界面不提供入口）。
 - EglImageRenderer：无 include guard、着色器 uniform 未赋值（tex_height/img_height 默认 0 → 除零 NaN），且 BT.601 假设与 RGBA 主路径不符——仅存档参考。
-- **检索的三条硬口径**（2026-10-31，改任何一条都会让列表页说谎或卡顿）：
+- **检索的四条硬口径**（2026-10-31，改任何一条都会让列表页说谎或卡顿）：
   ① **命中数与当前页必须同一次 `buildFilterWhere` 的产物**——先 `countByFilter` → `clampPageToTotal()` →
-  再 `filter.offset = page_ * 200` 取行。顺序反了就会出现"第 3 / 2 页"配着不存在的 offset 取回来的行。
+  再 `filter.offset = page_ * filter.limit` 取行（`limit` 就是 `pageSize()`，偏移由它推，两处不各算一遍）。
+  顺序反了就会出现"第 3 / 2 页"配着不存在的 offset 取回来的行。
   ② **页面不可见 ⇒ 零 SQL 零重建**（`reloadCurrentTab()` 与三个 `refresh*Table()` 各有 `isVisible()` 门）。
-  实测「全部」档一次重建 317~326ms（其中 SQL ≈100ms：count 10 + 取页 2 + 三个 facet 90，剩下是 200 行
-  ×8 列的 `QTableWidgetItem`），这个量级绝不能被后台的 `statsUpdated` 白白触发。
-  ③ **不做关键词输入框**——本轮没有虚拟键盘，任何要打字检索的设计都落不了地；
-  取值一律点选（下拉或表头菜单），日期一律档位（不做日历控件）。
+  一页 200 行时实测「全部」档一次重建 317~326ms（其中 SQL ≈100ms：count 10 + 取页 2 + 三个 facet 90，
+  剩下是 200 行 ×8 列的 `QTableWidgetItem`）；改成"一页 = 一屏"（11 行）后同一档降到 **7~35ms**。
+  ③ **新报警到达不许翻动用户正在读的那一页**：自动刷新（防抖定时器与 frmMain 两条路）走
+  `refreshForNewData()`，`page_ > 0` 时直接返回。本机报警是每秒都在产生的，照旧重建会让同一份数据
+  随新行整体下移——上一页刚读过的几行在下一页顶端又出现一遍，本该轮到的那几行被跳过，而且每 300ms
+  跳一次。「刷新」按钮、切 Tab、改条件、回首页都是用户自己的动作，照旧重建。
+  ④ **不做关键词输入框**——本轮没有虚拟键盘，任何要打字检索的设计都落不了地；
+  取值一律点选（下拉或表头菜单），日期一律档位（不做日历控件），**跳页也一律点选**
+  （「第 N / M 页」是按钮不是标签：QLabel 收不到点击；菜单给首页/末页、±10/±100 粗调、附近 3 页）。
 - **老报警行没有施工信息是事实，不是 bug**：`worker_name` 为空 → 列表与详情统一显示 `—`，
   详情框额外补一句「（该报警产生时未登录，无施工信息）」。不回填。
 - **表头筛选菜单是从对应下拉现搭的**，不是第二份状态；围栏 Tab 点表头改的是 `fenceRole_`（闯入/离岗），

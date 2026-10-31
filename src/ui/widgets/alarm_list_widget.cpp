@@ -27,16 +27,16 @@
 #include <QComboBox>
 #include <QAbstractItemView>
 #include <QCursor>
+#include <QAction>
 
 namespace {
 
-// 每页 200 行。
-// 这个数字以前的含义是"总共只画 500 行，其余看不见"，那是性能妥协不是产品设计；
-// 现在它是"一页"，剩下的用翻页到达。为什么是 200 而不是 500：
-// 触屏上没人会用手指滑过 500 行（一屏约 9 行，等于要连滑五十多下），
-// 而每行的 8 个 QTableWidgetItem + 一个 setCellWidget 是 GUI 线程上唯一还能感知到帧的开销
-// ——上一轮实测 500 行 ×5 列重建就是 45~61ms，那正是当时 GUI 卡顿的元凶之一。
-constexpr int kPageSize = 200;
+// 一页的行数不写死，见 AlarmListWidget::pageSize()：含义是"当前那张表一屏能显示几行"。
+// 以前的 200（更早是 500，含义还是"总共只画这么多"）在 56px 行高下要连滑二十多屏才够一页，
+// 那不叫分页。留这个常量只作为视口还没布局出来时的兜底。
+constexpr int kPageSizeFallback = 10;
+constexpr int kPageSizeMin = 5;
+constexpr int kPageSizeMax = 50;
 
 enum TabIndex { TabClass = 0, TabFence = 1, TabDetection = 2 };
 
@@ -168,10 +168,17 @@ AlarmListWidget::AlarmListWidget(QWidget *parent)
 void AlarmListWidget::onDebouncedRefresh()
 {
     QElapsedTimer probe; probe.start();
-    reloadCurrentTab();
+    refreshForNewData();
     if (perfProbe() && probe.elapsed() > 5) {
         qWarning() << "[PROBE] alarmList refreshTable" << probe.elapsed() << "ms";
     }
+}
+
+void AlarmListWidget::refreshForNewData()
+{
+    // 见声明处：用户在读第 2 页往后的内容时，新报警不许把他的行换掉。
+    if (page_ > 0) return;
+    reloadCurrentTab();
 }
 
 /*
@@ -503,24 +510,39 @@ void AlarmListWidget::setupFilterBar(QVBoxLayout *mainLay)
 
     comboLay->addStretch();
 
+    // 分页条：首页 · 上一页 · 第 N / M 页 ▾ · 下一页 · 末页。
+    // 「第 N / M 页」必须是按钮：QLabel 收不到点击，而本机没有虚拟键盘，
+    // 跳页就只能靠点这个数字弹一个可点选的菜单。
+    btnFirstPage_ = new QPushButton("首页");
     btnPrevPage_ = new QPushButton("◀ 上一页");
+    btnPage_ = new QPushButton("第 1 / 1 页 ▾");
     btnNextPage_ = new QPushButton("下一页 ▶");
-    for (QPushButton *b : {btnPrevPage_, btnNextPage_}) {
-        b->setStyleSheet(
-            QString("QPushButton { color: %1; background: %2; border: 1px solid %3; border-radius: 4px;"
-                    "  min-height: %4px; padding: 6px 14px; }"
-                    "QPushButton:disabled { color: %5; }")
-                .arg(theme::TEXT, theme::FIELD, theme::BORDER)
-                .arg(theme::TOUCH_FIELD_MIN_H)
-                .arg(theme::TEXT_MUTED));
+    btnLastPage_ = new QPushButton("末页");
+
+    const QString navQss =
+        QString("QPushButton { color: %1; background: %2; border: 1px solid %3; border-radius: 4px;"
+                "  min-height: %4px; padding: 6px 14px; }"
+                "QPushButton:disabled { color: %5; }")
+            .arg(theme::TEXT, theme::FIELD, theme::BORDER)
+            .arg(theme::TOUCH_FIELD_MIN_H)
+            .arg(theme::TEXT_MUTED);
+    // 页码那颗同高但透明底：一行里五个实心按钮会看不出哪个是页码，
+    // 而它的角色是"跳转入口"，不是又一个翻页动作。
+    const QString pageQss =
+        QString("QPushButton { color: %1; background: transparent; border: 1px solid %2;"
+                " border-radius: 4px; min-height: %3px; padding: 6px 14px; }")
+            .arg(theme::TEXT_MUTED, theme::BORDER)
+            .arg(theme::TOUCH_FIELD_MIN_H);
+
+    for (QPushButton *b : {btnFirstPage_, btnPrevPage_, btnPage_, btnNextPage_, btnLastPage_}) {
+        b->setStyleSheet(b == btnPage_ ? pageQss : navQss);
         comboLay->addWidget(b);
     }
+    connect(btnFirstPage_, &QPushButton::clicked, this, [this]() { gotoPage(0); });
     connect(btnPrevPage_, &QPushButton::clicked, this, [this]() { onPageStep(-1); });
+    connect(btnPage_, &QPushButton::clicked, this, &AlarmListWidget::openPageJumpMenu);
     connect(btnNextPage_, &QPushButton::clicked, this, [this]() { onPageStep(1); });
-
-    lblPage_ = new QLabel("第 1 / 1 页");
-    lblPage_->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
-    comboLay->insertWidget(comboLay->indexOf(btnNextPage_) + 1, lblPage_);
+    connect(btnLastPage_, &QPushButton::clicked, this, [this]() { gotoPage(pageCount() - 1); });
 
     mainLay->addLayout(comboLay);
 }
@@ -559,8 +581,8 @@ AlarmFilter AlarmListWidget::currentAlarmFilter(AlarmFilter::Scope scope) const
     f.constructionId = comboData(comboConstruction_).toString();
     f.fenceRole = fenceRole_;
     f.scope = scope;
-    f.limit = kPageSize;
-    f.offset = page_ * kPageSize;
+    f.limit = pageSize();
+    f.offset = page_ * f.limit;   // 偏移由 limit 推，别和上面那个数各算一遍
     return f;
 }
 
@@ -570,8 +592,8 @@ DetectionFilter AlarmListWidget::currentDetectionFilter() const
     timeRange(&f.startTime, &f.endTime);
     f.channel = comboChannel_ ? comboChannel_->currentData().toInt() : -1;
     f.className = comboData(comboClass_).toString();
-    f.limit = kPageSize;
-    f.offset = page_ * kPageSize;
+    f.limit = pageSize();
+    f.offset = page_ * f.limit;   // 偏移由 limit 推，别和上面那个数各算一遍
     return f;
 }
 
@@ -628,10 +650,38 @@ void AlarmListWidget::reloadCurrentTab()
         : theme::text(theme::SUCCESS, theme::FS_BODY));
 }
 
+/*
+====================================================
+作用：一页多少行 = 当前那张表一屏能显示几行
+说明：见文件头 kPageSizeFallback 的注释。取 viewport 高度而不是 widget 高度：
+      表头不占行。少算 1px 是为了不把"露出一点点的半行"也算进一屏。
+====================================================
+*/
+int AlarmListWidget::pageSize() const
+{
+    QTableWidget *t = table_;
+    if (tabWidget_) {
+        const int idx = tabWidget_->currentIndex();
+        if (idx == TabFence && fenceTable_) t = fenceTable_;
+        else if (idx == TabDetection && detTable_) t = detTable_;
+    }
+    if (!t) return kPageSizeFallback;
+
+    const int rowH = qMax(1, t->verticalHeader()->defaultSectionSize());
+    const int viewH = t->viewport()->height();
+    if (viewH <= 0) return kPageSizeFallback;   // 还没布局出来（首次刷新前不该发生，兜底而已）
+    return qBound(kPageSizeMin, (viewH - 1) / rowH, kPageSizeMax);
+}
+
+int AlarmListWidget::pageCount() const
+{
+    const int per = qMax(1, pageSize());
+    return qMax(1, (totalRows_ + per - 1) / per);
+}
+
 void AlarmListWidget::clampPageToTotal()
 {
-    const int pages = qMax(1, (totalRows_ + kPageSize - 1) / kPageSize);
-    page_ = qBound(0, page_, pages - 1);
+    page_ = qBound(0, page_, pageCount() - 1);
 }
 
 /*
@@ -646,11 +696,15 @@ void AlarmListWidget::updatePagingLabel()
         ? QStringLiteral("命中 %1 条（不含误报）").arg(totalRows_)
         : QStringLiteral("命中 %1 条（%2）").arg(totalRows_).arg(statusLabel(status)));
 
-    const int pages = qMax(1, (totalRows_ + kPageSize - 1) / kPageSize);
-    lblPage_->setText(QStringLiteral("第 %1 / %2 页").arg(page_ + 1).arg(pages));
+    const int pages = pageCount();
+    // ▾ 是"这颗能点"的唯一提示：跳页菜单里给首页/末页、附近页码与 ±10/±100，
+    // 本轮没有虚拟键盘，所以不能给一个"输入页码"的框。
+    btnPage_->setText(QStringLiteral("第 %1 / %2 页 ▾").arg(page_ + 1).arg(pages));
 
+    btnFirstPage_->setEnabled(page_ > 0);
     btnPrevPage_->setEnabled(page_ > 0);
     btnNextPage_->setEnabled(page_ < pages - 1);
+    btnLastPage_->setEnabled(page_ < pages - 1);
 }
 
 /*
@@ -667,7 +721,7 @@ void AlarmListWidget::refreshTable()
     AlarmFilter filter = currentAlarmFilter(AlarmFilter::ClassOnly);
     totalRows_ = dao.countByFilter(filter);
     clampPageToTotal();          // 先钳页再取行：反过来的话"第 3 / 2 页"这种自相矛盾真会出现
-    filter.offset = page_ * kPageSize;
+    filter.offset = page_ * filter.limit;
     pageAlarms_ = dao.queryByFilter(filter);
     updatePagingLabel();
 
@@ -737,7 +791,7 @@ void AlarmListWidget::refreshFenceTable()
     AlarmFilter filter = currentAlarmFilter(AlarmFilter::FenceOnly);
     totalRows_ = dao.countByFilter(filter);
     clampPageToTotal();
-    filter.offset = page_ * kPageSize;
+    filter.offset = page_ * filter.limit;
     pageFenceAlarms_ = dao.queryByFilter(filter);
     updatePagingLabel();
 
@@ -787,7 +841,7 @@ void AlarmListWidget::refreshDetectionTable()
     DetectionFilter filter = currentDetectionFilter();
     totalRows_ = dao.countByFilter(filter);
     clampPageToTotal();
-    filter.offset = page_ * kPageSize;
+    filter.offset = page_ * filter.limit;
     pageDetections_ = dao.queryByFilter(filter);
     updatePagingLabel();
 
@@ -1020,12 +1074,85 @@ void AlarmListWidget::onFilterChanged()
 /*
 ====================================================
 作用：翻页
+说明：钳到 pageCount() 而不是只钳下界 —— 跳转菜单能给 ±100，不钳上界会跑到
+      一个不存在的页上（虽然 refresh 前 clampPageToTotal 会兜住，但按钮可用态
+      是在那之后算的，中间会有一帧"下一页"该灰着却是亮的）。
 ====================================================
 */
 void AlarmListWidget::onPageStep(int delta)
 {
-    page_ = qMax(0, page_ + delta);
+    page_ = qBound(0, page_ + delta, pageCount() - 1);
     reloadCurrentTab();
+}
+
+void AlarmListWidget::gotoPage(int page0)
+{
+    const int target = qBound(0, page0, pageCount() - 1);
+    if (target == page_) return;   // 已经在这一页就别再查一遍库、再重建一遍表
+    page_ = target;
+    reloadCurrentTab();
+}
+
+/*
+====================================================
+作用：点「第 N / M 页」弹出跳页菜单
+说明：全部可点选，没有输入框（本机不做虚拟键盘）。三段：
+        首页/末页 —— 两端各一跳就到；
+        ±10/±100  —— 粗调，目标页直接写在标签上，点的人不用自己算；
+        附近页码  —— 当前页前后各 3 页，适合逐屏细看。
+      菜单弹在按钮正下方而不是光标处：触屏没有光标。
+====================================================
+*/
+void AlarmListWidget::openPageJumpMenu()
+{
+    const int pages = pageCount();
+
+    QMenu menu(this);
+    menu.setStyleSheet(
+        QString("QMenu { background: %1; color: %2; border: 1px solid %3; }"
+                "QMenu::item { padding: 14px 24px; }"
+                "QMenu::item:selected { background: %4; }")
+            .arg(theme::PANEL, theme::TEXT, theme::BORDER, theme::BTN_SECONDARY));
+
+    QAction *toFirst = menu.addAction(QStringLiteral("首页（第 1 页）"));
+    toFirst->setEnabled(page_ > 0);
+    connect(toFirst, &QAction::triggered, this, [this]() { gotoPage(0); });
+
+    QAction *toLast = menu.addAction(QStringLiteral("末页（第 %1 页）").arg(pages));
+    toLast->setEnabled(page_ < pages - 1);
+    connect(toLast, &QAction::triggered, this, [this, pages]() { gotoPage(pages - 1); });
+
+    menu.addSeparator();
+
+    // 粗调：目标页直接写在标签上，点的人不用自己算。
+    // 落点等于当前页的项不给（贴边时 -100 与 -10 都会被钳到同一页）——
+    // 一行点了没反应的菜单项不如没有，两行做同一件事更不如只留一行。
+    int lastStepTarget = page_;
+    for (const int delta : {-100, -10, 10, 100}) {
+        const int target = qBound(0, page_ + delta, pages - 1);
+        if (target == lastStepTarget) continue;
+        lastStepTarget = target;
+        QAction *act = menu.addAction(
+            QString("%1 %2 页 → 第 %3 页")
+                .arg(delta > 0 ? QStringLiteral("前进") : QStringLiteral("后退"))
+                .arg(qAbs(delta))
+                .arg(target + 1));
+        connect(act, &QAction::triggered, this, [this, target]() { gotoPage(target); });
+    }
+
+    if (pages > 1) {
+        menu.addSeparator();
+        const int from = qMax(0, page_ - 3);
+        const int to = qMin(pages - 1, page_ + 3);
+        for (int p = from; p <= to; ++p) {
+            if (p == page_) continue;
+            QAction *act = menu.addAction(QStringLiteral("第 %1 页").arg(p + 1));
+            connect(act, &QAction::triggered, this, [this, p]() { gotoPage(p); });
+        }
+    }
+
+    menu.exec(btnPage_ ? btnPage_->mapToGlobal(QPoint(0, btnPage_->height()))
+                       : QCursor::pos());
 }
 
 /*
