@@ -27,11 +27,15 @@ inline bool perfProbe()
 // 用途是把"画框"整段从帧预算里摘出来做 A/B，量它对吞吐的真实占比
 // （分阶段探针报的 draw 占比需要这样一次反证，而不是只看数字推断）。
 //
-// 板端 A/B 实测（4 路 1080p/30fps，同一份 assets/test/192.mp4）：
+// 板端 A/B 实测（4 路 1080p/30fps，同一份 assets/test/192.mp4）——注意这组数是
+// a2c6227 之前取的，当时叠加绘制还在非缓存映射上做逐像素读-改-写，是瓶颈本体：
 //   开：单帧 total 55~69ms，实际 14.5~18fps，进程 CPU 420%，节拍 sleep 仅 12us
 //   关：单帧 total 33.3ms（贴着 30fps 锚线），4 路稳定 30.00fps，
 //       paints/s = arrivals/s = 30.0，进程 CPU 96~103%
-// 即叠加绘制一项吃掉约 3.2 个 A76 核，且是非缓存映射上逐像素读-改-写造成的。
+// 即叠加绘制一项当时吃掉约 3.2 个 A76 核。
+// 987e9a6 把绘制改成整行纯写之后这一档差距已经不复存在（draw 段实测
+// 1.43~1.48ms/帧，见 ffmpeg_video_decoder.cpp 里 DecodeStages 上方的本轮数字），
+// 本轮没有重跑 IDGE_NODRAW 的对照，上面两行只在复现历史问题时按历史值参考。
 inline bool noOverlayDraw()
 {
     static const bool on = qEnvironmentVariableIsSet("IDGE_NODRAW");

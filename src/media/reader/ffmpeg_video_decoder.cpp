@@ -1411,6 +1411,14 @@ void FFmpegVideoDecoder::decodeLoop()
     // total 33.3k~34.6k → 4 路全部 29.5~30.0fps，sleep 25k~27k（节拍器重新生效、
     // 有余量），进程 CPU 从 ~445% 降到 ~120%。rga 段拆开看是 import 0.3~0.7k、
     // cvt 0.8~1.1k——每帧 import/release 只占 1.7ms 里的 0.5ms，缓存句柄不值得。
+    //
+    // 本轮三个 commit 在同一口径下复测（4 路同一份 1280×720@30 循环源、每路
+    // ppe+coco 两槽位、测试登录后连续采样、每路 77 个 120 帧窗口）：
+    //   draw   2.24k → 1.43k   （987e9a6 矩形改整行 32 位纯写）
+    //   推理侧 letterbox 段 1.05ms → 0.64ms/次（1cc6f2d 源缓冲带上 DMA-BUF fd）
+    //   抓拍单次 28.3ms → 2.5ms（8aa94f3 RGBA→RGB 交给 RGA，见 SnapWriter::submit）
+    //   进程 CPU 中位 113.3% → 102.4%，线程数 33 不变，total 仍是 33.3k
+    //     ——total 恒等于节拍周期，省下来的时间一律表现为 sleep 变大，别拿 fps 当口径。
     struct DecodeStages {
         QElapsedTimer frame;   // 一个完整周期（含 recv）
         QElapsedTimer stage;   // 当前阶段
