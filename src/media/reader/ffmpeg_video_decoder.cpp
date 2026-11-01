@@ -1327,6 +1327,9 @@ void FFmpegVideoDecoder::decodeLoop()
         qint64 recv = 0, rga1 = 0, infer = 0, slot = 0, em = 0, sleep = 0, total = 0;
         qint64 sPop = 0, sDraw = 0, sAlarm = 0;
         qint64 rgaImp = 0, rgaCvt = 0;   // RGA 段内部拆分：导入句柄 vs 真正转换
+        // 每帧画了几个框：draw 段是"每像素成本 × 框数"，不给这个数就分不清
+        // "绘制慢"是常数大还是这帧东西多，也就无法判断改了之后有没有真的省。
+        qint64 nTracks = 0;
         int n = 0;
         // 每段结束时 add 并立刻 restart，避免某个分支被跳过时把时间记到下一段头上
         void add(qint64 &acc) { acc += stage.nsecsElapsed() / 1000; }
@@ -1343,10 +1346,12 @@ void FFmpegVideoDecoder::decodeLoop()
                        << "[pop" << sPop / n << "draw" << sDraw / n << "alarm" << sAlarm / n << "]"
                        << "emit" << em / n << "sleep" << sleep / n
                        << "total" << total / n
-                       << "fps" << (us_per_frame > 0 ? 1000000.0 / us_per_frame : 0.0);
+                       << "fps" << (us_per_frame > 0 ? 1000000.0 / us_per_frame : 0.0)
+                       << "tracks" << double(nTracks) / n;
             recv = rga1 = infer = slot = em = sleep = total = 0;
             sPop = sDraw = sAlarm = 0;
             rgaImp = rgaCvt = 0;
+            nTracks = 0;
             n = 0;
         }
     } ds;
@@ -1842,6 +1847,7 @@ void FFmpegVideoDecoder::decodeLoop()
 
                         // 画平滑后的框
                         ds.add(ds.sPop); ds.stage.restart();
+                        ds.nTracks += (int)smoother.tracks.size();
                         int color = kSlotColors[(int)k % 5];
                         char text[256];
                         for (const auto &tr : smoother.tracks) {

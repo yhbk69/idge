@@ -326,93 +326,48 @@ static void draw_rectangle_c3(unsigned char* pixels, int w, int h, int rx, int r
 }
 
 // draw_rectangle_c4 - 四通道(RGBA)矩形绘制
+//
+// 绘制目标是 DRM dumb buffer，CPU 侧映射为非缓存/写合并内存（同文件 draw_text_c4
+// 上方记着这事的 A/B 数字）。逐字节写一个像素 = 4 次总线事务且每次只填 32/64 字节
+// 写合并缓冲的一小段，凑不满就要提前刷；这里一次 unsigned int 写完一个像素。
+// 小端下 `*(unsigned int*)p = color` 与 `p[0..3] = ((uchar*)&color)[0..3]` 位等价，
+// 且四条边的每一处写都是同一个 color，重叠区（thickness 大于框厚时）谁先谁后
+// 结果一样 —— 所以改成"整行连续写"只动写入顺序、不动最终像素。
+static inline void fill_rect_c4(unsigned char* pixels, int w, int h, int x0, int y0, int x1, int y1,
+                                unsigned int color)
+{
+    const int stride = w * 4;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > w) x1 = w;
+    if (y1 > h) y1 = h;
+    for (int y = y0; y < y1; y++) {
+        unsigned int* row = (unsigned int*)(pixels + (size_t)stride * y);
+        for (int x = x0; x < x1; x++) row[x] = color;
+    }
+}
+
 static void draw_rectangle_c4(unsigned char* pixels, int w, int h, int rx, int ry, int rw, int rh, unsigned int color,
                               int thickness)
 {
-    const unsigned char* pen_color = (const unsigned char*)&color;
-    int stride = w * 4;
-
     if (thickness == -1) {
         // 填充模式
-        for (int y = ry; y < ry + rh; y++) {
-            if (y < 0) continue;
-            if (y >= h) break;
-            unsigned char* p = pixels + stride * y;
-            for (int x = rx; x < rx + rw; x++) {
-                if (x < 0) continue;
-                if (x >= w) break;
-                p[x * 4 + 0] = pen_color[0];
-                p[x * 4 + 1] = pen_color[1];
-                p[x * 4 + 2] = pen_color[2];
-                p[x * 4 + 3] = pen_color[3];
-            }
-        }
+        fill_rect_c4(pixels, w, h, rx, ry, rx + rw, ry + rh, color);
         return;
     }
 
     // 边框模式
     const int t0 = thickness / 2;
     const int t1 = thickness - t0;
+    const int xa = rx - t0;                 // 外左边
+    const int xb = rx + rw + t1;            // 外右边
+    const int ya = ry + t1;                 // 上下边之间的第一条行
+    const int yb = ry + rh - t0;            // 上下边之间的最后一条行之后
 
-    // 上边
-    for (int y = ry - t0; y < ry + t1; y++) {
-        if (y < 0) continue;
-        if (y >= h) break;
-        unsigned char* p = pixels + stride * y;
-        for (int x = rx - t0; x < rx + rw + t1; x++) {
-            if (x < 0) continue;
-            if (x >= w) break;
-            p[x * 4 + 0] = pen_color[0];
-            p[x * 4 + 1] = pen_color[1];
-            p[x * 4 + 2] = pen_color[2];
-            p[x * 4 + 3] = pen_color[3];
-        }
-    }
-
-    // 下边
-    for (int y = ry + rh - t0; y < ry + rh + t1; y++) {
-        if (y < 0) continue;
-        if (y >= h) break;
-        unsigned char* p = pixels + stride * y;
-        for (int x = rx - t0; x < rx + rw + t1; x++) {
-            if (x < 0) continue;
-            if (x >= w) break;
-            p[x * 4 + 0] = pen_color[0];
-            p[x * 4 + 1] = pen_color[1];
-            p[x * 4 + 2] = pen_color[2];
-            p[x * 4 + 3] = pen_color[3];
-        }
-    }
-
-    // 左边
-    for (int x = rx - t0; x < rx + t1; x++) {
-        if (x < 0) continue;
-        if (x >= w) break;
-        for (int y = ry + t1; y < ry + rh - t0; y++) {
-            if (y < 0) continue;
-            if (y >= h) break;
-            unsigned char* p = pixels + stride * y;
-            p[x * 4 + 0] = pen_color[0];
-            p[x * 4 + 1] = pen_color[1];
-            p[x * 4 + 2] = pen_color[2];
-            p[x * 4 + 3] = pen_color[3];
-        }
-    }
-
-    // 右边
-    for (int x = rx + rw - t0; x < rx + rw + t1; x++) {
-        if (x < 0) continue;
-        if (x >= w) break;
-        for (int y = ry + t1; y < ry + rh - t0; y++) {
-            if (y < 0) continue;
-            if (y >= h) break;
-            unsigned char* p = pixels + stride * y;
-            p[x * 4 + 0] = pen_color[0];
-            p[x * 4 + 1] = pen_color[1];
-            p[x * 4 + 2] = pen_color[2];
-            p[x * 4 + 3] = pen_color[3];
-        }
-    }
+    fill_rect_c4(pixels, w, h, xa, ry - t0, xb, ry + t1, color);       // 上边
+    fill_rect_c4(pixels, w, h, xa, ry + rh - t0, xb, ry + rh + t1, color);  // 下边
+    fill_rect_c4(pixels, w, h, xa, ya, rx + t1, yb, color);            // 左边
+    fill_rect_c4(pixels, w, h, rx + rw - t0, ya, xb, yb, color);       // 右边
 }
 
 // ============================================================================
