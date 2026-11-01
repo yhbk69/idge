@@ -8,6 +8,8 @@
 #include <fstream>
 #include <cstring>
 #include <set>
+#include <QDebug>
+#include "perf_probe.h"      // infer() 的分段耗时探针开关
 #ifdef Status
 #undef Status
 #endif
@@ -1084,10 +1086,16 @@ public:
         }
 
         TIMER timer;
+        // 分段耗时（IDGE_PERF=1）：一次 detect 里"CPU 搬运 / NPU 运行 / 取输出 / CPU 后处理"
+        // 各占多少，只有这四段分立量得出来，而它们决定了该往哪儿优化——总量 50ms 若集中在
+        // 后处理，那是 CPU 的问题；集中在 run，才是 NPU 的问题。
+        // 窗口用 thread_local：每个推理线程一份，天然等于"每个任务一份"，无需给本类加状态。
+        float msLetterbox = 0.f, msRun = 0.f, msGet = 0.f, msPost = 0.f, msRelease = 0.f;
 
         timer.tik();
         ret = convert_image_with_letterbox(img, &dst_img, &letter_box, bg_color);
         timer.tok();
+        msLetterbox = timer.get_time();
         //timer.print_time("convert_image_with_letterbox time:");
         if (ret < 0)
         {
@@ -1109,6 +1117,7 @@ public:
             timer.tik();
             ret = rknn_run(app_ctx->rknn_ctx, nullptr);
             timer.tok();
+            msRun += timer.get_time();
             //timer.print_time("rknn run time:");
         }
 
@@ -1136,18 +1145,47 @@ public:
             goto out;
         }
         timer.tok();
+        msGet = timer.get_time();
         //timer.print_time("rknn_outputs_get");
         // Post Process
         timer.tik();
         post_process(app_ctx, outputs, &letter_box, box_conf_threshold, nms_threshold, od_results);
+        timer.tok();
+        msPost = timer.get_time();
 
-        // 官方约定：is_prealloc=FALSE 时 buf 归 runtime 所有，必须用        // rknn_outputs_release 归还。板端实测 librknnrt 2.3.2 下 free() 等价
+        // 官方约定：is_prealloc=FALSE 时 buf 归 runtime 所有，必须用
+        // rknn_outputs_release 归还。板端实测 librknnrt 2.3.2 下 free() 等价
         // 无泄漏（800 轮 RSS 平稳、destroy 正常），但 release 才是 API 契约，
         // 且与 scrfd_face_detector 用法统一，跨 runtime 版本更安全。
+        timer.tik();
         rknn_outputs_release(app_ctx->rknn_ctx, app_ctx->io_num.n_output, outputs);
-
         timer.tok();
+        msRelease = timer.get_time();
         //timer.print_time("post_process");
+        if (perfProbe())
+        {
+            struct Window
+            {
+                double letterbox = 0, run = 0, get = 0, post = 0, release = 0;
+                int n = 0;
+            };
+            static thread_local Window w;
+            w.letterbox += msLetterbox;
+            w.run += msRun;
+            w.get += msGet;
+            w.post += msPost;
+            w.release += msRelease;
+            if (++w.n >= 100)
+            {
+                qWarning() << "[PROBE] split" << this
+                           << "ms/次 letterbox" << w.letterbox / w.n
+                           << "run" << w.run / w.n
+                           << "outputs_get" << w.get / w.n
+                           << "post" << w.post / w.n
+                           << "outputs_release" << w.release / w.n;
+                w = Window{};
+            }
+        }
     out:
         return ret;
     }

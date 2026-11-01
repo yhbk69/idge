@@ -49,6 +49,9 @@ private:
     std::atomic<bool> running_{false};                  // 运行状态标志（原子操作保证线程安全）；false 时 run() 在每次 pop 前后检查退出
     std::atomic<bool> finished_{false};                 // 线程完成标志（原子操作保证线程安全）；仅由 run() 出口写 true，stopBestEffort 轮询它决定是否可安全 join
     TaskConfig config;                                  // 任务配置（模型路径、核心分配等）；构造时拷贝一份，init() 后不再变更
+    // 投递时被 push_latest 淘汰的帧数（生产者线程加、run() 窗口报告后清零）。
+    // 只有这里知道"NPU 消化不过来多少"——解码侧的 infer 段量到的是投递成功与否，不看内容。
+    std::atomic<uint64_t> droppedFrames_{0};
 
 public:
     // =================================================================

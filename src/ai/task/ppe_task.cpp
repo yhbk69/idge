@@ -40,7 +40,9 @@
 #include "ppe_task.hpp"
 #include "DmaBufferPool.h"
 #include "easy_timer.h"
+#include "perf_probe.h"
 #include <QDebug>
+#include <QElapsedTimer>
 
 // 构造仅浅拷贝配置（modelPath/labelPath/core_mask/result_id）；
 // 模型加载与队列创建延迟到 init()：构造函数保持轻量、可安全提前构造，
@@ -112,7 +114,15 @@ void PpeTask::start()
 void PpeTask::run()
 {
     finished_.store(false);
-    TIMER t;
+    // 推理耗时探针（IDGE_PERF=1 才输出；默认关闭，qWarning 输出本身会污染测量）。
+    // 解码侧 ds.infer 只量到"投递成功"，一次 detect 真实花多久（NPU 等待 + 后处理）、
+    // 任务队列因 push_latest 淘汰了多少帧，只有本线程看得见。窗口 100 次，
+    // 与解码侧的 120 帧窗口同口径（均值 + 峰值）。
+    QElapsedTimer detectClock;
+    qint64 inferAccUs = 0, inferMaxUs = 0;
+    int inferN = 0;
+    const std::string &mp = config.modelPath;
+    const std::string modelBase = mp.substr(mp.find_last_of('/') + 1);
     while (running_)
     {
         std::shared_ptr<TaskData> taskData;
@@ -140,8 +150,26 @@ void PpeTask::run()
         //
         // 阈值取自 taskData 而不是 config：TaskConfig 是构造期快照、模型加载后不再变更，
         // 而设置页改置信度要求"不重启、下一帧就生效"，所以阈值必须随帧进来（见 TaskData 注释）。
+        if (perfProbe()) detectClock.restart();
         model_->detect(taskData->image, &od_results, true,
                        taskData->confThreshold, taskData->nmsThreshold);
+        if (perfProbe())
+        {
+            const qint64 us = detectClock.nsecsElapsed() / 1000;
+            inferAccUs += us;
+            if (us > inferMaxUs) inferMaxUs = us;
+            if (++inferN >= 100)
+            {
+                qWarning() << "[PROBE] detect" << this << modelBase.c_str()
+                           << "avg_us" << inferAccUs / inferN
+                           << "max_us" << inferMaxUs
+                           << "cores" << int(config.core_mask)
+                           << "dropped" << droppedFrames_.exchange(0);
+                inferAccUs = 0;
+                inferMaxUs = 0;
+                inferN = 0;
+            }
+        }
         
         // 添加时间戳（用于结果排序）
         // taskData->time 由解码线程在采集时刻写入（epoch 纳秒）；
@@ -177,7 +205,10 @@ void PpeTask::run()
 // ============================================================================
 void PpeTask::put(std::shared_ptr<TaskData> task)
 {
-    taskQueue_->push_latest(task);
+    size_t replaced = 0;
+    taskQueue_->push_latest(task, &replaced);
+    if (replaced)
+        droppedFrames_ += replaced;
 }
 
 // ============================================================================
