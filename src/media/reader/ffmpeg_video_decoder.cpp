@@ -127,22 +127,60 @@
 // 报警截图异步写入器
 //
 // 为什么用后台线程：PNG/JPEG 编码比较费 CPU，若在解码线程同步执行会拖低帧率，
-// 所以解码线程只负责【拷贝像素 + 提交】，编码写盘在独立后台线程完成。
+// 所以解码线程只负责【发起一次像素转换 + 提交】，编码写盘在独立后台线程完成。
 //
 // 为什么用 JPG 不用 PNG：
 //   PNG 的 zlib 压缩在板子上非常慢；JPG(turbojpeg) 快得多、文件也小。
 //   image_utils 的 jpg 写入只支持 RGB(3通道)，所以先把 RGBA 转成 RGB 再写。
+//   【这一步交给 RGA，不在解码线程用 CPU 做】——显示缓冲的 CPU 映射是给设备写的，
+//   从它上面读整幅像素极慢（见 submit 上方的实测数字），CPU 版只留作 RGA 失败的回退。
 //
 // 目录：data/alarms/日期/通道N_类别_时间.jpg
 // ============================================================
 namespace {
 
-// 一张待写盘的任务：存一份 RGB 像素拷贝（去掉 alpha，体积比 RGBA 小 25%）+ 路径
+// 一张待写盘的任务：存一份 RGB 像素（去掉 alpha，体积比 RGBA 小 25%）+ 路径
+//
+// 像素有两种来源，pixels() 统一取出：
+//   - dmaVa：RGA 直接写进一块非缓存 DMA 缓冲（正常路径，所有权随本 job 移交
+//     写盘线程，析构时释放）。解码线程不再碰像素。
+//   - rgb：CPU 转换的堆副本（RGA 拒收源 fd 时的回退，也是改之前的唯一路径）。
 struct SnapJob {
-    std::vector<unsigned char> rgb;    // RGB 像素拷贝（w*h*3 字节）
+    SnapJob() = default;
+    SnapJob(const SnapJob &) = delete;
+    SnapJob &operator=(const SnapJob &) = delete;
+    SnapJob(SnapJob &&o) noexcept { *this = std::move(o); }
+    SnapJob &operator=(SnapJob &&o) noexcept
+    {
+        if (this != &o) {
+            release();
+            rgb = std::move(o.rgb);
+            dmaVa = o.dmaVa; dmaSize = o.dmaSize; dmaFd = o.dmaFd;
+            w = o.w; h = o.h; path = std::move(o.path);
+            o.dmaVa = nullptr; o.dmaSize = 0; o.dmaFd = -1;
+        }
+        return *this;
+    }
+    ~SnapJob() { release(); }
+
+    const unsigned char *pixels() const { return dmaVa ? dmaVa : rgb.data(); }
+
+    std::vector<unsigned char> rgb;    // 回退路径的 RGB 堆副本
+    unsigned char *dmaVa = nullptr;    // RGA 路径：非缓存 DMA 缓冲的 CPU 映射
+    size_t dmaSize = 0;
+    int dmaFd = -1;
     int w = 0;
     int h = 0;
     QString path;                      // 保存路径(.jpg)
+
+private:
+    void release()
+    {
+        if (dmaFd >= 0) dma_buf_free(dmaSize, &dmaFd, dmaVa);
+        dmaVa = nullptr;
+        dmaSize = 0;
+        dmaFd = -1;
+    }
 };
 
 class SnapWriter {
@@ -153,21 +191,75 @@ public:
         return w;
     }
 
-    // 提交一张截图：RGBA 像素先转成 RGB 再入队，立即返回（不阻塞解码线程）
+    // 提交一张截图：把 RGBA 转成 RGB 后入队，立即返回（不阻塞解码线程）
     // 队列满（积压太多）时丢弃最旧的一张，避免内存无限增长
-    void submit(int w, int h, const unsigned char *rgba, const QString &path)
+    //
+    // srcFd 是那一帧 RGBA 的 DMA-BUF fd（显示缓冲）。转换优先交给 RGA：
+    // 显示缓冲的 CPU 映射是给设备写的，从它上面【读】3.7MB 是这条链上最贵的
+    // 一种访存——板端实测一次 submit 中位 28.3ms、p90 62.4ms、最大 104.4ms
+    // （4 路 1280×720、n=321），而一帧预算只有 33.3ms：一次抓拍吃掉大半个预算。
+    // 改走 RGA 后同口径中位 2.5ms、最大 9.7ms（n=62），且逐字节等于 CPU 的结果。
+    void submit(int w, int h, const unsigned char *rgba, int srcFd, const QString &path)
     {
         SnapJob job;
         job.w = w;
         job.h = h;
         job.path = path;
-        job.rgb.resize((size_t)w * h * 3);
 
-        // RGBA(4字节/像素) -> RGB(3字节/像素)，跳过 alpha 字节
-        // 使用 ARM NEON SIMD 加速，每次处理 8 个像素
+        if (!convertByRga(job, srcFd)) convertByCpu(job, rgba);   // 回退：RGA 拒收该 fd 也得有图
+
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            if ((int)q_.size() >= kMaxPending) q_.pop();   // 满了丢最旧
+            q_.push(std::move(job));
+        }
+        cv_.notify_one();
+    }
+
+private:
+    static const int kMaxPending = 4;   // 最多积压 4 张，防止内存暴涨
+
+    // RGA 路径：RGBA(显示缓冲) → RGB888(一次性非缓存 DMA 缓冲)，不缩放，
+    // 走的是仓里已有的 rgba_to_rgb_resize（letterbox=false 分支 = imcvtcolor）。
+    //
+    // 目标缓冲用 system-uncached 而不是带缓存的 system：探针实测同一块 cached
+    // 缓冲被 CPU 先摸过（哪怕只是 memset 清零）再交给 RGA 写，事后 CPU 读会读到
+    // 自己那份过期缓存（1280×720 抽查 20 万像素 2.9% 不符），而 dma_sync_* 在这
+    // 个内核上是空操作、拦不住。非缓存堆 4 组组合全部 0 不符，且与 DmaBufferPool
+    // 的选择一致。代价挪到写盘线程：读带宽约 3.7GB/s（cached 约 8GB/s），一次几毫秒。
+    static bool convertByRga(SnapJob &job, int srcFd)
+    {
+        const size_t sz = (size_t)job.w * job.h * 3;
+        int fd = -1;
+        void *va = nullptr;
+        if (dma_buf_alloc(DMA_HEAP_UNCACHE_PATH, sz, &fd, &va) != 0 || !va)
+            return false;
+
+        // 行步长按 w*4 / w*3 传：rgba_to_rgb_resize 内部 importbuffer_fd 不接受
+        // 步长参数，这个假设与画框那段（draw_rectangle_c4 用 w*4）是同一个口径。
+        const int rc = RgaConverter::rgba_to_rgb_resize(srcFd, job.w, job.h, job.w * 4,
+                                                        fd, job.w, job.h, job.w * 3, false);
+        if (rc != 0) {
+            dma_buf_free(sz, &fd, va);
+            if (perfProbe()) qWarning() << "[PROBE] snap rga 0";
+            return false;
+        }
+        if (perfProbe()) qWarning() << "[PROBE] snap rga 1";
+        job.dmaFd = fd;
+        job.dmaVa = (unsigned char *)va;
+        job.dmaSize = sz;
+        return true;
+    }
+
+    // 回退路径（也是改动前的唯一路径）：CPU 把 RGBA(4字节/像素) 拷成 RGB(3字节/像素)，
+    // 跳过 alpha。ARM NEON，每次 8 像素。
+    static void convertByCpu(SnapJob &job, const unsigned char *rgba)
+    {
+        job.rgb.resize((size_t)job.w * job.h * 3);
+
         const unsigned char *s = rgba;
         unsigned char *d = job.rgb.data();
-        size_t n = (size_t)w * h;
+        size_t n = (size_t)job.w * job.h;
         size_t i = 0;
 
         // NEON 优化：每次处理 8 个 RGBA 像素 -> 8 个 RGB 像素
@@ -187,17 +279,7 @@ public:
             s += 4;
             d += 3;
         }
-
-        {
-            std::lock_guard<std::mutex> lk(mtx_);
-            if ((int)q_.size() >= kMaxPending) q_.pop();   // 满了丢最旧
-            q_.push(std::move(job));
-        }
-        cv_.notify_one();
     }
-
-private:
-    static const int kMaxPending = 4;   // 最多积压 4 张，防止内存暴涨
 
     SnapWriter() { th_ = std::thread([this] { run(); }); }
     ~SnapWriter()
@@ -231,7 +313,7 @@ private:
         image_buffer_t img;
         memset(&img, 0, sizeof(img));
         img.format = image_format_t::IMAGE_FORMAT_RGB888;
-        img.virt_addr = job.rgb.data();   // 指向 RGB 像素拷贝
+        img.virt_addr = const_cast<unsigned char *>(job.pixels());   // RGB 像素（RGA 或堆副本）
         img.width = job.w;
         img.height = job.h;
         img.width_stride = job.w;
@@ -248,7 +330,7 @@ private:
     //   换掉 GUI 线程的十几毫秒是净赚。
     // 【尺寸口径】与读侧 loadThumbnailScaled 一致：等比装进 64×48 框，
     //   16:9 源出 64×36，读侧 ratio==1 直接用、不再二次缩放。
-    // 【色彩】job.rgb 是 RGB 序，cv::imwrite 按 BGR 解释 → 必须先转一次。
+    // 【色彩】job.pixels() 是 RGB 序，cv::imwrite 按 BGR 解释 → 必须先转一次。
     static void writeThumb(SnapJob &job)
     {
         static const int kBoxW = 64, kBoxH = 48;
@@ -256,7 +338,7 @@ private:
         const double ratio = std::min(double(kBoxW) / job.w, double(kBoxH) / job.h);
         if (ratio >= 1.0) return;   // 源图本来就比较小，sidecar 没有收益
 
-        cv::Mat rgb(job.h, job.w, CV_8UC3, job.rgb.data());
+        cv::Mat rgb(job.h, job.w, CV_8UC3, const_cast<unsigned char *>(job.pixels()));
         cv::Mat bgr, thumb;
         cv::cvtColor(rgb, bgr, cv::COLOR_RGB2BGR);
         cv::resize(bgr, thumb, cv::Size(int(job.w * ratio), int(job.h * ratio)),
@@ -455,8 +537,14 @@ static void submitAlarmClip(const std::shared_ptr<VideoRecorder> &recorder,
 
 // 生成截图路径并提交给后台线程，返回保存路径
 static QString submitAlarmSnapshot(int channel, const QString &className,
-                                   int w, int h, const unsigned char *rgba)
+                                   int w, int h, const unsigned char *rgba, int srcFd)
 {
+    // 整段都在解码线程上跑（建目录 + 拼文件名 + 拷一份像素副本），报警密集时
+    // 这些微秒直接从这一路的帧预算里扣。[PROBE] snap 每次报警出一行，
+    // 因为报警是"次"级事件（板端实测十几条/分钟），按窗口平均反而看不出量级。
+    QElapsedTimer snapClock;
+    if (perfProbe()) snapClock.start();
+
     // 一级目录 data/alarms/ 存截图根目录
     const QString alarmRoot = RuntimePaths::alarmsDir();
     if (::mkdir(alarmRoot.toUtf8().constData(), 0755) != 0 && errno != EEXIST) {
@@ -476,8 +564,10 @@ static QString submitAlarmSnapshot(int channel, const QString &className,
         .arg(className)
         .arg(QDateTime::currentDateTime().toString("HHmmss_zzz"));
 
-    // 提交给后台线程写盘（拷贝像素副本），解码线程立即返回不等待
-    SnapWriter::get().submit(w, h, rgba, path);
+    // 提交给后台线程写盘（像素转换交给 RGA，产物随 job 移交），解码线程立即返回不等待
+    SnapWriter::get().submit(w, h, rgba, srcFd, path);
+    if (perfProbe())
+        qWarning() << "[PROBE] snap us" << snapClock.nsecsElapsed() / 1000;
     return path;
 }
 
@@ -503,7 +593,7 @@ static void deliverAlarms(int channel, QVector<AlarmRecord> &alarms,
     if (AlarmManager::instance().screenshotsEnabled()) {
         const QString snap = submitAlarmSnapshot(
             channel, alarms.front().className, frame.width, frame.height,
-            (const unsigned char *)frame.virt_addr);
+            (const unsigned char *)frame.virt_addr, frame.fd);
         // 只在截图成功时设置路径
         for (auto &a : alarms) a.imagePath = snap;
     }
@@ -1707,6 +1797,9 @@ void FFmpegVideoDecoder::decodeLoop()
                     image_buffer_t dislayImage;
                     dislayImage.format = image_format_t::IMAGE_FORMAT_RGBA8888;
                     dislayImage.virt_addr = (unsigned char*)dst_buf->ptr();
+                    // 同一块显示缓冲的 DMA-BUF fd：报警抓拍要把"已经画好框"的这一帧交给
+                    // RGA 转出，只能按 fd 取（见 SnapWriter::submit）。此前这里是未初始化值。
+                    dislayImage.fd = dst_buf->fd();
                     dislayImage.width = dst_buf->width();
                     dislayImage.height = dst_buf->height();
 
