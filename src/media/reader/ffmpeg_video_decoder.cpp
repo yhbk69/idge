@@ -1627,6 +1627,13 @@ void FFmpegVideoDecoder::decodeLoop()
                             std::shared_ptr<image_buffer_t>  image = std::make_shared<image_buffer_t>();
                             image->format = image_format_t::IMAGE_FORMAT_RGB888;
                             image->virt_addr = (uint8_t*)(rgabuffer->va);  // RGB 像素的虚拟地址
+                            // 同一块缓冲的 DMA-BUF fd。上面 rgba_to_rgb_resize 就是往这个 fd 写的，
+                            // 但包给推理时只带了 va——于是 PpeTask 里 convert_image_with_letterbox
+                            // 走 importbuffer_virtualaddr：librga 得先 madvise + 读 /proc/self/pagemap
+                            // 把这段虚拟地址反查回页才能交给 RGA，每次调用都要重做一遍。
+                            // 目标侧（rknn 输入张量）本来就是按 fd 交的，只有源侧漏了。
+                            // va 保留：RGA 不接受该 fd 时 convert_image 会回退 CPU，那条路径只认 va。
+                            image->fd = rgabuffer->fd;
                             image->width = 640;
                             image->height = 640;
                             image->width_stride = 640;
