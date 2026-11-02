@@ -81,6 +81,14 @@ QString field(const char *bg)
         .arg(TOUCH_FIELD_MIN_H);
 }
 
+QString panel(const char *bg)
+{
+    // 带选择器 = 只作用于分组框自身；裸声明会漏给子件，见 theme.h 的 panel() 注释。
+    // 标题位置沿用皮肤层 .QGroupBox::title，这里不重复声明，改了会把标题挪位。
+    return QString("QGroupBox { color:%1; background:%2; border:1px solid %3; border-radius:4px; }")
+        .arg(TEXT, bg, BORDER);
+}
+
 QString miniButton(const char *bg)
 {
     // T3：30 + 2*8 + 2*1 = 48px ≈ 5.4mm（原来是 3px 上下 padding ≈ 24px，只有 2.7mm）。

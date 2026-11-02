@@ -12,7 +12,6 @@
 #include "alarm_dao.h"       // AlarmFilter：这一页的查询词汇表
 #include "detection_dao.h"   // DetectionFilter + DetectionRecord
 
-class QButtonGroup;
 class QComboBox;
 class QVBoxLayout;
 
@@ -148,14 +147,6 @@ private slots:
 
     /*
     ====================================================
-    作用：时间档位切换
-    说明：档位变了要重新拉筛选候选值（候选值按时间档收敛），并回到第一页
-    ====================================================
-    */
-    void onTimePresetChanged();
-
-    /*
-    ====================================================
     作用：任一筛选条件变化
     说明：条件变了必须回到第一页，否则会停在一个不存在的新页数上
     ====================================================
@@ -274,14 +265,6 @@ private:
 
     /*
     ====================================================
-    作用：当前时间档位对应的毫秒区间
-    参数：startTime/endTime - 输出；都置 0 表示不限（"全部"档）
-    ====================================================
-    */
-    void timeRange(long *startTime, long *endTime) const;
-
-    /*
-    ====================================================
     UI组件
     ====================================================
     */
@@ -302,7 +285,6 @@ private:
           而它们的唯一写入者（表头菜单）从来没被连上过。
     ====================================================
     */
-    QButtonGroup *timeGroup_ = nullptr;    // 时间档位（今天/近3天/近7天/全部）
     QComboBox *comboChannel_ = nullptr;
     QComboBox *comboClass_ = nullptr;
     QComboBox *comboStatus_ = nullptr;

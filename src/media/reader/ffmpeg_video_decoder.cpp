@@ -1510,6 +1510,14 @@ void FFmpegVideoDecoder::decodeLoop()
     // 用流自身帧率定 target_fps；循环末尾对每个解码帧"睡到发布点 / 落后重锚"（见 4.12）。
     // 关键：限的是解码产生速率，不只是显示——否则解码/推理/RGA 会被超量喂爆（实测卡死根因）。
     // 落后时重锚到 now，绝不"睡到累计目标线去补追赶连发"（那正是 1↔50 的来源）。
+    //
+    // 但**实时采集节点（/dev/videoN）必须跳过整个节拍器**：它的帧率上限就是设备出帧率，
+    // av_read_frame 天然阻塞在设备上，不存在"超量产生"可言；而这类节点的流元数据不可信
+    // ——本机 rkisp mainpath/selfpath 不支持 VIDIOC_G_PARM，ffmpeg 把残留的 timeperframe
+    // 倒数成 avg_fps=r_fps=0.0333（即"每帧 30 秒"），于是 target_fps 被 qBound 的下限
+    // 夹成 1 → 每帧睡满一秒 → 预览实测恒定 FPS 1.0，而节点本身能出 7.49fps。
+    // 见下面 qInfo 里那行 pacer=off：现场核对摄像头帧率时，先看这条再看界面角标。
+    const bool pacerEnabled = !isV4l2Node;
     int target_fps = 25;
     {
         AVRational pfr = fmt_ctx->streams[vidx]->avg_frame_rate;
@@ -1524,6 +1532,17 @@ void FFmpegVideoDecoder::decodeLoop()
     // 流元数据常报 50/90/120fps（摄像头默认值），超过硬件能力
     // 会导致每帧都落后、累计线永远追不上 → 帧率振荡。
     if (target_fps > 30) target_fps = 30;
+    // 兜住"元数据把帧率报得离谱地低"这一类：节拍器限的是**上限**，把 target_fps
+    // 定得比源实际帧率高是无害的（av_read_frame 自己会阻塞），定得低才是伤害——
+    // 一路 25fps 的流被 1fps 的锚线拖住，表现就是"画面几乎静止但没报错"。
+    // 所以低于 5fps 的解析结果一律当不可信，退回默认 25 并告警。
+    if (pacerEnabled && target_fps < 5) {
+        qWarning() << "decoder pacer ch" << channel_ << "源元数据帧率不可信:" << target_fps
+                   << "→ 按 25 限速 (avg_fps="
+                   << av_q2d(fmt_ctx->streams[vidx]->avg_frame_rate) << " r_fps="
+                   << av_q2d(fmt_ctx->streams[vidx]->r_frame_rate) << ")";
+        target_fps = 25;
+    }
     const qint64 publish_interval_us = 1000000 / target_fps;
     QElapsedTimer pub_clock;
     pub_clock.start();
@@ -1533,7 +1552,8 @@ void FFmpegVideoDecoder::decodeLoop()
     qint64 pacer_drift_us = 0;
 
     // ===== 节拍目标帧率识别（每路开流打印一次，便于核对源帧率口径）=====
-    qInfo() << "decoder pacer ch" << channel_ << "target_fps=" << target_fps
+    qInfo() << "decoder pacer ch" << channel_ << (pacerEnabled ? "on" : "off(live v4l2)")
+            << "target_fps=" << target_fps
             << "(avg_fps=" << av_q2d(fmt_ctx->streams[vidx]->avg_frame_rate)
             << " r_fps=" << av_q2d(fmt_ctx->streams[vidx]->r_frame_rate) << ")";
 
@@ -2267,7 +2287,9 @@ void FFmpegVideoDecoder::decodeLoop()
             // 为什么阈值取一个周期而不是"一落后就重锚"：后者正是老注释担心的
             // "每帧落后→每帧重置→每帧睡满 interval"脉冲来源；只在落后超过一帧时
             // 重锚，小抖动仍由累计线自然阻尼。
-            {
+            //
+            // 实时采集节点整段跳过（理由见上面 pacerEnabled 的定义处）：设备就是节拍本身。
+            if (pacerEnabled) {
                 qint64 expected_us = (qint64)frame_count * publish_interval_us + pacer_drift_us;
                 qint64 elapsed_us = pub_clock.nsecsElapsed() / 1000;
                 if (elapsed_us - expected_us > publish_interval_us) {

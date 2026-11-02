@@ -22,8 +22,6 @@
 #include <QFileInfo>
 #include <QShowEvent>
 #include <QPushButton>
-#include <QAbstractButton>
-#include <QButtonGroup>
 #include <QComboBox>
 #include <QAbstractItemView>
 #include <QCursor>
@@ -77,17 +75,6 @@ QString comboQss()
         .arg(theme::TOUCH_FIELD_MIN_H);
 }
 
-QString chipQss(bool checked)
-{
-    return QStringLiteral(
-        "QPushButton { color: %1; background: %2; border: 1px solid %3; border-radius: 4px;"
-        "  min-height: %4px; padding: 6px 14px; }")
-        .arg(checked ? theme::TEXT : theme::TEXT_MUTED,
-             checked ? theme::ACCENT : theme::FIELD,
-             theme::BORDER)
-        .arg(theme::TOUCH_MAIN_MIN_H);
-}
-
 // 把候选值灌进下拉，并按 data 找回原来的选择。
 // blockSignals 是必需的：灌值会触发 currentIndexChanged → onFilterChanged → 重查库 →
 // 而 rebuildFacets 正是被这次条件变化叫起来的，于是无限递归。
@@ -106,7 +93,7 @@ void fillCombo(QComboBox *combo, const QString &allText,
     int target = 0;
     if (!wanted.toString().isEmpty()) {
         const int found = combo->findData(wanted);
-        // 找回不到就退回"全部"：留着选一个当前时间档里不存在的值，
+        // 找回不到就退回"全部"：留着选一个当前候选里没有的值，
         // 结果是零行而原因藏在看不见的那行小字里，这是自找的困惑。
         target = (found >= 0) ? found : 0;
     }
@@ -353,10 +340,16 @@ void AlarmListWidget::setupUi()
     */
     table_ = new QTableWidget();
     // 1920 宽下再加就必截字，所以列表**只这一列**负责人，其余施工信息进详情框。
-    table_->setColumnCount(8);
-    table_->setHorizontalHeaderLabels({"时间", "通道", "类别", "置信度", "负责人", "状态", "操作", "ID"});
-    table_->horizontalHeader()->setStretchLastSection(true);
+    // uuid 那一列已撤：界面上除了它没有第二处能读到报警 id（详情框里也不显示了），
+    // 而它是排查时唯一能被抄进聊天框的一串字符 —— 真要定位某一条，用时间+通道+类别。
+    table_->setColumnCount(7);
+    table_->setHorizontalHeaderLabels({"时间", "通道", "类别", "置信度", "负责人", "状态", "操作"});
+    // 撤掉最后一列后「操作」变成了最后一列：stretchLastSection 会无视它的 resize mode
+    // 把详情钮拉成一条几百像素的白条（围栏表同一个坑，见下面 fenceTable_ 的写法）。
+    table_->horizontalHeader()->setStretchLastSection(false);
     table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    table_->horizontalHeader()->setSectionResizeMode(6, QHeaderView::Fixed);
+    table_->setColumnWidth(6, 100);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setAlternatingRowColors(true);
     table_->setStyleSheet(tableQss);
@@ -433,65 +426,17 @@ void AlarmListWidget::setupUi()
 /*
 ====================================================
 作用：检索条
-说明：两行 —— 上行时间档位（主操作档 54px），下行五个下拉 + 翻页。
-      没有任何文字输入框：本机不做虚拟键盘（见 src/ui/core/README.md 触屏口径），
-      所以"检索"在这一页只能是点选，关键字框要等虚拟键盘落地才有意义。
+说明：一行 —— 五个下拉 + 翻页 + 清除筛选。没有任何文字输入框：本机不做虚拟键盘
+      （见 src/ui/core/README.md 触屏口径），所以"检索"在这一页只能是点选，
+      关键字框要等虚拟键盘落地才有意义。
+      2026-11-02 撤掉了原先**上面那一行时间档位**（今天/近3天/近7天/全部）：这一页是
+      围着施工项目看的，而"当前选的是哪一档"在表格里问不出来 —— 档位在屏幕外时，
+      "今天确实没出报警"和"筛错了档"长得一模一样。现在恒为不限时间（startTime/endTime
+      留 0，DAO 里就是不加时间条件），要收窄有通道/类别/状态/负责人/施工id 五个下拉。
 ====================================================
 */
 void AlarmListWidget::setupFilterBar(QVBoxLayout *mainLay)
 {
-    QHBoxLayout *timeLay = new QHBoxLayout();
-    timeLay->setSpacing(10);
-
-    QLabel *lblTime = new QLabel("时间");
-    lblTime->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
-    timeLay->addWidget(lblTime);
-
-    timeGroup_ = new QButtonGroup(this);
-    timeGroup_->setExclusive(true);
-    // fromUtf8 而不是 latin1：档位名是中文，QLatin1String 会把 UTF-8 的每个字节当成
-    // 一个 Latin-1 字符，实测按钮上印出来的是 "ä»Šå¤©"。
-    const char *presetNames[] = {"今天", "近3天", "近7天", "全部"};
-    for (int i = 0; i < 4; ++i) {
-        QPushButton *b = new QPushButton(QString::fromUtf8(presetNames[i]));
-        b->setCheckable(true);
-        b->setStyleSheet(chipQss(i == 0));
-        timeGroup_->addButton(b, i);
-        timeLay->addWidget(b);
-    }
-    timeGroup_->button(0)->setChecked(true);   // 默认今天：现场问的第一句话就是"今天出了什么"
-    timeLay->addStretch();
-
-    btnClearFilter_ = new QPushButton("清除筛选");
-    btnClearFilter_->setStyleSheet(
-        QString("QPushButton { color: %1; background: %2; border: 1px solid %3; border-radius: 4px;"
-                "  min-height: %4px; padding: 6px 14px; }")
-            .arg(theme::TEXT, theme::BTN_SECONDARY, theme::BORDER)
-            .arg(theme::TOUCH_MAIN_MIN_H));
-    connect(btnClearFilter_, &QPushButton::clicked, this, [this]() {
-        // 清除 = 回到"今天 + 无附加条件 + 第一页"。档位与下拉一起复位：
-        // 只复位下拉却留着"近7天"，或者反过来，按下之后按钮一个没动而数字变了，
-        // 那就是又造出一个"看不见的条件"。
-        QAbstractButton *today = timeGroup_->button(0);
-        if (today) {
-            today->setChecked(true);
-            onTimePresetChanged();   // 直接调而不绕信号：下面还要清下拉，分两次触发会查两遍库
-        }
-        for (QComboBox *c : {comboChannel_, comboClass_, comboStatus_,
-                             comboWorker_, comboConstruction_}) {
-            if (c) { c->blockSignals(true); c->setCurrentIndex(0); c->blockSignals(false); }
-        }
-        fenceRole_ = AlarmFilter::RoleAll;
-        page_ = 0;
-        reloadCurrentTab();
-    });
-    timeLay->addWidget(btnClearFilter_);
-
-    mainLay->addLayout(timeLay);
-
-    connect(timeGroup_, QOverload<int>::of(&QButtonGroup::buttonClicked), this,
-            [this](int) { onTimePresetChanged(); });
-
     QHBoxLayout *comboLay = new QHBoxLayout();
     comboLay->setSpacing(10);
 
@@ -557,36 +502,40 @@ void AlarmListWidget::setupFilterBar(QVBoxLayout *mainLay)
     connect(btnNextPage_, &QPushButton::clicked, this, [this]() { onPageStep(1); });
     connect(btnLastPage_, &QPushButton::clicked, this, [this]() { gotoPage(pageCount() - 1); });
 
+    // 清除筛选排在翻页之后：它是这一行的"复位"，和翻页不是一类动作，
+    // 混在左侧那五个下拉中间会被当成第六个条件。
+    btnClearFilter_ = new QPushButton("清除筛选");
+    btnClearFilter_->setStyleSheet(
+        QString("QPushButton { color: %1; background: %2; border: 1px solid %3; border-radius: 4px;"
+                "  min-height: %4px; padding: 6px 14px; }")
+            .arg(theme::TEXT, theme::BTN_SECONDARY, theme::BORDER)
+            .arg(theme::TOUCH_MAIN_MIN_H));
+    connect(btnClearFilter_, &QPushButton::clicked, this, [this]() {
+        // 清除 = 五个下拉 + 围栏角色一起回到"全部"再回第一页。
+        // 复位必须一次做完：按下之后按钮一个没动而数字变了，就是又造出一个看不见的条件。
+        for (QComboBox *c : {comboChannel_, comboClass_, comboStatus_,
+                             comboWorker_, comboConstruction_}) {
+            if (c) { c->blockSignals(true); c->setCurrentIndex(0); c->blockSignals(false); }
+        }
+        fenceRole_ = AlarmFilter::RoleAll;
+        page_ = 0;
+        reloadCurrentTab();
+    });
+    comboLay->addWidget(btnClearFilter_);
+
     mainLay->addLayout(comboLay);
 }
 
 /*
 ====================================================
-作用：当前时间档位对应的毫秒区间
-说明：档位而不是日历控件 —— 手输日期要虚拟键盘。近3天=含今天在内 3 个自然日，
-      所以起点是那天的 00:00:00，不是"现在减 72 小时"（后者会让人以为
-      昨天凌晨的记录被漏掉了，其实没有）。
+作用：当前筛选条件 → DAO 的查询条件
+说明：时间两项恒为 0（= 不限）。2026-11-02 撤掉了时间档位，这里不再换算区间；
+      DAO 侧的 startTime/endTime 参数留着，是把区间还给界面的现成口子。
 ====================================================
 */
-void AlarmListWidget::timeRange(long *startTime, long *endTime) const
-{
-    const int preset = timeGroup_ && timeGroup_->checkedButton()
-                           ? timeGroup_->id(timeGroup_->checkedButton()) : 0;
-    if (preset == 3) {
-        *startTime = 0;      // "全部"档：0/0 在 DAO 里就是不加时间条件
-        *endTime = 0;
-        return;
-    }
-    const int backDays = (preset == 0) ? 0 : (preset == 1 ? 2 : 6);
-    const QDate day = QDate::currentDate().addDays(-backDays);
-    *startTime = QDateTime(day, QTime(0, 0, 0)).toMSecsSinceEpoch();
-    *endTime = QDateTime::currentDateTime().toMSecsSinceEpoch();
-}
-
 AlarmFilter AlarmListWidget::currentAlarmFilter(AlarmFilter::Scope scope) const
 {
     AlarmFilter f;
-    timeRange(&f.startTime, &f.endTime);
     f.channel = comboChannel_ ? comboChannel_->currentData().toInt() : -1;
     f.className = comboData(comboClass_).toString();
     f.status = comboData(comboStatus_).toString();
@@ -602,7 +551,6 @@ AlarmFilter AlarmListWidget::currentAlarmFilter(AlarmFilter::Scope scope) const
 DetectionFilter AlarmListWidget::currentDetectionFilter() const
 {
     DetectionFilter f;
-    timeRange(&f.startTime, &f.endTime);
     f.channel = comboChannel_ ? comboChannel_->currentData().toInt() : -1;
     f.className = comboData(comboClass_).toString();
     f.limit = pageSize();
@@ -613,15 +561,14 @@ DetectionFilter AlarmListWidget::currentDetectionFilter() const
 /*
 ====================================================
 作用：重建筛选下拉的候选值
-说明：候选值与条数按**当前时间档**收敛，不跟随其它已选条件（见 alarm_dao.h 的
+说明：候选值与条数按**全量**（不限时间）统计，不跟随其它已选条件（见 alarm_dao.h 的
       facets 说明）。负责人/施工id 只在报警两张表有意义，检测明细 Tab 不重新拉。
 ====================================================
 */
 void AlarmListWidget::rebuildFacets()
 {
     AlarmDAO dao;
-    long start = 0, end = 0;
-    timeRange(&start, &end);
+    const long start = 0, end = 0;   // 0/0 = 不限时间（时间档位已撤，见 setupFilterBar）
 
     const bool fenceTab = (tabWidget_ && tabWidget_->currentIndex() == TabFence);
     const AlarmFilter::Scope scope =
@@ -784,9 +731,6 @@ void AlarmListWidget::refreshTable()
             if (i < pageAlarms_.size()) showAlarmDetail(pageAlarms_.at(i));
         });
         table_->setCellWidget(i, 6, btnDetail);
-
-        // ID列
-        table_->setItem(i, 7, new QTableWidgetItem(a.id));
     }
 }
 
@@ -1021,7 +965,7 @@ void AlarmListWidget::onHeaderSectionClicked(int logicalIndex)
     case 2: target = comboClass_; break;
     case 4: target = comboWorker_; break;
     case 5: target = fenceTab ? nullptr : comboStatus_; break;
-    default: return;   // 时间/置信度/操作/ID 这几列没有可筛的取值
+    default: return;   // 时间/置信度/操作 这几列没有可筛的取值
     }
 
     // 围栏表的第 5 列是"围栏类型"，检索条上没有对应下拉，单独走角色菜单
@@ -1062,23 +1006,6 @@ void AlarmListWidget::onHeaderSectionClicked(int logicalIndex)
     }
 
     menu.exec(QCursor::pos());
-}
-
-/*
-====================================================
-作用：时间档位切换
-说明：档位变了要重新拉候选值（候选按时间档收敛）并回到第一页
-====================================================
-*/
-void AlarmListWidget::onTimePresetChanged()
-{
-    for (int i = 0; i < timeGroup_->buttons().size(); ++i) {
-        QAbstractButton *b = timeGroup_->buttons().at(i);
-        b->setStyleSheet(chipQss(b->isChecked()));   // 选中态换色，皮肤层管不到这里
-    }
-    page_ = 0;
-    rebuildFacets();
-    reloadCurrentTab();
 }
 
 /*
@@ -1206,8 +1133,7 @@ void AlarmListWidget::onTabChanged()
             }
         }
         DetectionDAO dao;
-        long start = 0, end = 0;
-        timeRange(&start, &end);
+        const long start = 0, end = 0;   // 0/0 = 不限时间
         fillCombo(comboClass_, QStringLiteral("全部类别"), dao.classFacets(start, end));
     } else {
         rebuildFacets();

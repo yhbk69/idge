@@ -124,6 +124,20 @@ if (!qss.isEmpty()) {
    ⇒ 容器必须 `setFixedHeight(行高)`，且行高与容器高**同源取一个常量**（见
    `roll_call_widget.cpp` / `equipment_inventory_widget.cpp` 的 `kTaskRowH`）。
    直接 `setCellWidget(i, col, btn)`（不套容器）不吃这个亏 —— 报警表两颗 `详情` 钮就是这么放的，实测正好 48。
+7. **QSS 的 `min-height` 是"赋值"，不是"与现有下限取大"，而且会顺着父子链漏下去**
+   （2026-11-02 板端实测，设置页整页塌成一叠的根因）。两条规则叠在一起才咬人：
+   ① 裸声明样式表（`theme::field()` 这种没有选择器的）作用于该控件**及其所有子孙**；
+   ② `QStyleSheetStyle` polish 时，只要命中的规则里写了 `min-height`，就直接把控件的
+   `minimumSize` **改写成** `min-height + 竖向 padding + 上下边框`，代码里先设的大值被顶掉。
+   于是 `group->setStyleSheet(theme::field(...))` 的 42+12+2=56 会盖掉
+   `table->setMinimumHeight(328)`。实测对照：设置页三张带 `field()` 的分组框全塌成 65px
+   （围栏那组两行表单 y=32/y=40 直接叠在一起），同一页没带 `field()` 的 WebSocket 分组框
+   高度正常（193px = 自身 sizeHint）。
+   ⇒ 分组框这类**容器**一律用 `theme::panel()`（带 `QGroupBox{}` 选择器、不含 min-height/padding）；
+   叶子输入件才用 `theme::field()`。控件自己样式表里的 `min-height` 优先级高于皮肤层，
+   压得住皮肤层那条全局 `QTextEdit{min-height:42px}`（运行日志的下限就是这么设的）。
+   另注意 `QScrollArea(widgetResizable)` 只把内容撑到"各块最小高度之和"，布局不会给谁
+   超出最小值的份 ⇒ 这类页面里"能看见多少"完全由最小高度决定，没有下限就等于没有内容。
 
 ## 命中区实测探针（`IDGE_TOUCHDUMP`）
 

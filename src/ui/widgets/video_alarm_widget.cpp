@@ -1,6 +1,5 @@
 #include "video_alarm_widget.h"
 #include "alarm_detail_dialog.h"
-#include "construction_session.h"   // ConstructionInfo::display()：空负责人显示 "—"
 #include "theme.h"
 #include "qt_image_utils.h"
 #include "perf_probe.h"
@@ -11,7 +10,8 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QPushButton>
+#include <QMouseEvent>
+#include <QVariant>
 #include <QPixmap>
 #include <QDateTime>
 #include <QFile>
@@ -46,23 +46,24 @@ void VideoAlarmWidget::setupUi()
 
     contentWidget_ = new QWidget();
     // 条目样式集中在父级设一次，条目内控件只用 objectName 命中规则：QSS 每次
-    // setStyleSheet 都要重新解析样式表文本并重新 polish 子树，一条报警 6 个控件、
-    // 20 条就是 120 次解析。实测条目构造本身只剩 3~5ms，大头转移到了抓拍图解码。
+    // setStyleSheet 都要重新解析样式表文本并重新 polish 子树，一条报警 3 个控件、
+    // 20 条就是 60 次解析。实测条目构造本身只剩 3~5ms，大头转移到了抓拍图解码。
+    //
+    // 条目里的 QLabel 一律 transparent 底：卡片整张是点击入口后，悬停/按下的高亮
+    // 必须看得出来 —— 标签各自刷成 PANEL 的话，卡片换色只会在 8px 的缝隙里露一点，
+    // 等于没有反馈。（缩略图那条更具体，仍然保留自己的底。）
     contentWidget_->setStyleSheet(QString(
         "background: %1;"
         "QWidget#alarmItem { background: %2; border-radius: 6px; }"
-        "QWidget#alarmItem QLabel { background: %2; }"
+        "QWidget#alarmItem:hover { background: %8; }"
+        "QWidget#alarmItem QLabel { background: transparent; }"
         "QWidget#alarmItem QLabel#alarmThumb { background: %1; border: 1px solid %3; border-radius: 4px; }"
-        "QLabel#alarmTime, QLabel#alarmChannel { color: %4; font-size: %5px; }"
-        "QLabel#alarmClass { color: %6; font-size: %5px; font-weight: bold; }"
-        "QPushButton#alarmDetail { color: %6; background: %7; border-radius: 4px;"
-        " min-height:30px; padding: 8px 14px; font-size: %5px; }"
-        "QPushButton#alarmDetail:hover { background: %8; }")
+        "QLabel#alarmChannel { color: %4; font-size: %5px; }"
+        "QLabel#alarmClass { color: %6; font-size: %5px; font-weight: bold; }")
                                      .arg(theme::BG, theme::PANEL, theme::BORDER,
                                           theme::TEXT_MUTED)
                                      .arg(theme::FS_HINT)
-                                     .arg(theme::TEXT, theme::BTN_SECONDARY,
-                                          theme::BTN_SECONDARY_HOVER));
+                                     .arg(theme::TEXT, theme::HOVER));   // 卡片底用"深悬停底"，不是按钮那一档亮蓝
     contentLayout_ = new QVBoxLayout(contentWidget_);
     contentLayout_->setContentsMargins(8, 8, 8, 8);
     contentLayout_->setSpacing(8);
@@ -151,10 +152,15 @@ QWidget *VideoAlarmWidget::createAlarmItem(const AlarmRecord &alarm)
     // 子控件上不要再 setStyleSheet（见那里的注释）
     QWidget *itemWidget = new QWidget();
     itemWidget->setObjectName("alarmItem");
-    // 80→104：详情钮抬到 T3（min-height 30 + 2*8 padding = 48）后，
-    // 上下 margin 12 只给到 60 会把钮压扁。侧栏列宽被 .ui 锁 280px，
-    // 这里只长高不加长，避免 280 内截字。
-    itemWidget->setFixedHeight(104);
+    // 104→72：撤掉「详情」钮后卡片只剩两行文字，竖向再没有别的东西要地方。
+    // 侧栏列宽被 .ui 锁死 280px，横向才是稀缺的；竖向省下来的是"一屏能看几条"，
+    // 实测同一块侧栏从 ~8 条抬到 ~12 条。
+    itemWidget->setFixedHeight(72);
+    // 整张卡片就是入口：光标 + 悬停变色。:hover 对普通 QWidget 要 WA_Hover 才发事件。
+    itemWidget->setCursor(Qt::PointingHandCursor);
+    itemWidget->setAttribute(Qt::WA_Hover, true);
+    itemWidget->setProperty("alarmId", alarm.id);
+    itemWidget->installEventFilter(this);
 
     QHBoxLayout *itemLayout = new QHBoxLayout(itemWidget);
     itemLayout->setContentsMargins(8, 6, 8, 6);
@@ -185,41 +191,65 @@ QWidget *VideoAlarmWidget::createAlarmItem(const AlarmRecord &alarm)
     }
     itemLayout->addWidget(imageLabel);
 
-    // 信息区域
+    // 信息区域：两行，先"是什么"再"什么时候/哪一路"。
+    // 负责人这一项从卡片上撤了 —— 它是**会话级**的常量（makeAlarmRecord 从当前登录
+    // 打戳），同一次登录里每条报警都是同一个名字，而标题栏右上角那颗角标恒显示的就是
+    // 这个姓名；280px 的侧栏里它是纯粹占掉类别名那一行的宽度。要看的人：报警数据页
+    // 有负责人列，点开这条的详情框有整份施工信息。
     QVBoxLayout *infoLayout = new QVBoxLayout();
     infoLayout->setSpacing(2);
 
-    QDateTime dt = QDateTime::fromString(alarm.alarmTime, Qt::ISODate);
-    QLabel *timeLabel = new QLabel(dt.toString("HH:mm:ss"));
-    timeLabel->setObjectName("alarmTime");
-    infoLayout->addWidget(timeLabel);
-
-    QLabel *classLabel = new QLabel(QString("%1 (%2%)")
+    QLabel *classLabel = new QLabel(QString("%1 %2%")
         .arg(alarm.className)
         .arg(alarm.confidence * 100, 0, 'f', 0));
     classLabel->setObjectName("alarmClass");
     infoLayout->addWidget(classLabel);
 
-    // 负责人并到通道那一行：卡片是 setFixedHeight(104)，多塞一行会被裁掉，
-    // 而沿用 alarmChannel 的对象名正好复用同一套字号/颜色，不动高度也不动样式。
-    QLabel *channelLabel = new QLabel(
-        QString("通道%1 · %2").arg(alarm.channel + 1)
-            .arg(session::ConstructionInfo::display(alarm.workerName)));
-    channelLabel->setObjectName("alarmChannel");
-    infoLayout->addWidget(channelLabel);
+    QDateTime dt = QDateTime::fromString(alarm.alarmTime, Qt::ISODate);
+    QLabel *metaLabel = new QLabel(QString("%1 · 通道%2")
+                                       .arg(dt.toString("HH:mm:ss"))
+                                       .arg(alarm.channel + 1));
+    metaLabel->setObjectName("alarmChannel");   // 与原来同一档字号/颜色，不新增样式
+    infoLayout->addWidget(metaLabel);
 
     itemLayout->addLayout(infoLayout, 1);
 
-    // 操作按钮（详情）
-    QPushButton *btnDetail = new QPushButton("详情");
-    btnDetail->setObjectName("alarmDetail");
-    connect(btnDetail, &QPushButton::clicked, this, [this, alarmId = alarm.id]() {
-        onAlarmClicked(alarmId);
-    });
-    itemLayout->addWidget(btnDetail);
+    // 子件一律不吃鼠标：否则点在文字或缩略图上就不会冒到卡片，
+    // "整张可点"会变成"只有那圈空白可点"。
+    for (QWidget *child : itemWidget->findChildren<QWidget *>()) {
+        child->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    }
 
     items_.insert(alarm.id, itemWidget);
     return itemWidget;
+}
+
+// ============================================================================
+// eventFilter - 卡片点击 → 打开这条报警的详情
+// ============================================================================
+// 为什么要自己判位移而不直接认 release：这块侧栏挂了 QScroller 触摸拖动
+// （frmMain 构造末尾的 enableTouchScrollAll），一次滑动的收尾同样是落在卡片上的
+// MouseButtonRelease —— 不判位移就是"每次滚动列表都弹一个详情框"。
+// 阈值 16px ≈ 1.8mm（板上 226PPI），够容指肚的滚动，又远小于一次有意的滑动。
+// ============================================================================
+bool VideoAlarmWidget::eventFilter(QObject *watched, QEvent *event)
+{
+    QWidget *card = qobject_cast<QWidget *>(watched);
+    if (card) {
+        const QMouseEvent *me = static_cast<const QMouseEvent *>(event);
+        if (event->type() == QEvent::MouseButtonPress && me->button() == Qt::LeftButton) {
+            card->setProperty("pressPos", me->globalPos());
+        } else if (event->type() == QEvent::MouseButtonRelease && me->button() == Qt::LeftButton) {
+            const QPoint down = card->property("pressPos").toPoint();
+            card->setProperty("pressPos", QVariant());
+            const QString id = card->property("alarmId").toString();
+            if (!id.isEmpty() && (me->globalPos() - down).manhattanLength() <= 16) {
+                onAlarmClicked(id);
+                return true;   // 这次点击已经被"打开详情"消费掉了
+            }
+        }
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void VideoAlarmWidget::onAlarmClicked(const QString &alarmId)

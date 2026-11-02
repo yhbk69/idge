@@ -96,9 +96,9 @@
   用 `insertWidget(count()-1, …)` 插到三钮区**之前**（贴着右上角，且不写死下标）。
   它刻意**不在** `widgetTop` 里：进了 `widgetTop` 就会被第 6 步那句
   `findChildren<QAbstractButton*>` 批量设成导航项、并被 `buttonClick()` 的文字分派接管，
-  点一下就会去切页面。文本只放「负责人 + 施工id」两项，其余三项进
-  `uiwidgets` 的 `ConstructionDetailDialog`——标题栏是跟导航行抢横向空间的一方，
-  五项全铺在 1920 宽下必截字。
+  点一下就会去切页面。文本**只放负责人姓名**一项（2026-11-02：原先是「登录人 姓名 · 施工id」，
+  18px 字加 id 在三字姓名上就开始截字），其余四项进
+  `uiwidgets` 的 `ConstructionDetailDialog`——那颗钮本身就是详情框的入口。
   可见性由 `updateSessionBadge()` 按会话决定（未登录整颗隐藏），在 `showLoginGate()` 与
   `onLoginSucceeded()` 两处各调一次；`widgetTop` 的 `hide()` 盖不到它，所以必须单独处理，
   否则登录页右上角会挂着一颗"登录人 —"，看着像还登着。

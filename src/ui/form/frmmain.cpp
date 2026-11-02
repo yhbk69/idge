@@ -1146,11 +1146,10 @@ void frmMain::updateSessionBadge()
         sessionBadge_->hide();
         return;
     }
-    // 只放"这一班是谁 + 哪块施工"，其余四项进详情框看：标题栏是 1920 宽里跟导航行
-    // 抢横向空间的一方，全字段铺开就会截字（截了字就等于没有这个提示）。
-    sessionBadge_->setText(QString::fromUtf8("登录人 %1 · %2")
-                               .arg(session::ConstructionInfo::display(info.workerName),
-                                    session::ConstructionInfo::display(info.constructionId)));
+    // 只放姓名：这一颗回答的是"现在系统记的是谁"，施工id/电话/工号点开来在详情框里
+    // 全都有。带上"登录人 …·施工id"那阵子，18px 的字在 1920 宽里跟导航行抢横向空间，
+    // 三字姓名加个 id 就开始截字 —— 截了字就等于没有这个提示。
+    sessionBadge_->setText(session::ConstructionInfo::display(info.workerName));
     sessionBadge_->show();
     sessionBadge_->raise();
 }
@@ -1159,6 +1158,11 @@ void frmMain::openSessionDetail()
 {
     ConstructionDetailDialog dialog(this);
     dialog.exec();
+    // 登出必须等这个框先下去再走：onLogoutRequested 自己还要弹一个确认框，
+    // 在详情框的模态循环里调它就是两层模态，确认框会被压在详情框下面、岗位上按不到。
+    if (dialog.logoutRequested()) {
+        onLogoutRequested();
+    }
 }
 
 void frmMain::onLoginSucceeded()
@@ -1252,10 +1256,29 @@ static int configuredTaskCount()
  *   - 模型参数：一行一个模型库 id，报警类别与备注写在这里
  *   - 模型库管理：库内模型的 类别数 / 输入尺寸 / 被引用通道
  *   - 电子围栏：围栏类别（单值，默认 person）+ 报警最小间隔秒数
- *   - 检测配置：置信度阈值、NMS 阈值（当前未接入推理，见 README 已知问题）
+ *   - 检测配置：全局置信度/NMS 阈值（真开关：随帧透传到 detect()，改完即时生效，
+ *     每模型还可在模型参数表里覆盖置信度）
  *
  * 同时输出初始日志到运行日志面板
  */
+// ── 设置页三个"内容区"的可视档位 ─────────────────────────────
+// 为什么必须写**最小**高度：pageSettings 整体包在 QScrollArea(widgetResizable) 里，
+// 内容区只会被撑到"各块最小高度之和"（板端实测：内容 minimumSizeHint=1177 时布局就
+// 只给 1177，谁的下限小谁被压扁），没有下限的表格/日志会塌成表头那一截，表现就是
+// "模型参数/模型库/运行日志整块折叠、看不见内容"。上限只用来防止模型多了把页面撑得没边。
+// ⚠ 这个下限还得躲开 QSS：任何一条命中该控件的 min-height 规则都会在 polish 时**改写**
+//   minimumSize（不是取大），代码里设的值会被顶掉 —— 见 theme::panel() 的说明。
+// kTableHeaderH 是实测档（16px 字 + ::section 的 4px 上下 padding），差几像素无妨：
+// 这里要的是"至少能看清 N 行"，不是像素级对齐。
+constexpr int kTableHeaderH = 48;
+constexpr int kModelTableMinRows = 5;   ///< 两张模型表至少露 5 行（约 330px）
+constexpr int kModelTableMaxRows = 8;   ///< 再多就靠页内滚动，不把别的块顶出屏
+constexpr int kLogMinLines = 12;        ///< 运行日志至少 12 行（现场靠它排障）
+constexpr int kLogLineH = 24;           ///< 16px 字的行高
+
+// 取设置页滚动区的内容布局（定义在本文件后面，initDebugPage 要先用一次）
+static QVBoxLayout *settingsContentLayout(QWidget *page);
+
 void frmMain::initDebugPage()
 {
     ConfigManager &cfg = ConfigManager::instance();
@@ -1297,6 +1320,14 @@ void frmMain::initDebugPage()
             pageSettingsLayout->addWidget(scrollArea);
         }
     }
+
+    // 运行日志至少 12 行。这个下限**只能写在它自己的样式表里**：皮肤层
+    // `QTextEdit{min-height:42px;padding:6px 10px;border:1px}` 对 QSS 是"声明即赋值"，
+    // initStyle() 重新 polish 时会把 setMinimumHeight(288) 直接改写成 42+12+2=56，
+    // 于是日志塌成两三条、整页看起来像叠在一起。组件自身样式表优先级高于皮肤层，
+    // 274 = 288 − 竖向 padding 12 − 上下边框 2（padding/边框来自皮肤层，不在这里重复声明）。
+    ui->textBrowserLog->setStyleSheet(
+        QString("QTextBrowser { min-height:%1px; }").arg(kLogMinLines * kLogLineH - 14));
 
     // ========== 视频通道（config 的 video.channels，下标即通道号） ==========
     // 模型路径/标签文件/输入尺寸/模型类型四行在本轮 schema 里失去意义：
@@ -1529,12 +1560,17 @@ void frmMain::initDebugPage()
                 }
             });
 
-        // 插入到 pageSettings 布局
-        QVBoxLayout *pageSettingsLayout = qobject_cast<QVBoxLayout *>(
-            ui->pageSettings->layout());
-        if (pageSettingsLayout) {
-            int count = pageSettingsLayout->count();
-            pageSettingsLayout->insertWidget(count - 1, grpWs);
+        // 放进滚动区的内容布局里，和围栏分组同一个写法。
+        // 原来这里插的是 pageSettings 自己的布局：那段代码在开头已经把页内控件整体搬进
+        // QScrollArea，该布局只剩滚动区一项，insertWidget(count-1=0, grpWs) 等于把这块
+        // 钉在滚动区**之外**的页面顶部——它不参与滚动、白占一屏高度，还把
+        // "滚动区是第 0 项"这个前提打破，后面任何分组框都会静默加不进来。
+        QVBoxLayout *contentLayout = settingsContentLayout(ui->pageSettings);
+        if (contentLayout) {
+            contentLayout->insertWidget(contentLayout->count() - 1, grpWs);
+        } else {
+            qWarning() << "initDebugPage: 找不到设置页滚动区，WebSocket 分组未加入";
+            grpWs->deleteLater();
         }
     }
 
@@ -1745,9 +1781,18 @@ void frmMain::applyGlobalThresholdNow()
 static QVBoxLayout *settingsContentLayout(QWidget *page)
 {
     QVBoxLayout *pageLayout = qobject_cast<QVBoxLayout *>(page->layout());
-    QLayoutItem *first = pageLayout ? pageLayout->itemAt(0) : nullptr;
-    QScrollArea *sa = first ? qobject_cast<QScrollArea *>(first->widget()) : nullptr;
-    return sa ? qobject_cast<QVBoxLayout *>(sa->widget()->layout()) : nullptr;
+    if (!pageLayout)
+        return nullptr;
+    // 遍历找那个 QScrollArea，而不是认定它在第 0 项：曾经有一处把 WebSocket 分组框
+    // insertWidget(0, ...) 插到了页面布局里，于是"第 0 项是滚动区"这个前提一破，
+    // 所有后续分组框都只打一条 qWarning 就静默不加入页面（看着像功能消失）。
+    // 顺序不该决定控件在不在。
+    for (int i = 0; i < pageLayout->count(); ++i) {
+        QScrollArea *sa = qobject_cast<QScrollArea *>(pageLayout->itemAt(i)->widget());
+        if (sa)
+            return qobject_cast<QVBoxLayout *>(sa->widget()->layout());
+    }
+    return nullptr;
 }
 
 // 置信度下拉的两个特殊项（存的是 QComboBox 的 itemData）：
@@ -1800,7 +1845,7 @@ void frmMain::initModelParamsUi()
     if (insertAt < 0) return;
 
     QGroupBox *group = new QGroupBox("模型参数（报警类别 / 置信度按模型配置）");
-    group->setStyleSheet(theme::field(theme::PANEL));
+    group->setStyleSheet(theme::panel(theme::PANEL));
     QVBoxLayout *v = new QVBoxLayout(group);
 
     modelParamTable_ = new QTableWidget(0, 6);
@@ -1822,8 +1867,9 @@ void frmMain::initModelParamsUi()
     modelParamTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
     modelParamTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
     modelParamTable_->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
-    // 行高 56 后按"表头 48 + 4 行"重算上限，否则可见行数会被行长挤没
-    modelParamTable_->setMaximumHeight(300);
+    // 行高 56 后按"表头 48 + N 行"重算上下限，否则可见行数会被行长挤没
+    modelParamTable_->setMinimumHeight(kTableHeaderH + kModelTableMinRows * theme::TOUCH_TABLE_ROW);
+    modelParamTable_->setMaximumHeight(kTableHeaderH + kModelTableMaxRows * theme::TOUCH_TABLE_ROW);
     modelParamTable_->setStyleSheet(QString(
         "QTableWidget { background: %1; border: 1px solid %2; color: %3; font-size: %4px; }"
         "QTableWidget::item { padding: 4px 8px; border-bottom: 1px solid %2; }"
@@ -2185,7 +2231,7 @@ void frmMain::initGeofenceUi()
     }
 
     QGroupBox *group = new QGroupBox("电子围栏（独立于级联模型）");
-    group->setStyleSheet(theme::field(theme::PANEL));
+    group->setStyleSheet(theme::panel(theme::PANEL));
     QGridLayout *gl = new QGridLayout(group);
     gl->setHorizontalSpacing(10);
     gl->setVerticalSpacing(6);
@@ -2265,7 +2311,7 @@ void frmMain::initModelLibraryUi()
     if (insertAt < 0) return;
 
     QGroupBox *group = new QGroupBox("模型库管理");
-    group->setStyleSheet(theme::field(theme::PANEL));
+    group->setStyleSheet(theme::panel(theme::PANEL));
     QVBoxLayout *v = new QVBoxLayout(group);
 
     QHBoxLayout *bar = new QHBoxLayout();
@@ -2301,8 +2347,9 @@ void frmMain::initModelLibraryUi()
     modelLibTable_->setShowGrid(false);
     modelLibTable_->horizontalHeader()->setStretchLastSection(false);
     modelLibTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    // 行高 56 后按"表头 48 + 4 行"重算上限
-    modelLibTable_->setMaximumHeight(280);
+    // 行高 56 后按"表头 48 + N 行"重算上下限，否则可见行数会被行长挤没
+    modelLibTable_->setMinimumHeight(kTableHeaderH + kModelTableMinRows * theme::TOUCH_TABLE_ROW);
+    modelLibTable_->setMaximumHeight(kTableHeaderH + kModelTableMaxRows * theme::TOUCH_TABLE_ROW);
     modelLibTable_->setStyleSheet(QString(
         "QTableWidget { background: %1; border: 1px solid %2; color: %3; font-size: %4px; }"
         "QTableWidget::item { padding: 4px 8px; border-bottom: 1px solid %2; }"

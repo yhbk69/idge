@@ -6,7 +6,6 @@
 #include <QHBoxLayout>
 #include <QGridLayout>
 #include <QMessageBox>
-#include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
 #include <QPixmap>
@@ -67,14 +66,28 @@ void AlarmDetailDialog::setupUi()
         return val;
     };
 
-    QDateTime dt = QDateTime::fromString(alarm_.alarmTime, Qt::ISODate);
-
-    addRow(0, "时间:", dt.toString("yyyy-MM-dd HH:mm:ss"));
-    addRow(1, "通道:", QString("通道 %1").arg(alarm_.channel + 1));
-    addRow(2, "类别:", alarm_.className);
+    // 时间行按要求撤了：这一页是围着施工项目看的，时刻在列表那一行上，重复一遍只占位。
+    addRow(0, "通道:", QString("通道 %1").arg(alarm_.channel + 1));
+    addRow(1, "类别:", alarm_.className);
+    // 报警级别：目前只有两个真实取值 —— 模型检测=3（一般）、电子围栏=2（重要），
+    // 分别来自 alarm_manager.cpp 里那两处 makeAlarmRecord 的入参；1/4 还没有生产者。
+    // 颜色跟着级别走：岗位上一眼要分得清"这条要不要现在处理"。
+    QString levelText;
+    switch (alarm_.alarmLevel) {
+    case 1: levelText = QString::fromUtf8("紧急"); break;
+    case 2: levelText = QString::fromUtf8("重要"); break;
+    case 3: levelText = QString::fromUtf8("一般"); break;
+    case 4: levelText = QString::fromUtf8("提示"); break;
+    default: levelText = QString::fromUtf8("未知（%1）").arg(alarm_.alarmLevel); break;
+    }
+    QLabel *levelLabel = addRow(2, "报警级别:", levelText);
+    if (alarm_.alarmLevel <= 2) {
+        levelLabel->setStyleSheet(theme::text(alarm_.alarmLevel == 1 ? theme::DANGER
+                                                                     : theme::WARNING,
+                                              theme::FS_BODY, true));
+    }
     addRow(3, "置信度:", QString("%1%").arg(alarm_.confidence * 100, 0, 'f', 1));
-    addRow(4, "ID:", alarm_.id);
-    statusLabel_ = addRow(5, "状态:", alarm_.status == "rectified" ? "已确认" : "未确认");
+    statusLabel_ = addRow(4, "状态:", alarm_.status == "rectified" ? "已确认" : "未确认");
     if (alarm_.status != "rectified") {
         statusLabel_->setStyleSheet(theme::text(theme::WARNING, theme::FS_BODY, true));
     } else {
@@ -99,7 +112,7 @@ void AlarmDetailDialog::setupUi()
                 .arg(webCopy.exists() ? QStringLiteral(" · 网页副本 .mp4") : QString());
         }
     }
-    addRow(6, "视频:", clipText);
+    addRow(5, "视频:", clipText);
 
     // 施工信息：按 JSON 里有什么就列什么，键→中文名与顺序由 ConstructionInfo::fields()
     // 给（与「施工详情」框同一个口径，见 src/biz/session/construction_session.h）。
@@ -107,7 +120,7 @@ void AlarmDetailDialog::setupUi()
     // 历史上确实没有这份信息，显示成一行说明比留白或假数据诚实。
     const QVector<session::ConstructionField> construction =
         session::ConstructionInfo::fieldsFromJson(alarm_.constructionJson);
-    int nextRow = 7;
+    int nextRow = 6;
     if (construction.isEmpty()) {
         QLabel *val = addRow(nextRow++, QString::fromUtf8("施工信息:"),
                              QString::fromUtf8("— （该报警产生时未登录，无施工信息）"));

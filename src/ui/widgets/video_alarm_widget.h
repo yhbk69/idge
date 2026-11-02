@@ -24,6 +24,12 @@ signals:
 private slots:
     void onAlarmClicked(const QString &alarmId);
 
+protected:
+    // 整张卡片就是入口（原来那颗「详情」钮已撤）：卡片是普通 QWidget，
+    // 收不到子控件上的点击，所以子件一律 WA_TransparentForMouseEvents，
+    // 再在这里把按下-松开的一次完整点击认成"看这条的详情"。
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
 private:
     void setupUi();
     // 构建一条报警项并登记进 items_，但不加入布局（由 refreshAlarms 决定落位）

@@ -94,6 +94,18 @@ QString chip(const char *fg, const char *bg, int px, int radius = 4);
 QString field(const char *bg = FIELD);
 
 /**
+ * @brief 分组框容器的底：与 field() 同配色，但**只描自己、不带 min-height/padding**。
+ *
+ * ⚠ 容器一律用它，不要用 field()：field() 是裸声明（无选择器），Qt 会把它顺着父子链
+ *   漏给组里的每一个子件。而 QSS 的 min-height 是**赋值**不是"与现有下限取大"
+ *   （QStyleSheetStyle::setGeometry 只在规则声明了 min-height 时才写 minimumSize），
+ *   于是漏到 QTableWidget 上就把代码里的 setMinimumHeight(328) 改成 56，整组被压到
+ *   65px、两行表单叠成一行。2026-11-02 板端实测：设置页三张带 field() 的分组框全部
+ *   塌成 65px，同一页没带 field() 的 WebSocket 分组框高度正常（193px=自身 sizeHint）。
+ */
+QString panel(const char *bg = PANEL);
+
+/**
  * @brief 内联小按钮微样式（清空/浏览等）：主文字 + 指定底色
  */
 QString miniButton(const char *bg);
