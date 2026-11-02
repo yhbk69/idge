@@ -238,6 +238,39 @@ void FenceOverlay::drawTempPolygon(QPainter &painter)
 }
 
 // ============================================================================
+// closePolygon / undoLastPoint - 多边形闭合与撤销顶点（工具栏入口）
+// ============================================================================
+// 触屏上没有右键，"再点一下第一点"也不是可靠手势，所以闭合必须由**可见的按钮**
+// 完成。右键（mousePressEvent）与双击（mouseDoubleClickEvent）两条老路径原样保留、
+// 都改走这一个函数：闭合的语义只有一份，落点颜色/角色/归一化的处理不能各写一边。
+// 不足 3 点时静默作废（不弹框、不落盘）—— 与原来右键的行为一致，误点不会多出围栏，
+// 也不会在画布上留下一个用户没见过的形状。
+// ============================================================================
+void FenceOverlay::closePolygon()
+{
+    if (polyPoints_.size() < 3) return;
+
+    FenceShape shape;
+    shape.type = ShapeType::Polygon;
+    shape.role = role_;
+    for (const auto &pt : polyPoints_) {
+        shape.points.push_back(toNorm(pt));   // 像素 → 归一化，落盘用
+    }
+    channelFence_.shapes.push_back(shape);
+    channelFence_.enabled = true;
+    saveFences();
+}
+
+// 撤销最后一个顶点。点歪了一个点不必整块重画 —— 这一条是"闭合按钮"存在的另一半：
+// 只给闭合不给撤销，等于把误点多出来的顶点永久留在围栏里。
+void FenceOverlay::undoLastPoint()
+{
+    if (polyPoints_.isEmpty()) return;
+    polyPoints_.removeLast();
+    update();
+}
+
+// ============================================================================
 // mousePressEvent - 鼠标按下事件
 // ============================================================================
 // 矩形模式：左键按下开始拖动
@@ -264,17 +297,7 @@ void FenceOverlay::mousePressEvent(QMouseEvent *event)
             update();
         } else if (event->button() == Qt::RightButton) {
             // 右键闭合多边形（至少 3 个点）
-            if (polyPoints_.size() >= 3) {
-                FenceShape shape;
-                shape.type = ShapeType::Polygon;
-                shape.role = role_;
-                for (const auto &pt : polyPoints_) {
-                    shape.points.push_back(toNorm(pt));   // 像素 → 归一化，落盘用
-                }
-                channelFence_.shapes.push_back(shape);
-                channelFence_.enabled = true;
-                saveFences();
-            }
+            closePolygon();
             polyPoints_.clear();
             update();
         }
@@ -368,17 +391,7 @@ void FenceOverlay::mouseReleaseEvent(QMouseEvent *event)
 void FenceOverlay::mouseDoubleClickEvent(QMouseEvent *event)
 {
     if (drawMode_ == DrawMode::PolyDraw && event->button() == Qt::LeftButton) {
-        if (polyPoints_.size() >= 3) {
-            FenceShape shape;
-            shape.type = ShapeType::Polygon;
-            shape.role = role_;
-            for (const auto &pt : polyPoints_) {
-                shape.points.push_back(toNorm(pt));   // 像素 → 归一化，落盘用
-            }
-            channelFence_.shapes.push_back(shape);
-            channelFence_.enabled = true;
-            saveFences();
-        }
+        closePolygon();
         polyPoints_.clear();
         update();
     }

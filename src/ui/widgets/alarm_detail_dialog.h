@@ -20,11 +20,18 @@ private slots:
     void onMarkFalsePositive();
     void onMarkNormal();
 
+protected:
+    // 抓拍图要跟着对话框一起长大：构造时按 label 的当前尺寸缩放一次，等于把图
+    // 钉死在最小尺寸上，之后用户/代码再怎么放大对话框，图仍是那一小块。
+    void resizeEvent(QResizeEvent *event) override;
+
 private:
     void setupUi();
     void loadScreenshot();
+    void rescaleScreenshot();
 
     AlarmRecord alarm_;
+    QPixmap snapshot_;        // 原始抓拍（缩放的唯一来源，不重复读盘）
     QLabel *imageLabel_ = nullptr;
     QLabel *statusLabel_ = nullptr;
 };

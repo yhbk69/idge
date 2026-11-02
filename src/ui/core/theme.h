@@ -64,6 +64,11 @@ constexpr int TOUCH_FIELD_MIN_H = 42;  ///< T2 输入件：42 + 2*6 + 2*1 = 56px
 constexpr int TOUCH_ROW_MIN_H   = 30;  ///< T3 表格内次级钮：30 + 2*8 + 2*1 = 48px ≈ 5.4mm
 constexpr int TOUCH_ICON_BTN    = 48;  ///< T4 纯图标钮边长（代码 setFixedSize 直接用）
 constexpr int TOUCH_TABLE_ROW   = 56;  ///< 表格行高：CSS 的 ::item padding 管不到，只能 setDefaultSectionSize
+// TOUCH_FIELD_H 是 T2 的**总高**，给代码里 setMinimumHeight 用（皮肤对 QCheckBox 没有高度档，
+// indicator 就是全部命中区，只能自己抬）。与 TOUCH_TABLE_ROW 数值相同但语义不同：
+// 一个是"输入件要多高"，一个是"表格一行要多高"，改任意一个都不该连带另一个。
+constexpr int TOUCH_FIELD_H     = 56;  ///< T2 总高（setMinimumHeight 直接可用）
+constexpr int TOUCH_MAIN_H      = 72;  ///< T1 总高（弹窗关闭钮这类代码里定尺寸的场合）
 
 // ========== 顶部导航字号（去 icon 后唯一被调大的一档） ==========
 // 导航钮从"图上字下"变"只有字"，横向不再被 22px 图标占位，才敢从 FS_NAV 抬到 18。
@@ -92,6 +97,15 @@ QString field(const char *bg = FIELD);
  * @brief 内联小按钮微样式（清空/浏览等）：主文字 + 指定底色
  */
 QString miniButton(const char *bg);
+
+/**
+ * @brief 页级主操作钮（T1）：与 miniButton 同配色，只是命中区从 48 抬到 72。
+ *
+ * 判据只有一条：**这个按钮不在表格行里**。表格行高 56，行内钮必须走 T3 才不被行边界裁掉；
+ * 而页面上独立的一级动作（保存/连接/导入/删除选中）用 T3 实测只有 5.4mm，低于 6mm 下限。
+ * 2026-11-01 板端实测把这两档混用的代价照了出来：设置页 10 处页级钮全是 88x48。
+ */
+QString mainButton(const char *bg);
 
 /**
  * @brief 把 QComboBox **弹出列表**的行高抬到触屏档（默认 T5 表格行 56px）。

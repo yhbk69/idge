@@ -84,21 +84,6 @@ LoginWidget::LoginWidget(QWidget *parent) : QWidget(parent)
     statusLabel_->setTextInteractionFlags(Qt::NoTextInteraction);
     left->addWidget(statusLabel_);
 
-    // 取景说明：把"怎么扫"写在页面上，岗位上没人教也能自己试对。
-    // 口径已改成实时扫描——窗格打开即扫，没有快门键。
-    auto *hint = new QLabel(
-        QString::fromUtf8("操作：点「扫码登录」→ 窗格打开即开始扫描，把二维码放进画面中央的取景框"
-                          "→ 解出后下方显示码内内容，点「确认登录」即完成登录。\n"
-                          "码上信息不全（缺施工id 或负责人姓名）会被拒绝，这一行会写明缺哪一项。"),
-        this);
-    hint->setWordWrap(true);
-    hint->setStyleSheet(QString("QLabel { color:%1; font-size:%2px; background:%3;"
-                                "border:1px solid %4; border-radius:10px; padding:18px; }")
-                            .arg(theme::TEXT)
-                            .arg(theme::FS_CARD)
-                            .arg(theme::PANEL, theme::BORDER));
-    left->addWidget(hint);
-
     left->addStretch(2);
 
     // ── 右：三个操作，竖排 ─────────────────────────────────

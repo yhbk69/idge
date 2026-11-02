@@ -230,6 +230,8 @@ void frmVideoWindow::setupFenceToolbar()
     // 设置工具栏的暗色主题样式
     // 注意：这里的 QPushButton 内联规则特异性高于 blacksoft.css 的全局 T1，
     // 所以必须自带 min-height，否则整条工具栏的按钮不会跟着放大。
+    // :disabled 那条是给「撤销顶点 / 闭合」用的：触屏没有 hover，也没有 tooltip，
+    // 非多边形模式下点这两颗钮本来就不该有反应，灰态是唯一能告诉用户"这条现在不归你管"的手段。
     toolbar->setStyleSheet(
         QString("QFrame { background: %1; border: 1px solid %2; }"                 // 框架背景和边框
                 "QPushButton { background: %2; color: %3; border: 1px solid %4;"   // 按钮默认样式
@@ -237,6 +239,7 @@ void frmVideoWindow::setupFenceToolbar()
                 "  font-size:%5px; }"
                 "QPushButton:hover { background: %4; }"                            // 鼠标悬停样式
                 "QPushButton:checked { background: %6; color: %7; }"               // 选中状态样式（主题强调色）
+                "QPushButton:disabled { background: %9; color: %10; border-color: %9; }"
                 "QLabel { color: %8; font-size:%5px; }")                           // 标签文字样式
             .arg(theme::PANEL, theme::BORDER)
             .arg(theme::TEXT)
@@ -244,7 +247,9 @@ void frmVideoWindow::setupFenceToolbar()
             .arg(theme::FS_BODY)
             .arg(theme::ACCENT)
             .arg(theme::BG)
-            .arg(theme::TEXT_MUTED));
+            .arg(theme::TEXT_MUTED)
+            .arg(theme::BG)          // %9 灰态底：比面板再暗一档，一眼看出"这颗现在不干活"
+            .arg(theme::TEXT_MUTED)); // %10 灰态字
 
     // ========================================================================
     // 第二步：创建水平布局并设置间距
@@ -348,6 +353,37 @@ void frmVideoWindow::setupFenceToolbar()
     polyBtn->setCheckable(true);                               // 设置可选中
     lay->addWidget(polyBtn);                                   // 添加到布局
 
+    // ========================================================================
+    // 第五步之二：多边形的两个动作钮（触屏唯一可靠的闭合入口）
+    // ========================================================================
+    // 闭合原本只有两条路：右键（fence_overlay.cpp mousePressEvent 的 RightButton 分支）
+    // 和双击（mouseDoubleClickEvent）。电容屏上右键不存在，双击在按下-抬起的间隔稍长
+    // 时被识别成拖动 —— 于是"多边形画得出来、合不上"。这两颗钮补的就是那一步。
+    // 刻意不进 fenceDrawGroup_（那个组是互斥的**模式**，这里是**动作**），
+    // 右键与双击路径原样保留，鼠标用户行为不变。
+    fenceUndoPointBtn_ = new QPushButton("撤销顶点", toolbar);
+    fenceUndoPointBtn_->setObjectName("fenceUndoPoint");
+    lay->addWidget(fenceUndoPointBtn_);
+
+    fenceClosePolyBtn_ = new QPushButton("闭合", toolbar);
+    fenceClosePolyBtn_->setObjectName("fenceClosePoly");
+    lay->addWidget(fenceClosePolyBtn_);
+
+    // 初始是空闲模式（没有工具被选中），两颗动作钮先灰着，由 onFenceToolClicked 点亮。
+    fenceUndoPointBtn_->setEnabled(false);
+    fenceClosePolyBtn_->setEnabled(false);
+
+    // 点钮时同时给"当前通道的那块画布"下指令；overlay 自己在闭合后清顶点，
+    // 撤销只删最后一个点，两者的空态都是静默无操作。
+    connect(fenceUndoPointBtn_, &QPushButton::clicked, this, [this]() {
+        if (auto *pw = playerWidget(currentFenceChannel_))
+            if (pw->fenceOverlay()) pw->fenceOverlay()->undoLastPoint();
+    });
+    connect(fenceClosePolyBtn_, &QPushButton::clicked, this, [this]() {
+        if (auto *pw = playerWidget(currentFenceChannel_))
+            if (pw->fenceOverlay()) pw->fenceOverlay()->closePolygon();
+    });
+
     // 删除按钮
     QPushButton *deleteBtn = new QPushButton("删除", toolbar); // 创建"删除"按钮
     deleteBtn->setObjectName("fenceDelete");                   // 设置对象名
@@ -431,6 +467,12 @@ void frmVideoWindow::onFenceToolClicked(int id)
     if (pw) {
         pw->fenceOverlay()->setDrawMode(mode);
     }
+
+    // 「撤销顶点 / 闭合」只在多边形模式下有意义：这两颗钮在矩形/删除模式下点下去
+    // 什么也不会发生（overlay 的顶点列表本来就是空的），与其让用户按下一次空的，
+    // 不如让它一开始就看着按不动。
+    if (fenceUndoPointBtn_)  fenceUndoPointBtn_->setEnabled(mode == DrawMode::PolyDraw);
+    if (fenceClosePolyBtn_)  fenceClosePolyBtn_->setEnabled(mode == DrawMode::PolyDraw);
 }
 
 void frmVideoWindow::onFenceChannelClicked(int ch)

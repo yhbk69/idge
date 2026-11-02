@@ -6,6 +6,17 @@
 #include <QScroller>
 #include <QScrollerProperties>
 #include <QCoreApplication>
+#include <QAbstractButton>
+#include <QAbstractSpinBox>
+#include <QComboBox>
+#include <QLineEdit>
+#include <QAbstractItemView>
+#include <QTableView>
+#include <QHeaderView>
+#include <QTabBar>
+#include <QApplication>
+#include <QLayout>
+#include <QDebug>
 
 // 时间戳宏,用于调试输出
 #define TIMEMS qPrintable(QTime::currentTime().toString("HH:mm:ss zzz"))
@@ -86,6 +97,94 @@ void QtHelper::enableTouchScrollAll(QWidget *root)
     const QList<QAbstractScrollArea *> areas = root->findChildren<QAbstractScrollArea *>();
     for (QAbstractScrollArea *area : areas) {
         enableTouchScroll(area);
+    }
+}
+
+// 面板实测 ≈226PPI（DSI-1 1920x1200 / 10.1" 16:10），工程未开 HiDPI 缩放 ⇒ 逻辑 px == 物理 px。
+static constexpr double kPxPerMm = 8.9;
+
+void QtHelper::dumpTouchGeometry(QWidget *root)
+{
+    if (!root) return;
+
+    // 一行一个控件：类别 身份 WxH 高mm 高度约束。只收"用手指点的件"，
+    // 纯展示件（QLabel/QFrame）收进来会把有效行淹掉。
+    auto dumpOne = [](QWidget *w, const QString &id) {
+        const int h = w->height();
+        const int wd = w->width();
+        if (h <= 0 || wd <= 0) return;
+        // 约束只看 min==max（那才是 setFixedSize）——内联 QSS 打穿皮肤层时，
+        // 这里露出来的就是屏幕上真正能给指肚的那几条像素。
+        const bool pinned = (w->minimumHeight() == w->maximumHeight());
+        const QString cls = QString::fromLatin1(w->metaObject()->className());
+        const QString cap = pinned ? QStringLiteral("fixed")
+                                   : QStringLiteral("min=%1").arg(w->minimumHeight());
+        // 带上**全局坐标**：审计要能反过来用——按中心点合成一次点击，验证触点真落进这个件。
+        const QPoint g = w->mapToGlobal(QPoint(0, 0));
+        qInfo().noquote() << QStringLiteral("[TOUCH] %1|%2|%3x%4@%5,%6|%7mm|%8")
+                                 .arg(cls, id)
+                                 .arg(wd).arg(h)
+                                 .arg(g.x()).arg(g.y())
+                                 .arg(h / kPxPerMm, 0, 'f', 1)
+                                 .arg(cap);
+    };
+
+    dumpOne(root, QStringLiteral("root"));
+    // 顶层窗口全扫：按需 new 的对话框（点名详情、报警详情、识别结果）不少是无父顶层窗，
+    // 只扫 root 的子树会整窗漏掉。root 先打，方便按"一次 dump 一块"切分日志。
+    QList<QWidget *> tops;
+    tops << root;
+    for (QWidget *top : QApplication::topLevelWidgets())
+        if (top != root && top->isVisible()) tops << top;
+
+    for (QWidget *top : tops) {
+        if (top != root) {
+            const QString title = top->windowTitle().isEmpty()
+                ? QString::fromLatin1(top->metaObject()->className())
+                : top->windowTitle();
+            dumpOne(top, QStringLiteral("win:") + title);
+        }
+        if (!top->isVisible()) continue;
+        const QList<QWidget *> all = top->findChildren<QWidget *>();
+        for (QWidget *w : all) {
+        if (!w->isVisible()) continue;              // 可见性含祖先，藏着的面页不算命中区
+        if (auto *b = qobject_cast<QAbstractButton *>(w)) {
+            QString id = b->objectName();
+            if (id.isEmpty()) id = b->text().left(12);
+            dumpOne(b, id);
+        } else if (auto *tb = qobject_cast<QTabBar *>(w)) {
+            dumpOne(tb, tb->objectName().isEmpty() ? QStringLiteral("tabs") : tb->objectName());
+        } else if (auto *hv = qobject_cast<QHeaderView *>(w)) {
+            // 表头在本仓是**功能件**：报警页点列头弹筛选菜单
+            dumpOne(hv, hv->objectName().isEmpty()
+                            ? QStringLiteral("header(%1)")
+                                      .arg(hv->orientation() == Qt::Horizontal
+                                               ? QStringLiteral("h") : QStringLiteral("v"))
+                            : hv->objectName());
+        } else if (auto *cb = qobject_cast<QComboBox *>(w)) {
+            dumpOne(cb, cb->objectName().isEmpty() ? QStringLiteral("combo") : cb->objectName());
+        } else if (auto *sb = qobject_cast<QAbstractSpinBox *>(w)) {
+            dumpOne(sb, sb->objectName().isEmpty() ? QStringLiteral("spin") : sb->objectName());
+        } else if (auto *le = qobject_cast<QLineEdit *>(w)) {
+            dumpOne(le, le->objectName().isEmpty() ? QStringLiteral("edit") : le->objectName());
+        } else if (auto *iv = qobject_cast<QAbstractItemView *>(w)) {
+            // 表格/列表行高：CSS 管不到，只能看 verticalHeader 的 default section size
+            if (auto *tv = qobject_cast<QTableView *>(iv)) {
+                const int row = tv->verticalHeader()->defaultSectionSize();
+                qInfo().noquote() << QStringLiteral("[TOUCH_ROW] %1|%2|row=%3px|%4mm")
+                                         .arg(QString::fromLatin1(iv->metaObject()->className()),
+                                              iv->objectName())
+                                         .arg(row)
+                                         .arg(row / kPxPerMm, 0, 'f', 1);
+            }
+        } else if (qstrcmp(w->metaObject()->className(), "QWidget") == 0
+                   && w->layout() && !w->findChildren<QAbstractButton *>().isEmpty()) {
+            // 表格 setCellWidget 用的裸容器：Qt 会按它的 sizeHint 居中放进行格，
+            // 容器比里面的钮矮时钮就被裁掉下半截（文字切一半就是这个）。
+            // 光看按钮几何看不出来，必须把容器一起打出来对。
+            dumpOne(w, QStringLiteral("cellbox"));
+        }
+        }
     }
 }
 

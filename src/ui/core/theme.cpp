@@ -90,6 +90,16 @@ QString miniButton(const char *bg)
         .arg(TOUCH_ROW_MIN_H);
 }
 
+QString mainButton(const char *bg)
+{
+    // T1：54 + 2*8 + 2*1 = 72px ≈ 8.1mm。padding 与 miniButton 同值，只有 min-height 差档，
+    // 这样同一批按钮换档时横向留白一致，不会出现"高度变了宽度没变"的错位。
+    return QString("color:%1;background:%2;border-radius:4px;"
+                   "min-height:%3px;padding:8px 14px;")
+        .arg(TEXT, bg)
+        .arg(TOUCH_MAIN_MIN_H);
+}
+
 void makeComboTouch(QComboBox *combo, int rowH)
 {
     if (!combo)

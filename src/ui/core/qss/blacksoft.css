@@ -295,7 +295,10 @@ height:20px;
 right:2px;
 }
 
-/* 下拉命中区：15px 宽的手指按不到，抬到 44px（与步进钮同档） */
+/* 下拉箭头子控件宽度：44px 只是让箭头看得清、留得住右侧空间。
+   ⚠ 这里**不是**命中区——2026-11-01 板上实测：点 combo 最左缘弹层照样打开，整颗 QComboBox 都能点。
+   原先这条注释写成"15px 宽的手指按不到"是错的，害得内联样式压到 28/30px 被当成一条违规。
+   弹层行高才是真问题，QSS 管不到，见 theme::makeComboTouch()。 */
 QComboBox::drop-down,QDateEdit::drop-down,QTimeEdit::drop-down,QDateTimeEdit::drop-down{
 subcontrol-origin:padding;
 subcontrol-position:top right;

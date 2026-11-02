@@ -16,7 +16,7 @@
 | gl_video_widget.h/.cpp | GLVideoWidget：QOpenGLWidget 双缓冲零拷贝视频控件（含 FPS 叠加） |
 | player_widget.h/.cpp | PlayerWidget：视频 + OSD + 围栏叠加 + 放大按钮的通道窗体，持有解码器 |
 | dashboard_widget.h/.cpp | DashboardWidget：统计卡片、/proc 系统监控（CPU/内存/温度）、类别排行条 |
-| alarm_list_widget.h/.cpp | AlarmListWidget：**三个** Tab（类别报警 / 电子围栏 / 检测明细），数据**全部来自数据库**（不再是 `AlarmManager` 的 RAM 窗口，所以 3.5 万条历史也翻得到）。检索条 = 时间档位 4 颗（今天/近3天/近7天/全部，**自然日**不是"现在减 72 小时"）+ 5 个下拉（通道/类别/状态/负责人/施工id）+ 清除筛选 + 分页条（首页 / 上一页 / **第 N / M 页 ▾** / 下一页 / 末页，「第 N / M 页」点开是跳页菜单）；下拉的候选值与计数来自 DAO 的 facet 查询，表头点击弹的菜单**读的就是这些下拉**（同一份状态，不会两处漂移）。**一页 = 当前那张表一屏能显示几行**（`pageSize()` 按 viewport 高度现算，行高 56px 下实测 11 行；旧代码的 200/500 是"总共只画这么多"的性能妥协，56px 行高下要滑二十多屏才够一页，那不叫分页）；围栏表 6 列、检测表 5 列、类别表 8 列，负责人列空值显示 `—` |
+| alarm_list_widget.h/.cpp | AlarmListWidget：**三个** Tab（类别报警 / 电子围栏 / 检测明细），数据**全部来自数据库**（不再是 `AlarmManager` 的 RAM 窗口，所以 3.5 万条历史也翻得到）。检索条 = 时间档位 4 颗（今天/近3天/近7天/全部，**自然日**不是"现在减 72 小时"）+ 5 个下拉（通道/类别/状态/负责人/施工id）+ 清除筛选 + 分页条（首页 / 上一页 / **第 N / M 页 ▾** / 下一页 / 末页，「第 N / M 页」点开是跳页菜单）；下拉的候选值与计数来自 DAO 的 facet 查询，表头点击弹的菜单**读的就是这些下拉**（同一份状态，不会两处漂移）。**一页 = 当前那张表一屏能显示几行**（`pageSize()` 按 viewport 高度现算，行高 56px 下实测 11 行；旧代码的 200/500 是"总共只画这么多"的性能妥协，56px 行高下要滑二十多屏才够一页，那不叫分页）；围栏表 7 列（末列 `操作`）、检测表 5 列、类别表 8 列，负责人列空值显示 `—` |
 | video_alarm_widget.h/.cpp | VideoAlarmWidget：视频监控页右侧报警卡片列表（QScrollArea），点击跳转详情；卡片第二行是「通道N · 负责人」（复用 `alarmChannel` 的 objectName，卡片高度不变） |
 | alarm_detail_dialog.h/.cpp | AlarmDetailDialog：报警详情对话框，支持误报标记与单条确认；"视频"行展示片段文件名/大小与网页副本是否随行；施工信息**按 `construction_info` 的键逐行渲染**（不是按固定字段），渲染口径来自 `ConstructionInfo::fields()`（与 ConstructionDetailDialog 同一份），所以 `ConstructionInfo` 加字段这里不用改 |
 | construction_detail_dialog.h/.cpp | ConstructionDetailDialog：**当前登录的施工信息**详情框，只读、无信号无槽（不需要 moc），入口是标题栏右上角那颗登录人角标（`frmMain::sessionBadge_`）。打开时读一次 `snapshot()`，之后不回查会话。逐键渲染同样走 `ConstructionInfo::fields()`。值标签挂了 `TextSelectableByMouse`——现场要照着抄电话号码 |
@@ -63,6 +63,13 @@ GLuint tex = pool.acquire(fd, w, h, stride, DRM_FORMAT_ABGR8888);
 - **围栏 Tab 的筛选靠 `isFenceAlarm`（`alarmType` 前缀 `fence`）**：新增的 `fence_in`/`fence_out` 与
   历史数据里裸的 `"fence"` 都要落进同一个 Tab，判据一旦改成精确相等，重启回读的老围栏报警会
   掉进「类别」Tab 显示成"person 检测到报警"。第 4 列的文字按 `fence_out` 分「离岗」，其余围栏出「闯入禁区」。
+- **围栏 Tab 的详情入口是行内 `详情` 钮（2026-11-01 触屏批次加的，第 7 列）**：改之前这张表行内
+  **零**可点件，唯一入口是 `cellDoubleClicked`，而触屏上双击不可靠（两次按下之间极易被识别成拖动）。
+  `cellDoubleClicked` **保留**——改手势语义是产品决策，本轮只做加法。
+  加列时踩到一条：`setStretchLastSection(true)` 会**无视**最后一列的 resize mode，
+  把 `操作` 拉成 300px 宽的白条；所以改成 `setStretchLastSection(false)` + 显式
+  `setSectionResizeMode(0/5, Stretch)`（与改动前等价：仍是时间列与类型列分剩余宽度）+ `操作` 列 Fixed 100。
+  `onHeaderSectionClicked` 的列号判据不用动：1/2/4/5 两张表同义，第 6 列落进 `default: return`。
 - **`contentRect()` 是围栏层的唯一几何真值**：GLVideoWidget 里"视频实际占了哪块 widget 像素"只有一处算式
   （`aspectScale()` 给 sx/sy，`drawQuad()` 摆顶点和 `contentRect()` 算画面块共用它），
   所以渲染与围栏映射不可能各写一边再漂移。paintGL 与 resizeGL 末尾各调一次 `notifyContentRect()`，

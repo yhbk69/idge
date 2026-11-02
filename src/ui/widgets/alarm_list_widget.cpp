@@ -378,15 +378,23 @@ void AlarmListWidget::setupUi()
     ====================================================
     */
     fenceTable_ = new QTableWidget();
-    fenceTable_->setColumnCount(6);
-    fenceTable_->setHorizontalHeaderLabels({"时间", "通道", "类别", "置信度", "负责人", "围栏类型"});
-    fenceTable_->horizontalHeader()->setStretchLastSection(true);
+    fenceTable_->setColumnCount(7);
+    fenceTable_->setHorizontalHeaderLabels({"时间", "通道", "类别", "置信度", "负责人", "围栏类型", "操作"});
+    // 原来靠 setStretchLastSection(true) 把「围栏类型」撑满；加了「操作」列后它就是最后一列，
+    // 而 stretchLastSection 会**无视**该列的 resize mode，把按钮拉成 300px 宽的白条。
+    // 所以改成显式指定：时间/围栏类型两列分剩余宽度（与改动前等价），操作列定宽。
+    fenceTable_->horizontalHeader()->setStretchLastSection(false);
     fenceTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    fenceTable_->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Stretch);
+    fenceTable_->horizontalHeader()->setSectionResizeMode(6, QHeaderView::Fixed);
+    fenceTable_->setColumnWidth(6, 100);
     fenceTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     fenceTable_->setAlternatingRowColors(true);
     fenceTable_->setStyleSheet(tableQss);
     fenceTable_->verticalHeader()->setVisible(false);
     fenceTable_->verticalHeader()->setDefaultSectionSize(theme::TOUCH_TABLE_ROW);
+    // 双击入口保留：改手势语义（双击→单击）是产品决策，本轮只做**加法**。
+    // 但触屏上双击不可靠是事实，所以另加一颗「详情」钮作为可点的入口（见 refreshFenceTable）。
     connect(fenceTable_, &QTableWidget::cellDoubleClicked, this,
             [this](int row, int) {
                 // 围栏行也能看详情：以前只有类别表接了双击，围栏报警点开无门。
@@ -828,6 +836,15 @@ void AlarmListWidget::refreshFenceTable()
                 a.alarmType == QLatin1String("fence_out")
                     ? QStringLiteral("离岗")
                     : QStringLiteral("闯入禁区")));
+
+        // 操作列：围栏 Tab 原本行内**零**可点件，详情的唯一入口是 cellDoubleClicked，
+        // 而触屏上双击不可靠（两次按下之间极易被识别成拖动/滚动）。与类别报警表同档 T3。
+        QPushButton *btnDetail = new QPushButton(QStringLiteral("详情"));
+        btnDetail->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
+        connect(btnDetail, &QPushButton::clicked, this, [this, i]() {
+            if (i < pageFenceAlarms_.size()) showAlarmDetail(pageFenceAlarms_.at(i));
+        });
+        fenceTable_->setCellWidget(i, 6, btnDetail);
     }
 }
 

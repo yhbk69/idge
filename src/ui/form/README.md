@@ -61,6 +61,9 @@
   窗口级模态 `Qt::WindowModal`），智能识别页卡片经信号触发 `showRollCallDialog()`/`showEquipmentDialog()`，
   每次打开前先 `refreshTaskList()`。用 WindowModal 而非 `exec()` 是硬约束：点名详情是**非模态顶层窗口**，
   应用级模态会把它一起锁死。`btnData`/`btnConfig` 保持 `hide()`，不再复用为业务导航。
+  **两个宿主 `QDialog` 底部各带一颗 T1 `关闭` 钮**（2026-11-01 触屏批次）：WindowModal 下原本
+  唯一出口是 mutter 服务端装饰的 ×，那颗 × 约 24~28px 且**不是 QSS 能管的尺寸**（皮肤层再怎么抬
+  也抬不到它），触屏按不到就等于把人锁在模态窗里。尺寸**不可测**（WM 画的，探针读不到）。
 - 业务对话框均为**模态**（`exec()`）嵌套：点名创建 = 输入名 → PhotoSelectionDialog → RecognitionResultDialog；自定义返回码 `done(2)` 约定"用户取消且任务已删"，外层据此只提示不重复删除。
   点名/盘点的**任务列表页**是唯一的例外：宿主 `QDialog` 用 `show()` + `Qt::WindowModal`（见上条）。
 - 任务详情页（点名）刻意用非模态 `QWidget + WA_DeleteOnClose + show()`，可与列表并行查看。
@@ -234,4 +237,14 @@
   放大模式（player 占 `(0,0,2,2)`）下跨列写法同样成立，别把它拆回单列。
 - **表格行高只能走代码**：`QTableView::item{padding}` 不改行高，必须
   `verticalHeader()->setDefaultSectionSize(theme::TOUCH_TABLE_ROW)`（本目录 2 张 + `alarm_list_widget` 2 张）。
+- **行内"容器 + 布局"必须显式给到行高**：`setCellWidget` 的容器按自身 sizeHint 居中放行格、不拉满，
+  容器比里面的钮矮就把钮裁掉下半截。点名/盘点任务列表的操作列各吃过一次（板端实测：行 72、
+  容器 39、钮 66 ⇒ 只画到 36px，"查看/删除"切一半），现在两处都用一个 `kTaskRowH` 常量同时喂
+  `setRowHeight()` 和 `setFixedHeight()`。判据与细节见 `src/ui/core/README.md`「触屏命中区设计令牌」第 6 条。
+- **调试设置页的页级按钮走 `theme::mainButton()`，不是 `miniButton()`**：`模型…`/`清空`/`保存`/`连接`/
+  `刷新`/`导入模型...`/`导入zip包...`/`测试选中`/`删除选中` 实测原本是 `88x48`（5.4mm，低于 6mm 下限），
+  因为 `miniButton` 的 `min-height:30` 打穿了皮肤层的 54。改完 10 处全部 `x72`（8.1mm）。
+  通道行那颗 `启用` `QCheckBox` 是另一类：皮肤对 `QCheckBox` **只有 `::indicator` 尺寸、没有整件高度档**，
+  所以只能在代码里 `setMinimumHeight(theme::TOUCH_FIELD_H)`（实测 42→56）。indicator 保持 40x40 不变，
+  只是从顶格变居中。
 - **中文文案编码**：`cancellation_result_dialog.*` 刻意使用 `\uXXXX` 转义书写中文，防源文件编码差异乱码，新增文案请保持该约定。

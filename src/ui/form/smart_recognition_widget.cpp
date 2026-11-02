@@ -570,10 +570,6 @@ void SmartRecognitionWidget::showOcrRegionDialog(const QString& imagePath) {
 
     root->addWidget(textLabel(QStringLiteral("调整识别区域"), theme::FS_PAGE, theme::TEXT, &dialog, true));
 
-    root->addWidget(textLabel(
-        QStringLiteral("绿色框为推荐区域，可拖动调整。灰色框为检测到的所有文本区域（参考）。"),
-        theme::FS_HINT, theme::TEXT_MUTED, &dialog));
-
     auto* scene = new QGraphicsScene(&dialog);
     auto* view = new QGraphicsView(scene, &dialog);
     view->setMinimumHeight(500);

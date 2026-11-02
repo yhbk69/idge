@@ -24,21 +24,23 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
+#include <thread>
 #include <vector>
 
-// 从解码器映射指针获取 RGBA 帧，转为 QImage（RGB888）供显示与解码
-QImage captureFrameAsImage(FFmpegVideoDecoder *decoder)
+// 从 stride 口径的 RGBA 帧缓冲造一张 RGB888 图。
+// 单独拆出来是因为扫码线程用的缓冲是帧的一份拷贝、不是解码器那块活的显存，
+// 拿 decoder 指针的入口在 work 线程上是错的（那个槽约两帧后就被覆盖）。
+static QImage imageFromRGBA(const uint8_t *pixels, int w, int h, int stride)
 {
-    const uint8_t *ptr = decoder->captureCurrentFramePtr();
-    if (!ptr)
-        return {};
-    int w = 0, h = 0, stride = 0;
-    if (!decoder->getCurrentFrameInfo(w, h, stride))
+    if (!pixels || w <= 0 || h <= 0 || stride < w * 4)
         return {};
 
     QImage img(w, h, QImage::Format_RGB888);
     for (int y = 0; y < h; ++y) {
-        const uint8_t *srcRow = ptr + static_cast<size_t>(y) * stride;
+        const uint8_t *srcRow = pixels + static_cast<size_t>(y) * stride;
         uint8_t *dstRow = img.scanLine(y);
         for (int x = 0; x < w; ++x) {
             dstRow[x * 3 + 0] = srcRow[x * 4 + 0];
@@ -47,6 +49,20 @@ QImage captureFrameAsImage(FFmpegVideoDecoder *decoder)
         }
     }
     return img;
+}
+
+// 从解码器映射指针获取 RGBA 帧，转为 QImage（RGB888）供显示与解码
+QImage captureFrameAsImage(FFmpegVideoDecoder *decoder)
+{
+    if (!decoder)
+        return {};
+    const uint8_t *ptr = decoder->captureCurrentFramePtr();
+    if (!ptr)
+        return {};
+    int w = 0, h = 0, stride = 0;
+    if (!decoder->getCurrentFrameInfo(w, h, stride))
+        return {};
+    return imageFromRGBA(ptr, w, h, stride);
 }
 
 namespace {
@@ -168,10 +184,139 @@ private:
 
 enum class Outcome { Confirmed, Cancelled };
 
-// ZBar 限流：解码线程上每 250ms 最多解一帧。实测板上 CSI 摄像头预览约 7.7fps，
+// ZBar 限流：每 250ms 最多解一帧。实测板上 CSI 摄像头预览约 7.7fps，
 // 150ms 间隔时解一帧要吃掉三成多的帧预算、预览掉到 5.1fps，对"举着码等它认"这件事
 // 来说不值：现场码是静止张贴的，250ms 的识别延迟肉眼看不出来，预览顺不顺却看得出来。
 constexpr qint64 kScanIntervalMs = 250;
+
+// 单槽背压的扫码线程。
+//
+// 为什么要单独一条线程：ZBar 一次 pass 是几十毫秒级 CPU 活（上面的实测数就是它）。
+// 挂在解码线程上时这几十毫秒直接从帧交付里扣走 —— 30fps 源每帧只有 33ms 窗口，
+// 一次 pass 丢掉 1~2 帧，而且是在源头丢（ISP 缓冲区溢出），现场读作"每隔一下卡一次"。
+// 挪走之后解码线程只付一次 memcpy（1080p RGBA 约 8MB，量级 1~2ms），
+// pass 多久都不再影响帧率，只影响"多久认得出码"，而后者有 kScanIntervalMs 兜着。
+//
+// 只有一个槽：worker 还没取走上一帧时直接丢当前帧，不排队。扫码要的是"最新那一帧"，
+// 排队只会让积压的旧帧越解越晚，还多一条内存上限要管。
+//
+// 生命周期：thread_ 在 stop() 里 join，而 stop() 必须在 runLiveScan 返回前跑完 ——
+// job_/onHits_/paused_ 全是它的栈上对象。收尾顺序见 runLiveScan 末尾那段注释。
+class QrScanWorker {
+public:
+    using ResultFn =
+        std::function<void(const QImage &, const std::vector<qrcode::QrHit> &)>;
+
+    QrScanWorker(QObject *resultContext, std::atomic_bool *paused, ResultFn onHits)
+        : context_(resultContext), paused_(paused), onHits_(std::move(onHits))
+    {
+        thread_ = std::thread([this] { loop(); });
+    }
+
+    ~QrScanWorker() { stop(); }
+
+    QrScanWorker(const QrScanWorker &) = delete;
+    QrScanWorker &operator=(const QrScanWorker &) = delete;
+
+    // 在解码线程上调用：拷贝进槽并唤醒 worker。槽被占着就返回 false（本帧作废）。
+    bool submit(const uint8_t *pixels, int w, int h, int stride)
+    {
+        if (!pixels || w <= 0 || h <= 0 || stride < w * 4)
+            return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (quitting_ || hasJob_)
+            return false;
+        job_.pixels.assign(pixels, pixels + static_cast<size_t>(stride) * h);
+        job_.w = w;
+        job_.h = h;
+        job_.stride = stride;
+        hasJob_ = true;
+        cv_.notify_one();
+        return true;
+    }
+
+    void stop()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            quitting_ = true;
+            cv_.notify_all();
+        }
+        if (thread_.joinable())
+            thread_.join();
+    }
+
+private:
+    struct Job {
+        std::vector<uint8_t> pixels;
+        int w = 0;
+        int h = 0;
+        int stride = 0;
+    };
+
+    void loop()
+    {
+        Job work;
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [this] { return quitting_ || hasJob_; });
+                if (quitting_)
+                    return;
+                // 换指针不换内容：解码线程可以立刻往腾空的槽里写下一帧
+                work.pixels.swap(job_.pixels);
+                work.w = job_.w;
+                work.h = job_.h;
+                work.stride = job_.stride;
+                hasJob_ = false;
+            }
+            // 已经有结果在等用户确认时不要再接着解：paused 只由本线程在贴出 hits 时
+            // 置位、由 GUI 点「重新扫描」时复位，所以这里读到 true 就意味着"上一帧已经
+            // 交过一次结果"。不判这一条的话，落在槽里的那一帧会被解成第二次 onHits，
+            // 把用户正在挑的冻结画面换成更新的一帧——原来 pass 串行在解码线程上时
+            // 这种情况天然不存在，挪线程就得自己把它关回来。
+            if (paused_->load(std::memory_order_acquire))
+                continue;
+
+            std::vector<qrcode::QrHit> hits;
+            QString decodeError;
+            if (!qrcode::scanQrFromRGBA(work.pixels.data(), work.w, work.h,
+                                        work.stride, &hits, &decodeError))
+                continue;
+            hits.erase(std::remove_if(hits.begin(), hits.end(),
+                                      [](const qrcode::QrHit &hit) {
+                                          return hit.content.isEmpty();
+                                      }),
+                       hits.end());
+            if (hits.empty())
+                continue;
+
+            // 冻结帧取自这一份拷贝，坐标与画面必然同帧：不再回头看那块活的缓冲
+            const QImage frozen =
+                imageFromRGBA(work.pixels.data(), work.w, work.h, work.stride);
+            if (frozen.isNull())
+                continue;
+
+            paused_->store(true, std::memory_order_release);
+            // 回调按值带走，不捕获 this：投递出去的事件晚于本对象析构时也不会碰到悬垂
+            ResultFn callback = onHits_;
+            QMetaObject::invokeMethod(
+                context_,
+                [callback, frozen, hits]() { callback(frozen, hits); },
+                Qt::QueuedConnection);
+        }
+    }
+
+    QObject *context_;
+    std::atomic_bool *paused_;
+    ResultFn onHits_;
+    std::thread thread_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    Job job_;
+    bool hasJob_ = false;
+    bool quitting_ = false;
+};
 
 // 实时扫码窗格。返回 Confirmed 时 confirmedContent 是用户点确认那颗码的原文。
 Outcome runLiveScan(QWidget *parent, const QString &confirmText,
@@ -275,9 +420,8 @@ Outcome runLiveScan(QWidget *parent, const QString &confirmText,
     againBtn->setEnabled(false);   // 还没解出码时"重新扫描"无意义，先按住
 
     // ── 扫描状态机 ─────────────────────────────────────────────
-    // paused：GUI 线程在解出码时置位、点「重新扫描」时复位；解码线程每帧读一次。
-    // 旧版靠"先停扫描线程再停解码器"的收尾顺序规避竞态，现在解码直接挂在解码线程上，
-    // 没有第二条线程可停，所以这个标志必须是 atomic。
+    // paused：worker 解出码时置位、GUI 线程点「重新扫描」时复位，解码线程每帧读一次
+    // 决定还要不要往槽里拷。写方是两条线程、读方是第三条，所以必须是 atomic。
     std::atomic_bool paused{false};
     QString selectedContent;
     std::vector<qrcode::QrHit> currentHits;
@@ -388,13 +532,18 @@ Outcome runLiveScan(QWidget *parent, const QString &confirmText,
     QObject::connect(decoder, &FFmpegVideoDecoder::frameReady,
                      previewWidget, &GLVideoWidget::onFrameReady, Qt::DirectConnection);
 
-    // 解码放在解码线程做，而不是 GUI 线程：ZBar 解一帧是几十毫秒级 CPU 活，
-    // 留在 GUI 线程会直接卡住画面（智能识别页是在四路都在跑的时候进来的）。
-    // 用 frameReady 当"来新帧了"的节拍并限流，比自建扫描线程少一条线程要收尾；
-    // 指针就在生产它的线程上读，双缓冲的覆盖竞态天然不存在。
+    // 节拍器留在解码线程（frameReady 就是"来新帧了"），但 ZBar 本身交给 QrScanWorker。
+    // 原来两条都挤在解码线程上：一次 pass 几十毫秒直接从帧交付里扣走，30fps 源每帧只有
+    // 33ms 窗口 → 每 250ms 卡一下。现在这里只付一次拷贝，槽被占着就丢帧不排队。
+    QrScanWorker worker(&dialog, &paused,
+                        [&onHits](const QImage &frame,
+                                  const std::vector<qrcode::QrHit> &hits) {
+                            onHits(frame, hits);
+                        });
+
     auto scanConn = QObject::connect(
         decoder, &FFmpegVideoDecoder::frameReady, decoder,
-        [&dialog, decoder, &paused, &onHits, &scanClock, &lastPassMs]() {
+        [&paused, decoder, &worker, &scanClock, &lastPassMs]() {
             if (paused.load(std::memory_order_acquire))
                 return;
             const qint64 now = scanClock.elapsed();
@@ -406,40 +555,21 @@ Outcome runLiveScan(QWidget *parent, const QString &confirmText,
             int w = 0, h = 0, stride = 0;
             if (!ptr || !decoder->getCurrentFrameInfo(w, h, stride))
                 return;
-
-            std::vector<qrcode::QrHit> hits;
-            QString decodeError;
-            if (!qrcode::scanQrFromRGBA(ptr, w, h, stride, &hits, &decodeError))
-                return;
-            hits.erase(std::remove_if(hits.begin(), hits.end(),
-                                      [](const qrcode::QrHit &hit) {
-                                          return hit.content.isEmpty();
-                                      }),
-                       hits.end());
-            if (hits.empty())
-                return;
-
-            // 冻结帧必须在解码线程拷走：captureCurrentFramePtr() 指向的槽约两帧后就被覆盖
-            const QImage frozen = captureFrameAsImage(decoder);
-            if (frozen.isNull())
-                return;
-
-            paused.store(true, std::memory_order_release);
-            QMetaObject::invokeMethod(
-                &dialog, [&onHits, frozen, hits]() { onHits(frozen, hits); },
-                Qt::QueuedConnection);
+            worker.submit(ptr, w, h, stride);
         },
         Qt::DirectConnection);
 
     decoder->start(cameraUrl);
     dialog.exec();
 
-    // 收尾顺序不能调：先断开扫描回调，再 stop()（它会 join 解码线程，
-    // 返回后 frameReady 不可能再发），最后把已经投递但还没派发的 onHits 就地跑完——
-    // dialog 与它捕获的那些栈对象此刻仍然有效。放到函数返回后再派发就是野指针。
+    // 收尾顺序不能调：先断开扫描回调（不再往槽里写），再 stop() 解码线程（join 之后
+    // frameReady 不可能再发），然后 join worker —— 它可能正拿着最后一帧在解，join 完
+    // 它投递的 onHits 已全部落在 dialog 的事件队列里，最后 sendPostedEvents 就地跑完：
+    // dialog 与 onHits 捕获的那些栈对象此刻仍然有效。放到函数返回后再派发就是野指针。
     QObject::disconnect(scanConn);
     paused.store(true, std::memory_order_release);
     decoder->stop();
+    worker.stop();
     QCoreApplication::sendPostedEvents(&dialog, QEvent::MetaCall);
     delete decoder;
 

@@ -79,15 +79,20 @@ if (!qss.isEmpty()) {
 
 | 档 | 总高 | mm | 常量 | 用在 |
 | --- | --- | --- | --- | --- |
-| T1 主操作 | 72 | 8.1 | `TOUCH_MAIN_MIN_H=54`（+2×8 padding +2×1 border） | 全局 `.QPushButton/.QToolButton`、顶部导航钮、围栏工具栏钮 |
-| T2 输入件 | 56 | 6.3 | `TOUCH_FIELD_MIN_H=42` | `QLineEdit/QComboBox/QSpinBox/QDoubleSpinBox` 及 `theme::field()`；下拉**弹层**另见下方第 4 条 `theme::makeComboTouch()` |
+| T1 主操作 | 72 | 8.1 | `TOUCH_MAIN_MIN_H=54`（+2×8 padding +2×1 border）；代码里要直接给总高的场合用 `TOUCH_MAIN_H=72` | 全局 `.QPushButton/.QToolButton`、顶部导航钮、围栏工具栏钮、`theme::mainButton()` |
+| T2 输入件 | 56 | 6.3 | `TOUCH_FIELD_MIN_H=42`；代码里给非输入件（如 `QCheckBox`）抬高度用 `TOUCH_FIELD_H=56` | `QLineEdit/QComboBox/QSpinBox/QDoubleSpinBox` 及 `theme::field()`；下拉**弹层**另见下方第 4 条 `theme::makeComboTouch()` |
 | T3 表格内 | 48 | 5.4 | `TOUCH_ROW_MIN_H=30` | `详情`/`查看`/`注销`/`移除` 等行内次级钮、`theme::miniButton()` |
 | T4 图标钮 | 48x48 | 5.4 | `TOUCH_ICON_BTN` | 画面放大钮、标题栏 min/max/close、照片删除 × |
 | 指示器 | 40x40 | 4.5 | — | `QCheckBox/QRadioButton::indicator`（Qt 里 indicator 尺寸**就是**命中区，只能真放大） |
-| 步进/下拉 | 宽 44 | — | — | `::up-button/::down-button`、`::drop-down`（原 10px/15px 指肚按不到） |
+| 步进钮 | 宽 44 | — | — | `::up-button/::down-button`（原 10px 指肚按不到） |
 | 滚动条 | 厚 26 | 2.9 | — | `QScrollBar`（原 12px 且无翻页钮） |
 
-四条容易踩的口径，都是这一轮量出来的：
+**T1 与 T3 的判据只有一条：这个按钮在不在表格行里。** 行高 56，行内钮必须 T3（48）才不被行边界裁掉；
+页面上独立的一级动作（保存/连接/导入/删除选中/弹窗关闭）用 T3 实测只有 5.4mm，低于 6mm 下限。
+2026-11-01 板端探针把这条混用的代价照了出来：设置页 10 处页级钮全是 `88x48`。
+`mainButton()` 与 `miniButton()` 的 padding 同值，只差 `min-height`，换档时横向留白不变。
+
+五条容易踩的口径，都是这一轮量出来的：
 1. **字号基本不动**。全局正文仍是 `font-size:16px`（css 尾部），唯一上调的一档是导航 `FS_NAV_TOUCH=18`——
    因为导航钮去掉了 icon，横向纵向都腾出了空间。"按钮小"的解法是长命中区，不是长字号；
    动字号必然截字，本轮用探针验过 5 个页面 626 个可见控件 0 截字才收工。
@@ -107,6 +112,34 @@ if (!qss.isEmpty()) {
    吞滚轮不是洁癖：QComboBox 在滚动区里被滚一下就会改当前项并触发 `activated`，
    而 `activated` 的槽是"写配置 + 落盘"——板上实测一次无意的滚动把某模型的
    「跟随全局」改成了 0.15 并写进了 `config.json`。真触屏没有滚轮，会踩到的是鼠标/触控板与自动化。
+5. **`QComboBox::drop-down` 的 `width` 不是命中区**（2026-11-01 板上实测，推翻本目录与
+   `blacksoft.css` 里原先的写法）。皮肤注释写的是"下拉命中区：15px 宽的手指按不到，抬到 44px"，
+   内联样式又把它压回 28/30px，于是长期被记成一条"皮肤被打穿"的违规。实测：点 combo **最左缘**
+   （x = combo.x + 10）弹层照样打开 —— 整颗 `QComboBox` 都是命中区，`::drop-down` 的宽度
+   只决定箭头子控件的视觉宽度。**这一条不值得改**，别再照"44px 才是对的"去加宽内联样式。
+6. **`setCellWidget` 的容器按自身 sizeHint 居中放行格，不会拉满行格**。行内放"一个容器 + QHBoxLayout
+   + 几颗钮"时，容器高度取的是它自己的 sizeHint，而 sizeHint 在内联 QSS 生效前就算好了 ⇒
+   容器比里面的钮矮，钮被容器裁掉下半截。板端实测：行 72、容器 39、钮 66 ⇒ 只画到 36px，
+   `查看/删除` 四个字切一半（`/tmp/touch/before_item5_btns.png`）。
+   ⇒ 容器必须 `setFixedHeight(行高)`，且行高与容器高**同源取一个常量**（见
+   `roll_call_widget.cpp` / `equipment_inventory_widget.cpp` 的 `kTaskRowH`）。
+   直接 `setCellWidget(i, col, btn)`（不套容器）不吃这个亏 —— 报警表两颗 `详情` 钮就是这么放的，实测正好 48。
+
+## 命中区实测探针（`IDGE_TOUCHDUMP`）
+
+上面每一条数字都来自这个探针，别用"看代码推算"代替它：`min-height` 不含 padding/border、
+`setFixedSize` 会封顶、内联 QSS 会打穿皮肤层，三条叠加后推算经常错。
+
+- 实现：`QtHelper::dumpTouchGeometry()`（`qthelper.cpp`），调用点在 `frmMain` 构造末尾，
+  **仅当环境变量 `IDGE_TOUCHDUMP=1` 时**建一个 2s 定时器；不开变量时零开销。
+- 输出 `[TOUCH] 类名|objectName|宽x高@全局x,全局y|mm|min=…|fixed`，另有
+  `[TOUCH_ROW]`（表格行高，CSS 管不到那一档）与 `[TOUCH] QWidget|cellbox|…`（`setCellWidget` 的容器，
+  专治上面第 6 条——只打按钮几何看不出容器比钮矮）。
+- 扫的是**当前可见**的件，并且除 `root` 子树外还遍历 `QApplication::topLevelWidgets()`：
+  按需 new 的对话框不少是无父顶层窗，只扫子树会整窗漏掉。
+- 已知局限：智能识别页的四张卡片是 `QFrame` + 事件过滤器，不是 `QAbstractButton`，探针不报它们
+  （尺寸 680x200 由代码固定，无违规）；`QHeaderView`/`QTabBar` 是单独加分支才看到的。
+- mm 换算常数 `kPxPerMm = 8.9`（DSI-1 实测 ≈226PPI，未开 HiDPI 缩放 ⇒ 逻辑 px == 物理 px）。
 
 顶部导航已从"图标+文字（`ToolButtonTextUnderIcon`）"改为**纯文字**，`IconHelper` 只留给标题栏三钮的 glyph；
 `labIco`（日历 glyph）隐藏。顺带删掉了"双击标题栏切最大化"——触屏上是误触源。

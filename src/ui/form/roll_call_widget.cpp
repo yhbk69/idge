@@ -183,7 +183,12 @@ void RollCallWidget::refreshTaskList() {
  */
 void RollCallWidget::loadTasks() {
     if (!service_) return;
-    
+
+    // 行高与行内容器高度**必须同源**：Qt 把 setCellWidget 的容器按容器自己的 sizeHint
+    // 居中塞进格子，不会拉满行格。板端实测：行 72、容器 39、里面的钮 66 ⇒ 钮被容器裁到
+    // 36px，"查看/删除"四个字正好切一半。所以容器要显式给到行高，不能只靠 margin 和行高。
+    constexpr int kTaskRowH = 72;
+
     task_table_->setRowCount(0);
     
     auto tasks = service_->getAllTasks();
@@ -193,7 +198,7 @@ void RollCallWidget::loadTasks() {
         
         int row = task_table_->rowCount();
         task_table_->insertRow(row);
-        task_table_->setRowHeight(row, 72);
+        task_table_->setRowHeight(row, kTaskRowH);
         
         // 任务名称
         auto* name_item = new QTableWidgetItem(QString::fromStdString(task.name));
@@ -237,8 +242,11 @@ void RollCallWidget::loadTasks() {
         
         // 操作按钮
         auto* actions_widget = new QWidget();
+        actions_widget->setFixedHeight(kTaskRowH);
         auto* actions_layout = new QHBoxLayout(actions_widget);
-        actions_layout->setContentsMargins(12, 10, 12, 10);
+        // 上下 margin 3：容器 72，钮实测 66（皮肤 min-height 54 + 这里 padding 6*2，
+        // 内联 border:none 把边框那 2px 也吃了）。margin 写 10 就是 86 > 72，直接溢出。
+        actions_layout->setContentsMargins(12, 3, 12, 3);
         actions_layout->setSpacing(10);
 
         int task_id = task.id;
@@ -262,8 +270,11 @@ void RollCallWidget::loadTasks() {
                 .arg(pressed);
         };
 
-        // 触屏档 T3：行内钮走 minimumSize 而不是 fixedSize —— 固定宽在文字变长时
-        // 会直接截字（"查看"→"查看详情"就没了），minimum 让按钮只增不减。
+        // 行内钮走 minimumSize 而不是 fixedSize —— 固定宽在文字变长时会直接截字
+        // （"查看"→"查看详情"就没了），minimum 让按钮只增不减。
+        // ⚠ 这里的 48 是**惰性下限**：button_style 只覆盖了 padding，没覆盖 min-height，
+        // 皮肤层的 54 仍然生效，实测钮高 66（板端 TOUCH 探针）。别照着 48 去"对齐 T3"，
+        // 那等于把已经够点的钮改小。
         auto* view_btn = new QPushButton("查看", actions_widget);
         view_btn->setMinimumSize(96, 48);
         view_btn->setStyleSheet(button_style(theme::ACCENT, theme::PANEL));

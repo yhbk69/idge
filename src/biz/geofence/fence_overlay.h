@@ -13,7 +13,8 @@
 // 交互模式（DrawMode）：
 //   NoMode:     空闲模式，不处理鼠标事件
 //   RectDraw:   矩形绘制，按下拖动松开完成
-//   PolyDraw:   多边形绘制，逐点点击，右键/双击闭合
+//   PolyDraw:   多边形绘制，逐点点击；闭合有三个入口 —— 工具栏「闭合」钮
+//               （触屏唯一可靠的那条）、右键、双击
 //   DeleteMode: 删除模式，点击围栏删除
 //
 // 角色（FenceRole）与模式是**两个正交的维度**：模式决定"怎么画"，
@@ -86,6 +87,14 @@ public:
 
     // 将当前围栏数据保存到 FenceManager
     void saveFences();
+
+    // 多边形的手势闭合入口（工具栏「闭合」「撤销」按钮调这两个）。
+    // public 的理由是**触屏没有右键**，而闭合原本只挂在右键与双击上；
+    // 双击在电容屏上还极易被识别成拖动。右键/双击两条老路径保留，
+    // 但都改成调用 closePolygon()，闭合语义只有一份。
+    // 不足 3 点：closePolygon 静默返回（不落盘、不弹框），undoLastPoint 空操作。
+    void closePolygon();
+    void undoLastPoint();
 
 signals:
     void fenceUpdated();

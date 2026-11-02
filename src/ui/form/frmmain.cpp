@@ -99,6 +99,19 @@ frmMain::frmMain(QWidget *parent) : QWidget(parent), ui(new Ui::frmMain)
     // （构造里改 geometry 会打断全屏），见 Lane E 的说明。
     QtHelper::enableTouchScrollAll(this);
 
+    // 触屏命中区审计：IDGE_TOUCHDUMP=1 时每 2s 打一遍**当前可见**的可点件真实高度。
+    // 为什么必须实测而不能推算：min-height 不含 padding/border、setFixedSize 会封顶、
+    // 内联 QSS 会打穿皮肤层，三条规则叠加后代码里的数字和屏幕上的像素经常不符。
+    // 不开这个变量时零开销（定时器都不建）。
+    if (qEnvironmentVariableIsSet("IDGE_TOUCHDUMP")) {
+        QTimer *dumpTimer = new QTimer(this);
+        dumpTimer->setInterval(2000);
+        connect(dumpTimer, &QTimer::timeout, this, [this]() {
+            QtHelper::dumpTouchGeometry(this);
+        });
+        dumpTimer->start();
+    }
+
     // 门在最上面：所有页面都建好了才合门，这样登录页是构造完成后唯一可见的页面。
     // 四路视频此刻还没开（initForm 第 11 步已挪到 onLoginSucceeded），
     // 所以登录期间不推流、不检测、不出报警。
@@ -353,11 +366,16 @@ void frmMain::initForm()
     // 10. 设置各通道围栏覆盖层的通道号 + 加载围栏配置
     //     必须在开流之前：解码器建推理任务时要检查"本通道有没有模型能产出围栏类别"，
     //     晚加载会让这条告警静默跳过（围栏本身在 decodeLoop 里逐帧读，不受时序影响）。
+    //     ⚠ 这两步的先后**不能换**：setChannel() 内部会立刻 loadFences()，
+    //     而 loadFences() 读的是 FenceManager 的内存表。先 setChannel 就等于让四块画布
+    //     各自去抄一份还没灌过的空表 —— 结果开机后一条围栏线都不画（报警照报，因为
+    //     判定端逐帧现读），要等用户点一下工具栏的通道钮才"突然"显示出来。
+    //     2026-11-01 板端实测：重启后四宫格无任何围栏线，点通道2→通道1 后红框立刻出现。
+    geofence::FenceManager::instance().loadFromConfig();
     for (int i = 0; i < 4; ++i) {
         PlayerWidget *pw = videoWindow->playerWidget(i);
         if (pw) pw->setChannel(i);
     }
-    geofence::FenceManager::instance().loadFromConfig();
 
     // 11. 四路视频**不在这里开**。扫码登录前不推流、不检测、不出报警，
     //     开流动作在 onLoginSucceeded() 里经 startAllStreams() 完成（幂等）。
@@ -691,6 +709,21 @@ void frmMain::initBusinessPages()
         QMessageBox::warning(this, "警告", "人员点名服务初始化失败");
     }
 
+    // 弹窗自带的关闭钮：这两个是 WindowModal，原本唯一出口是 mutter 服务端装饰的 ×
+    // （约 24~28px，不是 QSS 能管的尺寸，皮肤层再怎么抬也抬不到它）。触屏上按不到
+    // 就等于把人锁在模态窗里，只能回主界面重开程序。给一颗 T1（72px）兜底。
+    auto addCloseBar = [](QDialog *dlg, QVBoxLayout *lay) {
+        QHBoxLayout *bar = new QHBoxLayout();
+        bar->setContentsMargins(16, 4, 16, 12);
+        bar->addStretch();
+        QPushButton *close = new QPushButton(QStringLiteral("关闭"));
+        close->setMinimumWidth(120);
+        close->setStyleSheet(theme::mainButton(theme::BTN_SECONDARY));
+        bar->addWidget(close);
+        lay->addLayout(bar);
+        QObject::connect(close, &QPushButton::clicked, dlg, &QDialog::accept);
+    };
+
     rollCallWidget_ = new RollCallWidget();
     rollCallWidget_->setService(rollCallService_);
     rollCallDialog_ = new QDialog(this);
@@ -701,6 +734,7 @@ void frmMain::initBusinessPages()
     auto* rollLayout = new QVBoxLayout(rollCallDialog_);
     rollLayout->setContentsMargins(0, 0, 0, 0);
     rollLayout->addWidget(rollCallWidget_);
+    addCloseBar(rollCallDialog_, rollLayout);
 
     // 设备盘点（初始化失败与点名同级弹窗提示）
     const bool equipmentOk = initEquipmentService();
@@ -718,6 +752,7 @@ void frmMain::initBusinessPages()
     auto* equipLayout = new QVBoxLayout(equipmentDialog_);
     equipLayout->setContentsMargins(0, 0, 0, 0);
     equipLayout->addWidget(equipmentWidget_);
+    addCloseBar(equipmentDialog_, equipLayout);
 
     // 智能识别页（二维码 + OCR + 人员点名 + 设备盘点 四卡片）
     // 可用性在构造时传入：服务先初始化完，卡片一出现就是终态（置灰卡片不响应点击）
@@ -1336,8 +1371,11 @@ void frmMain::initDebugPage()
             gl->addWidget(chNoteEdit_[i], i, 3);
 
             // 启用开关：即时生效——停用即停本路，启用即按当前源地址重开本路
+            // 皮肤层对 QCheckBox 只有 ::indicator 尺寸、没有整件高度档，所以这里必须自己抬：
+            // 实测 87x42 = 4.7mm 低于 6mm 下限，而它决定的是"这一路跑不跑检测"。
             QCheckBox *enableBox = new QCheckBox("启用");
             enableBox->setChecked(cfg.channelEnabled(i));
+            enableBox->setMinimumHeight(theme::TOUCH_FIELD_H);
             enableBox->setStyleSheet(theme::text(theme::TEXT, theme::FS_BODY));
             connect(enableBox, &QCheckBox::toggled, this, [this, i](bool on) {
                 ConfigManager &c = ConfigManager::instance();
@@ -1353,7 +1391,7 @@ void frmMain::initDebugPage()
             // 改成只给下限、让宽度跟着文字走 —— 触屏上截字是硬伤。
             QPushButton *modelBtn = new QPushButton("模型…");
             modelBtn->setMinimumWidth(88);
-            modelBtn->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
+            modelBtn->setStyleSheet(theme::mainButton(theme::BTN_SECONDARY));
             connect(modelBtn, &QPushButton::clicked, this,
                     [this, i]() { openChannelModelsDialog(i); });
             gl->addWidget(modelBtn, i, 5);
@@ -1361,7 +1399,7 @@ void frmMain::initDebugPage()
             // 清空按钮：清掉该路的视频路径 + 备注
             QPushButton *clearBtn = new QPushButton("清空");
             clearBtn->setMinimumWidth(88);
-            clearBtn->setStyleSheet(theme::miniButton(theme::DANGER));
+            clearBtn->setStyleSheet(theme::mainButton(theme::DANGER));
             connect(clearBtn, &QPushButton::clicked, this, [this, i, chEdit]() {
                 chEdit->clear();
                 chNoteEdit_[i]->clear();
@@ -1415,7 +1453,7 @@ void frmMain::initDebugPage()
 
         QPushButton *btnWsSave = new QPushButton("保存");
         btnWsSave->setMinimumWidth(88);   // 上限 60 会在新 padding 下截字，改给下限
-        btnWsSave->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
+        btnWsSave->setStyleSheet(theme::mainButton(theme::BTN_SECONDARY));
         glWs->addWidget(btnWsSave, 0, 3);
 
         // 连接状态
@@ -1428,7 +1466,7 @@ void frmMain::initDebugPage()
 
         wsConnectBtn_ = new QPushButton("连接");
         wsConnectBtn_->setMinimumWidth(88);
-        wsConnectBtn_->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
+        wsConnectBtn_->setStyleSheet(theme::mainButton(theme::BTN_SECONDARY));
         glWs->addWidget(wsConnectBtn_, 1, 3);
 
         // 保存按钮
@@ -1718,14 +1756,17 @@ constexpr int kConfCustom = -2;         ///< 手改 JSON 得到的非档位值�
 
 // ============================================================
 // touchComboQss: 表格内下拉的**本体**样式（弹层行高不在这里，见 theme::makeComboTouch）
-//   ⚠ 一条 QSS 里同一个占位符编号只会被 QString::arg 替换**一次**（每次替换编号最低的
-//   那一个出现），所以重复用到的值一律编号，别指望 %4 写两遍能替两处。
+//   padding 上下取 6：T2 的总高是 42 + 2*6 + 2*1 = 56，写成 4 就只有 52，
+//   同一张表里下拉比旁边的按钮矮 4px，看着像"没跟上档"。
+//   （更正：这里原先写"QString::arg 一个编号只替换一次，重复用到的值必须另编号"——
+//    那句是错的。板上用 /tmp/qsschk 实测：arg() 每次替换的是**当前编号最低的那个
+//    占位符的所有出现**，`%2` 写两遍两次都被替。编号递增只是为了让 .arg 链的顺序可读。）
 // ============================================================
 static QString touchComboQss()
 {
     return QStringLiteral(
         "QComboBox { background: %1; color: %2; border: 1px solid %3; border-radius: 4px;"
-        "  min-height: %4px; padding: 4px 8px; font-size: %5px; }"
+        "  min-height: %4px; padding: 6px 8px; font-size: %5px; }"
         "QComboBox::drop-down { width: 28px; }")
         .arg(theme::FIELD, theme::TEXT, theme::BORDER)
         .arg(theme::TOUCH_FIELD_MIN_H)
@@ -1761,14 +1802,6 @@ void frmMain::initModelParamsUi()
     QGroupBox *group = new QGroupBox("模型参数（报警类别 / 置信度按模型配置）");
     group->setStyleSheet(theme::field(theme::PANEL));
     QVBoxLayout *v = new QVBoxLayout(group);
-
-    QLabel *hint = new QLabel(
-        "报警类别留空 = 这个模型只画框不报警；置信度选「(跟随全局)」= 用上方全局阈值。"
-        "改动对已引用它的通道即时生效（槽位数没变则在线换，否则自动重开那一路）。"
-        "阈值按**模型**配置：同一个模型挂在几路就几路共用这一个值，看『被引用通道』列。");
-    hint->setWordWrap(true);
-    hint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
-    v->addWidget(hint);
 
     modelParamTable_ = new QTableWidget(0, 6);
     modelParamTable_->setHorizontalHeaderLabels(
@@ -1996,14 +2029,6 @@ void frmMain::openChannelModelsDialog(int channel)
     dlg.resize(1080, 900);
     QVBoxLayout *v = new QVBoxLayout(&dlg);
 
-    QLabel *tip = new QLabel(QStringLiteral(
-        "勾选该通道要跑的模型；列表顺序即级联槽位顺序（画面左上角 M1/M2… 与报警 result_id 同序），"
-        "用『上移/下移』调整。确定后本通道会立即按新列表重开一次：该路重新拉流"
-        "（本地文件回到开头、RTSP/国标是重连），画面停顿约一秒。"));
-    tip->setWordWrap(true);
-    tip->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
-    v->addWidget(tip);
-
     QListWidget *list = new QListWidget;
     list->setStyleSheet(theme::field(theme::PANEL));
     // 已配置的排在最前（保持原顺序），其余库内模型跟在后面且未勾选
@@ -2171,6 +2196,9 @@ void frmMain::initGeofenceUi()
 
     QComboBox *clsCombo = new QComboBox;
     clsCombo->setStyleSheet(theme::field(theme::PANEL));
+    // 弹层行高 + 不吃滚轮：这一颗改的是"围栏拿哪个类别去比对检测结果"，
+    // 滚一下就把围栏判据换掉并当场写盘，和模型参数表里那颗置信度下拉同一类事故。
+    theme::makeComboTouch(clsCombo);
     // 候选 = 四个通道用到的模型类名并集（围栏只看这一路能不能产出该类别）
     QStringList candidates;
     for (int ch = 0; ch < cfg.channelCount(); ++ch) {
@@ -2196,16 +2224,6 @@ void frmMain::initGeofenceUi()
     throttleSpin->setValue(cfg.geofenceThrottleSeconds());
     throttleSpin->setStyleSheet(theme::field(theme::PANEL));
     gl->addWidget(throttleSpin, 1, 1);
-
-    QLabel *hint = new QLabel(QStringLiteral(
-        "围栏报警复用本通道已有的检测结果，不额外占用 NPU：只有当该通道的模型能产出"
-        "上述类别时围栏才会触发（启动日志会检查并告警）。"
-        "报警按【进入】触发：走进围栏报一条，站在里面不动不再报，离开约 1.5 秒后再进来算新的一条。"
-        "上面的秒数是同通道同类别两次报警的最小间隔，用于兜住框抖动与多人同时进入。"
-        "围栏形状仍在『视频监控』页绘制。"));
-    hint->setWordWrap(true);
-    hint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
-    gl->addWidget(hint, 2, 0, 1, 2);
 
     connect(clsCombo, &QComboBox::currentTextChanged, this, [this](const QString &cls) {
         ConfigManager &c = ConfigManager::instance();
@@ -2256,11 +2274,11 @@ void frmMain::initModelLibraryUi()
     QPushButton *btnZip = new QPushButton("导入zip包...");
     QPushButton *btnTest = new QPushButton("测试选中");
     QPushButton *btnDelete = new QPushButton("删除选中");
-    btnRefresh->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
-    btnImport->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
-    btnZip->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));
-    btnTest->setStyleSheet(theme::miniButton(theme::SUCCESS));
-    btnDelete->setStyleSheet(theme::miniButton(theme::DANGER));
+    btnRefresh->setStyleSheet(theme::mainButton(theme::BTN_SECONDARY));
+    btnImport->setStyleSheet(theme::mainButton(theme::BTN_SECONDARY));
+    btnZip->setStyleSheet(theme::mainButton(theme::BTN_SECONDARY));
+    btnTest->setStyleSheet(theme::mainButton(theme::SUCCESS));
+    btnDelete->setStyleSheet(theme::mainButton(theme::DANGER));
     QLabel *hint = new QLabel("库目录 model/library；改选路径后重启程序生效");
     hint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
     bar->addWidget(btnRefresh);

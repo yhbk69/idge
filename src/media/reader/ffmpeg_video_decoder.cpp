@@ -1144,23 +1144,67 @@ void FFmpegVideoDecoder::decodeLoop()
     // av_read_frame() 和 avcodec_receive_frame() 会立即返回错误，
     // 使解码线程能快速退出，避免阻塞在 IO 上（尤其是网络流）
     AVIOInterruptCB interrupt_cb = {decodeInterruptCallback, &running_};
-    fmt_ctx = avformat_alloc_context();
-    if (!fmt_ctx) {
-        qCritical() << "avformat_alloc_context failed (OOM)";
-        emit error("Decoder init failed (OOM)");
-        return;
-    }
-    fmt_ctx->interrupt_callback = interrupt_cb;
 
-    // 打开输入流：可以是本地文件(如 video.mp4)或网络流(如 rtsp://...)
-    // 这一步会自动探测容器格式（MP4/RTSP/FLV等）和编解码器信息
-    ret = avformat_open_input(&fmt_ctx, url_.toUtf8().constData(), nullptr, nullptr);
-    if (ret < 0)
-    {
+    // 打开输入流：可以是本地文件(如 video.mp4)、网络流(如 rtsp://...) 或摄像头节点。
+    // 文件与网络流交给 FFmpeg 自己探容器；/dev/videoN 必须显式给 v4l2 参数——
+    // 不传 input_format/video_size 时 ffmpeg 只能用"节点当前留下的"格式，那个值是
+    // 跨进程残留的（谁先跑谁定义形状），本机实测落过 1920x3136：单帧 12MB，等于把
+    // 每帧的 CPU 颜色转换与一切像素级后处理成本抬到 1080p 的 3 倍。
+    // 三档协商与 CameraPreviewDecoder 同一口径：CSI 经 rkisp 只出 NV12/UYVY，
+    // USB UVC 常只给 MJPEG，写死任一档都会让另一类摄像头直接打不开。
+    const bool isV4l2Node = url_.startsWith(QLatin1String("/dev/video")) &&
+                            av_find_input_format("v4l2") != nullptr;
+    static const char *const kV4l2InputFormats[] = {"nv12", "yuyv", "mjpeg"};
+    // 采集尺寸走 smartRecognition.camera_size（默认 1280x720）：它同时决定每帧要转多少
+    // 像素、ZBar 要看多少像素、OCR 那张静图有多少字。getter 已经把非法值夹回默认。
+    const QByteArray cameraSize =
+        isV4l2Node ? ConfigManager::instance().smartRecognitionCameraSize().toUtf8()
+                   : QByteArray();
+
+    // 摄像头节点：三档协商 + 一档"什么都不指定"的旧口径兜底；文件与网络流**只开一次**，
+    // 否则 RTSP 连不上时要把超时乘四，界面停在"最后一帧"上更久。
+    const int maxAttempts = isV4l2Node ? 4 : 1;
+    ret = AVERROR(EINVAL);
+    for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+        // 最后一档（attempt==3）不带任何参数，等价于改动前的开流方式。
+        const bool pinnedFormat = isV4l2Node && attempt < 3;
+
+        fmt_ctx = avformat_alloc_context();
+        if (!fmt_ctx) {
+            qCritical() << "avformat_alloc_context failed (OOM)";
+            emit error("Decoder init failed (OOM)");
+            return;
+        }
+        fmt_ctx->interrupt_callback = interrupt_cb;
+
+        AVDictionary *options = nullptr;
+        const AVInputFormat *inputFormat = nullptr;
+        if (pinnedFormat) {
+            inputFormat = av_find_input_format("v4l2");
+            av_dict_set(&options, "video_size", cameraSize.constData(), 0);
+            av_dict_set(&options, "input_format", kV4l2InputFormats[attempt], 0);
+            av_dict_set(&options, "framerate", "30", 0);
+        }
+
+        ret = avformat_open_input(&fmt_ctx, url_.toUtf8().constData(), inputFormat,
+                                  &options);
+        av_dict_free(&options);
+
+        if (ret == 0) {
+            if (pinnedFormat) {
+                qInfo() << "Camera" << url_ << "opened at" << cameraSize << "with"
+                        << kV4l2InputFormats[attempt];
+            }
+            break;
+        }
+        // 审查点：FFmpeg 约定 avformat_open_input 失败时内部已 free 并把传入指针
+        // 置 NULL，此处 free 实为对 NULL 的安全空操作，保留仅作防御性写法；
+        // 每一轮都必须重新 alloc 一个 context，沿用上一轮的指针是未定义行为。
         avformat_free_context(fmt_ctx);
         fmt_ctx = nullptr;
-        // 审查点：FFmpeg 约定 avformat_open_input 失败时内部已 free 并把传入指针
-        // 置 NULL，此处 free 实为对 NULL 的安全空操作，保留仅作防御性写法。
+    }
+    if (ret < 0) {
+        qWarning() << "Cannot open" << url_ << "ret =" << ret;
         emit error("Cannot open file");
         return;
     }

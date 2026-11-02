@@ -120,6 +120,9 @@ void EquipmentInventoryWidget::refreshTaskList() { loadTasks(); }
 // lambda 按值捕获 task.id（C++14 初始化捕获），不依赖行号。
 void EquipmentInventoryWidget::loadTasks() {
     if (!equipment_service_ || !task_table_) return;
+    // 与 roll_call_widget 同一个坑：setCellWidget 的容器按自身 sizeHint 居中放行格，
+    // 不拉满行格 ⇒ 容器比里面的钮矮就把钮裁掉下半截。容器高度必须跟行高同源。
+    constexpr int kTaskRowH = 72;
     task_table_->setRowCount(0);
     for (const auto& task : equipment_service_->getEquipmentTasks()) {
         const int row = task_table_->rowCount();
@@ -138,8 +141,10 @@ void EquipmentInventoryWidget::loadTasks() {
         task_table_->setItem(row, 3, status);
 
         auto* actions = new QWidget(task_table_);
+        actions->setFixedHeight(kTaskRowH);
         auto* layout = new QHBoxLayout(actions);
-        layout->setContentsMargins(12, 10, 12, 10);
+        // 容器 72、钮实测 66（皮肤 min-height 54 + 内联 padding 6*2），上下 margin 超 3 就溢出。
+        layout->setContentsMargins(12, 3, 12, 3);
         layout->setSpacing(10);
         const auto button_style = [](const char *accent) {
             return QString(
@@ -168,7 +173,7 @@ void EquipmentInventoryWidget::loadTasks() {
         connect(delete_button, &QPushButton::clicked, this,
                 [this, id = task.id]() { onDeleteTask(id); });
         task_table_->setCellWidget(row, 4, actions);
-        task_table_->setRowHeight(row, 72);
+        task_table_->setRowHeight(row, kTaskRowH);
     }
 }
 

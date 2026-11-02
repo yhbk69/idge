@@ -122,6 +122,10 @@ QString probeCameraNode()
     return raw_format_node;
 }
 
+// 智能识别/扫码摄像头的默认采集尺寸。"帧率优先"那一档：摄像头每帧的 CPU 颜色转换量、
+// 喂给 ZBar 的像素量、OCR 抓下来的那张静图，三处都按这个数走。
+static const char *const kDefaultCameraSize = "1280x720";
+
 } // namespace
 
 // ============================================================================
@@ -202,6 +206,14 @@ void ConfigManager::load(const QString &path)
 
         // 报警上行（P0-1：报警信息 + 截图 + 片段经 WS 推送）
         root_["alarm_uplink"] = makeAlarmUplinkDefaults();
+
+        // 智能识别/扫码：用哪个节点 + 采多大分辨率。两个键都有 getter，所以写出来；
+        // 此前这段根本不进默认配置，"用哪只摄像头、多少像素"全靠运行时猜、现场无法改。
+        // camera 留空 = 走 probeCameraNode() 实探测；camera_size 是帧率与清晰度的旋钮。
+        root_["smartRecognition"] = QJsonObject{
+            {"camera", QString()},
+            {"camera_size", QString::fromLatin1(kDefaultCameraSize)},
+        };
 
         saveUnsafe();  // 保存默认配置
         return;
@@ -1377,4 +1389,38 @@ QString ConfigManager::smartRecognitionCamera() const
     qWarning() << "smartRecognition.camera is unset and no usable camera node was found;"
                   " falling back to /dev/video0";
     return QStringLiteral("/dev/video0");
+}
+
+// 智能识别/扫码摄像头的采集尺寸。默认值即 kDefaultCameraSize（"帧率优先"那一档）。
+QString ConfigManager::smartRecognitionCameraSize() const
+{
+    QString configured;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        configured = root_["smartRecognition"].toObject()["camera_size"].toString();
+    }
+    if (configured.trimmed().isEmpty())
+        return QString::fromLatin1(kDefaultCameraSize);
+
+    // "WxH"，两轴都必须是 8 的倍数：本机 rkisp mainpath 的 stepwise 范围写的就是
+    // step 8/8，给了非 8 倍数会被 S_FMT 拒掉，表现成"摄像头打不开"而不是一句尺寸不对。
+    const QStringList parts = configured.trimmed().split(QLatin1Char('x'));
+    bool okW = false;
+    bool okH = false;
+    const int w = parts.size() == 2 ? parts.at(0).trimmed().toInt(&okW) : -1;
+    const int h = parts.size() == 2 ? parts.at(1).trimmed().toInt(&okH) : -1;
+    if (!okW || !okH || w < 320 || w > 4224 || h < 240 || h > 3136) {
+        qWarning() << "smartRecognition.camera_size 不可用:" << configured
+                   << "应为 \"宽x高\"（宽 320..4224、高 240..3136）; 回退"
+                   << kDefaultCameraSize;
+        return QString::fromLatin1(kDefaultCameraSize);
+    }
+
+    const int alignedW = w & ~7;
+    const int alignedH = h & ~7;
+    if (alignedW != w || alignedH != h) {
+        qWarning() << "smartRecognition.camera_size" << configured
+                   << "不是 8 的倍数，已对齐到" << alignedW << 'x' << alignedH;
+    }
+    return QStringLiteral("%1x%2").arg(alignedW).arg(alignedH);
 }

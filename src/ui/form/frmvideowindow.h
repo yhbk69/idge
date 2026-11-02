@@ -83,6 +83,11 @@ private:
     // 在 onFenceToolClicked 里被直接翻译成 DrawMode，混进去会让"点禁区"变"换工具"。
     QButtonGroup *fenceRoleGroup_ = nullptr;
     QPushButton *fenceChannelBtns_[4] = {nullptr};
+    // 多边形的两个动作钮（不属于 fenceDrawGroup_ —— 它们是动作，不是模式）。
+    // 留着指针只为一个目的：只在多边形模式下可点，其余模式呈灰态。
+    // 触屏上没有 hover/tooltip，"点了没反应"是唯一能说的提示。
+    QPushButton *fenceUndoPointBtn_ = nullptr;
+    QPushButton *fenceClosePolyBtn_ = nullptr;
 
     // 把当前选中的角色推给指定通道的 overlay（绘制前与切通道后都要调，
     // 否则角色会落后于通道，画出来的形状带着上一个通道的选择落盘）。
