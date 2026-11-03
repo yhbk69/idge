@@ -42,6 +42,7 @@
 #include "login_widget.h"        // 扫码登录页（stackedWidget 第 0 页 = 门）
 #include "construction_session.h"
 #include "construction_detail_dialog.h"  // 点右上角登录人弹出的施工详情
+#include "stream_editor_dialog.h"        // 视频流注册表（video.sources[]）编辑对话框
 #include "roll_call_service.h"
 #include "equipment_inventory_service.h"
 #include "model_registry.h"
@@ -1116,7 +1117,14 @@ void frmMain::startAllStreams()
     for (int ch = 0; ch < cfg.channelCount(); ++ch) {
         if (!cfg.channelEnabled(ch))
             continue;
-        videoWindow->openVideo(ch, cfg.channelSource(ch));
+        // 按**解析后的流**开这一路：内联地址的旧配置、以及引用 video.sources[] 的新配置
+        // 都在 resolveChannelSource 里合流，这里不再自己拼一遍判据。
+        // 解析不出地址（未配置，或 source_id 悬空）就不开：空地址交给 openVideo 拦，
+        // 悬空 id 的告警也在那一步打，界面留"视频待接入"而不是黑一块。
+        const VideoSourceCfg source = cfg.resolveChannelSource(ch);
+        if (source.url.isEmpty())
+            continue;
+        videoWindow->openVideo(ch, source);
         ++opened;
     }
     streamsRunning_ = true;
@@ -1376,8 +1384,12 @@ void frmMain::initDebugPage()
     // 模型路径/标签文件/输入尺寸/模型类型四行在本轮 schema 里失去意义：
     // config 只写模型库目录名，路径与标签由 model/library 解析，所以整行隐藏。
     for (int i = 0; i < 4; ++i) {
+        // 四颗源地址手填框整片隐藏：选流由下拉负责（下拉就放在它们原来那一格）。
+        // 先 removeWidget 再 hide：留在网格里的那一格会同时被两颗控件占着，
+        // 单元格的尺寸要按两者一起算，几何上不如干脆摘干净。
         QLineEdit *chEdit = channelSourceEdit(i);
-        chEdit->setText(cfg.channelSource(i));
+        ui->gridLayout_model->removeWidget(chEdit);
+        chEdit->setVisible(false);
     }
     for (QWidget *w : {static_cast<QWidget *>(ui->labModelPath),
                        static_cast<QWidget *>(ui->lineEditModelPath),
@@ -1394,7 +1406,7 @@ void frmMain::initDebugPage()
         w->setVisible(false);
     }
     if (QGroupBox *grp = qobject_cast<QGroupBox *>(ui->gridLayout_model->parentWidget()))
-        grp->setTitle("视频通道（源 / 备注 / 启用 / 级联模型）");
+        grp->setTitle("视频通道（选流 / 备注 / 启用 / 级联模型）");
 
     // ========== 检测配置（从 config.json 读取） ==========
     // 触屏够得着的最低值必须就是安全下限：不钉这一颗，长按 ▼ 能一路按到 0.00，
@@ -1415,23 +1427,20 @@ void frmMain::initDebugPage()
     // 实际路数 = 各通道解析出的模型数之和，这里显示真实值而不是 config 里的占位 3。
     ui->labThreadsVal->setText(QString("%1 路（Σ各通道模型）").arg(configuredTaskCount()));
 
-    // ========== 每路：备注 + 启用开关 + 级联模型 + 清空 ==========
+    // ========== 每路：选流下拉 + 备注 + 启用开关 + 级联模型 + 清空 ==========
     {
         QGridLayout *gl = ui->gridLayout_model;   // 现有通道所在的分组框网格
         for (int i = 0; i < 4; ++i) {
-            QLineEdit *chEdit = channelSourceEdit(i);
-            // 地址输入框改动即落盘（浏览按钮也会写，这里补上手输的情况）。
-            // 失焦也会触发 editingFinished，值没变就不落盘、不刷日志。
-            connect(chEdit, &QLineEdit::editingFinished, this, [this, i, chEdit]() {
-                ConfigManager &c = ConfigManager::instance();
-                const QString v = chEdit->text().trimmed();
-                if (c.channelSource(i) == v)
-                    return;
-                c.setChannelSource(i, v);
-                c.save();
-                log("system", QStringLiteral("通道%1 视频源已保存: %2（点『浏览』可立即重开本路，否则重启后生效）")
-                                .arg(i + 1).arg(v.isEmpty() ? QStringLiteral("(空)") : v));
-            });
+            // 选流下拉占在手填框原来那一格（那四颗框已摘出布局并隐藏，见上面）。
+            // 为什么是下拉而不是输入框：一条流的参数有十项（类型/尺寸/帧率/循环/超时/重连…），
+            // 输入框只给得出 url，其余必然全部回落默认——那注册表就白建了。
+            QComboBox *sourceCombo = new QComboBox;
+            sourceCombo->setMinimumWidth(300);   // 与原手填框同宽，整行几何不动
+            theme::makeComboTouch(sourceCombo);  // 弹层行高抬到触屏档，否则选项要点歪
+            chSourceCombo_[i] = sourceCombo;
+            gl->addWidget(sourceCombo, i, 1);
+            connect(sourceCombo, QOverload<int>::of(&QComboBox::activated), this,
+                    [this, i]() { applyChannelSourceChoice(i); });
 
             // 备注输入框（编辑完自动保存）
             chNoteEdit_[i] = new QLineEdit(cfg.channelNote(i));
@@ -1470,21 +1479,39 @@ void frmMain::initDebugPage()
                     [this, i]() { openChannelModelsDialog(i); });
             gl->addWidget(modelBtn, i, 5);
 
-            // 清空按钮：清掉该路的视频路径 + 备注
+            // 清空按钮：撤掉本路的流引用 + 内联地址 + 备注，并立刻停本路
             QPushButton *clearBtn = new QPushButton("清空");
             clearBtn->setMinimumWidth(88);
             clearBtn->setStyleSheet(theme::mainButton(theme::DANGER));
-            connect(clearBtn, &QPushButton::clicked, this, [this, i, chEdit]() {
-                chEdit->clear();
+            connect(clearBtn, &QPushButton::clicked, this, [this, i]() {
                 chNoteEdit_[i]->clear();
                 ConfigManager &c = ConfigManager::instance();
+                // 引用与内联两个键一起清：setChannelSource("") 内部已顺带清 source_id，
+                // 这里再写一次是不让"清空"这个动作依赖那条实现细节。
+                c.setChannelSourceId(i, QString());
                 c.setChannelSource(i, "");
                 c.setChannelNote(i, "");
                 c.save();
-                log("system", QString("通道%1 视频源与备注已清空").arg(i + 1));
+                log("system", QString("通道%1 视频流引用与备注已清空").arg(i + 1));
+                refreshChannelSourceCombos();
+                // 清完就重开本路：只改配置不停流，画面还在跑刚才那条引用，
+                // 现场会以为"清空没生效"。
+                applyChannelConfigNow(i);
             });
             gl->addWidget(clearBtn, i, 6);
         }
+
+        // 视频流注册表入口：一条流可以被多路同时引用，它不属于任何一行通道，
+        // 所以单独占一行放在四路下面（跨"标签 + 下拉"两列，不动既有列宽）。
+        QPushButton *streamMgrBtn = new QPushButton("视频流管理…");
+        streamMgrBtn->setMinimumWidth(140);
+        streamMgrBtn->setStyleSheet(theme::mainButton(theme::BTN_SECONDARY));
+        connect(streamMgrBtn, &QPushButton::clicked, this, [this]() { openStreamManager(); });
+        gl->addWidget(streamMgrBtn, gl->rowCount(), 0, 1, 2);
+
+        // 灌数据放在四颗下拉都建好之后：refresh 会按当前 config 把每路选中项摆对，
+        // 期间全程屏蔽信号，不会在这里就触发一次重开流。
+        refreshChannelSourceCombos();
     }
 
     // ========== 模型库管理区 + 模型参数表 ==========
@@ -1659,6 +1686,9 @@ void frmMain::initDebugPage()
 // channelSourceEdit: 通道号（0-based）→ "视频通道"分组框里的源地址输入框
 //   .ui 里四行控件叫 lineEditCh1~4（1 基命名），程序内部一律 0 基，
 //   换算只留这一处。
+//   这四颗框现在**已摘出布局并隐藏、不再读写**：选流由下拉负责（见 refreshChannelSourceCombos），
+//   内联 source 那个键的值直接从 ConfigManager 读（channelInlineSource）。
+//   控件本身留在 .ui 里不动 —— 摘出布局 + 隐藏就够了，不必改 Designer 里的对象名。
 // ============================================================
 QLineEdit *frmMain::channelSourceEdit(int channel) const
 {
@@ -1668,6 +1698,149 @@ QLineEdit *frmMain::channelSourceEdit(int channel) const
     case 2: return ui->lineEditCh3;
     case 3: return ui->lineEditCh4;
     default: return nullptr;
+    }
+}
+
+// 下拉每一项的两个角色：kind 决定"选中它意味着什么动作"，id 只在 kind=流 时有意义。
+// 用角色而不是靠文本前缀判断：文本是给人看的，会随显示口径改，动作判据不能跟着漂。
+enum SourcePickKind {
+    kPickStream = 0,   ///< 引用注册表里的一条流（id 见 kSrcRoleStreamId）
+    kPickInline = 1,   ///< 用通道里内联的 source（旧口径）
+    kPickNone = 2,     ///< 不选流：这一路不开
+    kPickBroken = 3,   ///< 配置里的 source_id 在注册表里已不存在（悬空引用，只展示不可选动作）
+};
+static const int kSrcRoleKind = Qt::UserRole;
+static const int kSrcRoleStreamId = Qt::UserRole + 1;
+
+// ============================================================
+// refreshChannelSourceCombos: 按当前 config 重灌四路"选流"下拉
+// ============================================================
+// 全程 blockSignals：这个函数只在"界面要跟配置对齐"时调用（建页、注册表改动、
+// 清空），任何一次都不该被当成用户动作去写盘或重开流。
+// ============================================================
+void frmMain::refreshChannelSourceCombos()
+{
+    ConfigManager &cfg = ConfigManager::instance();
+    const QList<VideoSourceCfg> streams = cfg.videoSources();
+    for (int i = 0; i < 4; ++i) {
+        QComboBox *combo = chSourceCombo_[i];
+        if (!combo)
+            continue;   // 设置页还没建起来（登录门在它之前），这里无事可做
+        const QString curId = cfg.channelSourceId(i);
+        const QString inlineUrl = cfg.channelInlineSource(i);
+        combo->blockSignals(true);
+        combo->clear();
+
+        for (const VideoSourceCfg &s : streams) {
+            // 显示 "id · 备注(没有备注就显示地址)"：id 是唯一键，必须打头，
+            // 否则两条备注相同的流在下拉里长得一样。完整参数留在 tooltip。
+            combo->addItem(QStringLiteral("%1 · %2")
+                               .arg(s.id, s.note.isEmpty() ? s.url : s.note), kPickStream);
+            const int row = combo->count() - 1;
+            combo->setItemData(row, s.id, kSrcRoleStreamId);
+            combo->setItemData(row,
+                               QStringLiteral("地址：%1\n类型：%2 ｜ 尺寸：%3 ｜ 帧率：%4\n循环：%5 ｜ 硬解：%6 ｜ 超时：%7ms ｜ 重连：%8ms")
+                                   .arg(s.url,
+                                        s.type.isEmpty() ? QStringLiteral("(按地址自动识别)") : s.type)
+                                   .arg(s.width > 0 && s.height > 0
+                                            ? QStringLiteral("%1x%2").arg(s.width).arg(s.height)
+                                            : QStringLiteral("(不指定)"))
+                                   .arg(s.fps > 0 ? QString::number(s.fps) : QStringLiteral("(不指定)"))
+                                   .arg(s.loop ? QStringLiteral("开") : QStringLiteral("关"))
+                                   .arg(s.hardwareDecode ? QStringLiteral("开") : QStringLiteral("关"))
+                                   .arg(s.timeoutMs)
+                                   .arg(s.reconnectMs),
+                               Qt::ToolTipRole);
+        }
+
+        if (!curId.isEmpty() && cfg.videoSource(curId).url.isEmpty()) {
+            // 悬空引用要**显式列出来**而不是悄悄不选中：这一路不开流，界面却看不出为什么，
+            // 现场就会去查摄像头而不是查配置（ConfigManager 那边的口径是"宁可不黑屏也要留告警"）。
+            combo->addItem(QStringLiteral("（流 %1 已不存在）").arg(curId), kPickBroken);
+            combo->setItemData(combo->count() - 1, curId, kSrcRoleStreamId);
+        }
+        if (!inlineUrl.isEmpty())
+            combo->addItem(QStringLiteral("（内联地址）%1").arg(inlineUrl), kPickInline);
+        if (curId.isEmpty() && inlineUrl.isEmpty())
+            combo->addItem(QStringLiteral("（不选流，本路不开）"), kPickNone);
+
+        int sel = -1;
+        for (int r = 0; r < combo->count(); ++r) {
+            const int kind = combo->itemData(r, kSrcRoleKind).toInt();
+            if (kind == kPickInline) {
+                if (curId.isEmpty()) { sel = r; break; }   // 没引用注册表 → 当前就在用内联
+                continue;
+            }
+            if (combo->itemData(r, kSrcRoleStreamId).toString() == curId) { sel = r; break; }
+        }
+        combo->setCurrentIndex(sel < 0 ? 0 : sel);
+        combo->blockSignals(false);
+    }
+}
+
+// ============================================================
+// applyChannelSourceChoice: 用户在某一路的下拉里选了别的项
+// ============================================================
+// activated 在"重新点中当前项"时也会发，所以每个分支都先比值再动：
+// 不判就会把"点了没改"变成一次停流 + 重开流。
+// ============================================================
+void frmMain::applyChannelSourceChoice(int channel)
+{
+    QComboBox *combo = chSourceCombo_[channel];
+    if (!combo || combo->currentIndex() < 0)
+        return;
+    const int kind = combo->currentData(kSrcRoleKind).toInt();
+    if (kind == kPickBroken)
+        return;   // 只是把悬空状态显示出来，没有"切到悬空"这个动作
+
+    ConfigManager &c = ConfigManager::instance();
+    if (kind == kPickStream) {
+        const QString id = combo->currentData(kSrcRoleStreamId).toString();
+        if (c.channelSourceId(channel) == id)
+            return;
+        c.setChannelSourceId(channel, id);
+        c.save();
+        log("system", QStringLiteral("通道%1 已引用视频流 %2：%3")
+                        .arg(channel + 1)
+                        .arg(id, c.videoSource(id).url));
+    } else {
+        // 内联 / 不选流 都是"撤掉引用"，区别只在 config 里还留没留内联地址
+        if (c.channelSourceId(channel).isEmpty())
+            return;
+        c.setChannelSourceId(channel, QString());
+        c.save();
+        log("system", kind == kPickInline
+                ? QStringLiteral("通道%1 已改用内联地址：%2")
+                      .arg(channel + 1).arg(c.channelInlineSource(channel))
+                : QStringLiteral("通道%1 已不引用任何流，本路不开").arg(channel + 1));
+    }
+    applyChannelConfigNow(channel);
+}
+
+// ============================================================
+// openStreamManager: 打开"视频流管理"对话框，落盘后重开受影响的那几路
+// ============================================================
+void frmMain::openStreamManager()
+{
+    ConfigManager &cfg = ConfigManager::instance();
+    // 先记住每路当前引用的是哪条流：对话框里删一条流时，ConfigManager 会把引用它的
+    // source_id 一起清掉，事后再拿"当前引用"去比对就找不到受影响的那一路了。
+    QString before[4];
+    for (int i = 0; i < 4; ++i)
+        before[i] = cfg.channelSourceId(i);
+
+    StreamEditorDialog dlg(this);
+    if (dlg.exec() != QDialog::Accepted)
+        return;   // 取消：改的是工作副本，注册表一个字节都没动
+
+    const QStringList touched = dlg.touchedSourceIds();
+    refreshChannelSourceCombos();
+    if (touched.isEmpty())
+        return;
+    for (int i = 0; i < 4; ++i) {
+        // 引用变了（被删流连带清空）或引用的那条流被改过 → 整路重开
+        if (before[i] != cfg.channelSourceId(i) || touched.contains(before[i]))
+            applyChannelConfigNow(i);
     }
 }
 
@@ -1708,17 +1881,23 @@ void frmMain::applyChannelConfigNow(int channel)
     dec->releaseTasks();
 
     ConfigManager &cfg = ConfigManager::instance();
-    const QString source = cfg.channelSource(channel);
+    // 解析整条流（不只是地址）：这一路重开时要带走的是 type/尺寸/帧率/loop/超时/重连，
+    // 只取 url 的话注册表里改这些参数就得重启才生效——而"改了不生效"正是本仓最忌讳的假开关。
+    const VideoSourceCfg source = cfg.resolveChannelSource(channel);
     const QStringList ids = cfg.channelModelIds(channel);
     if (!cfg.channelEnabled(channel))
         log("system", QStringLiteral("通道%1 已停用，本路不开流").arg(channel + 1));
-    else if (source.isEmpty())
-        log("system", QStringLiteral("通道%1 没有视频源地址，本路不开流").arg(channel + 1));
+    else if (source.url.isEmpty())
+        log("system", QStringLiteral("通道%1 没有可用的视频流（未配置，或 source_id 悬空），本路不开流")
+                          .arg(channel + 1));
     else {
         videoWindow->openVideo(channel, source);
-        log("system", QStringLiteral("通道%1 已重开: %2 ｜ 模型 %3")
+        log("system", QStringLiteral("通道%1 已重开: %2%3 ｜ 模型 %4")
                             .arg(channel + 1)
-                            .arg(source)
+                            .arg(source.url)
+                            .arg(source.id.isEmpty()
+                                     ? QString()
+                                     : QStringLiteral("（流 %1）").arg(source.id))
                             .arg(ids.isEmpty() ? QStringLiteral("(未配置，回退库内默认模型)")
                                                : ids.join(QStringLiteral(" → "))));
     }
@@ -2682,61 +2861,74 @@ void frmMain::testSelectedModel()
 // ==========================================
 // 视频通道控制
 // ==========================================
-
-/**
- * @brief 打开视频到指定通道
- * @param channel 通道索引（0-3，对应 videoWindow1~4）
- * @param path    视频文件路径或RTSP地址
- */
-void frmMain::openVideoToChannel(int channel, const QString &path)
-{
-    if (!videoWindow) return;
-
-    // 走 frmVideoWindow::openVideo 这一条口径：它会带上通道号。
-    // 直接调 PlayerWidget::open(path) 会用默认参数 channel=0，把这一路的
-    // decoder 通道号改成 0——槽位解析、报警键、围栏全部按通道 0 走。
-    videoWindow->openVideo(channel, path);
-    if (!path.isEmpty())
-        log("system", QString("通道%1 视频源已加载: %2（模型与报警类别沿用当前配置，改动在设置页即时生效）")
-                        .arg(channel + 1).arg(path));
-}
+// 「把某个地址开到某一路」不再从这里走：这一路的源由 video.channels[i].source_id
+// 决定，改引用的唯一出口是 applyChannelSourceChoice() → applyChannelConfigNow()，
+// 免得留下第二条"绕过配置直接开流"的路径（它开出来的流和 config 里写的不一定一致）。
 
 // ==========================================
 // 4路视频浏览按钮
 // ==========================================
 
-/**
- * @brief 浏览某一路的视频源并立即打开
- * @param channel 通道号（0-based，与 config 的 video.channels 下标同口径）
- * @param edit    该通道源地址所在的 QLineEdit
- *
- * 选中文件后：更新输入框 → 写 config 并落盘 → openVideoToChannel 重开这一路。
- */
-void frmMain::browseChannelSource(int channel, QLineEdit *edit)
+// 给"浏览添加"生成一个不撞车的流 id：local-chN，被占用就递增后缀。
+// id 是注册表主键，撞车等于把另一路正在用的流改掉，所以宁可一路试到 99 再退到时间戳。
+static QString freeStreamIdFor(ConfigManager &c, int channel)
 {
-    if (!edit) return;
-    const QString currentPath = edit->text().isEmpty()
-        ? QDir::homePath()
-        : QFileInfo(edit->text()).path();
+    const QString base = QStringLiteral("local-ch%1").arg(channel + 1);
+    for (int k = 1; k <= 99; ++k) {
+        const QString id = (k == 1) ? base : QStringLiteral("%1-%2").arg(base).arg(k);
+        if (c.videoSource(id).url.isEmpty())
+            return id;
+    }
+    return base + QStringLiteral("-%1").arg(QDateTime::currentSecsSinceEpoch());
+}
+
+/**
+ * @brief 浏览某一路的视频文件，把它登记成一条流并让本路引用
+ * @param channel 通道号（0-based，与 config 的 video.channels 下标同口径）
+ *
+ * 选中文件后：建 video.sources[] 条目 → 本路 source_id 指过去 → 落盘 → 立即重开这一路。
+ * 不再写内联 source：内联那条路只装得下 url 一个参数，类型/循环/硬解/超时/重连
+ * 全要落回默认值，注册表就白建了。
+ */
+void frmMain::browseChannelSource(int channel)
+{
+    ConfigManager &c = ConfigManager::instance();
+    const QString curUrl = c.resolveChannelSource(channel).url;
+    const QString startDir = curUrl.isEmpty() ? QDir::homePath() : QFileInfo(curUrl).path();
 
     QFileDialog dialog(this, QString("选择通道%1视频文件").arg(channel + 1));
     dialog.setFileMode(QFileDialog::ExistingFile);
-    dialog.setDirectory(currentPath);
+    dialog.setDirectory(startDir);
     dialog.setNameFilter("视频文件 (*.mp4 *.avi *.mkv *.mov *.flv *.ts *.webm);;所有文件 (*)");
 
-    if (dialog.exec() == QDialog::Accepted && !dialog.selectedFiles().isEmpty()) {
-        const QString file = dialog.selectedFiles().first();
-        edit->setText(file);
-        ConfigManager::instance().setChannelSource(channel, file);
-        ConfigManager::instance().save();
-        openVideoToChannel(channel, file);
+    if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty())
+        return;
+    const QString file = dialog.selectedFiles().first();
+
+    VideoSourceCfg s;
+    s.id = freeStreamIdFor(c, channel);
+    s.type = QStringLiteral("file");
+    s.url = file;
+    s.note = QStringLiteral("浏览添加");
+    s.hardwareDecode = true;
+    // loop/timeoutMs/reconnectMs 一律留默认（关 / 0 / 0）：与"内联打开一个文件"的旧行为逐字一致。
+    // 要循环播放或断流重连，去「视频流管理…」里改那条流——参数现在有据可依了。
+    if (!c.setVideoSource(s)) {
+        log("system", QStringLiteral("通道%1 建流失败：id 或地址为空").arg(channel + 1));
+        return;
     }
+    c.setChannelSourceId(channel, s.id);
+    c.save();
+    log("system", QStringLiteral("通道%1 已登记视频流 %2：%3")
+                    .arg(channel + 1).arg(s.id, file));
+    refreshChannelSourceCombos();
+    applyChannelConfigNow(channel);
 }
 
-void frmMain::on_btnBrowseCh1_clicked() { browseChannelSource(0, ui->lineEditCh1); }
-void frmMain::on_btnBrowseCh2_clicked() { browseChannelSource(1, ui->lineEditCh2); }
-void frmMain::on_btnBrowseCh3_clicked() { browseChannelSource(2, ui->lineEditCh3); }
-void frmMain::on_btnBrowseCh4_clicked() { browseChannelSource(3, ui->lineEditCh4); }
+void frmMain::on_btnBrowseCh1_clicked() { browseChannelSource(0); }
+void frmMain::on_btnBrowseCh2_clicked() { browseChannelSource(1); }
+void frmMain::on_btnBrowseCh3_clicked() { browseChannelSource(2); }
+void frmMain::on_btnBrowseCh4_clicked() { browseChannelSource(3); }
 
 // ==========================================
 // 阈值变化 -> 保存配置 + 日志

@@ -15,6 +15,7 @@
 #include <QWidget>
 #include <QPushButton>
 #include <QButtonGroup>
+#include "ConfigManager.h"   // VideoSourceCfg：openVideo 的正式入参（一条流，不只是地址）
 
 class PlayerWidget;
 
@@ -62,6 +63,13 @@ public:
      * 作用：将指定路径的视频文件加载到对应通道的播放器中进行解码显示
      */
     void openVideo(int ch, const QString &path);
+
+    /**
+     * @brief 打开"一条流"到指定通道（正式路径：带 type/尺寸/帧率/loop/超时/重连等打开参数）
+     * @param ch     通道号（0-3）
+     * @param source 已由 ConfigManager::resolveChannelSource() 解析出来的流；url 为空则不动
+     */
+    void openVideo(int ch, const VideoSourceCfg &source);
 
 private:
     /**

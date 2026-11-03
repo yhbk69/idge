@@ -158,16 +158,33 @@ ConfigManager &ConfigManager::instance()
 static QJsonObject makeRecordingDefaults();
 static QJsonObject makeAlarmUplinkDefaults();
 static QJsonObject makePadServerDefaults();
+// 流注册表的 JSON 互转（定义在"视频流注册表"一节，makeVideoDefaults 要先用一次）
+static QJsonObject sourceToJson(const VideoSourceCfg &s);
 
 // 新装现场的默认 video 段。直接按 V2 写，是为了让全新配置根本不进迁移分支
 // （迁移分支只在读到老文件时才该跑一次）。
 static QJsonObject makeVideoDefaults()
 {
+    // 一条自带的测试片作为注册表样板：全新安装的通道就写成"引用"，
+    // 让现场第一眼看到的结构就是"流在 sources 里、通道只写 source_id"。
+    // 解析出来的地址仍是 assets/test/192.mp4，所以这批改默认值不改变任何行为。
+    VideoSourceCfg demo;
+    demo.id = QStringLiteral("file-demo");
+    demo.type = QStringLiteral("file");
+    demo.url = QStringLiteral("assets/test/192.mp4");
+    demo.note = QStringLiteral("仓库自带测试片（改这几路就改这一条）");
+    demo.loop = true;
+    demo.hardwareDecode = true;
+
+    QJsonArray sources;
+    sources.append(sourceToJson(demo));
+
     const QJsonArray kModels{"yolo11n-ppe", "yolo11n-coco"};
     QJsonArray channels;
     for (int ch = 0; ch < 4; ++ch) {
         channels.append(QJsonObject{{"channel", ch},
-                                    {"source", "assets/test/192.mp4"},
+                                    {"source_id", demo.id},
+                                    {"source", ""},
                                     {"note", ""},
                                     {"enabled", true},
                                     {"models", kModels}});
@@ -179,6 +196,7 @@ static QJsonObject makeVideoDefaults()
             {"yolo11n-coco", QJsonObject{{"alarm_class", ""},
                                          {"note", "COCO通用检测"}}},
         }},
+        {"sources", sources},
         {"channels", channels},
     };
 }
@@ -274,6 +292,12 @@ void ConfigManager::load(const QString &path)
     // 缺 pad_server 段时补齐默认值（enabled=false，出厂不开监听口）
     if (migratePadServerDefaults()) {
         qInfo() << "[ConfigManager] 已补齐 Pad 服务端默认配置 (pad_server/)";
+        saveUnsafe();
+    }
+
+    // 缺 video.sources 段时补一个空数组（不改各通道已有的内联 source）
+    if (migrateVideoSourcesDefaults()) {
+        qInfo() << "[ConfigManager] 已补齐视频流注册表空段 (video.sources)";
         saveUnsafe();
     }
 
@@ -638,6 +662,22 @@ bool ConfigManager::migratePadServerDefaults()
     return true;
 }
 
+bool ConfigManager::migrateVideoSourcesDefaults()
+{
+    if (!root_.contains("video")) {
+        return false;   // 连 video 段都没有（V1 之前的怪文件），不归这里管
+    }
+    QJsonObject video = root_["video"].toObject();
+    if (video.contains("sources")) {
+        return false;   // 已有段一律不动：现场改过的流不能被启动流程覆盖
+    }
+    // 只补一个**空数组**，不猜内容：现场的四路此刻还是内联 source，解析走兜底，
+    // 补出来的空表既不改行为，也让运维看得见"这里能写流"。
+    video["sources"] = QJsonArray();
+    root_["video"] = video;
+    return true;
+}
+
 // ============================================================================
 // 从 root_ 更新缓存值
 // ============================================================================
@@ -703,6 +743,7 @@ static void writeChannelObject(QJsonObject &video, int ch, const QJsonObject &ob
     QJsonArray arr = video["channels"].toArray();
     while (arr.size() <= ch) {
         arr.append(QJsonObject{{"channel", arr.size()},
+                              {"source_id", ""},
                               {"source", ""},
                               {"note", ""},
                               {"enabled", true},
@@ -728,7 +769,8 @@ VideoChannelCfg ConfigManager::channelCfg(int ch) const
     std::lock_guard<std::mutex> lock(mutex_);
     const QJsonObject obj = channelObjectAt(root_["video"].toObject(), ch);
     VideoChannelCfg c;
-    c.source = obj["source"].toString();
+    c.source = obj["source"].toString().trimmed();
+    c.sourceId = obj["source_id"].toString().trimmed();
     c.note = obj["note"].toString();
     c.enabled = obj["enabled"].toBool(true);  // 缺键=打开，与 V1"四路全开"等价
     for (const auto &v : obj["models"].toArray()) {
@@ -741,7 +783,9 @@ VideoChannelCfg ConfigManager::channelCfg(int ch) const
 
 QString ConfigManager::channelSource(int ch) const
 {
-    return channelCfg(ch).source;
+    // 返回**解析后**的地址：界面/解码器要的从来就是"这一路要开什么"，
+    // 而不是"内联那个键里写了什么"。注册表引用与内联两种写法在这一步合流。
+    return resolveChannelSource(ch).url;
 }
 
 void ConfigManager::setChannelSource(int ch, const QString &source)
@@ -749,7 +793,36 @@ void ConfigManager::setChannelSource(int ch, const QString &source)
     std::lock_guard<std::mutex> lock(mutex_);
     if (ch < 0 || ch >= channelCount())
         return;
-    patchChannelField(root_, ch, QStringLiteral("source"), source);
+    // 写内联地址就是"这一路不用注册表了"，所以同时清掉 source_id。
+    // 不清的话：用户在手填框里改了地址、保存、重启，画面还是旧流（source_id 优先），
+    // 那就是一个"看起来能改其实不生效"的假开关。
+    QJsonObject video = root_["video"].toObject();
+    QJsonObject obj = channelObjectAt(video, ch);
+    obj["source"] = source.trimmed();
+    obj["source_id"] = QString();
+    if (!obj.contains("channel")) obj["channel"] = ch;
+    writeChannelObject(video, ch, obj);
+    root_["video"] = video;
+}
+
+QString ConfigManager::channelSourceId(int ch) const
+{
+    return channelCfg(ch).sourceId;
+}
+
+QString ConfigManager::channelInlineSource(int ch) const
+{
+    return channelCfg(ch).source;
+}
+
+void ConfigManager::setChannelSourceId(int ch, const QString &id)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (ch < 0 || ch >= channelCount())
+        return;
+    patchChannelField(root_, ch, QStringLiteral("source_id"), id.trimmed());
+    // 内联 source **故意保留不动**：从"引用注册表"切回"不用注册表"时，
+    // 现场原来手填的那个地址还在，不至于把老配置改成空串再靠记忆填回去。
 }
 
 QString ConfigManager::channelNote(int ch) const
@@ -795,6 +868,215 @@ void ConfigManager::setChannelModelIds(int ch, const QStringList &ids)
             arr.append(one);
     }
     patchChannelField(root_, ch, QStringLiteral("models"), arr);
+}
+
+// ==========================================
+// 视频流注册表（video.sources[]，通道用 source_id 引用）
+// ==========================================
+// 为什么要一张表：同一只摄像头/同一路 rtsp 常被几路通道共用（监控四路 + 智能识别扫码 +
+// 点名拍照），地址写在各通道里就是"改一处漏三处"；而分辨率/帧率/输入格式是**流的属性**，
+// 通道该只管"挂哪些模型"。键名沿用 caichao 版 idge.json 的驼峰（hardwareDecode/inputFormat/
+// timeoutMs/reconnectMs），两份配置能直接对拷；本仓 gb28181 段也是驼峰，不算新规矩。
+//
+// 三层兜底（resolveChannelSource）：source_id 命中注册表 → 用它；否则内联 source 非空 →
+// 按老语义当地址用；都没有 → 空 = 界面显示"视频待接入"。所以现网两份 config.json
+// （root 与 build 目录，值都是内联地址）不改也照跑。
+// 键名与 JSON 的映射集中在这两个函数里，别在别处再拼一遍字符串字面量。
+static VideoSourceCfg sourceFromJson(const QJsonObject &o)
+{
+    VideoSourceCfg s;
+    s.id = o["id"].toString().trimmed();
+    s.type = o["type"].toString().trimmed().toLower();
+    // "mp4" 是本仓 gb28181 段用惯的词，与 caichao 版的 "file" 同义，收成一个口径，
+    // 免得解码器那边要同时认两种拼法。空串表示"没写类型"，由 URL 前缀嗅探（旧行为）。
+    if (s.type == QLatin1String("mp4"))
+        s.type = QStringLiteral("file");
+    s.url = o["url"].toString().trimmed();
+    s.note = o["note"].toString();
+    s.width = o["width"].toInt(0);
+    s.height = o["height"].toInt(0);
+    s.fps = o["fps"].toInt(0);
+    s.inputFormat = o["inputFormat"].toString().trimmed();
+    s.loop = o["loop"].toBool(false);
+    s.hardwareDecode = o["hardwareDecode"].toBool(true);   // 缺键 = 硬解，与改动前一致
+    s.timeoutMs = o["timeoutMs"].toInt(0);
+    s.reconnectMs = o["reconnectMs"].toInt(0);
+    return s;
+}
+
+static QJsonObject sourceToJson(const VideoSourceCfg &s)
+{
+    QJsonObject o;
+    o["id"] = s.id;
+    o["type"] = s.type;
+    o["url"] = s.url;
+    o["note"] = s.note;
+    o["width"] = s.width;
+    o["height"] = s.height;
+    o["fps"] = s.fps;
+    o["inputFormat"] = s.inputFormat;
+    o["loop"] = s.loop;
+    o["hardwareDecode"] = s.hardwareDecode;
+    o["timeoutMs"] = s.timeoutMs;
+    o["reconnectMs"] = s.reconnectMs;
+    return o;
+}
+
+// 取 video.sources 数组（不加锁，供已持锁的成员函数复用）
+static QJsonArray sourcesArray(const QJsonObject &root)
+{
+    return root["video"].toObject()["sources"].toArray();
+}
+
+static void writeSourcesArray(QJsonObject &root, const QJsonArray &arr)
+{
+    QJsonObject video = root["video"].toObject();
+    video["sources"] = arr;
+    root["video"] = video;
+}
+
+QStringList ConfigManager::videoSourceIds() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QStringList ids;
+    for (const auto &v : sourcesArray(root_)) {
+        const QString id = v.toObject()["id"].toString().trimmed();
+        if (!id.isEmpty())
+            ids.append(id);
+    }
+    return ids;
+}
+
+QList<VideoSourceCfg> ConfigManager::videoSources() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QList<VideoSourceCfg> out;
+    for (const auto &v : sourcesArray(root_)) {
+        const VideoSourceCfg s = sourceFromJson(v.toObject());
+        if (!s.id.isEmpty())
+            out.append(s);
+    }
+    return out;
+}
+
+VideoSourceCfg ConfigManager::videoSource(const QString &id) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (id.isEmpty())
+        return VideoSourceCfg();
+    for (const auto &v : sourcesArray(root_)) {
+        const VideoSourceCfg s = sourceFromJson(v.toObject());
+        if (s.id == id)
+            return s;
+    }
+    return VideoSourceCfg();
+}
+
+bool ConfigManager::setVideoSource(const VideoSourceCfg &source)
+{
+    const QString id = source.id.trimmed();
+    const QString url = source.url.trimmed();
+    // 主键或地址为空就不写：宁可配置不动，也不要造出一条"有 id 没 url"的流——
+    // 那种条目被通道引用后解析得出空地址，界面就是无声黑屏，比报错难查。
+    if (id.isEmpty() || url.isEmpty())
+        return false;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    VideoSourceCfg normalized = source;
+    normalized.id = id;
+    normalized.url = url;
+
+    QJsonArray arr = sourcesArray(root_);
+    QJsonArray kept;
+    bool replaced = false;
+    for (const auto &v : arr) {
+        const QString one = v.toObject()["id"].toString().trimmed();
+        if (one == id) {
+            // 手改 JSON 很容易留下同 id 两条；只保留第一条的**替换结果**，
+            // 否则"命中哪条"取决于数组顺序，同样的配置两个进程跑出两样行为。
+            if (!replaced) {
+                kept.append(sourceToJson(normalized));
+                replaced = true;
+            }
+            continue;
+        }
+        kept.append(v);
+    }
+    if (!replaced)
+        kept.append(sourceToJson(normalized));
+    writeSourcesArray(root_, kept);
+    return true;
+}
+
+void ConfigManager::removeVideoSource(const QString &id)
+{
+    if (id.isEmpty())
+        return;
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    QJsonArray arr = sourcesArray(root_);
+    QJsonArray kept;
+    for (const auto &v : arr) {
+        if (v.toObject()["id"].toString().trimmed() != id)
+            kept.append(v);
+    }
+    writeSourcesArray(root_, kept);
+
+    // 引用一起清（与 removeModelParam 同一政策）：只删条目就会留下悬空 id，
+    // 而悬空 id 的通道是"不打开 + 一条告警"，现场只看画面容易当成摄像头坏了。
+    QJsonObject video = root_["video"].toObject();
+    QJsonArray channels = video["channels"].toArray();
+    for (int i = 0; i < channels.size(); ++i) {
+        QJsonObject o = channels[i].toObject();
+        if (o["source_id"].toString().trimmed() == id) {
+            o["source_id"] = QString();
+            channels[i] = o;
+        }
+    }
+    video["channels"] = channels;
+    root_["video"] = video;
+}
+
+int ConfigManager::videoSourceReferrerCount(const QString &id) const
+{
+    if (id.isEmpty())
+        return 0;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const QJsonArray channels = root_["video"].toObject()["channels"].toArray();
+    int n = 0;
+    for (const auto &v : channels) {
+        if (v.toObject()["source_id"].toString().trimmed() == id)
+            ++n;
+    }
+    return n;
+}
+
+VideoSourceCfg ConfigManager::resolveChannelSource(int ch) const
+{
+    // 不加本函数自己的锁：channelCfg()/videoSource() 各自持锁，这里再套一层就是死锁
+    // （std::mutex 不可重入，见 ConfigManager.h 顶部"重入死锁"那条教训）。
+    const VideoChannelCfg c = channelCfg(ch);
+
+    if (!c.sourceId.isEmpty()) {
+        const VideoSourceCfg s = videoSource(c.sourceId);
+        if (!s.url.isEmpty())
+            return s;
+        // 悬空 id **不回退**到内联 source：那等于"你以为选的是 A，其实偷偷用了旧地址"，
+        // 排查的人会盯着 A 看半天。宁可这一路不开，也要把这条告警留在日志里。
+        qWarning() << "[ConfigManager] 通道" << ch << "引用的视频流 id 不在 video.sources 里:"
+                   << c.sourceId << "—— 这一路不打开（请在设置页重新选流）";
+        return VideoSourceCfg();
+    }
+
+    if (!c.source.isEmpty()) {
+        // 老口径：内联地址直接当源。**type 故意留空** = 交给解码器按 url 前缀嗅探
+        // （/dev/video → 摄像头，其余交给 FFmpeg 探容器），行为与加注册表之前逐字一致。
+        VideoSourceCfg s;
+        s.url = c.source;
+        s.note = c.note;
+        return s;
+    }
+    return VideoSourceCfg();
 }
 
 // ==========================================

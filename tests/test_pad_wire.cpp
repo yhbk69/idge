@@ -11,7 +11,7 @@
 //   · taskId 取错键 → 对端按施工计划过滤，一条也显示不出来；
 //   · 越界的媒体路径被拼进 URL → 零鉴权服务上等于任意文件可读。
 //
-// 覆盖十五条契约：
+// 覆盖十六条契约：
 //   1) wireTime 补本机时区偏移，且对已带偏移/带 Z 的输入幂等
 //   2) wireTime 对空串与坏文本回落到"现在"（updatedAt 不能为空）
 //   3) internalTimeFromWire 与 wireTime 往返一致；认不出的形状返回空串（= 按全量处理）
@@ -27,6 +27,7 @@
 //  13) 片段 .mp4 不存在 → 不写 clipUrl（宁缺勿假）；存在 → 写出来
 //  14) alarmUpdateJson 不含 evidence，updatedAt 必填，dispose 只在有处置文本时出现
 //  15) 信封：alarm/sync_result 带 code=0+message=ok；pong 不带 code；error 的 code 在信封层
+//  16) defaultDeviceId：非空、带 EDGE- 前缀、进程内稳定（口径 A17，hello_ack 的必填键）
 //
 // 仓库根运行：./build/build_rk3588_linux/test_pad_wire，rc 0=PASS 1=FAIL
 // ============================================================================
@@ -331,10 +332,22 @@ try {
               "协议版本不兼容时 hello_ack 带 code=1001（§3.5）");
     }
 
+    // ── 16：deviceId 派生（口径 A17）────────────────────────────────────────
+    {
+        const QString id = pad::defaultDeviceId();
+        check(!id.isEmpty(), "defaultDeviceId 不能返回空串（§13.1.3 的必填键没有值就等于缺键）");
+        check(id.startsWith(QLatin1String("EDGE-")), "派生 ID 带 EDGE- 前缀，与 §7.1 示例同族");
+        check(id.length() > 6 && id.length() <= 17,
+              "派生 ID 长度可控（EDGE- + 最多 12 位，现场抄得下来）");
+        check(pad::defaultDeviceId() == id, "两次调用必须同一串：进程内派生、不受墙钟影响");
+        // 打一行真值：hello_ack 的 deviceId 现场要对得上，靠推不算实测
+        std::cout << "  deviceId 派生值 = " << id.toStdString() << '\n';
+    }
+
     std::cout << "pad wire contracts passed: timezone round-trip / status 3-values / readAt "
                  "fallback / taskId from construction_id / type table + fallback / required keys "
                  "/ evidence URL + traversal refusal + clip presence / alarm_update shape "
-                 "/ envelope without v & requestId\n";
+                 "/ envelope without v & requestId / deviceId 派生稳定（A17）\n";
     return 0;
 } catch (const std::exception &e) {
     std::cerr << "FAIL: " << e.what() << '\n';

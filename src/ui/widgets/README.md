@@ -88,6 +88,8 @@ GLuint tex = pool.acquire(fd, w, h, stride, DRM_FORMAT_ABGR8888);
   "已清理"。要看到路径请等 2 秒后再打开。
 - **录制参数只在 `PlayerWidget::open()` 注入一次**：编码器在解码线程打开流后按真实宽高创建，
   运行期改 `config.json` 的 recording 段不会重建编码器，必须换流/重启才生效（界面不提供入口）。
+  `open()` 现在有两个重载：`open(VideoSourceCfg, ch)` 是正口径（带类型/尺寸/循环/超时/重连），
+  `open(std::string url, ch)` 只给地址、其余全默认，仅为还没换成注册表口径的调用方留着。
 - EglImageRenderer：无 include guard、着色器 uniform 未赋值（tex_height/img_height 默认 0 → 除零 NaN），且 BT.601 假设与 RGBA 主路径不符——仅存档参考。
 - **检索的四条硬口径**（2026-10-31，改任何一条都会让列表页说谎或卡顿）：
   ① **命中数与当前页必须同一次 `buildFilterWhere` 的产物**——先 `countByFilter` → `clampPageToTotal()` →

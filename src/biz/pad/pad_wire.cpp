@@ -13,6 +13,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonParseError>
+#include <QSysInfo>   // machineHostName()：defaultDeviceId() 的兜底来源
 
 namespace pad {
 
@@ -140,6 +141,24 @@ QString taskIdOf(const AlarmRecord &record)
         return QString();
     }
     return doc.object().value(QStringLiteral("construction_id")).toString();
+}
+
+QString defaultDeviceId()
+{
+    static const QString cached = [] {
+        // 前缀与 §7.1 示例的 "EDGE-05-007" 同族；machine-id 取前 12 位十六进制，
+        // 够唯一又能抄进现场记录（完整 32 位没人会在 Pad 屏幕上核对）。
+        QFile machineId(QStringLiteral("/etc/machine-id"));
+        if (machineId.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            const QString id = QString::fromLatin1(machineId.readAll()).trimmed().toUpper();
+            if (!id.isEmpty()) {
+                return QStringLiteral("EDGE-") + id.left(12);
+            }
+        }
+        // QSysInfo::machineHostName() 在 Qt 5.12 就返回 QString，不要再包一层 fromLatin1
+        return QStringLiteral("EDGE-") + QSysInfo::machineHostName().toUpper();
+    }();
+    return cached;
 }
 
 TypeWire typeOf(const AlarmRecord &record)

@@ -44,13 +44,38 @@
 | `models.<库目录名>.alarm_class` | string | **模型的参数**：该模型检出这一类才出报警；空 = 只画框不报警。不是通道或槽位属性，同一个模型挂在哪一路触发的都是同一个类别。设置页改动对引用它的通道即时生效（见 `frmMain::applyAlarmClassNow`） |
 | `models.<库目录名>.label` | string | 标签文件覆盖，库外标签的逃生口；留空用库内 `labels.txt`（优先级：此值 > 库内） |
 | `models.<库目录名>.note` | string | 备注，仅供设置页展示 |
+| `sources` | array | **视频流注册表**：一条 = 一路可被引用的取流地址 + 它的全部打开参数，见下面那张表 |
 | `channels[i]` | object | **数组下标即通道号（0-based）**；条目里的 `channel` 字段只给人看、不参与解析 |
-| `channels[i].source` | string | 本地文件 / `/dev/videoN` / RTSP，交给 `avformat_open_input` |
-| `channels[i].enabled` | bool | 这一路是否开流。设置页改完即时生效（停用=停本路，启用=按 `source` 重开），手改文件需重启或让该路重开一次 |
+| `channels[i].source` | string | 内联地址（**旧口径，仍支持**）：本地文件 / `/dev/videoN` / RTSP |
+| `channels[i].source_id` | string | 引用 `sources[]` 里那条流。**非空且命中时优先于 `source`**；命中不了（悬空 id）就**不回退**内联，这一路不开 + 一条 warning |
+| `channels[i].enabled` | bool | 这一路是否开流。设置页改完即时生效（停用=停本路，启用=按解析出的流重开），手改文件需重启或让该路重开一次 |
 | `channels[i].models` | array | 有序库 id 列表，**顺序即级联槽位顺序**（画面上 M1/M2/… 前缀与报警 `result_id`），重排会改号。设置页改动即时生效：该路 stop→`releaseTasks()`→start 重开一次 |
 
+#### `video.sources[]` 一条流的字段（`VideoSourceCfg`）
+
+| 键 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | — | **主键**，通道靠它引用。改 id = 换一条流，所有引用变悬空，所以设置页里 id 只读 |
+| `type` | string | 空 | `camera`/`file`/`rtsp`/`rtmp`；`mp4` 读入归一成 `file`。**空 = 按地址前缀嗅探**（老口径） |
+| `url` | string | — | 设备节点 / 本地文件 / 流地址。空 id 或空 url 的条目 `setVideoSource()` 直接拒写 |
+| `note` | string | 空 | 备注，下拉与列表用它当显示名 |
+| `width`/`height` | int | `0` | **仅 `camera`**：`<=0` = 不指定，回落 `smartRecognition.camera_size` |
+| `fps` | int | `0` | **仅 `camera`**：`<=0` = 不指定（30） |
+| `inputFormat` | string | 空 | **仅 `camera`**：`mjpeg`/`nv12`/`yuyv`；空 = 三档协商 |
+| `loop` | bool | `false` | **仅 `file`**：读到结尾回到开头继续放 |
+| `hardwareDecode` | bool | `true` | `false` = 不建 rkmpp 设备，走 CPU 软解（帧在系统内存） |
+| `timeoutMs` | int | `0` | `<=0` = 打开/探测不设墙上时钟超时（只受 stop 打断，即旧行为） |
+| `reconnectMs` | int | `0` | `<=0` = 断流/打开失败不再重连（旧行为）；`>0` = 失败后按该间隔重建上下文再试 |
+
 对应 API：`channelSource/Note/Enabled/ModelIds(int ch)`（一律 0-based）+
+`channelSourceId/setChannelSourceId/channelInlineSource` +
+**`resolveChannelSource(ch)`（唯一解析出口）** +
+`videoSources/videoSourceIds/videoSource/setVideoSource/removeVideoSource/videoSourceReferrerCount` +
 `modelParam/libId` 系列 + `modelParamUsers(id)`（供删除守卫统计引用）。
+三层兜底与"悬空不回退"这两条口径的断言在 `tests/test_video_sources.cpp`，改动这段必读该文件头。
+`removeVideoSource()` 会连带清掉引用它的通道的 `source_id`（与 `removeModelParam()` 同政策）。
+**默认配置**（第一次启动、文件不存在）会种一条 `file-demo`（`assets/test/192.mp4`，`loop=true`）
+并让四路都引用它；老配置只补一个**空**的 `sources` 段，各通道内联地址原样不动。
 **段里不出现任何模型/标签路径**，`model/library/<id>/{model.rknn,labels.txt,meta.json}` 是唯一事实源，
 解析出口只有 `ModelRegistry::resolveChannelSlots(ch)`。
 **推理间隔没有配置键**：`ffmpeg_video_decoder.cpp` 的 4.6 节写死 `frame_count % 3`，
@@ -120,8 +145,10 @@ MJPEG**，只认 MJPEG 会把这颗物理摄像头整个漏掉）。只出 10-bi
 两档都不命中，因此不会被选中。节点号随插拔、USB 口、ISP/CSI 接线和内核版本漂移，
 板端曾稳定落在 `/dev/video41`，换环境即打不开——这就是自动探测取代硬编码的原因。
 
-**与其它取流地址互不相干**：监控 4 路走 `video.channels[].source`、国标推流走
-`gb28181.streams[].source`。各处没有设备注册表，同一台设备被两处同时打开会有一方失败。
+**与其它取流地址互不相干**：监控 4 路走 `video.sources[]`（老配置仍可内联在
+`video.channels[].source`）、国标推流走 `gb28181.streams[].source`、扫码走本段。
+`video.sources[]` 只在监控 4 路**内部**共用（同一条目可被多路引用），不与后两处共表；
+同一台设备被两处同时打开会有一方失败。
 
 ### pad_server 段（Pad 接口 v1 的入站服务端，本轮新增）
 | 键 | 类型 | 默认 | 说明 |
@@ -129,7 +156,7 @@ MJPEG**，只认 MJPEG 会把这颗物理摄像头整个漏掉）。只出 10-bi
 | `enabled` | bool | **`false`** | 总开关。开着才 `listen()` 并订阅 `AlarmManager`。默认关的理由与 `alarm_uplink` 一致而风险更大：这是**入站**的明文零鉴权监听口，局域网内任何设备都能连进来收报警 |
 | `port` | int | `8899`（1024~65535） | Pad WS 监听口，取 v1 §2.1 的占位值。⚠ v1 想让 WS 与 `/api/` 同占 8899，在这套栈上做不到（`QWebSocketServer` 独占一只监听器）；也与 `alarm_uplink.media_http_port`（8090，媒体字节出站）不是同一个口 |
 | `ws_path` | string | `/` | **只进日志**。`QWebSocketServer` 不按路径筛连接，Pad 连哪条路径都收；写 `/ws` 不会把别的路径挡掉 |
-| `device_id` | string | 空 | `hello_ack.data.deviceId`（例 `EDGE-05-007`）；空 = 该键省略 |
+| `device_id` | string | 空 | `hello_ack.data.deviceId`（例 `EDGE-05-007`）；**空 = 按本机派生**（`/etc/machine-id` 前 12 位，本机实测 `EDGE-1030A3F99414`），该键 §13.1.3 规定必填、不会省略；现场要固定值就填这里，填了赢 |
 | `media_base_url` | string | 空 | 证据 URL 前缀。空 = 复用内嵌文件服务的自动地址（并在需要时把它起起来）；写了就一切按它来，本机服务可以不起——对端经 NAT/反代访问的场景就靠它 |
 | `sync_limit` | int | `500`（1~5000） | 一次 `sync_result` 最多带几条。v1 没给分页规则，先设上限；游标取本次返回里的最大 `update_time`，所以截断不会漏下一批 |
 

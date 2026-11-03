@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-C++ 测试源码目录。含十个测试程序与一个人工联调工具：
+C++ 测试源码目录。含十二个测试程序与一个人工联调工具：
 
 - `test_database.cpp`：针对 `src/biz/db/` 的检测记录 DAO / 报警记录 DAO /
   DatabaseManager 做初始化、插入、批量插入、条件查询、统计、状态更新与维护
@@ -35,6 +35,15 @@ C++ 测试源码目录。含十个测试程序与一个人工联调工具：
   从行尾取模型路径，尾巴上多一个 token 会把路径解析坏。
   这条测试已经抓到过一个真回归：`start()` 里没有把
   对象线程归属搬回 GUI 线程，第二次 `moveToThread` 被 Qt 拒绝，重开的那路一帧都不出。
+- `test_video_sources.cpp`：视频流注册表（`video.sources[]`）与通道引用解析的**离线契约自检**（5 组 12 条）。
+  只编 `ConfigManager.cpp`、纯 `Qt5::Core`、不碰 FFmpeg/模型/屏幕，配置读写全在 `QDir::tempPath()`
+  下的临时文件（不会碰运行时 `data/config.json`）。钉的是那些**改代码时最容易顺手改错**的口径：
+  三层兜底（引用命中带全部十个参数 / 内联兜底 `type` 必须留空走嗅探 / 两者都空不开流）、
+  **悬空 `source_id` 不回退内联**、`setChannelSource()` 必须同时清 `source_id`（否则手改地址是假开关）、
+  `setChannelSourceId()` 不得抹掉内联地址、`setVideoSource()` 拒空 id/空 url 且把重复 id 收口成一条、
+  `removeVideoSource()` 连带清引用、`videoSourceReferrerCount()` 计数、`type=mp4` 归一成 `file`、
+  setter→`save()`→重新 `load()` 的十字段往返一致、以及迁移**只补空的 `sources` 段**且幂等
+  （现场改过的流不会被启动流程改回默认）。出厂默认那条也钉住：新配置就带 `file-demo` 且四路引用它。
 - `test_alarm_uplink.cpp`：报警上行（`src/biz/ws/alarm_uplink_engine`）的**离线契约自检**，
   用 `FakeTransport` 顶掉 `WsClient`，所以不链 WebSockets、不建线程、不要 GUI，纯 `Qt5::Core`。
   十八组断言覆盖四类事：①`alarm_info` 报文形状（两种 `media_transport` 各一套字段）；
@@ -61,7 +70,7 @@ C++ 测试源码目录。含十个测试程序与一个人工联调工具：
   `fields()` 逐键渲染的形状（已知键按声明顺序给中文名、空值成行显示 `—`、未知键用键名排在后面
   —— 报警详情框与施工详情框共用这一份，渲染口径散成两处就等于字段契约也有两处）。
   只链 `Qt5::Core` + `Qt5::Gui` + zbar，不开摄像头、不起 GUI 线程。
-- `test_pad_wire.cpp`：Pad 接口 v1 **出站 JSON 映射**的离线契约自检（15 组）。
+- `test_pad_wire.cpp`：Pad 接口 v1 **出站 JSON 映射**的离线契约自检（16 组，含 `deviceId` 派生）。
   `AlarmRecord` → `alarm` / `alarm_update` 的唯一出口（`src/biz/pad/pad_wire.cpp`）：
   时区偏移补齐与游标反向换算的往返一致（对端按 `updatedAt` 合并与推进游标，偏移缺失=整批漏同步）、
   `rectified` 映射成 `PENDING+readAt` 而不是 `DISPOSED`（"我看过了"不许上报成"我处理过了"）、
@@ -78,7 +87,7 @@ C++ 测试源码目录。含十个测试程序与一个人工联调工具：
   边界用 `>=`（同一秒内的更新不许被漏）、建行那一刻就写 `update_time` 才能被增量看到。
   `markRead()` 的两条语义：`read_time` 保留最早值（重复已读不推后、墙钟回拨取更早者），
   但 `update_time` **每次都往前走**。只链 `Qt5::Core` + `Qt5::Sql` + DAO 依赖闭包。
-- `test_pad_ws_server.cpp`：Pad 接口 v1 的 **WS 服务端线上自检**（11 组，loopback 单进程）。
+- `test_pad_ws_server.cpp`：Pad 接口 v1 的 **WS 服务端线上自检**（12 组，loopback 单进程）。
   起真 `PadWsServer` 在 127.0.0.1 的临时口上，用真 `QWebSocket` 按 §3 走一遍：
   `hello→hello_ack`（`serverTime` 带偏移、`capabilities` 只有 `alarm`、`detectionBoxes` 恒 false）、
   版本不匹配 `code=1001` 且连接被关闭、`ping→pong` 不带 code、每个 `sync_request` **恰好一个**
@@ -106,20 +115,25 @@ C++ 测试源码目录。含十个测试程序与一个人工联调工具：
 | `test_alarm_uplink.cpp` | 报警上行离线自检（18 组：两种 transport 报文形状 / 帧序 / 地址换算与路径逃逸 / 队列·ack·退避），纯 Qt Core，任意机器可跑 |
 | `test_geofence_role.cpp` | 围栏角色判定离线自检（8 组：禁区优先 / 无岗区域守卫 / 任一岗区域内 / shapeIndex 口径 / 凹多边形回归 / role 回落），纯 Qt Core，任意机器可跑 |
 | `test_construction_qr.cpp` | 扫码登录门离线自检（12 组：施工信息解析/校验/会话状态机/逐键渲染 + 真解一张含中文的码图），Qt Core+Gui+zbar，无摄像头无 GUI |
-| `test_pad_wire.cpp` | Pad 接口 v1 出站 JSON 映射离线自检（15 组：时区往返 / 状态三值 / readAt 回落 / taskId / 类型表与兜底 / 必填键 / 证据 URL 与越界拒绝 / 信封无 v 无 requestId），纯 Qt Core |
+| `test_pad_wire.cpp` | Pad 接口 v1 出站 JSON 映射离线自检（16 组：时区往返 / 状态三值 / readAt 回落 / taskId / 类型表与兜底 / 必填键 / 证据 URL 与越界拒绝 / 信封无 v 无 requestId / deviceId 派生非空且稳定），纯 Qt Core |
 | `test_pad_sync.cpp` | Pad 断线补漏的库侧自检（8 组：全量与增量游标 / 老行按 alarm_time 兜底 / `>=` 边界 / 新行可见 / markRead 保留最早已读但必推 update_time），Qt Core+Sql，内存库 |
-| `test_pad_ws_server.cpp` | Pad WS 服务端线上自检（11 组：握手与能力位 / 1001 关闭 / pong 形状 / sync_result 恰好一条 / 未知 type 出 error / alarm_ack 不回复 / 报警广播），Qt Core+Network+Sql+WebSockets，loopback |
+| `test_pad_ws_server.cpp` | Pad WS 服务端线上自检（12 组：握手与能力位 / 1001 关闭 / pong 形状 / sync_result 恰好一条 / 未知 type 出 error / alarm_ack 不回复 / 报警广播 / 空 device_id 也出必填 deviceId），Qt Core+Network+Sql+WebSockets，loopback |
+| `test_video_sources.cpp` | 视频流注册表与通道引用解析离线自检（5 组：默认种子 / 三层兜底与悬空不回退 / 内联与引用互斥 / 注册表写入规则 / 存盘往返与迁移幂等），纯 Qt Core，临时文件不碰 `data/config.json` |
 | `ws_sink.cpp` | 人工联调用的假对端（`QWebSocketServer`）：收 text+binary、按 media_id 拼文件对拍 sha256，url 档只打印地址 |
 
 ## 使用方法
 
-七个测试与 `ws_sink` 都已接入根 `CMakeLists.txt`（各自一个 `add_executable`，随主程序一并构建）：
+十二个测试与 `ws_sink` 都已接入根 `CMakeLists.txt`（各自一个 `add_executable`，随主程序一并构建）：
 
 ```bash
 ./build-linux.sh -t rk3588 -b Release
 ./build/build_rk3588_linux/test_database    # 退出码：失败数>0 时为 1，否则 0
 ./build/build_rk3588_linux/test_latest_frame_slot   # 同上；纯 CPU，不依赖板子外设
 ./build/build_rk3588_linux/test_alarm_uplink        # 同上；纯 Qt Core，不依赖外设与 cwd
+
+# 视频流注册表自检只链 ConfigManager.cpp，改解析口径（三层兜底/悬空/内联互斥）时先跑它
+cmake --build build/build_rk3588_linux --target test_video_sources -j"$(nproc)"
+./build/build_rk3588_linux/test_video_sources       # 无 GUI、与 cwd 无关；配置读写在 /tmp 下的临时文件
 
 # Pad 接口 v1（src/biz/pad）三连：映射层 → 库侧游标 → 服务端线上。改协议字段时按顺序跑，
 # 前两个不需要网络，第三个会在 127.0.0.1:18899 上起真服务端
@@ -191,6 +205,9 @@ curl -o /tmp/x.jpg '<sink 打出的 snapshot/media_begin url>' && sha256sum /tmp
 - `test_geofence_role` 只链 `Qt5::Core`，源 = `fence_checker.cpp` 一个文件：它只依赖
   `fence_shape.h` 与 `common.hpp` 里的 `image_rect_t` 字段，不碰 OpenCV/RKNN 符号，
   所以围栏判定改动能在不链主程序的前提下验证
+- `test_video_sources` 只链 `Qt5::Core`，源 = `ConfigManager.cpp` 一个文件（`runtime_paths.h`
+  是头文件唯一事实源，不用额外编译）。它跑的是纯 JSON 读写，所以与 cwd 无关、任何机器可跑，
+  也**不会**碰运行时的 `data/config.json`（临时文件名前缀 `idge_video_sources_`）
 - `test_construction_qr` 链 `Qt5::Core` + `Qt5::Gui` + `${ZBAR_LIBRARIES}`，源 =
   `construction_session.cpp` + `qr_decoder.cpp` 两个文件：解码器刻意只用 `QImage`/`QRect`
   （不拖 OpenCV/RKNN 头），这是它能脱离摄像头与 GUI 线程自测的前提

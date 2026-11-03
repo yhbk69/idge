@@ -47,7 +47,8 @@ namespace pad {
 struct ServerConfig {
     quint16 port = 0;             ///< 0 = 非法，start 直接返回 false
     QString path;                 ///< 仅作日志显示；QWebSocketServer 不按路径过滤连接
-    QString deviceId;             ///< hello_ack.deviceId，例 "EDGE-05-007"
+    QString deviceId;             ///< hello_ack.deviceId，例 "EDGE-05-007"；**空 = 按本机派生**
+                                  ///（pad::defaultDeviceId()，口径 A17：这个键 §13.1.3 规定必填）
     QString mediaBaseUrl;         ///< 证据 URL 前缀，空 = 不发地址
     QString mediaRootDir;         ///< 与 mediaBaseUrl 对应的那棵树（绝对路径）
     int syncLimit = 500;          ///< 一次 sync_result 最多带几条（v1 未定分页，先设上限）

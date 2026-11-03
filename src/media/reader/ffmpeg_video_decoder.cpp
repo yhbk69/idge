@@ -660,6 +660,48 @@ static int decodeInterruptCallback(void *ctx)
 }
 
 // ============================================================================
+// 带墙上时钟上限的中断回调（video.sources[].timeoutMs）
+// ============================================================================
+// 为什么单独一个：老配置里根本没有超时，RTSP/摄像头拔线时 avformat_open_input 会
+// 一直卡在协议自己的重试里（ffmpeg 默认 tcp 不设超时），四路就是四个僵住的解码线程，
+// 界面全停在"正在接入…"。timeoutMs>0 时把"打开+探测"这一段夹住；
+// **读帧阶段不套这个上限** —— 真实时流本来就会有一段一段地没数据，
+// 用墙上时钟掐它就是把"摄像头 10 秒没人走动"当成断流。
+// ============================================================================
+namespace {
+
+struct OpenInterrupt {
+    std::atomic<bool> *running;
+    qint64 startedMs = 0;    // 本次尝试的起点（每次重试重算，四档协商各给一份全额超时）
+    qint64 budgetMs = 0;     // <=0 = 不设限
+};
+
+int openInterruptCallback(void *ctx)
+{
+    auto *o = static_cast<OpenInterrupt *>(ctx);
+    if (!o->running->load()) {
+        return 1;
+    }
+    if (o->budgetMs > 0 &&
+            QDateTime::currentMSecsSinceEpoch() - o->startedMs >= o->budgetMs) {
+        return 1;
+    }
+    return 0;
+}
+
+// 一条流到底算不算"实时采集节点"：注册表写了 type=camera 就按它，
+// 没写（内联 source 的旧口径）才退回 /dev/video 前缀嗅探。
+bool isCaptureNode(const VideoSourceCfg &s)
+{
+    if (!s.type.isEmpty()) {
+        return s.type.compare(QLatin1String("camera"), Qt::CaseInsensitive) == 0;
+    }
+    return s.url.startsWith(QLatin1String("/dev/video"));
+}
+
+} // namespace
+
+// ============================================================================
 // 构造函数
 // ============================================================================
 // 初始化 DMA 缓冲池和级联推理任务
@@ -929,6 +971,13 @@ bool FFmpegVideoDecoder::updateSlotParams(const std::vector<SlotRuntimeParam> &p
 // ============================================================================
 void FFmpegVideoDecoder::start(const QString &url)
 {
+    VideoSourceCfg s;
+    s.url = url;   // type 空 = 按 url 前缀嗅探，其余字段全默认 —— 与改动前逐字一致
+    start(s);
+}
+
+void FFmpegVideoDecoder::start(const VideoSourceCfg &source)
+{
     if (running_)
         stop();
 
@@ -941,7 +990,8 @@ void FFmpegVideoDecoder::start(const QString &url)
         return;
     }
 
-    url_ = url;
+    source_ = source;
+    url_ = source.url;
     running_ = true;
 
     // 按本通道配置建立推理任务（PreviewOnly 模式整条推理链路不建；
@@ -1112,38 +1162,79 @@ const uint8_t* FFmpegVideoDecoder::captureCurrentFramePtr() const
 }
 
 // ============================================================================
-// 主解码循环
+// 主解码循环的外环：只管"要不要按 reconnectMs 再来一次"
 // ============================================================================
-// 这是整个硬件解码流程的核心函数，运行在独立的 Qt 线程中。
-// 执行流程：
-//   1. 打开视频流（支持 RTSP/本地文件）
-//   2. 查找并初始化 Rockchip MPP 硬件解码器
-//   3. 分配 DMA-BUF 输出缓冲区
-//   4. 循环读取压缩数据包 → 送入解码器 → 获取解码帧 → RGA转换 → 送入推理
+// 拆两层的原因：重连要重复的是整段"打开→建解码器→分配 DMA 缓冲→读帧→释放"，
+// 不是只有打开那一步。内环（decodeOnce）按既有顺序把资源收尾干净后返回，
+// 外环再进一次就是一路全新的流——把重连塞进内环里最容易漏掉的就是
+// "上一路的 pts/帧率锚线/编码器参数还挂着"。
 //
-// 线程安全：
-//   - running_ 是 atomic<bool>，可在任意线程安全读写
-//   - decodeInterruptCallback 在 IO 阻塞时检查 running_，实现优雅退出
+// 退出条件只有两个：stop() 把 running_ 置假；或这条流没配 reconnectMs（旧行为：
+// 打不开就报错、播完就停）。reconnectMs 期间用 100ms 分片睡，保证点"停止"不会被
+// 一个 2 秒的整觉卡住（stop() 的 3s+10s 有界等待预算经不起多路一起睡满重连间隔）。
 // ============================================================================
 void FFmpegVideoDecoder::decodeLoop()
 {
-    // 存活计数 RAII：覆盖本函数所有 return 路径，供 start() 判断旧循环是否已退场
+    // 存活计数 RAII：覆盖**整段重连过程**。重连间隔里旧线程也算"还活着"，
+    // 否则 start() 的拒绝重启判据会出现一个空窗：两个循环同时碰 tasks_/dst_bufs。
     struct LiveGuard {
         std::atomic<int> &c;
         explicit LiveGuard(std::atomic<int> &cnt) : c(cnt) { ++c; }
         ~LiveGuard() { --c; }
     } liveGuard{liveLoops_};
 
+    for (;;) {
+        const PassEnd end = decodeOnce();
+        // 只有"这一路是失败收场"才走重连：StoppedByUser 是用户明确的意图，
+        // StreamEnded 是文件源的正常终点（没开 loop 就是播完了，重连等于偷偷替人
+        // 开了循环播放）。剩下 reconnectMs<=0 的（含全部旧配置）一律不再来一次。
+        if (end != PassEnd::Failed || !reconnectWanted()) {
+            break;
+        }
+        const int intervalMs = source_.reconnectMs;
+        for (int slept = 0; running_ && slept < intervalMs; slept += 100) {
+            QThread::msleep(100);
+        }
+        if (!running_) {
+            break;
+        }
+        qInfo() << "Channel" << channel_ << "按 reconnectMs=" << intervalMs << "ms 重开流" << url_;
+    }
+
+    // 整条链（含所有重连尝试）真的退场了才发这一次：老代码把它放在内环末尾，
+    // 加了外环之后就必须在外面，否则第一次断流就会告诉世界"这路结束了"
+    emit finished();
+}
+
+// ============================================================================
+// 一次完整的"打开 → 建解码器 → 读帧 → 释放"
+// ============================================================================
+// 执行流程：
+//   1. 打开视频流（RTSP/本地文件/摄像头节点，参数取自 source_）
+//   2. 查找并初始化 Rockchip MPP 硬件解码器（hardwareDecode=false 时跳过硬件段）
+//   3. 分配 DMA-BUF 输出缓冲区
+//   4. 循环读取压缩数据包 → 送入解码器 → 获取解码帧 → RGA转换 → 送入推理
+//
+// 线程安全：
+//   - running_ 是 atomic<bool>，可在任意线程安全读写
+//   - 打开/探测阶段用 openInterruptCallback（running_ + timeoutMs），
+//     读帧阶段换回 decodeInterruptCallback（只看 running_）
+// ============================================================================
+FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
+{
     int ret;
 
     // ===== 步骤1: 打开视频流 =====
     // AVFormatContext 是 FFmpeg 的核心结构，管理输入流的所有信息
     AVFormatContext *fmt_ctx = nullptr;
 
-    // 设置中断回调：当用户调用 stop() 将 running_ 设为 false 时，
-    // av_read_frame() 和 avcodec_receive_frame() 会立即返回错误，
-    // 使解码线程能快速退出，避免阻塞在 IO 上（尤其是网络流）
-    AVIOInterruptCB interrupt_cb = {decodeInterruptCallback, &running_};
+    // 中断回调：打开/探测这一段套 timeoutMs 的墙上时钟上限（老配置没有这个键 = 不设限，
+    // 行为与改动前一致）。读帧阶段要在 find_stream_info 之后换回只看 running_ 的那个——
+    // 实时源本来就会一段一段没数据，用墙上时钟掐读帧就是把"没人走动"当断流。
+    OpenInterrupt openCtx;
+    openCtx.running = &running_;
+    openCtx.budgetMs = source_.timeoutMs;
+    AVIOInterruptCB interrupt_cb = {openInterruptCallback, &openCtx};
 
     // 打开输入流：可以是本地文件(如 video.mp4)、网络流(如 rtsp://...) 或摄像头节点。
     // 文件与网络流交给 FFmpeg 自己探容器；/dev/videoN 必须显式给 v4l2 参数——
@@ -1152,38 +1243,65 @@ void FFmpegVideoDecoder::decodeLoop()
     // 每帧的 CPU 颜色转换与一切像素级后处理成本抬到 1080p 的 3 倍。
     // 三档协商与 CameraPreviewDecoder 同一口径：CSI 经 rkisp 只出 NV12/UYVY，
     // USB UVC 常只给 MJPEG，写死任一档都会让另一类摄像头直接打不开。
-    const bool isV4l2Node = url_.startsWith(QLatin1String("/dev/video")) &&
-                            av_find_input_format("v4l2") != nullptr;
+    //
+    // 判型现在优先看 video.sources[].type（声明式），type 为空才按 url 前缀嗅探。
+    // 这一步必须保住 av_find_input_format("v4l2") 的可用性判定：注册表写了 camera
+    // 但这份 FFmpeg 没编 v4l2 时，退化成一档"什么都不指定"，比拿 NULL 去 open 好。
+    const bool isV4l2Node = isCaptureNode(source_) && av_find_input_format("v4l2") != nullptr;
     static const char *const kV4l2InputFormats[] = {"nv12", "yuyv", "mjpeg"};
-    // 采集尺寸走 smartRecognition.camera_size（默认 1280x720）：它同时决定每帧要转多少
-    // 像素、ZBar 要看多少像素、OCR 那张静图有多少字。getter 已经把非法值夹回默认。
-    const QByteArray cameraSize =
-        isV4l2Node ? ConfigManager::instance().smartRecognitionCameraSize().toUtf8()
-                   : QByteArray();
 
-    // 摄像头节点：三档协商 + 一档"什么都不指定"的旧口径兜底；文件与网络流**只开一次**，
-    // 否则 RTSP 连不上时要把超时乘四，界面停在"最后一帧"上更久。
-    const int maxAttempts = isV4l2Node ? 4 : 1;
+    // 采集尺寸：这条流写了 width/height 就用它；没写就退回全局 smartRecognition.camera_size
+    // （默认 1280x720）—— 它同时决定每帧要转多少像素、ZBar 要看多少像素、OCR 静图有多少字。
+    // 只给一边（有宽没高）当"没写"处理：半套尺寸传进 ffmpeg 会得到 "0x720" 这种字符串，
+    // 报错信息是"Invalid video size"，排查的人只会盯着摄像头那一路看。
+    QByteArray cameraSize;
+    if (isV4l2Node) {
+        cameraSize = (source_.width > 0 && source_.height > 0)
+                ? QByteArray::number(source_.width) + 'x' + QByteArray::number(source_.height)
+                : ConfigManager::instance().smartRecognitionCameraSize().toUtf8();
+    }
+    // 帧率同理：写了就用，没写保持旧的硬编码 30（v4l2 只有 30 这一档被实测过）
+    const QByteArray frameRate =
+        source_.fps > 0 ? QByteArray::number(source_.fps) : QByteArrayLiteral("30");
+
+    // 要依次尝试的 input_format，末位恒为空串 = "什么都不指定"（改动前唯一的开流方式，
+    // 留着它才不会让"注册表里填错格式"从一次失败变成彻底打不开）。
+    // 文件与网络流只开一次：否则 RTSP 连不上时要把超时乘四，界面停在最后一帧更久。
+    QStringList inputFormats;
+    if (isV4l2Node) {
+        if (!source_.inputFormat.isEmpty()) {
+            inputFormats << source_.inputFormat.toLower();
+        } else {
+            for (const char *f : kV4l2InputFormats) {
+                inputFormats << QLatin1String(f);
+            }
+        }
+    }
+    inputFormats << QString();
+
     ret = AVERROR(EINVAL);
-    for (int attempt = 0; attempt < maxAttempts; ++attempt) {
-        // 最后一档（attempt==3）不带任何参数，等价于改动前的开流方式。
-        const bool pinnedFormat = isV4l2Node && attempt < 3;
+    for (const QString &tryFormat : inputFormats) {
+        const bool pinnedFormat = isV4l2Node && !tryFormat.isEmpty();
 
         fmt_ctx = avformat_alloc_context();
         if (!fmt_ctx) {
             qCritical() << "avformat_alloc_context failed (OOM)";
             emit error("Decoder init failed (OOM)");
-            return;
+            return PassEnd::Failed;
         }
+        // 每一档重新计时：四档协商共用的应该是"每档一个全额超时"，
+        // 用同一个起点的话最后一档只剩零头，等于给慢速摄像头判死刑。
+        openCtx.startedMs = QDateTime::currentMSecsSinceEpoch();
         fmt_ctx->interrupt_callback = interrupt_cb;
 
         AVDictionary *options = nullptr;
         const AVInputFormat *inputFormat = nullptr;
         if (pinnedFormat) {
+            const QByteArray formatUtf8 = tryFormat.toUtf8();
             inputFormat = av_find_input_format("v4l2");
             av_dict_set(&options, "video_size", cameraSize.constData(), 0);
-            av_dict_set(&options, "input_format", kV4l2InputFormats[attempt], 0);
-            av_dict_set(&options, "framerate", "30", 0);
+            av_dict_set(&options, "input_format", formatUtf8.constData(), 0);
+            av_dict_set(&options, "framerate", frameRate.constData(), 0);
         }
 
         ret = avformat_open_input(&fmt_ctx, url_.toUtf8().constData(), inputFormat,
@@ -1193,7 +1311,7 @@ void FFmpegVideoDecoder::decodeLoop()
         if (ret == 0) {
             if (pinnedFormat) {
                 qInfo() << "Camera" << url_ << "opened at" << cameraSize << "with"
-                        << kV4l2InputFormats[attempt];
+                        << tryFormat << "@" << frameRate << "fps";
             }
             break;
         }
@@ -1204,9 +1322,12 @@ void FFmpegVideoDecoder::decodeLoop()
         fmt_ctx = nullptr;
     }
     if (ret < 0) {
-        qWarning() << "Cannot open" << url_ << "ret =" << ret;
+        qWarning() << "Cannot open" << url_ << "ret =" << ret
+                   << (source_.timeoutMs > 0
+                           ? QStringLiteral("(timeoutMs=%1)").arg(source_.timeoutMs)
+                           : QString());
         emit error("Cannot open file");
-        return;
+        return PassEnd::Failed;
     }
 
     // 读取流的详细信息（编码参数、帧率、分辨率等）
@@ -1217,8 +1338,14 @@ void FFmpegVideoDecoder::decodeLoop()
         qWarning() << "avformat_find_stream_info failed, ret =" << ret;
         emit error("Cannot read stream info");
         avformat_close_input(&fmt_ctx);
-        return;
+        return PassEnd::Failed;
     }
+
+    // 打开与探测都过了，现在把超时上限撤掉：读帧阶段只受 stop() 打断。
+    // 不撤的话，一路"10 秒没有新包"的正常摄像头会被当成断流反复重开（timeoutMs
+    // 的本意是"别在 connect 上卡死"，不是"限制源的最长间隔"）。
+    fmt_ctx->interrupt_callback.callback = decodeInterruptCallback;
+    fmt_ctx->interrupt_callback.opaque = &running_;
 
     // 在所有流中找到最佳的视频流（可能是多个视频流，选质量最高的）
     // vidx 是视频流在 fmt_ctx->streams[] 数组中的索引
@@ -1227,7 +1354,7 @@ void FFmpegVideoDecoder::decodeLoop()
     {
         emit error("No video stream");
         avformat_close_input(&fmt_ctx);
-        return;
+        return PassEnd::Failed;
     }
 
     // ===== 步骤2: 初始化 Rockchip MPP 硬件解码器 =====
@@ -1237,18 +1364,24 @@ void FFmpegVideoDecoder::decodeLoop()
     //   - "hevc_rkmpp"  → H.265/HEVC 硬件解码（Rockchip MPP 后端）
     //   - "h264" / "hevc" → FFmpeg 内置软解码（CPU，慢）
     //
-    // 根据流的 codec_id 选择合适的硬件解码器，找不到则退回软解
+    // 根据流的 codec_id 选择合适的硬件解码器，找不到则退回软解。
+    // video.sources[].hardwareDecode=false 时**跳过整个硬件段**：帧落在 CPU 内存里，
+    // 由下面 4.5 已有的软件分支（sws 转 RGBA 写进同一块 DMA 缓冲）接手 —— 今天
+    // v4l2 裸流走的就是这条路，所以不需要新通路，只需要别再强行要 DRM_PRIME。
     enum AVCodecID codec_id = fmt_ctx->streams[vidx]->codecpar->codec_id;
     const AVCodec *codec = nullptr;
+    const bool wantHw = source_.hardwareDecode;
 
     // 按 codec_id 选择对应的 rkmpp 硬件解码器
-    if (codec_id == AV_CODEC_ID_H264) {
-        codec = avcodec_find_decoder_by_name("h264_rkmpp");
-    } else if (codec_id == AV_CODEC_ID_HEVC) {
-        codec = avcodec_find_decoder_by_name("hevc_rkmpp");
+    if (wantHw) {
+        if (codec_id == AV_CODEC_ID_H264) {
+            codec = avcodec_find_decoder_by_name("h264_rkmpp");
+        } else if (codec_id == AV_CODEC_ID_HEVC) {
+            codec = avcodec_find_decoder_by_name("hevc_rkmpp");
+        }
     }
 
-    // 硬件解码器找不到，退回通用软解码
+    // 硬件解码器找不到（或被显式关掉），退回通用软解码
     if (!codec) {
         codec = avcodec_find_decoder(codec_id);
     }
@@ -1256,7 +1389,7 @@ void FFmpegVideoDecoder::decodeLoop()
     {
         emit error("No decoder");
         avformat_close_input(&fmt_ctx);
-        return;
+        return PassEnd::Failed;
     }
 
     // 创建解码器上下文，用于存放解码器的状态和配置
@@ -1265,43 +1398,46 @@ void FFmpegVideoDecoder::decodeLoop()
         qCritical() << "avcodec_alloc_context3 failed (OOM)";
         emit error("Decoder init failed (OOM)");
         avformat_close_input(&fmt_ctx);
-        return;
+        return PassEnd::Failed;
     }
 
     // 将视频流的编码参数（分辨率、profile、level等）拷贝到解码器上下文
     avcodec_parameters_to_context(dec_ctx, fmt_ctx->streams[vidx]->codecpar);
 
-    // 设置硬件像素格式回调：告诉解码器"我需要 DRM_PRIME (DMA-BUF) 输出"
-    // 这个回调在 avcodec_open2() 内部被调用
-    enum AVPixelFormat stHWPixFmt = AV_PIX_FMT_DRM_PRIME;
-    dec_ctx->get_format = GetHWFormat;
+    if (wantHw) {
+        // 设置硬件像素格式回调：告诉解码器"我需要 DRM_PRIME (DMA-BUF) 输出"
+        // 这个回调在 avcodec_open2() 内部被调用
+        dec_ctx->get_format = GetHWFormat;
 
-    // ===== 创建硬件设备上下文 (rkmpp) =====
-    // 这一步初始化 Rockchip MPP 硬件加速器
-    // type = "rkmpp" 对应 Rockchip 的 MPP (Media Process Platform)
-    // 创建后，解码器就知道用哪个硬件设备进行解码
-    AVBufferRef *pHWDeviceCtx;
+        // ===== 创建硬件设备上下文 (rkmpp) =====
+        // 这一步初始化 Rockchip MPP 硬件加速器
+        // type = "rkmpp" 对应 Rockchip 的 MPP (Media Process Platform)
+        // 创建后，解码器就知道用哪个硬件设备进行解码
+        AVBufferRef *pHWDeviceCtx = nullptr;
 
-    enum AVHWDeviceType type;
-    type = av_hwdevice_find_type_by_name("rkmpp");
+        enum AVHWDeviceType type;
+        type = av_hwdevice_find_type_by_name("rkmpp");
 
-    int err = 0;
-    if ((err = av_hwdevice_ctx_create(&pHWDeviceCtx, type,
-									  NULL, NULL, 0)) < 0) {
-		qWarning() << "Failed to create DRM HW device context";
-        char errrbuf[256];
-        av_strerror(err, errrbuf, sizeof(errrbuf));
-        printf("failed %s\n", errrbuf);
-        avcodec_free_context(&dec_ctx);
-        avformat_close_input(&fmt_ctx);
-		return ;
-	}
+        int err = 0;
+        if ((err = av_hwdevice_ctx_create(&pHWDeviceCtx, type,
+                                          NULL, NULL, 0)) < 0) {
+            qWarning() << "Failed to create DRM HW device context";
+            char errrbuf[256];
+            av_strerror(err, errrbuf, sizeof(errrbuf));
+            qWarning() << "failed" << errrbuf;
+            avcodec_free_context(&dec_ctx);
+            avformat_close_input(&fmt_ctx);
+            return PassEnd::Failed;
+        }
 
-    // 将硬件设备上下文绑定到解码器上下文
-    // 之后 avcodec_open2() 会使用这个硬件设备进行解码
-    dec_ctx->hw_device_ctx = av_buffer_ref(pHWDeviceCtx);
-    // 释放本地引用（dec_ctx->hw_device_ctx 持有自己的引用，avcodec_free_context 会释放）
-    av_buffer_unref(&pHWDeviceCtx);
+        // 将硬件设备上下文绑定到解码器上下文
+        // 之后 avcodec_open2() 会使用这个硬件设备进行解码
+        dec_ctx->hw_device_ctx = av_buffer_ref(pHWDeviceCtx);
+        // 释放本地引用（dec_ctx->hw_device_ctx 持有自己的引用，avcodec_free_context 会释放）
+        av_buffer_unref(&pHWDeviceCtx);
+    } else {
+        qInfo() << "ch" << channel_ << "hardwareDecode=false，本路走软解（CPU 帧 + sws 转 RGBA）";
+    }
 
     // thread_count=1: 硬件解码器本身是单线程的，多线程反而会增加开销
     dec_ctx->thread_count = 1;
@@ -1314,7 +1450,7 @@ void FFmpegVideoDecoder::decodeLoop()
         emit error("Cannot open decoder");
         avcodec_free_context(&dec_ctx);
         avformat_close_input(&fmt_ctx);
-        return;
+        return PassEnd::Failed;
     }
 
     // 从解码器上下文获取视频分辨率（可能与流信息中的略有不同）
@@ -1400,7 +1536,7 @@ void FFmpegVideoDecoder::decodeLoop()
         close(drm_fd);
         avcodec_free_context(&dec_ctx);
         avformat_close_input(&fmt_ctx);
-        return;
+        return PassEnd::Failed;
     }
 
 
@@ -1431,9 +1567,10 @@ void FFmpegVideoDecoder::decodeLoop()
         av_packet_free(&pkt);
         avcodec_free_context(&dec_ctx);
         avformat_close_input(&fmt_ctx);
-        return;
+        return PassEnd::Failed;
     }
     int frame_count = 0;
+    int looped = 0;          // 文件源 loop 回卷了几次（收尾日志用，现场核对"是不是在同一段循环"）
     boxSmoother_.clear();
     fenceTracks_.clear();   // 重开流即新的一段监控，围栏事件不跨重启延续
 
@@ -1563,6 +1700,10 @@ void FFmpegVideoDecoder::decodeLoop()
     int software_scaler_src = AV_PIX_FMT_NONE;
     int software_scaler_w = 0, software_scaler_h = 0;
 
+    // 这一路怎么收场的，供外环判要不要重连。默认值就是"被 stop() 叫停"：
+    // while(running_) 因为 running_ 变假而自然退出时，下面那行赋值根本不会执行。
+    PassEnd pass = PassEnd::StoppedByUser;
+
     while (running_)
     {
         // ===== 4.1 读取一个压缩数据包 =====
@@ -1570,6 +1711,19 @@ void FFmpegVideoDecoder::decodeLoop()
         // 对于 RTSP 流，这里可能会阻塞等待网络数据
         // 返回 0 表示成功，AVERROR_EOF 表示流结束
         ret = av_read_frame(fmt_ctx, pkt);
+        if (ret == AVERROR_EOF && source_.loop && !isV4l2Node) {
+            // 文件播完回到开头：与 GB28181 的 loop 同一手法（seek 0 + flush 解码器）。
+            // 只给文件源用——摄像头/网络流没有"结尾"，对它们做 seek 只会得到又一次失败。
+            // 节拍器不受影响：它数的是"本函数已经发出多少帧"（frame_count × 间隔），
+            // 与 pts 无关，所以回到开头不会让它以为落后了几千帧。
+            if (av_seek_frame(fmt_ctx, -1, 0, AVSEEK_FLAG_BACKWARD) >= 0) {
+                avcodec_flush_buffers(dec_ctx);
+                av_packet_unref(pkt);
+                looped++;
+                continue;
+            }
+            qWarning() << "ch" << channel_ << "loop 回卷失败，本路按播完收尾";
+        }
         if (ret < 0)
         {
             // 流已结束（文件播放完毕或连接断开）
@@ -1584,6 +1738,17 @@ void FFmpegVideoDecoder::decodeLoop()
             {
                 // 处理剩余帧（同下方逻辑）
                 av_frame_unref(frame);
+            }
+            // 收场原因只在这里判一次：AVERROR_EOF 是"这一路放完了"（文件源的正常终点，
+            // 外环不许把它当断流重连——那等于偷偷替用户开了循环播放）；
+            // 其它负值是"流断了"（rtsp 掉线、摄像头被拔），配了 reconnectMs 就该再来一次；
+            // running_ 已被置假则是用户按了停止，两种都不该再动。
+            if (!running_) {
+                pass = PassEnd::StoppedByUser;
+            } else if (ret == AVERROR_EOF) {
+                pass = PassEnd::StreamEnded;
+            } else {
+                pass = PassEnd::Failed;
             }
             break;
         }
@@ -2351,5 +2516,8 @@ void FFmpegVideoDecoder::decodeLoop()
     avcodec_free_context(&dec_ctx);
     avformat_close_input(&fmt_ctx);
 
-    emit finished();
+    if (looped > 0) {
+        qInfo() << "ch" << channel_ << "loop 回卷" << looped << "次，共出帧" << frame_count;
+    }
+    return pass;
 }

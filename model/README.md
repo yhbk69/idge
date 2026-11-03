@@ -77,10 +77,14 @@ config.json（schema V2）里**不出现任何模型/标签路径**，只按**�
 
 ```json
 "video": {
+  "sources":  [ { "id": "demo-mp4", "type": "file", "url": "assets/test/192.mp4" } ],
   "models":   { "yolo11n-coco": { "alarm_class": "", "note": "COCO通用检测" } },
-  "channels": [ { "channel": 0, "source": "assets/test/192.mp4", "models": ["yolo11n-ppe", "yolo11n-coco"] } ]
+  "channels": [ { "channel": 0, "source_id": "demo-mp4", "models": ["yolo11n-ppe", "yolo11n-coco"] } ]
 }
 ```
+
+通道引用视频流走 `source_id`（`video.sources[]` 的 `id`）；老写法直接内联
+`"source": "assets/test/192.mp4"` 仍然可用，见 `src/base/config/README.md` 的三层兜底。
 
 - 槽位解析单一出口 `ModelRegistry::resolveChannelSlots(ch)`：路径固定取
   `library/<id>/model.rknn`，标签优先级 = `video.models[<id>].label`（逃生口，一般留空）

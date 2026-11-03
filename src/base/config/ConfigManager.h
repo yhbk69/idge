@@ -39,6 +39,7 @@
 
 #include <QString>
 #include <QStringList>
+#include <QList>
 #include "runtime_paths.h"
 #include <QJsonObject>
 #include <mutex>
@@ -64,11 +65,40 @@ struct VideoModelParam
 };
 
 /**
+ * @brief 一路视频流的完整定义（config.json 的 video.sources[]，通道按 id 引用它）
+ *
+ * 为什么单独一张表：同一只摄像头/同一路 rtsp 会被多路通道复用，地址与采集参数写在
+ * 各通道里就会"改一处漏三处"；而分辨率/帧率/输入格式本来就是**流的属性**，
+ * 不是通道的属性（通道决定的是挂哪几个模型）。口径照 caichao 版 idge.json 的
+ * `video.sources[]`，字段则是本仓真能接进 FFmpeg 打开参数的那些（见 ffmpeg_video_decoder）。
+ *
+ * 三个"不指定"的约定：width/height<=0、fps<=0、inputFormat 空——都回落旧口径
+ * （摄像头尺寸走全局 smartRecognition.camera_size、帧率 30、输入格式三档协商），
+ * 这样老配置一条都不用改也能继续跑。
+ */
+struct VideoSourceCfg
+{
+    QString id;              ///< 注册表主键，通道靠它引用；空 = 非注册表条目
+    QString type;            ///< camera / file / rtsp / rtmp；空 = 按 url 前缀嗅探（旧口径）
+    QString url;             ///< 设备节点、本地文件或流地址
+    QString note;            ///< 备注（界面下拉显示用）
+    int width = 0;           ///< <=0 = 不指定；只对 camera 生效（其它源以流自身分辨率为准）
+    int height = 0;          ///< 同上
+    int fps = 0;             ///< <=0 = 不指定；只对 camera 生效（其它源的帧率从流里探）
+    QString inputFormat;     ///< 仅 camera：mjpeg / nv12 / yuyv；空 = 三档协商
+    bool loop = false;       ///< 仅 file：读到结尾后回到开头继续放
+    bool hardwareDecode = true; ///< false = 走软解（不建 rkmpp 设备，帧是 CPU 内存的）
+    int timeoutMs = 0;       ///< <=0 = 打开/探测不设墙上时钟超时（旧行为：只受 stop 打断）
+    int reconnectMs = 0;     ///< <=0 = 断流/打开失败就不再接（旧行为）
+};
+
+/**
  * @brief 一个视频通道的配置（config.json 的 video.channels[下标=通道号]）
  */
 struct VideoChannelCfg
 {
-    QString source;      ///< 视频源：本地文件 / 设备节点 / RTSP
+    QString source;      ///< 内联视频源（旧口径）：本地文件 / 设备节点 / RTSP
+    QString sourceId;    ///< 引用 video.sources[] 的 id；非空且命中时**优先于 source**
     QString note;        ///< 通道备注（四宫格 OSD 用）
     bool enabled = true; ///< false = 启动时不打开这一路
     QStringList modelIds;///< 有序模型库 id 列表，顺序即级联槽位顺序（= result_id）
@@ -101,9 +131,65 @@ public:
     /** @brief 通道完整配置（缺键字段取 VideoChannelCfg 的默认值） */
     VideoChannelCfg channelCfg(int ch) const;
 
-    /** @brief 通道视频源（本地文件/设备节点/RTSP），通道号非法返回空串 */
+    /**
+     * @brief 通道实际要打开的地址：**先按 source_id 查注册表，查不到再用内联 source**
+     * @return 两者都没有返回空串（界面据此显示"视频待接入"）
+     * @note 悬空的 source_id（非空但注册表里没有）**不回退**到内联 source：
+     *       "以为选的是流 A，其实悄悄用了旧地址"比"这一路黑屏 + 一条告警"更难查。
+     */
     QString channelSource(int ch) const;
     void setChannelSource(int ch, const QString &source);
+
+    /** @brief 通道引用的流 id（未用注册表时为空串） */
+    QString channelSourceId(int ch) const;
+    void setChannelSourceId(int ch, const QString &id);
+
+    /**
+     * @brief 通道里内联写的 source 原值（旧口径那个键），**不做解析**
+     *
+     * 只给界面用：设置页要靠它决定下拉里要不要列"内联地址"那一项。
+     * "这一路究竟开什么"仍然只有 resolveChannelSource() 一处口径，别拿这个值去开流。
+     */
+    QString channelInlineSource(int ch) const;
+
+    /**
+     * @brief 解析通道最终要用的那条流（地址 + 全部打开参数），一条解析口径
+     *
+     * 三层兜底：① source_id 命中注册表 → 那条目；② 否则内联 source 非空 → 合成一条
+     * （type 按 url 前缀嗅探，其余字段取默认，等价于改动前的行为）；③ 都空 → 返回空 cfg。
+     * 所有"这路要开什么"的消费者（解码、界面、将来的 /api/streams）都走这里，
+     * 不要在别处再拼一遍 if-else。
+     */
+    VideoSourceCfg resolveChannelSource(int ch) const;
+
+    // ========== 视频流注册表（video.sources[]，通道按 id 引用）==========
+
+    /** @brief 注册表全部条目（数组顺序即界面下拉顺序） */
+    QList<VideoSourceCfg> videoSources() const;
+
+    /** @brief 注册表里出现过的 id（可能含重复 id，见 setVideoSource 的收口说明） */
+    QStringList videoSourceIds() const;
+
+    /** @brief 按 id 取一条流；不存在时返回空 cfg（id 与 url 均为空） */
+    VideoSourceCfg videoSource(const QString &id) const;
+
+    /**
+     * @brief 新增或按 id 覆盖一条流（id 已存在则原地替换，不存在则追加）
+     * @return false = id 或 url 为空，调用方没给够主键/地址，配置不改动
+     * @note 只按 id 找**第一条**匹配项替换，并把重复 id 的后续条目一并删掉：
+     *       手改 JSON 很容易留下同 id 的两条，若两处都能命中，行为就取决于数组顺序。
+     */
+    bool setVideoSource(const VideoSourceCfg &source);
+
+    /**
+     * @brief 删除一条流，并把引用它的通道的 source_id 一起清空
+     * @note 与 removeModelParam() 同一政策：删条目和删引用一次做干净，
+     *       分开改就会造出一堆"悬空 id + 黑屏"的通道。
+     */
+    void removeVideoSource(const QString &id);
+
+    /** @brief 有多少通道正在引用这条流（删之前给界面确认用） */
+    int videoSourceReferrerCount(const QString &id) const;
 
     /** @brief 通道备注（四宫格 OSD），通道号非法返回空串 */
     QString channelNote(int ch) const;
@@ -321,7 +407,8 @@ public:
     /** @brief Pad WS 路径（默认 "/"，只进日志——QWebSocketServer 不按路径筛连接） */
     QString padServerPath() const;
 
-    /** @brief hello_ack.deviceId（默认空 = 省略该键） */
+    /** @brief hello_ack.deviceId（默认空 = 由 pad::defaultDeviceId() 按 /etc/machine-id 派生，
+     *         该键**一定会出现在 hello_ack**，因为 §13.1.3 规定它必填；口径见确认单 A17） */
     QString padServerDeviceId() const;
 
     /** @brief 证据 URL 前缀覆盖（默认空 = 用内嵌 http 服务的自动地址） */
@@ -442,6 +529,15 @@ private:
      * @return true=root_ 有改动（调用方负责 saveUnsafe 落盘）
      */
     bool migratePadServerDefaults();
+
+    /**
+     * @brief 老配置没有 video.sources 时补一个空数组（load 内持锁调用）
+     *
+     * 只为让这一段落进文件可见可改；**不**把各通道已有的内联 source 抽成条目——
+     * 那等于替现场决定"这几路算什么流、叫什么名"，而且抽完 id 就成了中文路径的哈希，
+     * 反而更难维护。想用注册表的人在设置页的下拉里选一次即可。
+     */
+    bool migrateVideoSourcesDefaults();
 
     QString configPath_;   ///< 配置文件路径
     QJsonObject root_;     ///< JSON 根对象

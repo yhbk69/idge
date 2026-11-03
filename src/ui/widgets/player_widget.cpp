@@ -255,6 +255,14 @@ void PlayerWidget::setExpanded(bool expanded)
 */
 void PlayerWidget::open(std::string url, int channel)
 {
+    // 旧口径（只给地址）：包一条流交给正式重载，参数全默认 = 改动前的行为
+    VideoSourceCfg source;
+    source.url = QString::fromStdString(url);
+    open(source, channel);
+}
+
+void PlayerWidget::open(const VideoSourceCfg &source, int channel)
+{
     // 报警视频录制参数一次性注入：编码器在 decodeLoop 打开流后才建，
     // 运行期改配置不会重建编码器，所以这里不做热更新。
     ConfigManager &cfg = ConfigManager::instance();
@@ -275,7 +283,7 @@ void PlayerWidget::open(std::string url, int channel)
     updatePlaceholder();
 
     decoder_->setChannel(channel);  // 设置解码器频道
-    decoder_->start(QString::fromStdString(url));  // 启动解码
+    decoder_->start(source);        // 启动解码（地址与打开参数一起交下去）
 }
 
 /* 

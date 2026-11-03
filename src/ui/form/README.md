@@ -7,7 +7,7 @@
 `src/ui/form` 是 IDGE（RK3588 施工行为监测与分析系统）的**顶层窗体目录**，包含主窗口 `frmMain` 及其挂载的全部页面控件：
 
 - **视频监控页**：4 路视频 2x2 网格实时显示（`frmVideoWindow` + `src/ui/PlayerWidget` + `src/ui/GLVideoWidget`），含单通道全屏放大与电子围栏绘制工具栏（画之前先选角色：禁区红 / 岗区域绿）；
-- **调试设置页**（导航文本"调试设置" → `ui->pageSettings`）：`config.json` 的编辑界面（视频通道/模型/阈值/报警类别/围栏类别）、WebSocket 地址与连接状态、级联模型 5 槽位配置、通道备注与清空，页底是带颜色分类的运行日志（`textBrowserLog`）。配置控件与日志同在一页，全部内嵌在 `frmmain.cpp` 的 `initDebugPage()`/`initCascadeUi()`，没有独立的"系统设置/帮助"页；
+- **调试设置页**（导航文本"调试设置" → `ui->pageSettings`）：`config.json` 的编辑界面（视频通道选流/视频流管理/模型/阈值/报警类别/围栏类别）、WebSocket 地址与连接状态、级联模型 5 槽位配置、通道备注与清空，页底是带颜色分类的运行日志（`textBrowserLog`）。配置控件与日志同在一页，全部内嵌在 `frmmain.cpp` 的 `initDebugPage()`/`initCascadeUi()`，没有独立的"系统设置/帮助"页；
 - **报警查询页**：数据看板（`dashboard_widget`）与报警记录列表（`alarm_list_widget`），本目录仅负责挂载与角标/toast 联动；
 - **人员点名页**（caichao 合入）：任务列表 + 拍照选图 + 登记识别 + 注销匹配全流程；
 - **设备盘点页**（caichao 合入）：复用点名选图界面做设备检测登记/注销与详情查看；
@@ -36,6 +36,7 @@
 | equipment_inventory_widget.h/.cpp | 设备盘点任务列表页（双服务注入） | caichao 合入 |
 | equipment_recognition_dialog.h/.cpp | 设备识别结果对话框（Registration/Cancellation 两阶段共用） | caichao 合入 |
 | equipment_detail_dialog.h/.cpp | 设备盘点任务详情对话框（只读快照） | caichao 合入 |
+| stream_editor_dialog.h/.cpp | 视频流注册表编辑（`video.sources[]`）：左列表 + 右表单，工作副本编辑、id 只读、确定才落盘；`touchedSourceIds()` 交回调用方决定重开哪几路 | 新增 |
 | login_widget.h/.cpp | **扫码登录页（门禁）**：**左品牌块 + 右操作列**两栏（2026-10-30 触屏复核后改）——左边 IDGE/「施工行为监测与分析」+ 状态行 + 取景说明，右边只有三颗竖排大按钮（扫码登录 / 测试登录 / 退出程序，480px 宽 × 72px 高）。只发信号 `loginSucceeded/loginFailed(reason)/exitProgramRequested`，不碰 `frmMain` 内部；解析校验全交给 `ConstructionSession` | 新增 |
 | smart_recognition_widget.h/.cpp | 智能识别页（二维码 + OCR 铭牌文字 + 人员点名 + 设备盘点）：四卡片入口，前两张自带模态对话框，后两张只发请求信号；含匿名 namespace 里的 OCR 选区控件。**二维码那三行现在只是转调 `uiwidgets` 的 `QrScanDialog::openFullScanner()`**（与登录页共用同一个扫码器） | 新增 |
 | photo_selection_dialog.h | **遗留未使用**旧版选图对话框声明（仅头文件，无实现无引用，含已修正的乱码注释），与 photo_selection_widget.h 同名类互斥 | caichao 合入（废弃版本） |
@@ -198,9 +199,34 @@
   ⚠ 重开有代价（漏一份 NPU 上下文，见 `src/media/reader/README.md`），别在验证时反复走。
 - **设置页的落盘纪律**：`ConfigManager::save()` 是**持锁整份 JSON 截断重写**（非原子），
   所以 ① `on_spinBoxConfThresh_valueChanged` 这类 handler 第一句必须是
-  `if (qFuzzyCompare(现值, 新值)) return;`（隔壁通道地址编辑器就是这么防的）；
-  ② `initDebugPage()` 里给控件灌初值的 `setValue()` 必须 `blockSignals` 包住 ——
-  否则"开机进设置页"就白写两次盘。两条都在 2026-10-31 板上用 `config.json` 的 mtime 验过。
+  `if (qFuzzyCompare(现值, 新值)) return;`；② `initDebugPage()` 里给控件灌初值的 `setValue()` 必须
+  `blockSignals` 包住 —— 否则"开机进设置页"就白写两次盘。两条都在 2026-10-31 板上用 `config.json`
+  的 mtime 验过。③ 选流下拉同一口径：连的是 `activated`（只有用户动作才发）而不是
+  `currentIndexChanged`，`refreshChannelSourceCombos()` 灌值时仍整段 `blockSignals`，
+  handler 第一句再比一次"引用有没有真的变"——重新点中当前项也会发 `activated`，
+  不判就成了"点一下没改配置却重开了一次流"。
+- **每路的源是「选流」下拉，不是地址输入框**（`frmMain::chSourceCombo_`，占掉原
+  `lineEditChN` 那一格；四颗手填框已从布局摘出并隐藏，**不再读写**，内联 `source` 的值直接从
+  `ConfigManager::channelInlineSource()` 取）：
+  - 条目 = 注册表每条流 +（有内联时）`（内联地址）…` +（引用与内联都没有时）`（不选流，本路不开）`
+    +（`source_id` 悬空时）`（流 X 已不存在）`。悬空那条**必须显示出来**：只把下拉摆成空，
+    现场就会去查摄像头而不是查配置。
+  - 每一项的动作判据存 `Qt::UserRole`（kind）与 `UserRole+1`（流 id），**不靠文本前缀判**——
+    文本是给人看的，会随显示口径改。
+  - 选中一条 = `setChannelSourceId()` + `save()` + `applyChannelConfigNow(ch)`：配置与画面同时走，
+    不留"改了没重开"的空档。
+  - 「浏览…」不再写内联地址：它在注册表里建一条 `type=file` 的流（id 为 `local-chN`，撞车递增后缀）
+    再让本路引用它。理由：内联那条写法装不下类型/循环/硬解/超时/重连这十项参数。
+  - 「清空」把引用、内联地址、备注一起清掉并**立刻重开本路**（结果就是这一路停流）。
+- **「视频流管理…」= `StreamEditorDialog`**（`stream_editor_dialog.{h,cpp}`）：左侧列表 + 右侧表单
+  （为什么不是表格：7 寸屏上表格单元格的点击目标远低于 6mm 下限）。三条硬规矩：
+  ① 编辑的是 `video.sources` 的**工作副本**，取消 = 磁盘与内存都不动；
+  ② 流的 **id 只读**——改 id 等于换一条流、所有引用变悬空，所以新建/删除是唯一入口；
+  ③ 落盘由对话框自己调 `save()`（`setVideoSource`/`removeVideoSource` 只改 `root_`）。
+  删除前按 `videoSourceReferrerCount()` 问一句"有几路正在引用"；地址为空的条目**当场拦下**、
+  不让确定（跳过不写等于界面上是空的、配置里还是旧地址）。
+  关闭后 `openStreamManager()` 按 `touchedSourceIds()` 重开受影响的路；**引用被删除连带清空的**
+  那几路靠"对话框前后 `channelSourceId` 变了"这条判据兜住（先取快照再开对话框）。
 - **item-view 的勾选态在 QSS 下不能靠换底色表达**（2026-10-30 逐像素核对，本目录最反直觉的一条）：
   `QListWidget` 一旦挂了 `theme::field()` 的样式表，`QListWidgetItem::setBackground()` 的 brush **被样式表忽略**，
   而 `setForeground()` **仍然生效** —— 于是"选中行底色没变、字却成了黑的"，深底深字直接读不了。
@@ -212,7 +238,9 @@
   `indicator` 想真放大只能改 QSS 的 `::indicator` 尺寸（Qt 里那就是命中区）；
   本目录的通道模型选择框两者都做了。
 - **按需 new 的对话框要显式挂 QScroller**：`frmMain` 构造末尾那次全量扫描扫不到它们
-  （通道模型选择框、OCR 结果框各补了一行 `QtHelper::enableTouchScroll`）。
+  （通道模型选择框、OCR 结果框各补了一行 `QtHelper::enableTouchScroll`；
+  `StreamEditorDialog` 的列表与右侧表单各补一行——表单十三行触屏档高过对话框最小高，
+  不滚动就只能把控件压回非触屏尺寸）。
   挂载范围与 tap/drag 分界的整体口径见 `src/ui/core/README.md`「手指拖动滚动」。
 - **日志区自动跟随必须条件化**：`logWithColor()` 只在 `verticalScrollBar()->value() >= maximum()-4`
   时才 `ensureCursorVisible()`。无条件跟随 + 报警约 1 条/秒 = 手指根本滑不动日志。

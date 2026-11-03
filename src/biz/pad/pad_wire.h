@@ -9,7 +9,8 @@
 // 而 v1 要求同一 alarmId 的合并只看 updatedAt（§3.8），三处口径不一致对端就会时而看到
 // PENDING 时而看到 DISPOSED。所有出站报警 JSON 只能从这里出。
 //
-// 三条口径要先看清（都是"规约没写死、这里必须选一个"的地方，理由写在 .cpp 对应函数上）：
+// 四条口径要先看清（都是"规约没写死、这里必须选一个"的地方，理由写在 .cpp 对应函数上）：
+//   汇总口径与"不同意时改哪一处"见 plan/口径确认单_2026-11-03.md；这里只列影响这份映射的。
 //   1) 本机 `rectified`（已确认）**不等于** v1 的 `DISPOSED`（已处置）。
 //      v1 只认 PENDING/DISPOSED/FALSE_ALARM（§3.10），而本机的"确认"语义是"我看过了"
 //      → 映射成 **PENDING + readAt**，处置信息一概不臆造。
@@ -20,6 +21,8 @@
 //      而本机报警那一刻视频片段还没落盘（ClipWriter 是"报警后 2 秒"才写）。
 //      → 片段到位后**再发一条完整的 `alarm`**（§3.8 明说重复下发同一报警是安全的、按 updatedAt 合并），
 //        而不是发一条带不上证据的 update。
+//   4) `hello_ack.deviceId` 必填而配置出厂为空 → `defaultDeviceId()` 按 /etc/machine-id 派生，
+//      配置填了才用配置的（口径 A17，见下方函数注释）。
 //
 // 分层：biz/pad → biz/alarm 是同层合法边；URL 拼装复用 uplink::mediaUrlFor
 // （那份实现有越界即不给的安全判据，且有离线契约覆盖）。
@@ -56,6 +59,15 @@ QString wireReadAt(const AlarmRecord &record);
 
 // 所属施工计划 ID（construction_info.construction_id）；未登录返回空串
 QString taskIdOf(const AlarmRecord &record);
+
+// ============================================================================
+// deviceId（口径确认单 A17）
+// ============================================================================
+// §13.1.3 把 `deviceId` 列为 hello_ack **必填**，而 `pad_server.device_id` 出厂是空串——
+// 空串的原因不是"没有 ID"，而是配置文件会被拷到别的板子，写死的 ID 会撞车。
+// 所以配置留空时按本机派生一个稳定值，优先 `/etc/machine-id`（板端实测存在，克隆镜像后每台不同），
+// 读不到才退到 hostname（克隆盘上 hostname 会重复，只作兜底）。**只在进程内算一次**。
+QString defaultDeviceId();
 
 // 报警类型三元组（v1 §13.2.1 要求 type/typeLabel/categoryLabel 都由边缘下发）
 struct TypeWire {

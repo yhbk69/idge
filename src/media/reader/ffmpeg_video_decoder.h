@@ -51,6 +51,7 @@ extern "C" {
 #include "ppe_task.hpp"
 #include "video_recorder.h"
 #include "fence_shape.h"
+#include "ConfigManager.h"   // VideoSourceCfg：一条流的打开参数（base 在 media 之下，方向合法）
 
 /**
  * @brief 一个级联槽位在运行期可换的模型参数
@@ -87,7 +88,23 @@ public:
                                 InferenceMode mode = InferenceMode::Cascade);
     ~FFmpegVideoDecoder();
 
+    /**
+     * @brief 按老口径只给一个地址开流（CLI -i、测试、内联 source 的通道都走这条）
+     *
+     * 等价于 start(VideoSourceCfg{url})：类型空着 → 解码循环里按 `/dev/video` 前缀嗅探，
+     * 采集尺寸/帧率沿用旧口径（全局 smartRecognition.camera_size + 30fps），
+     * 循环/重连/超时全关 —— 与加"视频流注册表"之前的行为逐字一致。
+     */
     void start(const QString& url);
+
+    /**
+     * @brief 按一条解析好的流开流（video.sources[] 引用出来的结果，正式路径）
+     *
+     * type/inputFormat/width/height/fps 直接进 avformat_open_input 的参数；
+     * hardwareDecode=false 就不建 rkmpp 设备（帧落在 CPU 内存，走既有 sws 分支）；
+     * loop 只让文件源播完回到开头；reconnectMs>0 时打开失败或断流后按间隔重试。
+     */
+    void start(const VideoSourceCfg& source);
     void stop();
     // 两阶段停止：先 signalStop 通知所有解码器退出（不阻塞），
     // 再 waitForStop 等待线程实际退出。用于 closeEvent 并行停止多路解码器。
@@ -175,7 +192,31 @@ signals:
     void statusChanged(int channel, int online);
 
 private:
+    /**
+     * @brief 线程入口：外环只管"要不要按 reconnectMs 再来一次"
+     *
+     * 拆成两层是因为重连要重复的是整段"打开→建解码器→读帧→释放"，而不只是打开那一步：
+     * 内层已经按既有顺序把 fmt_ctx/dec_ctx/DMA 缓冲都收尾了，外层再进一次就是干净的一路流。
+     * 退出条件只有两个：running_ 被 stop() 置假，或 source_.reconnectMs<=0（旧行为）。
+     */
     void decodeLoop();
+    /**
+     * @brief 一次完整的"打开→读帧→释放"，返回收场方式供外环判要不要重连
+     *
+     * StreamEnded（文件放完且没开 loop）与 StoppedByUser（stop() 过）**都不许重连**：
+     * 前者重连等于偷偷替用户开了循环播放，后者重连会让"停止"按钮失效。
+     * 其余退出（打不开、探测失败、没有视频流、缓冲分配失败）算 Failed，
+     * 配了 reconnectMs 就按间隔再来一次。
+     */
+    enum class PassEnd { StoppedByUser, StreamEnded, Failed };
+    PassEnd decodeOnce();
+    /**
+     * @brief 这一路要不要再来一次：stop() 之后（running_ 假）永远不重连
+     *
+     * 判据只有这一处：`stop()` 与 `reconnectMs>0`。写成函数是为了让 decodeOnce 里
+     * 九个失败出口和正常收尾都走同一条判据，避免出现"某条错误分支忘了重连"。
+     */
+    bool reconnectWanted() const { return running_.load() && source_.reconnectMs > 0; }
     /**
      * @brief 为本通道构建级联推理任务（首次 start() 时调用，幂等）
      *
@@ -187,6 +228,10 @@ private:
     void buildCascadeTasks();
 
     QString url_;
+    // 本次要开的流：url_ 是它的地址副本（日志/状态栏都读 url_，不新开一条读法）。
+    // type 为空 = 按 url 前缀嗅探（旧口径），所以 start(QString) 那条路进来时
+    // 除 url 外全默认，行为与加注册表之前逐字一致。
+    VideoSourceCfg source_;
     int channel_ = 0;
     QThread* thread_ = nullptr;
     // 运行标志：true→false 时通过 FFmpeg interrupt_callback 打断阻塞的

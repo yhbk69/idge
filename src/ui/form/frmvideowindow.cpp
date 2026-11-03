@@ -78,12 +78,21 @@ void frmVideoWindow::initForm()
 // 作用：根据通道号找到对应的播放器控件，并将视频文件路径传递给它进行解码播放
 // @param ch   通道号（0-3）
 // @param path 视频文件路径
+// 两个重载的关系：QString 版是"只有一个地址"的旧写法，包一条全默认的流再转给正式入口。
+// 空地址一律不动现有画面 —— 半路清空配置时把 tile 打回"待接入"比黑屏更容易看懂。
 // ============================================================================
 void frmVideoWindow::openVideo(int ch, const QString &path)
 {
+    VideoSourceCfg source;
+    source.url = path;
+    openVideo(ch, source);
+}
+
+void frmVideoWindow::openVideo(int ch, const VideoSourceCfg &source)
+{
     PlayerWidget *pw = playerWidget(ch);   // 根据通道号获取播放器指针
-    if (pw && !path.isEmpty()) {           // 确保播放器有效且路径非空
-        pw->open(path.toStdString(), ch);  // 将 QString 转为 std::string 后打开视频
+    if (pw && !source.url.isEmpty()) {     // 确保播放器有效且地址非空
+        pw->open(source, ch);              // 地址与打开参数一起交给播放器
     }
 }
 

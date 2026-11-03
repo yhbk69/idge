@@ -136,6 +136,9 @@ sqlite3 data/idge.db "select count(*) from alarms where video_path<>''"
 - 检测数据是否落库受 `storeDetections` 开关控制（对应提交 fc7ae46"仅存报警相关"）。
 - 建表语句在 `initialize()` 内幂等执行；修改表结构需同步 `tests/test_database.cpp` 与
   `sql/idge_init.sql`（**两份建表必须一致**，见下）。
+- `alarms` / `detections` 每一列都在两份建表语句里带了一行注释（谁写、什么格式、坑在哪）。
+  改列必须连注释一起同步——注释里的口径（时间无偏移、`update_time` 是补漏游标、
+  `rectified` ≠ 已处置）一旦和代码分叉，比没注释更有害。
 
 ### 表结构演进：`ensureColumns()`（本轮新增，此前全仓没有任何迁移机制）
 

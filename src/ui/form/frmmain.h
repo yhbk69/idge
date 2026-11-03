@@ -148,13 +148,6 @@ private:
      */
     void logWithColor(const QString &category, const QString &message, const QColor &color);
 
-    /**
-     * @brief 打开视频到指定通道
-     * @param channel 通道索引（0-3，对应 videoWindow1~4）
-     * @param path    视频文件路径或RTSP地址
-     */
-    void openVideoToChannel(int channel, const QString &path);
-
 private slots:
     void initForm();               ///< 初始化窗体（无边框、图标、标题、导航）
     void initStyle();              ///< 加载 QSS 样式表并提取颜色
@@ -191,8 +184,15 @@ private slots:
 private:
     // ========== 视频通道配置控件（源/备注/启用/级联模型，通道号一律 0-based） ==========
     QLineEdit *chNoteEdit_[4] = {nullptr, nullptr, nullptr, nullptr};  // 每路通道备注
-    QLineEdit *channelSourceEdit(int channel) const;    ///< 通道号(0..3) → 源地址输入框
-    void browseChannelSource(int channel, QLineEdit *edit);  ///< 浏览并打开某路视频源
+    QComboBox *chSourceCombo_[4] = {nullptr, nullptr, nullptr, nullptr};  // 每路引用的视频流
+    QLineEdit *channelSourceEdit(int channel) const;    ///< 通道号(0..3) → 源地址输入框（已整片隐藏，不再读写）
+    void browseChannelSource(int channel);             ///< 浏览本地文件 → 建一条流并给本路引用
+    /// @brief 用 config 重灌四路下拉（注册表条目 + 内联/未选两项），不触发任何写盘
+    void refreshChannelSourceCombos();
+    /// @brief 某路下拉被用户改动：按选中的那条流改 source_id、落盘并重开本路
+    void applyChannelSourceChoice(int channel);
+    /// @brief 打开"视频流管理"对话框；关闭后刷新下拉，并重开受影响的那几路
+    void openStreamManager();
 
     // ========== 通道配置热更新（改完不必重启整个程序） ==========
     /**

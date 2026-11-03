@@ -9,8 +9,23 @@
         "  由 ConfigManager::migrateSchemaV2() 在首次启动时一次性改写并落盘，之后不再触发。",
         "video.channels 是数组，【下标即通道号】（0-based），条目里的 channel 字段只给人看、不参与解析；",
         "  models 数组的顺序就是级联槽位顺序，也就是画面上 M1/M2/… 的前缀与报警 result_id，重排会改号。",
-        "  enabled=false 表示这一路不开流；设置页勾选即时生效（停用=停本路，启用=按 source 重开），",
+        "  enabled=false 表示这一路不开流；设置页勾选即时生效（停用=停本路，启用=按解析出的那条流重开），",
         "  但直接改本文件不会被运行中的程序感知——手改 JSON 后要么重启，要么在设置页随便动一次该通道配置把它重开。",
+        "video.sources 是【视频流注册表】：一条 = 一路可被复用的取流地址 + 它的全部打开参数（类型/尺寸/帧率/",
+        "  输入格式/循环/硬解/超时/重连间隔）。同一只摄像头或同一个文件【只写一次】，几路通道用 source_id 引用它，",
+        "  改一处就几路一起改；设置页每路的下拉就是选这里的一条，「视频流管理…」按钮编辑这张表。",
+        "  通道解析口径（ConfigManager::resolveChannelSource，唯一出口，全工程不要再拼 if-else）：",
+        "    ① source_id 非空且命中注册表 → 用那条流【整条】（十个参数全带上）；",
+        "    ② source_id 为空但内联 source 非空 → 用内联地址，type 留空=按地址前缀嗅探，其余参数全默认（=加注册表之前的行为）；",
+        "    ③ 两个都空 → 这一路不开，界面留「视频待接入」。",
+        "  【悬空 id 不回退】：source_id 非空但注册表里没有 → 这一路不开 + 一条 warning。",
+        "  故意不回退到内联，是为了不出现「你以为选的是 A，其实偷偷开了旧地址」——那种现场比黑屏难查得多。",
+        "  设置页改内联地址（走「浏览」）会【同时清掉 source_id】：不清就是假开关，改了地址重启还是旧流。",
+        "  width/height/fps/inputFormat 只对 type=camera 有意义；loop 只对 type=file 有意义；其余源的分辨率/帧率以流自身为准。",
+        "  timeoutMs<=0 = 打开不设墙上时钟超时（旧行为，只受停止打断）；reconnectMs<=0 = 断流不再重连（旧行为）。",
+        "本模板通道 0~2 引用 demo-mp4（开箱即有画面）、通道 3 故意保留内联写法，用来验证②这条路仍然通；",
+        "  csi-cam/net-cam 是【没被任何通道引用】的样板条目，接上设备后把某路的 source_id 改成它们就生效。",
+        "  新装现场请一律用 source_id，内联写法只为兼容老 config.json 才保留。",
         "报警类别是【模型的参数】（video.models[<库id>].alarm_class）：留空=这个模型只画框不报警。",
         "  它不属于通道也不属于槽位，同一个模型挂在哪一路触发的都是同一个类别；设置页改动即时生效（槽位数不变就在线换，变了就重开那一路）。",
         "围栏不属于级联：它复用该通道已有的检测结果、只做几何判定，类别是 geofence.alarmClass 单值（默认 person）。",
@@ -46,6 +61,39 @@
         "geofence.channels 的坐标是 overlay 像素空间，附带 overlay_w/h；改窗口布局或分屏方式后旧围栏会偏移。"
     ],
     "video": {
+        "sources": [
+            {
+                "id": "demo-mp4",
+                "type": "file",
+                "url": "assets/test/192.mp4",
+                "note": "演示视频（播完回到开头）",
+                "loop": true,
+                "hardwareDecode": true,
+                "reconnectMs": 0
+            },
+            {
+                "id": "csi-cam",
+                "type": "camera",
+                "url": "/dev/video22",
+                "note": "板载 CSI 摄像头；宽高/帧率留 0 = 用 smartRecognition.camera_size 与 30fps",
+                "width": 0,
+                "height": 0,
+                "fps": 0,
+                "inputFormat": "",
+                "hardwareDecode": true,
+                "timeoutMs": 5000,
+                "reconnectMs": 3000
+            },
+            {
+                "id": "net-cam",
+                "type": "rtsp",
+                "url": "rtsp://192.168.2.60:554/live/1",
+                "note": "网络摄像头示例（现场改成自己的地址；断流每 3 秒重连一次）",
+                "hardwareDecode": true,
+                "timeoutMs": 8000,
+                "reconnectMs": 3000
+            }
+        ],
         "models": {
             "yolo11n-ppe": {
                 "alarm_class": "un_helmet",
@@ -59,7 +107,7 @@
         "channels": [
             {
                 "channel": 0,
-                "source": "assets/test/192.mp4",
+                "source_id": "demo-mp4",
                 "note": "东门",
                 "enabled": true,
                 "models": [
@@ -69,7 +117,7 @@
             },
             {
                 "channel": 1,
-                "source": "assets/test/192.mp4",
+                "source_id": "demo-mp4",
                 "note": "",
                 "enabled": true,
                 "models": [
@@ -79,7 +127,7 @@
             },
             {
                 "channel": 2,
-                "source": "assets/test/192.mp4",
+                "source_id": "demo-mp4",
                 "note": "",
                 "enabled": true,
                 "models": [

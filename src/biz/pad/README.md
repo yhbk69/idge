@@ -19,7 +19,7 @@ Pad 接口 v1（`plan/idge-pad-v1.md`）里**本机作为服务端**的那一面
 | `pad_wire.h` / `.cpp` | `AlarmRecord` → v1 `alarm`/`alarm_update` 的**唯一**映射层：时区补齐、状态三值、类型表、证据 URL、信封。纯函数，离线可测 |
 | `pad_ws_server.h` / `.cpp` | `QWebSocketServer` 单例：`hello_ack`/`pong`/`error`/`sync_result`/`alarm`/`alarm_update`，连接表与广播 |
 
-## 三条必须先读的口径
+## 四条必须先读的口径
 1. **`rectified` 不等于 `DISPOSED`**。本机"确认"的语义是"我看过了"，v1 只认
    `PENDING/DISPOSED/FALSE_ALARM`（§3.10）→ 出站映射成 **`PENDING` + `readAt`**。
    真要上报"已处置"，得等处置表单（`dispose_*` 五列 + `AlarmDAO::dispose()` 现在，全工程零调用方）。
@@ -31,6 +31,14 @@ Pad 接口 v1（`plan/idge-pad-v1.md`）里**本机作为服务端**的那一面
    `status/readAt/dispose/updatedAt`，而本机的视频片段是"报警后 2 秒"才由 ClipWriter 落盘的。
    → 片段到位后**再发一条完整 `alarm`**（§3.8 明说重复下发同一报警是安全的、按 `updatedAt` 合并）。
    这条替代方案本身是对规约的一处补充，需要 Pad 确认（审查报告歧义 A16）。
+4. **`hello_ack` 的两个"必填"键不靠配置**。`deviceId` §13.1.3 规定必填，而 `pad_server.device_id`
+   出厂是空串——空串的原因不是没 ID，而是配置文件会被拷到别的板子、写死会撞车。所以配置留空时
+   按 `/etc/machine-id` 派生（`pad::defaultDeviceId()`，本机实测 `EDGE-1030A3F99414`），
+   **配置填了就用配置的**。`capabilities.alarm.evidenceUrl` 反过来：它据实反映媒体服务在不在，
+   服务起不来就报 `false`（口径 A17b："证据不可用 ≠ 协议违规"），不为了凑规约撒谎。
+
+> 有争议的 10 条口径（连同**不同意时只改哪一处**）汇总在
+> `plan/口径确认单_2026-11-03.md`，改协议语义前先去看那张表，别在代码里另立口径。
 
 ## 核心流程
 
@@ -68,9 +76,9 @@ v1 §2.1 想让 WS 与 `/api/` 同占 8899，在这套栈上做不到（`QWebSoc
 无 setter：改端口/开关要重启进程，避免"界面改了、其实连的还是旧口"。
 
 ## 自测
-- `tests/test_pad_wire.cpp` — 15 组映射契约（纯 Qt Core，与 cwd 无关）
+- `tests/test_pad_wire.cpp` — 16 组映射契约（纯 Qt Core，与 cwd 无关；会打印派生 deviceId 真值）
 - `tests/test_pad_sync.cpp` — 8 组游标与已读语义（内存库）
-- `tests/test_pad_ws_server.cpp` — 11 组线上行为（loopback 起真服务端 + 真客户端）
+- `tests/test_pad_ws_server.cpp` — 12 组线上行为（loopback 起真服务端 + 真客户端）
 
 三个都在 `tests/README.md` 里有一句话摘要；改协议字段时按"映射 → 库 → 服务端"的顺序跑。
 

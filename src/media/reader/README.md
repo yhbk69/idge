@@ -102,11 +102,13 @@ decodeLoop 打开流后：用 dec_ctx 的实际宽高 + 流的 avg_frame_rate(�
 ## 使用方法
 
 ```cpp
-// 主流水线（通道与模型由 config.json 的 video.channels[] 决定，start() 内按通道解析）
+// 主流水线（通道与模型由 config.json 的 video.channels[] 决定，start() 内按通道解析；
+// 这一路要开的那条流由 ConfigManager::resolveChannelSource(ch) 解析，见下面那张参数表）
 auto* decoder = new FFmpegVideoDecoder(this);
 decoder->setChannel(0);          // 必须先于 start()：buildCascadeTasks 用 channel_ 取本通道模型
 connect(decoder, &FFmpegVideoDecoder::frameReady, this, &MyView::onFrame);
-decoder->start("rtsp://192.168.1.10/stream1");
+decoder->start(cfg.resolveChannelSource(0));   // 监控 4 路一律传整条流（含类型/尺寸/循环/超时/重连）
+decoder->start("rtsp://192.168.1.10/stream1"); // 只给地址的旧写法仍可用：等价于全部参数取默认
 decoder->stop();               // 置 running_=false + interrupt_callback 打断阻塞读帧
 
 // 只取帧、不推理（智能识别 QR/OCR）：构造第二个参数换掉默认模式即可
@@ -137,6 +139,27 @@ std::vector<ScrfdFaceBox> faces;                 // {cv::Rect rect; float score;
 det.detectRgba(rgbaPixels, width, height, stride /*>=width*4*/,
                faces, 0.5f, 0.4f);               // 返回 false=链路失败而非"没人"
 ```
+
+### 一条流的参数落到 FFmpeg 的哪里
+
+`start()` 两个重载：`start(VideoSourceCfg)` 是监控 4 路的正口径，`start(QString url)`
+只给地址（等价于 `VideoSourceCfg{url}`，其余全默认）。**每个默认值都刻意等于加注册表之前的行为**，
+所以老 config（内联地址、没有 `sources` 段）解出来的流开法与改动前逐字一致。
+
+| `video.sources[]` 字段 | 生效位置 | 不指定时（= 旧行为） |
+| --- | --- | --- |
+| `type` | 判型只看 `camera`：`type` 非空 → `type=="camera"` 才算采集节点；`type` 空 → 按 `url` 前缀 `/dev/video` 嗅探（`isCaptureNode`，`ffmpeg_video_decoder.cpp:694`）。文件与网络流都不声明 `AVInputFormat`，交给 FFmpeg 探容器 | 嗅探 |
+| `width`/`height` | 仅采集节点：写进 `video_size` dict。**两边都 >0 才算写了**，半套尺寸当没写 | 回落 `smartRecognition.camera_size` |
+| `fps` | 仅采集节点：写进 `framerate` dict | `<=0` → 30 |
+| `inputFormat` | 仅采集节点：非空 → 先试这一档，失败仍继续往下；空 → 三档 `nv12`/`yuyv`/`mjpeg` 顺序协商。阶梯**末位恒为空串档**（"什么都不指定"），填错格式不至于彻底打不开。文件与网络流只开一次，不跑阶梯（否则 RTSP 连不上要把超时乘四） | 三档协商 |
+| `timeoutMs` | `AVIOInterruptCB` 里的墙上时钟预算，**只夹"打开 + `av_find_stream_info`"这一段**；探测一结束就把回调换回"只看 `running_`"，否则 10 秒没新包的正确摄像头会被判成断流反复重开 | `<=0` = 不设限，只有 `stop()` 能打断 |
+| `hardwareDecode` | `true` 才建 `rkmpp` 设备并挂 `get_format=GetHWFormat`；`false` 完全不碰硬解，帧是 CPU 内存里的软解帧（走已有的 `sws_scale` 分支） | `true` |
+| `loop` | 仅非采集节点：`av_read_frame` 返回 `AVERROR_EOF` → `av_seek_frame(-1, 0, BACKWARD)` + `avcodec_flush_buffers` 继续放，收场原因记一次 `looped` 日志 | `false` = 播完就停 |
+| `reconnectMs` | 只有以 `PassEnd::Failed` 收场才重连：等这个间隔（**100ms 分片睡**，`stop()` 不会被整段睡住）重建上下文再来一遍。`StoppedByUser` 与 `StreamEnded`（loop=false 的文件播完）**都不重连** | `<=0` = 打不开就报错、播完就停 |
+
+`decodeLoop()` 现在只是**外环**（要不要再来一遍），一遍的完整生命周期在 `decodeOnce()` 里；
+所有早退出口统一返回 `PassEnd`，所以"这一路是被谁结束的"只在一个地方判定一次。
+`emit finished()` 挪到外环，重连成功不会多发一次结束信号。
 
 ## 依赖关系
 
@@ -178,7 +201,9 @@ det.detectRgba(rgbaPixels, width, height, stride /*>=width*4*/,
     变成"老阈值永远留着"。
     ⚠ 它只覆盖**正在跑**的路：已停但没 `releaseTasks()` 的路下次 `start()` 仍按建任务时的
     配置走，所以 GUI 侧的兜底不是"下次开流自然生效"。
-  - **只落盘**——手输的视频源地址要点「浏览」重开本路才换。
+  - **换流也走"重开该路"**——每路的「选流」下拉、「浏览」（在注册表里建一条 `type=file` 的流并引用）、
+    「清空」，以及「视频流管理…」确定后被改动或被删除影响到的那几路，全部经 `applyChannelConfigNow()`。
+    "改了视频源地址只落盘、要重启才换"这一档已经没有了；剩下的只落盘项是**流备注**（不进解码参数）。
   同数量原地换模型仍未接线（`PpeTask::reloadModel()`，详见 `plan/roadmap.md` P1-2）。
 - **重开前必须把对象搬回 GUI 线程**：`start()` 里 `moveToThread(thread_)` 之后，本对象的线程归属
   就在解码线程上；那一轮 `QThread` 析构后归属仍挂在那条已不存在的线程上，下一次 `start()` 的

@@ -826,6 +826,24 @@ target_link_libraries(ws_sink
 )
 
 # ============================================================================
+# 视频流注册表与通道引用解析离线自检（video.sources + channels[].source_id）
+# 只编 ConfigManager.cpp：这一段全是读 JSON/改 JSON，不碰 FFmpeg、模型、屏幕，
+# 所以在任何机器上都能跑，也是唯一能把"这一路到底开什么"的三层兜底逐条钉死的地方。
+# 悬空 id 不回退、写内联即撤引用这两条是最容易被"顺手优化"掉的，必须有断言挡着。
+# 契约清单见 tests/test_video_sources.cpp 文件头；配置读写都在 QDir::tempPath() 下的
+# 临时文件，不会碰运行时的 data/config.json。
+# 仓库根运行：./build/build_rk3588_linux/test_video_sources，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_video_sources
+    tests/test_video_sources.cpp
+    src/base/config/ConfigManager.cpp
+)
+
+target_link_libraries(test_video_sources
+    Qt5::Core
+)
+
+# ============================================================================
 # 通道配置热更新自测（真解码器 + 真推理任务，无 GUI）
 # 覆盖四条契约：停止判据 isLoopAlive、releaseTasks 后按新配置重建槽位、
 # 反复重开线程数与 RSS 不涨、每槽生效阈值（slot params 那行日志的 conf/nms）；

@@ -130,9 +130,10 @@ QJsonObject PadWsServer::helloAckData() const
     QJsonObject data;
     data.insert(QStringLiteral("serverTime"), wireNow());
     data.insert(QStringLiteral("protocolVersion"), kProtocolVersion);
-    if (!cfg_.deviceId.isEmpty()) {
-        data.insert(QStringLiteral("deviceId"), cfg_.deviceId);
-    }
+    // §13.1.3 把 deviceId 列为必填，所以配置留空也要给一个（口径 A17：按 /etc/machine-id 派生）。
+    // "空就整键不插"这一版实测过后果：Pad 按字段字典校验必填项，直接判这条连接不合规。
+    data.insert(QStringLiteral("deviceId"),
+                cfg_.deviceId.isEmpty() ? defaultDeviceId() : cfg_.deviceId);
     data.insert(QStringLiteral("capabilities"), capabilities);
     return data;
 }

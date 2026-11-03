@@ -10,7 +10,7 @@
 //   · 未知 type 崩掉 = 现场一个对端版本差就把整机搞挂；
 //   · sync_result 省略 alarms 键（而不是给 []）会让 Pad 保留旧缓存、看起来"补漏成功"。
 //
-// 覆盖十一条契约：
+// 覆盖十二条契约：
 //   1) 端口占用/重复 start 的幂等（第二次 start 直接 true，不把已连的 Pad 踢掉）
 //   2) hello → hello_ack：serverTime 带偏移、protocolVersion=1、capabilities 只有 alarm、
 //      detectionBoxes 恒 false（v1 硬要求）
@@ -23,11 +23,13 @@
 //   9) alarm_ack **不回复**（用"紧接着的 ping 的 pong 是下一帧"来证明中间没有插话）
 //  10) AlarmManager 发 alarmGenerated → 连接上收到 type=alarm 的完整快照
 //  11) 没有媒体底址时 evidence.snapshotUrls 是 []（不臆造对端取不到的地址）
+//  12) 配置 device_id 留空时 hello_ack 仍带必填 deviceId（口径 A17）
 //
 // 仓库根运行：./build/build_rk3588_linux/test_pad_ws_server，rc 0=PASS 1=FAIL
 // ============================================================================
 
 #include "pad_ws_server.h"
+#include "pad_wire.h"      // defaultDeviceId()：契约 12 要比对派生值
 #include "alarm_manager.h"
 
 #include <QCoreApplication>
@@ -362,11 +364,34 @@ try {
           qPrintable(QStringLiteral("stop 后应能再 start：") + reopenErr));
     pad::PadWsServer::instance().stop();
 
+    // ── 12：device_id 留空也要出必填的 deviceId（口径 A17，报告 P2-1 的半条）──
+    {
+        pad::ServerConfig autoId = cfg;
+        autoId.deviceId.clear();
+        autoId.port = static_cast<quint16>(kPort + 1);
+        QString err;
+        check(pad::PadWsServer::instance().start(autoId, &err),
+              qPrintable(QStringLiteral("空 device_id 也要能起服务：") + err));
+
+        const QJsonObject ackData = pad::PadWsServer::instance().helloAckData();
+        const QString id = ackData.value(QLatin1String("deviceId")).toString();
+        check(ackData.contains(QLatin1String("deviceId")) && !id.isEmpty(),
+              "§13.1.3 的 deviceId 是必填：配置留空也必须插一个值，不能整键省略");
+        check(id == pad::defaultDeviceId(), "空配置时 hello_ack 用的就是派生值");
+        check(ackData.value(QLatin1String("capabilities")).toObject()
+                  .value(QLatin1String("alarm")).toObject()
+                  .value(QLatin1String("detectionBoxes")).toBool() == false,
+              "派生分支没动 capabilities");
+
+        pad::PadWsServer::instance().stop();
+    }
+
     std::cout << "pad ws server contracts passed: idempotent start / hello_ack shape "
                  "(detectionBoxes=false, serverTime with offset) / 1001 + close on version "
                  "mismatch / pong without code / exactly one sync_result with alarms+cursor / "
                  "error 2001 on unknown type / alarm_ack gets no reply / alarmGenerated "
-                 "broadcasts a full snapshot / no media base url means no evidence url\n";
+                 "broadcasts a full snapshot / no media base url means no evidence url / "
+                 "empty device_id still yields the required deviceId\n";
     return 0;
 } catch (const std::exception &e) {
     std::cerr << "FAIL: " << e.what() << '\n';

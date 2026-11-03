@@ -74,7 +74,8 @@ $IDGE_WORKSPACE/
 | 配置节 | 说明 |
 |--------|------|
 | `video.models` | 模型参数表，**以库目录名为键**：`{"yolo11n-ppe": {"alarm_class": "un_helmet", "conf_threshold": 0.3, "note": "…"}}`。`alarm_class` 与 `conf_threshold` 都是**这个模型的参数**（不是槽位、不是通道）：类别留空 = 只画框不报警，`conf_threshold` **缺键 = 跟随 `detect.conf_threshold`**（不是 0）。设置页"模型参数"表按行编辑，改完**即时生效**、不重开流 |
-| `video.channels` | 数组，**下标即通道号（0-based）**，条目里的 `channel` 字段只给人看。每路 = `source`/`note`/`enabled`/`models`。`models` 的顺序就是级联槽位顺序（画面上 `M1/M2/…` 前缀、报警 `result_id`），重排会改号；`enabled=false` 表示这一路不开流。两者在设置页改完都会**重开该路**（见 §八 第 10 条），只有手改 config 文件需要自己点「浏览」或勾一下「启用」 |
+| `video.sources` | 数组，**视频流注册表**：一条 = 一路可复用的取流地址 + 它的打开参数（`type`/`url`/`note`/`width`/`height`/`fps`/`inputFormat`/`loop`/`hardwareDecode`/`timeoutMs`/`reconnectMs`，主键 `id`）。同一只摄像头或同一个文件只写一次，几路通道用 `source_id` 引用它，改一处几路一起改；设置页「视频流管理…」编辑这张表。字段口径与默认值见 `src/base/config/README.md` |
+| `video.channels` | 数组，**下标即通道号（0-based）**，条目里的 `channel` 字段只给人看。每路 = `source_id`（引用上面那张表）/`source`（内联地址，旧口径，仍支持）/`note`/`enabled`/`models`。**解析只有 `ConfigManager::resolveChannelSource()` 一处**：`source_id` 命中→用那条流；为空→回落内联 `source`；`source_id` 悬空→**不回退**，这一路不开 + 一条 warning。`models` 的顺序就是级联槽位顺序（画面上 `M1/M2/…` 前缀、报警 `result_id`），重排会改号；`enabled=false` 表示这一路不开流。这三项在设置页改完都会**重开该路**（见 §八 第 10 条）；换流用每路的下拉、换本地文件点「浏览」（它会在注册表里建一条 `type=file` 的流并引用），只有直接改 config 文件需要自己动一次该通道配置 |
 | `detect` | `conf_threshold`/`nms_threshold` 是**全局底座**（默认 0.25/0.45），推理侧真的读：回落链 `video.models[id].conf_threshold` → `detect.conf_threshold` → 形参默认值，唯一解析点 `ModelRegistry::resolveConfThreshold()`。conf 有**下限 0.05**（`conf=0` 会打穿量化模型的预筛、把推理线程跑死），nms 没有下限。⚠ `class_num`/`threads` 是**假开关**：已连 getter 一起删掉（类别数属于每个模型，推理线程数 = 各通道模型数之和，设置页显示的是真实值），老配置里残留的这两个键程序不再读取 |
 | （无 `video.render`） | 推理间隔是编译期的 `frame_count % 3`（`ffmpeg_video_decoder.cpp` 的 4.6 节），**没有配置键**，别在 JSON 里加 `render.sampleInterval`——它只会变成一个改了不生效的假开关 |
 | `geofence` | 围栏**不属于级联**：复用该通道已有的检测结果、只做几何判定，不额外占用 NPU。`enabled` 总开关、`alarmClass` **单值触发类别**（默认 `person`，必须是该通道某个模型 `labels.txt` 里的叫法）、`throttleSeconds` 报警**节流下限**（默认 10 秒，每通道**每角色**每类别窗口内只留一条）、`channels` 每路的矩形/多边形顶点（overlay 像素坐标，随存 `overlay_w`/`overlay_h`，改窗口布局会偏移），**每个形状自带 `role`**——`forbidden` 禁区（进去就报）/ `workzone` 岗区域（待在外面就报），同一通道可混用。`mode`（`inside_alarm`/`outside_alarm`）**已退役**：唯一读者是 `FenceManager::loadFromConfig` 里给无 `role` 键的老形状补角色的迁移分支。报警语义是**进入沿**：走进禁区报 1 条、站在里面不动不再报；人在所有岗区域之外报 1 条「离岗」、回岗待 >1.5 秒再出来才算新事件（事件表在解码器 `fenceTracks_`，按角色分池，见 `src/biz/geofence/README.md`） |
@@ -417,7 +418,7 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
 | `model/` | 模型库 `library/<id>/`（yolo11n/s/m-coco、ppe、ocr 等，一个模型一个目录）+ `train/`（训练侧 .pt/yaml/校准清单，程序不读） | [README](model/README.md) |
 | `data/` | 运行时数据（config/idge.db/alarms/backups/roll_call_data，内容不入库） | — |
 | `python/` | 模型转换与验证脚本：`.pt → onnx → rknn`（`pt2rknn.sh`）、ONNX→RKNN（`convert.py`）、推理/mAP 验证（`yolo11.py`） | [README](python/README.md) |
-| `tests/` | 测试程序（test_database 数据库层；test_equipment 设备盘点、test_rollcall 人员点名全链离线自测；test_latest_frame_slot 帧广播槽跳帧/生命周期，均随主构建生成） | [README](tests/README.md) |
+| `tests/` | 测试程序（test_database 数据库层；test_equipment 设备盘点、test_rollcall 人员点名全链离线自测；test_latest_frame_slot 帧广播槽跳帧/生命周期；test_video_sources 视频流注册表与通道引用解析，均随主构建生成） | [README](tests/README.md) |
 | `docs/` | 技术知识库 | [README](docs/README.md) |
 | `res/` | Qt 资源（qrc：图片/字体/GL 着色器/音效） | [README](res/README.md) |
 | `sounds/` | 提示音文件 | [README](sounds/README.md) |
@@ -483,8 +484,9 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
    `inet_pton` 失败即静默 `return` 且无日志；`platform.transport` 是假开关（值不影响发包）。
    排障先看 `data/config.json` 的 `gb28181` 段，别等错误提示
 8. **本机摄像头无互斥**：`smartRecognition.camera`（二维码实时扫描 / OCR 拍照 + 人员点名/设备盘点预览）、
-   `video.channels[].source`、`gb28181.streams[].source` 三条取流路径各自 `avformat_open_input`，
-   同一设备被两路同时打开时后开的那路失败，报错只落在各自日志里
+   `video.sources[]`（老配置则是 `video.channels[].source`）、`gb28181.streams[].source` 三条取流路径各自 `avformat_open_input`，
+   同一设备被两路同时打开时后开的那路失败，报错只落在各自日志里。
+   注册表解决的是"地址只写一次"，**不是**"设备只开一次"：两路通道引用同一个 `type=camera` 条目照样撞车
 9. **扫码无去重/冷却**：窗格打开即扫，每 250ms 解一帧，解出即冻结画面等用户点「确认」。
     同一颗码举在镜头前时点「重新扫描」会立刻再解出同一内容（"重扫就是要它"，不是 bug）；
     跨会话也不去重，换一班次的码照样立刻解出
@@ -505,8 +507,13 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
     塞进 `TaskData`，下一帧的 `detect()` 就用新值，约 1 秒内可见；前提是该路槽位数没变，
     变了就退回重开那一路）、模型库导入与删除
     （盘点服务 `reloadEquipmentService()` 热更）；
-    重开该路——通道 `models`、通道 `enabled`、移除模型条目（槽位数变了，只能重建任务集合）；
-    只落盘——手输的视频源地址，要点「浏览」重开本路（或把「启用」勾掉再勾回）；
+    重开该路——通道 `models`、通道 `enabled`、移除模型条目（槽位数变了，只能重建任务集合）、
+    **每路的「选流」下拉、「浏览」与「清空」**（改的是这一路开哪条流，配置与画面必须同时走，
+    不存在"改了要重启才生效"的空档）；「视频流管理…」确定后按 `touchedSourceIds()`
+    重开**引用了被改动流**的那几路（删除一条流会连带清掉引用它的通道的 `source_id`，
+    那几路同样在重开之列，判据是对话框前后 `channelSourceId()` 变了）；
+    只落盘——视频流的**备注**（touched 判据只看影响解码的十项参数，备注改了不用重开）、
+    以及直接手改 `data/config.json` 的任何键（运行中的程序不感知文件，要重启或在页面上动一次该通道配置）；
     `geofence.enabled` 设置页里没有，手改 config 后要么重启、要么在页面上动一次「围栏类别」触发 `loadFromConfig()` 顺带重载；
     `geofence.mode` 已退役——手改它不会改变任何判定，形状的角色只认 `channels/*/shapes[]` 里的 `role` 键；
     `detect.class_num`/`detect.threads` 是假开关，程序根本不读（见 `src/base/config/README.md`）。
