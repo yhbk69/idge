@@ -92,7 +92,7 @@ struct AlarmInfoInput {
     QString imagePath;           ///< 抓拍图路径，本批次共享；空 = 没有图
     QString videoPath;           ///< 报警时刻恒为空，片段路径由 videoClipAttached 补
     // 施工信息整份 JSON（AlarmRecord::constructionJson 原样搬）。上行时作为
-    // data["construction"] **嵌套子对象**，键名待接口方确认，见 src/biz/ws/README.md。
+    // data["construction"] **嵌套子对象**，键名待接口方确认。
     // 空串（未登录/历史行为）⇒ 这个键根本不出现在报文里。
     QString constructionJson;
 };

@@ -178,6 +178,14 @@
         "max_pending": 16,
         "expect_ack": false
     },
+    "pad_server": {
+        "enabled": false,
+        "port": 8899,
+        "ws_path": "/",
+        "device_id": "",
+        "media_base_url": "",
+        "sync_limit": 500
+    },
     "smartRecognition": {
         "camera": ""
     },

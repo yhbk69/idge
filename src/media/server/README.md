@@ -9,7 +9,7 @@
 （`3rdparty/zlmediakit/`），不 fork `MediaServer` 进程、不引入第二个可执行文件。
 
 它只做一件事：把一个目录以明文 http 暴露出去。**没有鉴权、没有 TLS、没有索引**，
-所以它的存在本身就改变了本机的网络暴露面（`plan/websocket.md` §三 缺口 5 同一条口径）。
+所以它的存在本身就改变了本机的网络暴露面。
 判据在装配处只有一处：`alarm_uplink.enabled` 且 `media_transport="url"` 才 `start()`，
 出厂态（uplink 关）与 `ws_binary` 档**一次都不碰 `mk_*`**。
 

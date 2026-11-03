@@ -123,10 +123,25 @@ MJPEG**，只认 MJPEG 会把这颗物理摄像头整个漏掉）。只出 10-bi
 **与其它取流地址互不相干**：监控 4 路走 `video.channels[].source`、国标推流走
 `gb28181.streams[].source`。各处没有设备注册表，同一台设备被两处同时打开会有一方失败。
 
+### pad_server 段（Pad 接口 v1 的入站服务端，本轮新增）
+| 键 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | bool | **`false`** | 总开关。开着才 `listen()` 并订阅 `AlarmManager`。默认关的理由与 `alarm_uplink` 一致而风险更大：这是**入站**的明文零鉴权监听口，局域网内任何设备都能连进来收报警 |
+| `port` | int | `8899`（1024~65535） | Pad WS 监听口，取 v1 §2.1 的占位值。⚠ v1 想让 WS 与 `/api/` 同占 8899，在这套栈上做不到（`QWebSocketServer` 独占一只监听器）；也与 `alarm_uplink.media_http_port`（8090，媒体字节出站）不是同一个口 |
+| `ws_path` | string | `/` | **只进日志**。`QWebSocketServer` 不按路径筛连接，Pad 连哪条路径都收；写 `/ws` 不会把别的路径挡掉 |
+| `device_id` | string | 空 | `hello_ack.data.deviceId`（例 `EDGE-05-007`）；空 = 该键省略 |
+| `media_base_url` | string | 空 | 证据 URL 前缀。空 = 复用内嵌文件服务的自动地址（并在需要时把它起起来）；写了就一切按它来，本机服务可以不起——对端经 NAT/反代访问的场景就靠它 |
+| `sync_limit` | int | `500`（1~5000） | 一次 `sync_result` 最多带几条。v1 没给分页规则，先设上限；游标取本次返回里的最大 `update_time`，所以截断不会漏下一批 |
+
+全是只读 getter（`padServerEnabled/Port/Path/DeviceId/MediaBaseUrl/SyncLimit`），**没有 setter**：
+监听口开开关关要走重启，运行期"改了立刻生效"只会让现场看不出连的是哪个口。
+`migratePadServerDefaults()` 只补**整段缺失**的 `pad_server`，不往已有段里加键（与 `alarm_uplink` 同一条口径），
+老库上的缺键一律由 getter 回退到上面这份默认值。落点在 `src/biz/pad/`，报文形状与口径见那份 README。
+
 ### websocket 段（Pad↔Aibox 客户端）
 | 键 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `server_url` | string | 空 | **只填 `ws://`** 地址（`wss://` 在本机不可用，Qt 的 OpenSSL 符号缺口未适配，详见 `src/biz/ws/README.md`）；空 = 整条链路不启动。**有 setter**（`setWsServerUrl`），调试设置页的 WebSocket 分组可直接编辑 |
+| `server_url` | string | 空 | **只填 `ws://`** 地址（`wss://` 在本机不可用，Qt 的 OpenSSL 符号缺口未适配，见根 `README.md` 第 11 条）；空 = 整条链路不启动。**有 setter**（`setWsServerUrl`），调试设置页的 WebSocket 分组可直接编辑 |
 | `heartbeat_interval` | int（秒） | 30 | 应用层 `{"type":"ping"}` 周期；界面无控件，只能改 JSON |
 | `reconnect_interval` | int（秒） | 5 | 非主动断开后的重连延时；界面无控件，只能改 JSON |
 

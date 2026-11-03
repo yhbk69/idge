@@ -35,6 +35,7 @@
 #include "ws_client.h"
 #include "alarm_uplink.h"
 #include "http_file_service.h"   // 报警媒体的内嵌文件服务（url 模式；装配点在此）
+#include "pad_ws_server.h"        // Pad 接口 v1 的入站 WS 服务端（本机是服务端；装配点在此）
 #include "roll_call_widget.h"
 #include "equipment_inventory_widget.h"
 #include "smart_recognition_widget.h"
@@ -585,6 +586,48 @@ void frmMain::initNewPages()
     }
 
     AlarmUplink::instance().attach();
+
+    // Pad 接口 v1 的入站服务端（本机是 WS 服务端，Pad 连进来）。出厂 pad_server.enabled=false，
+    // 打开它等于在局域网里开一个明文零鉴权的收报警的口 —— 与 alarm_uplink 同一条安全口径，
+    // 所以开关只在这里判一次、随进程生命周期起一次（QWebSocketServer 可以关，但配置无 setter，
+    // 改了要重启，避免"看起来生效了其实连的是旧端口"）。
+    if (uplinkCfg.padServerEnabled()) {
+        pad::ServerConfig padCfg;
+        padCfg.port = static_cast<quint16>(uplinkCfg.padServerPort());
+        padCfg.path = uplinkCfg.padServerPath();
+        padCfg.deviceId = uplinkCfg.padServerDeviceId();
+        padCfg.syncLimit = uplinkCfg.padServerSyncLimit();
+
+        // 证据地址复用上面那台内嵌 http 文件服务：同一棵树、同一套 Range 实测行为，
+        // 不再起第二个服务器。配置里写了 pad_server.media_base_url 就一切按它来
+        // （对端经 NAT/反代访问的场景），本机服务可以不起。
+        const QString mediaOverride = uplinkCfg.padServerMediaBaseUrl();
+        HttpFileService &media = HttpFileService::instance();
+        const QString mediaRoot = QFileInfo(RuntimePaths::alarmsDir()).absoluteFilePath();
+        if (mediaOverride.isEmpty() && !media.running()) {
+            const quint16 mediaPort =
+                static_cast<quint16>(uplinkCfg.alarmUplinkMediaHttpPort());
+            if (!media.start(mediaRoot, mediaPort)) {
+                log("warning", QStringLiteral("Pad 服务端要出证据地址，但媒体文件服务 port=%1 没起来"
+                                              "——本次报警只发文字").arg(mediaPort));
+            }
+        }
+        padCfg.mediaRootDir = mediaRoot;
+        padCfg.mediaBaseUrl = media.baseUrl(mediaOverride);
+
+        connect(&pad::PadWsServer::instance(), &pad::PadWsServer::logMessage,
+                this, [this](const QString &cat, const QString &msg) {
+                    log(cat, msg);
+                });
+        QString padErr;
+        if (!pad::PadWsServer::instance().start(padCfg, &padErr)) {
+            log("warning", QStringLiteral("Pad 服务端没起来：%1").arg(padErr));
+        } else {
+            log("system", QStringLiteral("Pad 服务端已监听 ws://0.0.0.0:%1%2（明文零鉴权，"
+                                         "局域网内任何设备都能连进来收报警）")
+                              .arg(padCfg.port).arg(padCfg.path));
+        }
+    }
 
     // 类别名表由解码器按通道槽位建立（见 FFmpegVideoDecoder::buildCascadeTasks），
     // 这里不再从全局标签文件填 AlarmManager。

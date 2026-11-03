@@ -23,7 +23,7 @@
 //                  //    推理线程数 = 各通道模型数之和（一个模型一个 PpeTask 线程）。
 //     "geofence": {"enabled":true, "mode":"inside_alarm", "alarmClass":"person",
 //                  "throttleSeconds":10, "channels":{ "0":{...形状...} }},
-//     "recording":{...}, "alarm_uplink":{...}, "database":{...}, "websocket":{...}, "gb28181":{...}
+//     "recording":{...}, "alarm_uplink":{...}, "pad_server":{...}, "database":{...}, "websocket":{...}, "gb28181":{...}
 //   }
 //
 // 两条设计口径，改配置或加键前先对齐：
@@ -157,6 +157,7 @@ ConfigManager &ConfigManager::instance()
 // ============================================================================
 static QJsonObject makeRecordingDefaults();
 static QJsonObject makeAlarmUplinkDefaults();
+static QJsonObject makePadServerDefaults();
 
 // 新装现场的默认 video 段。直接按 V2 写，是为了让全新配置根本不进迁移分支
 // （迁移分支只在读到老文件时才该跑一次）。
@@ -206,6 +207,10 @@ void ConfigManager::load(const QString &path)
 
         // 报警上行（P0-1：报警信息 + 截图 + 片段经 WS 推送）
         root_["alarm_uplink"] = makeAlarmUplinkDefaults();
+
+        // Pad 接口 v1 的服务端（本机是服务端，Pad 连进来）。同样出厂关：开一个明文零鉴权
+        // 的监听口必须人来决定。
+        root_["pad_server"] = makePadServerDefaults();
 
         // 智能识别/扫码：用哪个节点 + 采多大分辨率。两个键都有 getter，所以写出来；
         // 此前这段根本不进默认配置，"用哪只摄像头、多少像素"全靠运行时猜、现场无法改。
@@ -263,6 +268,12 @@ void ConfigManager::load(const QString &path)
     // 缺 alarm_uplink 段时补齐默认值（enabled=false，默认不往外发；见 migrate 注释）
     if (migrateAlarmUplinkDefaults()) {
         qInfo() << "[ConfigManager] 已补齐报警上行默认配置 (alarm_uplink/)";
+        saveUnsafe();
+    }
+
+    // 缺 pad_server 段时补齐默认值（enabled=false，出厂不开监听口）
+    if (migratePadServerDefaults()) {
+        qInfo() << "[ConfigManager] 已补齐 Pad 服务端默认配置 (pad_server/)";
         saveUnsafe();
     }
 
@@ -567,7 +578,7 @@ bool ConfigManager::migrateRecordingDefaults()
 }
 
 // enabled 默认 false 的理由和 recording 相反：这是**往外发数据**，
-// 且当前链路是明文 ws + 零鉴权（plan/websocket.md §三 缺口 5），
+// 且当前链路是明文 ws + 零鉴权，
 // 装完就自动往配置里的地址推报警，等于默认把数据送上网，必须人来打开。
 static QJsonObject makeAlarmUplinkDefaults()
 {
@@ -597,6 +608,33 @@ bool ConfigManager::migrateAlarmUplinkDefaults()
         return false;
     }
     root_["alarm_uplink"] = makeAlarmUplinkDefaults();
+    return true;
+}
+
+// Pad 接口 v1 的服务端（plan/idge-pad-v1.md §2–§3）。enabled 默认 false 与 alarm_uplink
+// 同理：这是**新开一个明文零鉴权的入站监听口**——局域网里任何设备都能连进来收报警、
+// 拿证据地址，必须人来打开（审查报告冲突 B5）。
+static QJsonObject makePadServerDefaults()
+{
+    return QJsonObject{
+        {"enabled", false},        // false = 不 listen、不订阅 AlarmManager
+        {"port", 8899},            // v1 §2.1 的占位口。⚠ 与 /api/ 同口做不到：QWebSocketServer
+                                   //   自己占一只监听器，HTTP 层要另起一口（报告歧义 A4）
+        {"ws_path", "/"},          // 只进日志：QWebSocketServer 不按路径筛连接，Pad 连哪条路径都收
+        {"device_id", ""},         // hello_ack.deviceId（例 EDGE-05-007）；空 = 该键省略
+        {"media_base_url", ""},    // 证据 URL 前缀；空 = 用内嵌 http 服务的自动地址，
+                                   //   http 服务没起来就不发地址（宁缺勿假）
+        {"sync_limit", 500}        // 一次 sync_result 最多带几条。v1 没给分页规则，
+                                   //   先设上限；游标取本次返回里的最大 update_time，不会漏下一批
+    };
+}
+
+bool ConfigManager::migratePadServerDefaults()
+{
+    if (root_.contains("pad_server")) {
+        return false;
+    }
+    root_["pad_server"] = makePadServerDefaults();
     return true;
 }
 
@@ -1337,6 +1375,61 @@ QString ConfigManager::alarmUplinkMediaBaseUrl() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return alarmUplinkSection(root_).value("media_base_url").toString().trimmed();
+}
+
+// ============================================================================
+// pad_server 段：Pad 接口 v1 的入站服务端（本机是 WS 服务端，Pad 连进来收报警）
+// ----------------------------------------------------------------------------
+// 与 alarm_uplink 同为只读 getter，不给 setter：监听口开开关关要走重启，
+// 运行期"改了立刻生效"反而会把已连的 Pad 踢掉却看不出原因。
+// ⚠ port 与 alarm_uplink.media_http_port（内嵌 http 文件服务）不是同一个口：
+//   前者是 WS 入站，后者是媒体字节出站；两者都想用 8899 时只能挑一个（报告歧义 A4）。
+// ============================================================================
+
+static QJsonObject padServerSection(const QJsonObject &root)
+{
+    return root["pad_server"].toObject();
+}
+
+bool ConfigManager::padServerEnabled() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return padServerSection(root_).value("enabled").toBool(false);
+}
+
+int ConfigManager::padServerPort() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    // 与 media_http_port 同一条下界理由：1024 以下在本机 bind 不上，不如挡在配置层
+    return qBound(1024, padServerSection(root_).value("port").toInt(8899), 65535);
+}
+
+QString ConfigManager::padServerPath() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const QString raw = padServerSection(root_).value("ws_path").toString(QStringLiteral("/")).trimmed();
+    if (raw.isEmpty()) {
+        return QStringLiteral("/");
+    }
+    return raw.startsWith(QLatin1Char('/')) ? raw : QStringLiteral("/") + raw;
+}
+
+QString ConfigManager::padServerDeviceId() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return padServerSection(root_).value("device_id").toString().trimmed();
+}
+
+QString ConfigManager::padServerMediaBaseUrl() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return padServerSection(root_).value("media_base_url").toString().trimmed();
+}
+
+int ConfigManager::padServerSyncLimit() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return qBound(1, padServerSection(root_).value("sync_limit").toInt(500), 5000);
 }
 
 // ==========================================

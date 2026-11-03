@@ -56,6 +56,9 @@ test_*.cpp
 #   test_alarm_uplink             —— 报警上行报文组装/队列/水位/ack/退避 十八条离线契约
 #   test_geofence_role            —— 电子围栏每形状角色（禁区/岗区域）判定八条离线契约
 #   test_construction_qr          —— 施工信息解析/校验/会话 + 二维码离线解码（登录门的全部契约）
+#   test_pad_wire                 —— Pad 接口 v1 出站 JSON 映射 15 组离线契约
+#   test_pad_sync                 —— Pad 断线补漏的游标查询与已读语义（内存库 8 组）
+#   test_pad_ws_server            —— Pad WS 服务端线上自检（loopback 真服务端+真客户端 11 组）
 !tests/test_database.cpp
 !tests/test_equipment.cpp
 !tests/test_rollcall.cpp
@@ -64,6 +67,9 @@ test_*.cpp
 !tests/test_alarm_uplink.cpp
 !tests/test_geofence_role.cpp
 !tests/test_construction_qr.cpp
+!tests/test_pad_wire.cpp
+!tests/test_pad_sync.cpp
+!tests/test_pad_ws_server.cpp
 
 # 测试素材（*.jpg/*.mp4 全局忽略，此处显式放行；*_faces.json 等为运行产物不放行）
 !assets/test/1.mp4

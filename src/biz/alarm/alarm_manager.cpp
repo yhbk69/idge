@@ -213,6 +213,13 @@ AlarmRecord makeAlarmRecord(int channel, const object_detect_result &det,
         dt = QDateTime::currentDateTime();
     alarm.alarmTime = dt.toString(Qt::ISODate);
 
+    // create_time / update_time 在建行这一刻就写死，而不是留给 DAO 兜底或留着空串：
+    // Pad 接口 v1 把 update_time 当**断线补漏的游标**（§3.8"按 updatedAt 过滤、增量必须
+    // 包含新增报警"）。空 update_time 会让新报警被 `update_time >= 游标` 整批漏掉，
+    // 对端重连后看不到刚才那几条。状态变更仍走各自的 UPDATE 把它往后推。
+    alarm.createTime = alarm.alarmTime;
+    alarm.updateTime = alarm.alarmTime;
+
     alarm.status = "pending";
 
     // 施工信息在**产生这一刻**固化（不等到显示/上行时再回查会话）：

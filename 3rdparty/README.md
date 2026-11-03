@@ -65,7 +65,7 @@ Rockchip（rknn_model_zoo 系）交叉编译第三方预编译依赖集合，供
   与独立 `MediaServer` 抢同一组端口。能力表与静态服务实测语义见 `3rdparty/zlmediakit/README.md`。
 - 本目录**开了一个监听端口**：`alarm_uplink.enabled=true` 且 `media_transport="url"`（默认档）时
   本机监听 `media_http_port`（默认 8090，明文零鉴权）。出厂态（uplink 关）不 bind 任何口，
-  日志与线程数都能验证 `mk_env_init1` 一次都没调（见 `plan/websocket.md` §四 出厂态条目）。
+  日志与线程数都能验证 `mk_env_init1` 一次都没调。
 - `openssl1.1.0/lib` 里的 `libssl.so.1.1`/`libcrypto.so.1.1` **现在是运行期承重依赖**：
   `libmk_api.so` 自身 NEEDED 它们，必须进 `CMAKE_BUILD_RPATH`。工程同时链接系统 OpenSSL 3
   （Qt/QtNetwork 用），两套版本共存靠 RPATH 顺序——这也是 `wss://` 一直不可用的根因

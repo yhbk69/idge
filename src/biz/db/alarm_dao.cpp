@@ -730,6 +730,41 @@ AlarmRecord AlarmDAO::queryById(const QString &id)
     return record;
 }
 
+QVector<AlarmRecord> AlarmDAO::queryUpdatedSince(const QString &sinceInternal, int limit)
+{
+    QVector<AlarmRecord> results;
+    QSqlDatabase db = DatabaseManager::instance().database();
+    if (!db.isOpen()) return results;
+
+    // 生效更新时间在 WHERE 和 ORDER BY 里各写一遍：SQLite 不认列别名用于这两个子句。
+    // ⚠ 空游标必须走**没有 WHERE 的那条**：Qt 把空 QString 绑成 NULL，
+    //   `表达式 >= NULL` 恒不成立，绑 "" 反而一条都不回（内存库实测），
+    //   症状是"首次连接的全量同步永远返回空"。
+    QSqlQuery query(db);
+    const QString order = QStringLiteral(
+        " ORDER BY COALESCE(NULLIF(update_time, ''), alarm_time) ASC, id ASC LIMIT :limit");
+    if (sinceInternal.isEmpty()) {
+        query.prepare(QStringLiteral("SELECT * FROM alarms") + order);
+    } else {
+        query.prepare(QStringLiteral(
+            "SELECT * FROM alarms WHERE COALESCE(NULLIF(update_time, ''), alarm_time) >= :since")
+            + order);
+        query.bindValue(":since", sinceInternal);
+    }
+    query.bindValue(":limit", limit);
+
+    if (query.exec()) {
+        while (query.next()) {
+            results.append(recordFromQuery(query));
+        }
+    } else {
+        qWarning() << "Query alarms updated since" << sinceInternal
+                   << "failed:" << query.lastError().text();
+    }
+
+    return results;
+}
+
 // ============================================================================
 // 更新操作
 // ============================================================================
@@ -851,11 +886,23 @@ bool AlarmDAO::markRead(const QString &id)
     QSqlDatabase db = DatabaseManager::instance().database();
     if (!db.isOpen()) return false;
 
+    const QString now = currentDateTimeStr();
     QSqlQuery query(db);
+    // read_time 取最早：已经读过就不动（Pad 反复上报、板端二次点开都不能把已读时间推后），
+    // 但墙钟回拨时新值更早，仍以更早者为准。update_time 必须每次都写：
+    // 它是对端断线补漏的游标（见 plan/idge-pad-v1.md §3.8 第 4 条），漏写等于这条已读丢了。
     query.prepare(R"(
-        UPDATE alarms SET read_time = :read_time WHERE id = :id
+        UPDATE alarms SET
+            read_time = CASE
+                WHEN read_time IS NULL OR read_time = '' OR read_time > :now_then
+                THEN :read_time
+                ELSE read_time END,
+            update_time = :update_time
+        WHERE id = :id
     )");
-    query.bindValue(":read_time", currentDateTimeStr());
+    query.bindValue(":now_then", now);
+    query.bindValue(":read_time", now);
+    query.bindValue(":update_time", now);
     query.bindValue(":id", id);
 
     if (!query.exec()) {

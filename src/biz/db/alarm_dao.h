@@ -116,6 +116,14 @@ public:
     // 按ID查询
     AlarmRecord queryById(const QString &id);
 
+    // Pad 接口 v1 §3.8 的补漏查询：按**生效更新时间**升序返回 >= sinceInternal 的行。
+    // sinceInternal 传空串 = 全量（走没有 WHERE 的那条：Qt 把空 QString 绑成 NULL，
+    // `>= NULL` 恒不成立，绑成 "" 会一条都不回）。
+    // 用 COALESCE(NULLIF(update_time,''), alarm_time)：早期版本建行时不写 update_time，
+    // 老库里几万行是空串，直接按 update_time 过滤会把它们整批漏掉。
+    // 时间文本仍是库内那种定宽无偏移格式（与 alarm_time 的字典序过滤同一套口径）。
+    QVector<AlarmRecord> queryUpdatedSince(const QString &sinceInternal, int limit = 500);
+
     // ========================================================================
     // 更新操作
     // ========================================================================
@@ -137,7 +145,8 @@ public:
     // 标记为误报
     bool markFalseAlarm(const QString &id, const QString &remark = QString());
 
-    // 标记已读
+    // 标记已读：read_time 保留**最早**值（重复调用不会把已读时间推后），
+    // 并且每次都写 update_time —— 对端断线补漏按 update_time 做游标，漏写等于这条已读丢。
     bool markRead(const QString &id);
 
     // 更新备注

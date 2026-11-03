@@ -310,6 +310,26 @@ public:
     /** @brief 媒体地址前缀（默认空 = 自动取本机非回环 IPv4 + 实际绑定端口） */
     QString alarmUplinkMediaBaseUrl() const;
 
+    // ========== pad_server 配置（Pad 接口 v1 的入站服务端，本机是服务端）==========
+
+    /** @brief 是否启用 Pad 服务端（默认 false：明文零鉴权的入站口，必须人来打开） */
+    bool padServerEnabled() const;
+
+    /** @brief Pad WS 监听端口（默认 8899，范围 1024~65535） */
+    int padServerPort() const;
+
+    /** @brief Pad WS 路径（默认 "/"，只进日志——QWebSocketServer 不按路径筛连接） */
+    QString padServerPath() const;
+
+    /** @brief hello_ack.deviceId（默认空 = 省略该键） */
+    QString padServerDeviceId() const;
+
+    /** @brief 证据 URL 前缀覆盖（默认空 = 用内嵌 http 服务的自动地址） */
+    QString padServerMediaBaseUrl() const;
+
+    /** @brief 一次 sync_result 的条数上限（默认 500，范围 1~5000） */
+    int padServerSyncLimit() const;
+
     // ========== WebSocket 配置 ==========
 
     /** @brief WebSocket 服务器地址（如 "ws://192.168.1.100:8765"） */
@@ -413,6 +433,15 @@ private:
      * @return true=root_ 有改动（调用方负责 saveUnsafe 落盘）
      */
     bool migrateAlarmUplinkDefaults();
+
+    /**
+     * @brief 老配置缺少 pad_server 段时补齐默认值（load 内持锁调用，勿单独使用）
+     *
+     * 与 migrateAlarmUplinkDefaults 同口径；默认 enabled=false，补齐不会带来任何行为变化，
+     * 只是让这个入站开关在现场 config.json 里可见可改。
+     * @return true=root_ 有改动（调用方负责 saveUnsafe 落盘）
+     */
+    bool migratePadServerDefaults();
 
     QString configPath_;   ///< 配置文件路径
     QJsonObject root_;     ///< JSON 根对象

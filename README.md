@@ -81,13 +81,13 @@ $IDGE_WORKSPACE/
 | `database` | `storeDetections`（报警相关检测明细是否入 `detections` 表）与 `detectionRetentionDays`（保留天数）；写成 `null` 等于吃默认值 true/30 |
 | `recording` | 报警视频硬件编码录制（**默认 `enabled=true`**，报警必带关联片段是需求验收项）；`buffer_seconds` 需 ≥ 片段窗口 3+2 秒，缺键默认 8（`config_example.json` 模板当前写 5） |
 | `smartRecognition` | 智能识别四张卡片（二维码/OCR/点名/盘点）共用的取流地址；键缺省时自动探测摄像头节点（MJPEG 优先，其次 CSI/rkisp 的 NV12、YUYV），探测不到退回 `/dev/video0`。仅 getter，设置页不编辑 |
-| `websocket` | Pad↔Aibox 客户端：`server_url`（空=整条链路不启动，设置页可改）+ 心跳/重连间隔（仅 JSON）。**本机是客户端，这条连接本身不监听端口** |
+| `websocket` | Pad↔Aibox 客户端：`server_url`（空=整条链路不启动，设置页可改）+ 心跳/重连间隔（仅 JSON）。**本机是客户端，这条连接本身不监听端口**；它是旧协议，v1 之后由下面的 `pad_server` 取代（去留待接口方确认） |
+| `pad_server` | **Pad 接口 v1 的入站服务端**（本机是 WS 服务端，Pad 连进来收报警）。`enabled` **默认 `false`**——这是一个明文零鉴权的入站口，局域网内任何设备都能连。`port` 默认 8899（v1 占位；与 `media_http_port` 8090 是两个口）；`media_base_url` 空=复用内嵌文件服务的自动地址。只能改 JSON、无 setter（改口要重启）；落点 [src/biz/pad/](src/biz/pad/README.md)，键表见 [src/base/config/README.md](src/base/config/README.md)。**本轮只落 WS 报警面，`/api/` HTTP 面未实现** |
 | `alarm_uplink` | 本机报警的**上行推送**（`enabled` **默认 `false`**——往外发数据必须人开）。两段式：报警当刻发 `alarm_info`（文字 + 媒体地址承诺），媒体写稳后再发 `media_begin`。`media_transport` 默认 `url`＝本机起内嵌 http 静态文件服务（**监听 `media_http_port`，默认 8090，明文零鉴权**）只在 JSON 里发地址；`ws_binary`＝字节走 WS 分块帧（已实测，代码保留、非默认）。只能改 JSON，设置页无控件；键表见 [src/base/config/README.md](src/base/config/README.md) |
 
 另有一整段 **`gb28181`** 不经 `ConfigManager`，由 `src/biz/sip/gb28181_config.cpp` 直接读文件
 （国标推流的平台参数与通道列表；无此段即不启用推流），但会被 `save()` 原样保留。明细见
-[src/base/config/README.md](src/base/config/README.md)、[src/biz/sip/README.md](src/biz/sip/README.md)、
-[src/biz/ws/README.md](src/biz/ws/README.md)。
+[src/base/config/README.md](src/base/config/README.md)、[src/biz/sip/README.md](src/biz/sip/README.md)。
 
 报警记录写入 `data/idge.db`（Qt SQL 检测库），抓拍图片保存在 `data/alarms/YYYYMMDD/` 目录。
 打开 `recording.enabled` 后（出厂即开），同一目录还会多出报警前后共 5 秒、**带检测框**的视频片段：
@@ -406,11 +406,13 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
 | `src/biz/geofence/` | 电子围栏（形状、角色、判定、绘制 overlay） | [README](src/biz/geofence/README.md) |
 | `src/biz/db/` | 数据持久层：报警库 idge.db（QtSQL DAO）+ 业务库 roll_call.db（sqlite3 原生） | [README](src/biz/db/README.md) |
 | `src/biz/sip/` | GB/T 28181 设备侧：SIP 注册心跳、MANSCDP、PS 复用、RTP 推流 | [README](src/biz/sip/README.md) |
-| `src/biz/ws/` | Pad↔Aibox WebSocket 客户端（入站报警 + 心跳重连，预留 get_streams/set_fence）**与本机报警上行**：报文组装、内存队列、水位闸门、ack/退避、媒体读盘泵（`alarm_uplink*`/`media_pump`） | [README](src/biz/ws/README.md) |
+| `src/biz/ws/` | Pad↔Aibox WebSocket 客户端（入站报警 + 心跳重连，预留 get_streams/set_fence）**与本机报警上行**：报文组装、内存队列、水位闸门、ack/退避、媒体读盘泵（`alarm_uplink*`/`media_pump`）。**旧协议**，v1 之后待整块退役（报告冲突 B1） | — |
+| `src/biz/pad/` | **Pad 接口 v1 的服务端**（本机是被连的一方）：`QWebSocketServer` 收发 `hello_ack`/`pong`/`alarm`/`alarm_update`/`sync_result`/`error`，外加 `AlarmRecord`→v1 JSON 的唯一映射层。与 `src/biz/ws/` 方向相反，两套不能并存 | [README](src/biz/pad/README.md) |
 | `src/base/config/` | ConfigManager 单例 + data/config.json 解析 | [README](src/base/config/README.md) |
 | `src/base/buffer/` | DMA-BUF 分配与帧缓冲池 | [README](src/base/buffer/README.md) |
 | `src/base/queue/` | 阻塞队列 / 优先级队列 / 最新帧槽 | [README](src/base/queue/README.md) |
 | `src/base/imaging/` | 图像读写/格式转换/letterbox、软件画框、Qt 安全解码、文件读写原语 | [README](src/base/imaging/README.md) |
+| `src/base/sysinfo/` | 设备运行指标采样（CPU/内存/温度/电池/NPU/磁盘/uptime/系统版本）——看板与 Pad `/api/device/status` 的同一份口径 | [README](src/base/sysinfo/README.md) |
 | `tools/face_recognition/` | 人脸识别命令行工具（CLI 验证/点名对照回归基准，产物输出 model/face/） | [README](tools/face_recognition/README.md) |
 | `model/` | 模型库 `library/<id>/`（yolo11n/s/m-coco、ppe、ocr 等，一个模型一个目录）+ `train/`（训练侧 .pt/yaml/校准清单，程序不读） | [README](model/README.md) |
 | `data/` | 运行时数据（config/idge.db/alarms/backups/roll_call_data，内容不入库） | — |
@@ -515,7 +517,7 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
     当前决定不做适配，传输加密靠网络隔离兜（`WsClient::onSslErrors` 因此是死代码）。
     `WsClient::sendJson()` 本身**不排队**：未连接时直接丢弃并记 warning，所以入站报警的回执 `ack`
     在断线期间是真的丢了。**报警上行不受这条影响**——`AlarmUplinkEngine` 有自己的待确认队列，
-    没发出去的帧留在队首、连上后按原顺序续发（详见 `plan/websocket.md`、`src/biz/ws/README.md`）
+    没发出去的帧留在队首、连上后按原顺序续发。
 13. **开启报警上行的 `url` 档，本机就多监听一个明文端口**：默认 `media_http_port=8090`，
     根目录锁在 `data/alarms`、**只读且零鉴权**（只关了目录索引，知道文件名就能取）。
     这是"报警媒体交付方式"换来的代价，出厂 `alarm_uplink.enabled=false` 就是为了不默认开它；
@@ -527,6 +529,16 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
 12. **NPU 负载按"各通道模型数之和"计**：4 路 × 每路 3 个模型 = 12 个推理任务打在 3 个核上，
     配置不做硬拦截；任务数超过 6 时启动日志打软告警，核掩码按进程级轮转分配（跨通道共享一份
     模型上下文服务多路，仍是未做的优化）
+14. **打开 `pad_server.enabled` 是本机第一次"入站监听"**：前面所有链路都是本机主动连出去
+    （WS 客户端、GB28181 注册、报警上行），只有这一条是别人连进来。默认口 8899、明文 ws、
+    **零鉴权、无 Token**（v1 §2.3 当前就不要求 Token）——局域网内任何能连到本机的设备都能
+    收到实时报警、拉到历史报警快照与证据地址。所以出厂 `enabled=false`，与 `alarm_uplink`
+    同一条"必须人来打开"的口径；启用前先确认网段隔离范围。三条配套事实：
+    ①`QWebSocketServer` 独占一只监听器，v1 §2.1 想让 WS 与 `/api/` 同占 8899 在这套栈上做不到；
+    ②证据字节仍由 `media_http_port`（8090）那台文件服务出，开了 `pad_server` 就可能顺带把它
+    起起来（`pad_server.media_base_url` 写了外部地址时可不起）；
+    ③端口与开关**改了要重启**，设置页没有控件，也不做运行期重开
+    （落点与口径见 [src/biz/pad/README.md](src/biz/pad/README.md)）
 
 > 已闭环、不再在此罗列的历史项：解码线程与 `player_widget` 关闭（现 `closeEvent` 两阶段并行停 4 路）、
 > 硬解按 `codecpar->codec_id` 选 `h264_rkmpp`/`hevc_rkmpp`、

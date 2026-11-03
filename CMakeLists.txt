@@ -227,6 +227,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/base/config             # 配置管理（CLI/JSON 解析）
     ${CMAKE_SOURCE_DIR}/src/base/queue              # 阻塞队列/优先级队列/最新帧槽
     ${CMAKE_SOURCE_DIR}/src/base/imaging            # 图像读写/绘制/letterbox/Qt 安全解码（含文件读写原语）
+    ${CMAKE_SOURCE_DIR}/src/base/sysinfo            # /proc 与 /sys 运行指标采样（看板与 Pad 接口共用同一份口径）
 
     # --- media 视频管线域 ---
     ${CMAKE_SOURCE_DIR}/src/media                 # 媒体运行时初始化
@@ -244,6 +245,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/biz/alarm               # 报警管理（去重、限流）
     ${CMAKE_SOURCE_DIR}/src/biz/db                  # 数据持久层（业务 sqlite3 + 报警 QtSQL 两套）
     ${CMAKE_SOURCE_DIR}/src/biz/geofence            # 电子围栏（形状、检测、覆盖层）
+    ${CMAKE_SOURCE_DIR}/src/biz/pad                 # Pad 接口 v1 的服务端（WS 报警推送 + 出站 JSON 映射）
     ${CMAKE_SOURCE_DIR}/src/biz/qrcode              # 二维码解码（ZBar 封装，登录与智能识别共用）
     ${CMAKE_SOURCE_DIR}/src/biz/service             # 点名/盘点业务服务
     ${CMAKE_SOURCE_DIR}/src/biz/session             # 施工信息与登录会话
@@ -666,8 +668,101 @@ target_link_libraries(test_alarm_uplink
 )
 
 # ============================================================================
-# 电子围栏"每形状角色"判定离线自检（禁区/岗区域的归并与角色字符串回落）
-# 只编 fence_checker.cpp：它只用 object_detect_result 的三个整数字段，不调任何
+# Pad 接口 v1 出站 JSON 映射离线自检（时区/状态三值/类型表/证据 URL 安全判据/信封）
+# 只编 pad_wire.cpp + alarm_uplink_engine.cpp（借 mediaUrlFor 那份"越界即不给"的实现）：
+# 不起 WS 服务端、不开数据库、不碰 GUI。协议边界写错在板端看不出来，见文件头十五条。
+# 仓库根运行：./build/build_rk3588_linux/test_pad_wire，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_pad_wire
+    tests/test_pad_wire.cpp
+    src/biz/pad/pad_wire.cpp
+    src/biz/ws/alarm_uplink_engine.cpp
+)
+
+target_include_directories(test_pad_wire PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/biz/pad
+    ${CMAKE_SOURCE_DIR}/src/biz/ws
+    ${CMAKE_SOURCE_DIR}/src/biz/alarm
+)
+
+target_link_libraries(test_pad_wire
+    Qt5::Core
+)
+
+# ============================================================================
+# Pad 接口 v1 断线补漏的库侧自检（queryUpdatedSince 游标 + markRead 语义，内存库）
+# 契约清单见 tests/test_pad_sync.cpp 文件头；源列表照抄 test_database（DAO 的依赖闭包）
+# 仓库根运行：./build/build_rk3588_linux/test_pad_sync，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_pad_sync
+    tests/test_pad_sync.cpp
+    src/biz/db/database_manager.cpp
+    src/biz/db/alarm_dao.cpp
+    src/biz/session/construction_session.cpp
+)
+
+target_include_directories(test_pad_sync PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/biz/db
+    ${CMAKE_SOURCE_DIR}/src/ai/yolo11
+    ${CMAKE_SOURCE_DIR}/src/biz/alarm
+    ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/include
+    ${CMAKE_SOURCE_DIR}/3rdparty/sqlite
+)
+
+target_link_libraries(test_pad_sync
+    Qt5::Core
+    Qt5::Sql
+    sqlite3
+    ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/lib/libjsoncpp.a
+    pthread
+)
+
+# ============================================================================
+# Pad 接口 v1 的 WS 服务端线上自检（loopback 起真服务端 + 真 QWebSocket 客户端）
+# 源列表 = pad_ws_server 的依赖闭包（PadWsServer 订阅 AlarmManager，所以连 alarm/db/session
+# 一起编）；不链 GUI、不链 RKNN/OpenCV 符号。契约清单见 tests/test_pad_ws_server.cpp 头。
+# 仓库根运行：./build/build_rk3588_linux/test_pad_ws_server，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_pad_ws_server
+    tests/test_pad_ws_server.cpp
+    src/biz/pad/pad_ws_server.cpp
+    src/biz/pad/pad_wire.cpp
+    src/biz/ws/alarm_uplink_engine.cpp
+    src/biz/alarm/alarm_manager.cpp
+    src/biz/db/database_manager.cpp
+    src/biz/db/alarm_dao.cpp
+    src/biz/db/detection_dao.cpp
+    src/biz/session/construction_session.cpp
+    src/base/config/ConfigManager.cpp
+)
+
+target_include_directories(test_pad_ws_server PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/biz/pad
+    ${CMAKE_SOURCE_DIR}/src/biz/ws
+    ${CMAKE_SOURCE_DIR}/src/biz/alarm
+    ${CMAKE_SOURCE_DIR}/src/biz/db
+    ${CMAKE_SOURCE_DIR}/src/biz/session
+    ${CMAKE_SOURCE_DIR}/src/base
+    ${CMAKE_SOURCE_DIR}/src/base/config
+    ${CMAKE_SOURCE_DIR}/src/ai/yolo11
+    ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/include
+    ${CMAKE_SOURCE_DIR}/3rdparty/sqlite
+)
+
+target_link_libraries(test_pad_ws_server
+    Qt5::Core
+    Qt5::Network
+    Qt5::Sql
+    Qt5::WebSockets
+    sqlite3
+    ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/lib/libjsoncpp.a
+    pthread
+)
+
+# ============================================================================
+# 电子围栏"每形状角色"判定离线自检（禁区/岗区域的归并与角色字符串回落）# 只编 fence_checker.cpp：它只用 object_detect_result 的三个整数字段，不调任何
 # OpenCV/RKNN 符号，因此本目标不链 GUI、不链 AlarmManager，也不需要 config.json。
 # 为什么值得单独钉：禁区与岗区域的违规条件不是互补关系，归并写反会静默产出
 # "纯禁区通道把每个人每帧判成离岗"这类板端肉眼看不出来的行为（契约 2）。

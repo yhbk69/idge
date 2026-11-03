@@ -112,7 +112,7 @@ mk_stop_all_server();                               // 只在 main 事件循环�
   **必须先 `QFileInfo(...).absoluteFilePath()`**。
 - **明文 + 零鉴权**：`rootPath` 一定在 `data/alarms`，能连通本机的任何人都能按路径取走全部报警媒体。
   防线只有"对端不知道文件名" + `dirMenu=0` + 越界 404，这不是访问控制；
-  所以 `alarm_uplink.enabled` 出厂 `false`，开启前必须确认网段隔离（`plan/websocket.md` §三 缺口 5）。
+  所以 `alarm_uplink.enabled` 出厂 `false`，开启前必须确认网段隔离。
 - **日志级别 0~4 = Trace/Debug/Info/Warn/Error**：工程取 3(Warn)。Info 级会给每个客户端连接/断开
   各打一条，多浏览器标签时会把 idge 自己的检测日志刷掉。
 - **IO 线程取 2**：静态文件只服务"报警后取一次图 + 一段 mp4"的突发小流量。
