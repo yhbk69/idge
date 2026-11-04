@@ -7,21 +7,31 @@
  * 开流挂 interrupt_callback 指向 running_，所以 stop()/requestStop() 能把阻塞在
  * av_read_frame 里的线程叫醒；没有它，关流会卡到网络超时才退。
  *
+ * 取流定义一份都不在本文件里配：每次 `run()` 开头由 `Gb28181StreamConfig::takeSource()`
+ * 从 `video.sources[]` 解析进 `take_`（地址、类型、宽高帧率、input_format、loop、硬解开关），
+ * 注册表没给宽高/帧率时在这里补回国标侧的老默认值 1920x1080@25。
+ * 解析点不能放构造函数——见 run() 里那条时序注释。
+ *
  * 两条编码路径，配置项的含义随之不同：
- *   - 源已是 H.264：只接 h264_mp4toannexb 透传。此时 width/height/fps/bitrate
- *     **全部不生效**，出来的分辨率码率就是源的，配置里改它们没用。
+ *   - 源已是 H.264：只接 h264_mp4toannexb 透传。此时宽高帧率码率**全部不生效**，
+ *     出来的分辨率码率就是源的，配置里改它们没用。
  *   - 其它（camera 的 MJPEG、RTSP 的 H.265 等）：按 codec_id 找 h264_rkmpp /
- *     hevc_rkmpp / mjpeg_rkmpp 硬解并挂 rkmpp hwdevice；找不到同名解码器或建
- *     hwdevice 失败，就在 openDecoder 里换回普通软解；跑起来之后 DRM_PRIME 帧
- *     同步到内存失败，还会中途再换成纯软解继续推（openSoftwareDecoder 分支）。
+ *     hevc_rkmpp / mjpeg_rkmpp 硬解并挂 rkmpp hwdevice（`take_.hardwareDecode=false`
+ *     时跳过这一步直接软解）；找不到同名解码器或建 hwdevice 失败，就在 openDecoder 里
+ *     换回普通软解；跑起来之后 DRM_PRIME 帧同步到内存失败，还会中途再换成纯软解继续推
+ *     （openSoftwareDecoder 分支）。
  *     之后 swscale 到目标尺寸 → h264_rkmpp 编码，硬编打不开退 libx264
- *     (veryfast + zerolatency)。这条路上 width/height/bitrate 才真的读。
+ *     (veryfast + zerolatency)。这条路上宽高码率才真的读。
  *
  * 摄像头源的三个特殊处理：
- *   - 强制 input_format=mjpeg（板子上的 v4l2 设备大多给不了未压缩的 1080p）；
- *   - 按配置的 fps 开失败且不是 30 时，再用 30fps MJPEG 重试一次；
- *   - 开成功后用流的 avg_frame_rate 覆盖 config_.fps，所以配置值只是"期望"。
- * mp4 源读完是否重播由 config_.loop 决定，其它类型不看这个键。
+ *   - input_format 用注册表写的值，没写就落回 mjpeg（板子上的 v4l2 设备大多给不了未压缩的 1080p）；
+ *   - 按 take_.fps 开失败且不是 30 时，再用 30fps MJPEG 重试一次；
+ *   - 开成功后用流的 avg_frame_rate 覆盖 take_.fps，所以配置值只是"期望"。
+ * file 源读完是否重播由 `take_.loop` 决定，其它类型不看这个键。
+ *
+ * 注册表的 `timeoutMs` / `reconnectMs` 在这条路径**不生效**：国标一路的起停由 SIP 会话
+ * 决定（INVITE 起、BYE 停），没有"打不开就按间隔一直重试"的那层外环；把重试接进来会变成
+ * 会话早就结束还在后台连，反而把 RTP 端口占住。开流阻塞靠 interrupt_callback 由 stop() 打断。
  *
  * 首 5 秒 PTS 按墙钟 sleep_until 逐帧限速（回放/文件源瞬间读满会把平台收流缓冲
  * 打爆），超过 5 秒后按解码速度直发。
@@ -55,13 +65,11 @@ QString ffmpegError(int error) {
     return QString::fromLocal8Bit(buffer);
 }
 
-QString sourceUrl(const Gb28181StreamConfig &config) {
-    if (config.type == QStringLiteral("camera")) {
-        if (!config.source.isEmpty()) return config.source;
-        return QStringLiteral("/dev/video%1").arg(config.cameraIndex < 0 ? 0 : config.cameraIndex);
-    }
-    return config.source;
-}
+// 国标侧在注册表"不指定"(0) 时的兜底尺寸/帧率——就是改动前 gb28181.streams 的默认值，
+// 留着是为了让只写了 source_id、没在注册表里填宽高的老配置推出和以前一样的画面。
+constexpr int kGbDefaultWidth = 1920;
+constexpr int kGbDefaultHeight = 1080;
+constexpr int kGbDefaultFps = 25;
 
 int ffmpegInterrupt(void *opaque) {
     const auto *running = static_cast<const std::atomic<bool> *>(opaque);
@@ -99,14 +107,18 @@ bool copyAnnexBPacket(const AVPacket *packet, std::vector<uint8_t> *out) {
     return false;
 }
 
-AVCodecContext *openDecoder(const AVCodecParameters *parameters) {
+AVCodecContext *openDecoder(const AVCodecParameters *parameters, bool hardwareDecode) {
     const AVCodec *codec = nullptr;
-    if (parameters->codec_id == AV_CODEC_ID_H264)
-        codec = avcodec_find_decoder_by_name("h264_rkmpp");
-    else if (parameters->codec_id == AV_CODEC_ID_HEVC)
-        codec = avcodec_find_decoder_by_name("hevc_rkmpp");
-    else if (parameters->codec_id == AV_CODEC_ID_MJPEG)
-        codec = avcodec_find_decoder_by_name("mjpeg_rkmpp");
+    // 注册表写了 hardwareDecode=false 就完全不找 *_rkmpp：与 FFmpegVideoDecoder 那边同一个口径，
+    // 软解档存在的意义就是"硬件解码器出问题/要核预算"时有一条能跑的路。
+    if (hardwareDecode) {
+        if (parameters->codec_id == AV_CODEC_ID_H264)
+            codec = avcodec_find_decoder_by_name("h264_rkmpp");
+        else if (parameters->codec_id == AV_CODEC_ID_HEVC)
+            codec = avcodec_find_decoder_by_name("hevc_rkmpp");
+        else if (parameters->codec_id == AV_CODEC_ID_MJPEG)
+            codec = avcodec_find_decoder_by_name("mjpeg_rkmpp");
+    }
     const bool requestedHardware = codec != nullptr;
     if (!codec) codec = avcodec_find_decoder(parameters->codec_id);
     if (!codec) return nullptr;
@@ -145,7 +157,26 @@ AVCodecContext *openSoftwareDecoder(const AVCodecParameters *parameters) {
     return context;
 }
 
-AVCodecContext *openEncoder(const Gb28181StreamConfig &config) {
+AVCodecContext *openEncoder(const VideoSourceCfg &take, int bitrate) {
+    const int fps = take.fps > 0 ? take.fps : kGbDefaultFps;
+    const int targetBitrate = bitrate > 0 ? bitrate : 2000000;
+    // 硬编失败退软编时要再建一次上下文，那份参数与第一份逐字相同——
+    // 抄两遍的话"改了上面忘了改下面"就变成"软编档的分辨率和硬编不一样"。
+    auto fill = [fps, targetBitrate, &take](AVCodecContext *context, bool software) {
+        context->width = take.width;
+        context->height = take.height;
+        context->time_base = AVRational{1, fps};
+        context->framerate = AVRational{fps, 1};
+        context->pix_fmt = AV_PIX_FMT_YUV420P;
+        context->bit_rate = targetBitrate;
+        context->gop_size = fps * 2;
+        context->max_b_frames = 0;
+        if (software) {
+            av_opt_set(context->priv_data, "preset", "veryfast", 0);
+            av_opt_set(context->priv_data, "tune", "zerolatency", 0);
+        }
+    };
+
     const AVCodec *codec = avcodec_find_encoder_by_name("h264_rkmpp");
     bool hardware = codec != nullptr;
     if (!codec) {
@@ -157,18 +188,7 @@ AVCodecContext *openEncoder(const Gb28181StreamConfig &config) {
 
     AVCodecContext *context = avcodec_alloc_context3(codec);
     if (!context) return nullptr;
-    context->width = config.width;
-    context->height = config.height;
-    context->time_base = AVRational{1, config.fps > 0 ? config.fps : 25};
-    context->framerate = AVRational{config.fps > 0 ? config.fps : 25, 1};
-    context->pix_fmt = AV_PIX_FMT_YUV420P;
-    context->bit_rate = config.bitrate > 0 ? config.bitrate : 2000000;
-    context->gop_size = config.fps > 0 ? config.fps * 2 : 50;
-    context->max_b_frames = 0;
-    if (!hardware) {
-        av_opt_set(context->priv_data, "preset", "veryfast", 0);
-        av_opt_set(context->priv_data, "tune", "zerolatency", 0);
-    }
+    fill(context, !hardware);
     if (avcodec_open2(context, codec, nullptr) < 0) {
         avcodec_free_context(&context);
         if (hardware) {
@@ -177,16 +197,7 @@ AVCodecContext *openEncoder(const Gb28181StreamConfig &config) {
             if (!codec) return nullptr;
             context = avcodec_alloc_context3(codec);
             if (!context) return nullptr;
-            context->width = config.width;
-            context->height = config.height;
-            context->time_base = AVRational{1, config.fps > 0 ? config.fps : 25};
-            context->framerate = AVRational{config.fps > 0 ? config.fps : 25, 1};
-            context->pix_fmt = AV_PIX_FMT_YUV420P;
-            context->bit_rate = config.bitrate > 0 ? config.bitrate : 2000000;
-            context->gop_size = config.fps > 0 ? config.fps * 2 : 50;
-            context->max_b_frames = 0;
-            av_opt_set(context->priv_data, "preset", "veryfast", 0);
-            av_opt_set(context->priv_data, "tune", "zerolatency", 0);
+            fill(context, true);
             if (avcodec_open2(context, codec, nullptr) < 0) avcodec_free_context(&context);
         }
     }
@@ -217,25 +228,47 @@ void Gb28181MediaSource::reportError(const QString &message) const {
 }
 
 void Gb28181MediaSource::run() {
+    // 取流定义在**每次开流时**解析，不放在构造函数：manager 的 Runtime（连同本对象）是
+    // main() 里 Gb28181Manager::start() 建的，那时 frmMain 还没调 ConfigManager::load()，
+    // 构造期解析只能拿到空表——表现是"第一次 INVITE 就报引用取不到地址"，
+    // 而配置本身是对的。放这里还顺带做到"设置页改了地址，下一次点流就用新的"。
+    take_ = config_.takeSource();
+    if (take_.width <= 0) take_.width = kGbDefaultWidth;
+    if (take_.height <= 0) take_.height = kGbDefaultHeight;
+    if (take_.fps <= 0) take_.fps = kGbDefaultFps;
+    if (take_.url.isEmpty()) {
+        // 只剩一种成因：进程跑起来之后注册表里那条流被删了或 id 被改了
+        // （load() 已经在启动时挡过一遍悬空）。报错而不是拿空地址去开流——
+        // 空地址进 FFmpeg 得到 "Invalid argument"，日志里看不出是引用断了。
+        reportError(QStringLiteral("deviceCode=%1 的流引用的 video.sources[] 条目（source_id=%2）取不到地址")
+                        .arg(config_.deviceCode, config_.sourceId));
+        running_ = false;
+        return;
+    }
+    const bool isCamera = take_.type == QStringLiteral("camera");
+    // 注册表写了 inputFormat 就按它开；没写沿用这条路径原来的 mjpeg（板上的 v4l2 设备
+    // 大多给不了未压缩 1080p）。写错了不会彻底打不开：下面还有一次 mjpeg@30 的兜底。
+    const QString cameraInputFormat = take_.inputFormat.isEmpty()
+        ? QStringLiteral("mjpeg") : take_.inputFormat.toLower();
     AVFormatContext *format = nullptr;
     AVDictionary *options = nullptr;
-    if (config_.type == QStringLiteral("rtsp")) av_dict_set(&options, "rtsp_transport", "tcp", 0);
-    if (config_.type == QStringLiteral("camera")) {
-        av_dict_set(&options, "video_size", QStringLiteral("%1x%2").arg(config_.width).arg(config_.height).toLocal8Bit().constData(), 0);
-        av_dict_set(&options, "input_format", "mjpeg", 0);
-        av_dict_set(&options, "framerate", QByteArray::number(config_.fps > 0 ? config_.fps : 25).constData(), 0);
+    if (take_.type == QStringLiteral("rtsp")) av_dict_set(&options, "rtsp_transport", "tcp", 0);
+    if (isCamera) {
+        av_dict_set(&options, "video_size", QStringLiteral("%1x%2").arg(take_.width).arg(take_.height).toLocal8Bit().constData(), 0);
+        av_dict_set(&options, "input_format", cameraInputFormat.toLocal8Bit().constData(), 0);
+        av_dict_set(&options, "framerate", QByteArray::number(take_.fps).constData(), 0);
     }
-    const QByteArray url = sourceUrl(config_).toLocal8Bit();
+    const QByteArray url = take_.url.toLocal8Bit();
     format = avformat_alloc_context();
     if (format) {
         format->interrupt_callback.callback = ffmpegInterrupt;
         format->interrupt_callback.opaque = &running_;
     }
-    const AVInputFormat *inputFormat = config_.type == QStringLiteral("camera") ? av_find_input_format("v4l2") : nullptr;
+    const AVInputFormat *inputFormat = isCamera ? av_find_input_format("v4l2") : nullptr;
     int result = avformat_open_input(&format, url.constData(), inputFormat, &options);
     av_dict_free(&options);
-    if (result < 0 && config_.type == QStringLiteral("camera") && config_.fps != 30) {
-        qWarning() << "GB28181 camera open failed at" << config_.fps
+    if (result < 0 && isCamera && take_.fps != 30) {
+        qWarning() << "GB28181 camera open failed at" << take_.fps
                    << "fps; retrying MJPEG at 30 fps:" << ffmpegError(result);
         avformat_close_input(&format);
         format = avformat_alloc_context();
@@ -243,7 +276,7 @@ void Gb28181MediaSource::run() {
             format->interrupt_callback.callback = ffmpegInterrupt;
             format->interrupt_callback.opaque = &running_;
             AVDictionary *retryOptions = nullptr;
-            av_dict_set(&retryOptions, "video_size", QStringLiteral("%1x%2").arg(config_.width).arg(config_.height).toLocal8Bit().constData(), 0);
+            av_dict_set(&retryOptions, "video_size", QStringLiteral("%1x%2").arg(take_.width).arg(take_.height).toLocal8Bit().constData(), 0);
             av_dict_set(&retryOptions, "input_format", "mjpeg", 0);
             av_dict_set(&retryOptions, "framerate", "30", 0);
             result = avformat_open_input(&format, url.constData(), inputFormat, &retryOptions);
@@ -254,8 +287,8 @@ void Gb28181MediaSource::run() {
     }
     if (result < 0) {
         reportError(QStringLiteral("cannot open %1: %6 (requested %2x%3 @ %4 fps, input_format=%5)")
-                        .arg(QString::fromLocal8Bit(url)).arg(config_.width).arg(config_.height)
-                        .arg(config_.fps).arg(config_.type == QStringLiteral("camera") ? QStringLiteral("mjpeg") : QStringLiteral("auto"))
+                        .arg(QString::fromLocal8Bit(url)).arg(take_.width).arg(take_.height)
+                        .arg(take_.fps).arg(isCamera ? cameraInputFormat : QStringLiteral("auto"))
                         .arg(ffmpegError(result)));
         running_ = false;
         return;
@@ -276,18 +309,18 @@ void Gb28181MediaSource::run() {
     }
 
     AVStream *stream = format->streams[videoIndex];
-    qInfo() << "GB28181 media opened" << sourceUrl(config_) << "format="
+    qInfo() << "GB28181 media opened" << take_.url << "format="
             << (format->iformat ? format->iformat->name : "unknown")
             << "codec=" << avcodec_get_name(stream->codecpar->codec_id)
             << "size=" << stream->codecpar->width << "x" << stream->codecpar->height
             << "time_base=" << stream->time_base.num << "/" << stream->time_base.den;
-    if (config_.type == QStringLiteral("camera")) {
+    if (isCamera) {
         const AVRational sourceRate = stream->avg_frame_rate.num > 0 ? stream->avg_frame_rate : stream->r_frame_rate;
         const int detectedFps = sourceRate.num > 0 && sourceRate.den > 0
             ? static_cast<int>(av_q2d(sourceRate) + 0.5) : 0;
-        if (detectedFps > 0 && detectedFps != config_.fps) {
-            qInfo() << "GB28181 camera frame rate adjusted" << config_.fps << "->" << detectedFps;
-            config_.fps = detectedFps;
+        if (detectedFps > 0 && detectedFps != take_.fps) {
+            qInfo() << "GB28181 camera frame rate adjusted" << take_.fps << "->" << detectedFps;
+            take_.fps = detectedFps;
         }
     }
     const bool passthrough = stream->codecpar->codec_id == AV_CODEC_ID_H264;
@@ -325,7 +358,7 @@ void Gb28181MediaSource::run() {
         if (running_ && frameCallback_) {
             ++emittedFrames;
             if (emittedFrames == 1 || (emittedFrames % 100) == 0)
-                qInfo() << "GB28181 media frame" << sourceUrl(config_) << "count=" << emittedFrames
+                qInfo() << "GB28181 media frame" << take_.url << "count=" << emittedFrames
                         << "bytes=" << frame.data.size() << "pts90k=" << frame.pts90k
                         << "key=" << frame.keyFrame;
             frameCallback_(frame);
@@ -336,12 +369,12 @@ void Gb28181MediaSource::run() {
         goto cleanup;
     }
     if (!passthrough) {
-        decoder = openDecoder(stream->codecpar);
+        decoder = openDecoder(stream->codecpar, take_.hardwareDecode);
         if (!decoder) {
             reportError(QStringLiteral("cannot open decoder for %1").arg(stream->codecpar->codec_id));
             goto cleanup;
         }
-        encoder = openEncoder(config_);
+        encoder = openEncoder(take_, config_.bitrate);
         if (!encoder) {
             reportError(QStringLiteral("cannot open H.264 encoder (rkmpp and software fallback failed)"));
             goto cleanup;
@@ -361,7 +394,7 @@ void Gb28181MediaSource::run() {
     while (running_) {
         result = av_read_frame(format, packet);
         if (result < 0) {
-            if (config_.loop && config_.type == QStringLiteral("mp4")) {
+            if (take_.loop && take_.type == QStringLiteral("file")) {
                 if (av_seek_frame(format, videoIndex, 0, AVSEEK_FLAG_BACKWARD) < 0) break;
                 if (decoder) avcodec_flush_buffers(decoder);
                 continue;
@@ -465,6 +498,6 @@ cleanup:
     if (packet) av_packet_free(&packet);
     if (encoded) av_packet_free(&encoded);
     if (format) avformat_close_input(&format);
-    qInfo() << "GB28181 media stopped" << sourceUrl(config_) << "frames=" << emittedFrames;
+    qInfo() << "GB28181 media stopped" << take_.url << "frames=" << emittedFrames;
     running_ = false;
 }

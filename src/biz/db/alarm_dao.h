@@ -116,13 +116,28 @@ public:
     // 按ID查询
     AlarmRecord queryById(const QString &id);
 
-    // Pad 接口 v1 §3.8 的补漏查询：按**生效更新时间**升序返回 >= sinceInternal 的行。
-    // sinceInternal 传空串 = 全量（走没有 WHERE 的那条：Qt 把空 QString 绑成 NULL，
-    // `>= NULL` 恒不成立，绑成 "" 会一条都不回）。
-    // 用 COALESCE(NULLIF(update_time,''), alarm_time)：早期版本建行时不写 update_time，
-    // 老库里几万行是空串，直接按 update_time 过滤会把它们整批漏掉。
-    // 时间文本仍是库内那种定宽无偏移格式（与 alarm_time 的字典序过滤同一套口径）。
-    QVector<AlarmRecord> queryUpdatedSince(const QString &sinceInternal, int limit = 500);
+    /**
+     * @brief Pad 接口 v1 §3.8 的补漏查询：按**生效更新时间**升序返回 >= 游标 的行
+     * @param sinceInternal 空串 = 全量（走没有 WHERE 的那条：Qt 把空 QString 绑成 NULL，
+     *        `>= NULL` 恒不成立，绑成 "" 会一条都不回——首次全量就是这个形状）
+     * @param limit 最多取几行
+     * @param constructionId 非空时**在 SQL 里**按施工计划过滤（v1 的 taskId）
+     *
+     * 用 COALESCE(NULLIF(update_time,''), alarm_time)：早期版本建行时不写 update_time，
+     * 老库里几万行是空串，直接按 update_time 过滤会把它们整批漏掉。
+     * 时间文本仍是库内那种定宽无偏移格式（与 alarm_time 的字典序过滤同一套口径）。
+     *
+     * ⚠ `constructionId` 这条过滤**必须在 SQL 里**，不能"先取 limit 行再在 C++ 里筛"：
+     *   那是报告 §八 P1-2 的病灶——库里几万行历史时，升序取到的前 limit 行全是**别的应用**
+     *   最早期的报警，筛完剩 0 条 → 游标回显 null → Pad 存 null → 下次仍是全量，
+     *   该计划的报警**永远同步不到**且零报错（活锁）。下推之后 LIMIT 落在过滤之后，
+     *   增量才会向前推进。
+     * 过滤表达式与 buildFilterWhere() 的「按施工id」那条逐字同一套（instr + 带引号的
+     * 整段 needle）：本机 QSQLITE 插件内嵌 SQLite 3.31.1 且没编 JSON1，json_extract 会
+     * "no such function"；LIKE 的 needle 里 %/_ 是通配符，而施工 id 与键名都带下划线，会过度匹配。
+     */
+    QVector<AlarmRecord> queryUpdatedSince(const QString &sinceInternal, int limit = 500,
+                                           const QString &constructionId = QString());
 
     // ========================================================================
     // 更新操作

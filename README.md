@@ -74,7 +74,7 @@ $IDGE_WORKSPACE/
 | 配置节 | 说明 |
 |--------|------|
 | `video.models` | 模型参数表，**以库目录名为键**：`{"yolo11n-ppe": {"alarm_class": "un_helmet", "conf_threshold": 0.3, "note": "…"}}`。`alarm_class` 与 `conf_threshold` 都是**这个模型的参数**（不是槽位、不是通道）：类别留空 = 只画框不报警，`conf_threshold` **缺键 = 跟随 `detect.conf_threshold`**（不是 0）。设置页"模型参数"表按行编辑，改完**即时生效**、不重开流 |
-| `video.sources` | 数组，**视频流注册表**：一条 = 一路可复用的取流地址 + 它的打开参数（`type`/`url`/`note`/`width`/`height`/`fps`/`inputFormat`/`loop`/`hardwareDecode`/`timeoutMs`/`reconnectMs`，主键 `id`）。同一只摄像头或同一个文件只写一次，几路通道用 `source_id` 引用它，改一处几路一起改；设置页「视频流管理…」编辑这张表。字段口径与默认值见 `src/base/config/README.md` |
+| `video.sources` | 数组，**视频流注册表**：一条 = 一路可复用的取流地址 + 它的打开参数（`type`/`url`/`note`/`width`/`height`/`fps`/`inputFormat`/`loop`/`hardwareDecode`/`timeoutMs`/`reconnectMs`，主键 `id`）。同一只摄像头或同一个文件只写一次，**视频通道用 `source_id` 引用它，国标推流的 `gb28181.streams[]` 也从这里取**（2026-11-04 起国标段不再自带 `type`/`source`/宽高帧率），改一处几处一起改；设置页「视频流管理…」编辑这张表。字段口径与默认值见 `src/base/config/README.md` |
 | `video.channels` | 数组，**下标即通道号（0-based）**，条目里的 `channel` 字段只给人看。每路 = `source_id`（引用上面那张表）/`source`（内联地址，旧口径，仍支持）/`note`/`enabled`/`models`。**解析只有 `ConfigManager::resolveChannelSource()` 一处**：`source_id` 命中→用那条流；为空→回落内联 `source`；`source_id` 悬空→**不回退**，这一路不开 + 一条 warning。`models` 的顺序就是级联槽位顺序（画面上 `M1/M2/…` 前缀、报警 `result_id`），重排会改号；`enabled=false` 表示这一路不开流。这三项在设置页改完都会**重开该路**（见 §八 第 10 条）；换流用每路的下拉、换本地文件点「浏览」（它会在注册表里建一条 `type=file` 的流并引用），只有直接改 config 文件需要自己动一次该通道配置 |
 | `detect` | `conf_threshold`/`nms_threshold` 是**全局底座**（默认 0.25/0.45），推理侧真的读：回落链 `video.models[id].conf_threshold` → `detect.conf_threshold` → 形参默认值，唯一解析点 `ModelRegistry::resolveConfThreshold()`。conf 有**下限 0.05**（`conf=0` 会打穿量化模型的预筛、把推理线程跑死），nms 没有下限。⚠ `class_num`/`threads` 是**假开关**：已连 getter 一起删掉（类别数属于每个模型，推理线程数 = 各通道模型数之和，设置页显示的是真实值），老配置里残留的这两个键程序不再读取 |
 | （无 `video.render`） | 推理间隔是编译期的 `frame_count % 3`（`ffmpeg_video_decoder.cpp` 的 4.6 节），**没有配置键**，别在 JSON 里加 `render.sampleInterval`——它只会变成一个改了不生效的假开关 |
@@ -83,7 +83,7 @@ $IDGE_WORKSPACE/
 | `recording` | 报警视频硬件编码录制（**默认 `enabled=true`**，报警必带关联片段是需求验收项）；`buffer_seconds` 需 ≥ 片段窗口 3+2 秒，缺键默认 8（`config_example.json` 模板当前写 5） |
 | `smartRecognition` | 智能识别四张卡片（二维码/OCR/点名/盘点）共用的取流地址；键缺省时自动探测摄像头节点（MJPEG 优先，其次 CSI/rkisp 的 NV12、YUYV），探测不到退回 `/dev/video0`。仅 getter，设置页不编辑 |
 | `websocket` | Pad↔Aibox 客户端：`server_url`（空=整条链路不启动，设置页可改）+ 心跳/重连间隔（仅 JSON）。**本机是客户端，这条连接本身不监听端口**；它是旧协议，v1 之后由下面的 `pad_server` 取代（去留待接口方确认） |
-| `pad_server` | **Pad 接口 v1 的入站服务端**（本机是 WS 服务端，Pad 连进来收报警）。`enabled` **默认 `false`**——这是一个明文零鉴权的入站口，局域网内任何设备都能连。`port` 默认 8899（v1 占位；与 `media_http_port` 8090 是两个口）；`media_base_url` 空=复用内嵌文件服务的自动地址。只能改 JSON、无 setter（改口要重启）；落点 [src/biz/pad/](src/biz/pad/README.md)，键表见 [src/base/config/README.md](src/base/config/README.md)。**本轮只落 WS 报警面，`/api/` HTTP 面未实现** |
+| `pad_server` | **Pad 接口 v1 的入站服务端**（本机是 WS 服务端，Pad 连进来收报警）。`enabled` **默认 `false`**——这是一个明文零鉴权的入站口，局域网内任何设备都能连。`port` 默认 8899（v1 占位；与 `media_http_port` 8090 是两个口）；`media_base_url` 空=复用内嵌文件服务的自动地址。只能改 JSON、无 setter（改口要重启）；握手只放空 Origin 与 `android-app://*`（其余 403，判据 `originAllowed()` 一处）。落点 [src/biz/pad/](src/biz/pad/README.md)，键表见 [src/base/config/README.md](src/base/config/README.md)。**本轮只落 WS 报警面，`/api/` HTTP 面未实现** |
 | `alarm_uplink` | 本机报警的**上行推送**（`enabled` **默认 `false`**——往外发数据必须人开）。两段式：报警当刻发 `alarm_info`（文字 + 媒体地址承诺），媒体写稳后再发 `media_begin`。`media_transport` 默认 `url`＝本机起内嵌 http 静态文件服务（**监听 `media_http_port`，默认 8090，明文零鉴权**）只在 JSON 里发地址；`ws_binary`＝字节走 WS 分块帧（已实测，代码保留、非默认）。只能改 JSON，设置页无控件；键表见 [src/base/config/README.md](src/base/config/README.md) |
 
 另有一整段 **`gb28181`** 不经 `ConfigManager`，由 `src/biz/sip/gb28181_config.cpp` 直接读文件
@@ -214,15 +214,16 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
 | libmk_api | `3rdparty/zlmediakit/aarch64/` | 报警上行 url 档的内嵌 http 服务（进程级单例，`src/media/server/` 唯一封装点） |
 | OpenSSL 1.1 | `3rdparty/openssl1.1.0/lib/` | `libmk_api.so` 的 NEEDED（`libssl.so.1.1`/`libcrypto.so.1.1`）；与系统 OpenSSL 3 并存，**仅供 ZLM 链接**，Qt 的 TLS 仍走系统 3（故 `wss://` 不可用，见 §八 第 11 条）。本工程链了 `--disable-new-dtags` → DT_RPATH 可传递，`run.sh` 不需要为此加 `LD_LIBRARY_PATH` |
 
-### 网络端口口径（部署/防火墙要看的就这三条）
+### 网络端口口径（部署/防火墙要看的就这四条）
 
 | 方向 | 端口 | 何时存在 | 说明 |
 |------|------|----------|------|
 | 出站 | 对端的 `websocket.server_url` | 配了地址才连（空=整条链路不启动） | 本机是 **WS 客户端**，不监听这条；**只填 `ws://`**，`wss://` 本机连不上 |
 | **入站 TCP** | `alarm_uplink.media_http_port`，默认 **8090** | 仅 `alarm_uplink.enabled=true` 且 `media_transport="url"`（后者是默认档） | 内嵌 http 静态文件服务，根 = `data/alarms` 绝对路径，**只读、明文、零鉴权**（只关了目录索引）。报警媒体地址的交付面；想限来源网段可配库内的 `http.allow_ip_range`（默认未设＝不限）。详见 `src/media/server/README.md` |
+| **入站 TCP** | `pad_server.port`，默认 **8899** | 仅 `pad_server.enabled=true`（**出厂 `false`**） | Pad 接口 v1 的 WS 服务端，`listen(QHostAddress::Any)`，**明文、零鉴权**（§2.3 规定不鉴权）。唯一的门是 Origin 白名单：空 Origin 与 `android-app://*` 放行，带 `http(s)://` Origin 的握手回 **403**——判据在 `pad_ws_server.cpp` 的 `originAllowed()` 一处，放行别的来源改那里并回来更新本行。口径见 `src/biz/pad/README.md` |
 | 出入站 UDP | `gb28181.platform.localSipPort`（默认 5060）本机 `bind` | 仅 `gb28181` 段能凑出 platform + streams | SIP 注册/心跳/MANSCDP 收发（本机也收平台报文，但它是 UDP、不是 TCP 监听口）；RTP 推流另按 SDP 协商走 TCP/UDP。**当前 `platform.transport` 不影响发包，固定 UDP** |
 
-`ss -ltnp | grep 8090` 为空 + `/proc/<pid>/task` 里没有 ZLM 线程，是"出厂态没开文件服务"的两个证据
+`ss -ltnp | grep -E '8090|8899'` 为空 + `/proc/<pid>/task` 里没有 ZLM 线程，是"出厂态两个入站口都没开"的两个证据
 （别看日志行数）。
 
 ---
@@ -418,7 +419,7 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
 | `model/` | 模型库 `library/<id>/`（yolo11n/s/m-coco、ppe、ocr 等，一个模型一个目录）+ `train/`（训练侧 .pt/yaml/校准清单，程序不读） | [README](model/README.md) |
 | `data/` | 运行时数据（config/idge.db/alarms/backups/roll_call_data，内容不入库） | — |
 | `python/` | 模型转换与验证脚本：`.pt → onnx → rknn`（`pt2rknn.sh`）、ONNX→RKNN（`convert.py`）、推理/mAP 验证（`yolo11.py`） | [README](python/README.md) |
-| `tests/` | 测试程序（test_database 数据库层；test_equipment 设备盘点、test_rollcall 人员点名全链离线自测；test_latest_frame_slot 帧广播槽跳帧/生命周期；test_video_sources 视频流注册表与通道引用解析，均随主构建生成） | [README](tests/README.md) |
+| `tests/` | 测试程序（test_database 数据库层；test_equipment 设备盘点、test_rollcall 人员点名全链离线自测；test_latest_frame_slot 帧广播槽跳帧/生命周期；test_video_sources 视频流注册表与通道引用解析；test_stream_params 流参数板端实测；test_gb28181_source_ref 国标流引用注册表；test_pad_* Pad v1 三连，均随主构建生成） | [README](tests/README.md) |
 | `docs/` | 技术知识库 | [README](docs/README.md) |
 | `res/` | Qt 资源（qrc：图片/字体/GL 着色器/音效） | [README](res/README.md) |
 | `sounds/` | 提示音文件 | [README](sounds/README.md) |
@@ -480,13 +481,16 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
 6. **GB28181 MANSCDP 编码声明与实际不符**：XML 头写 `encoding="GB2312"`，实际发出的是 UTF-8 字节
    且 `Content-Length` 也按 UTF-8 长度算（`gb28181_manager.cpp` 心跳/应答处）。宽容平台无感，
    严格平台在中文 `DeviceName` 上会解析错乱。真要对接，改一处即需全模块统一口径
-7. **GB28181 配置写错只表现为"不启用"**：`serverHost`/`advertiseHost`/SDP `c=` 必须是 IPv4 字面量，
+7. **GB28181 平台地址写错只表现为"不启用"**：`serverHost`/`advertiseHost`/SDP `c=` 必须是 IPv4 字面量，
    `inet_pton` 失败即静默 `return` 且无日志；`platform.transport` 是假开关（值不影响发包）。
-   排障先看 `data/config.json` 的 `gb28181` 段，别等错误提示
-8. **本机摄像头无互斥**：`smartRecognition.camera`（二维码实时扫描 / OCR 拍照 + 人员点名/设备盘点预览）、
-   `video.sources[]`（老配置则是 `video.channels[].source`）、`gb28181.streams[].source` 三条取流路径各自 `avformat_open_input`，
-   同一设备被两路同时打开时后开的那路失败，报错只落在各自日志里。
-   注册表解决的是"地址只写一次"，**不是**"设备只开一次"：两路通道引用同一个 `type=camera` 条目照样撞车
+   但**流被丢弃是有日志的**：`GB28181 stream dropped: 第 N 条流…`（缺 `deviceCode`、缺 `source_id`、
+   `source_id` 在 `video.sources[]` 里查不到），先 `grep dropped` 再怀疑网络
+8. **本机摄像头无互斥**：`smartRecognition.camera`（二维码实时扫描 / OCR 拍照 + 人员点名/设备盘点预览）
+   与 `video.sources[]` 两条路径各自 `avformat_open_input`，同一设备被两路同时打开时后开的那路失败，
+   报错只落在各自日志里。
+   注册表解决的是"地址只写一次"，**不是**"设备只开一次"：两路通道引用同一个 `type=camera` 条目、
+   或**某个通道与某条国标流引用同一颗摄像头**（`gb28181.streams[].source_id` 现在指向同一张表），
+   平台点流时那次 `open` 会拿到 `Device or resource busy`
 9. **扫码无去重/冷却**：窗格打开即扫，每 250ms 解一帧，解出即冻结画面等用户点「确认」。
     同一颗码举在镜头前时点「重新扫描」会立刻再解出同一内容（"重扫就是要它"，不是 bug）；
     跨会话也不去重，换一班次的码照样立刻解出
@@ -512,6 +516,8 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
     不存在"改了要重启才生效"的空档）；「视频流管理…」确定后按 `touchedSourceIds()`
     重开**引用了被改动流**的那几路（删除一条流会连带清掉引用它的通道的 `source_id`，
     那几路同样在重开之列，判据是对话框前后 `channelSourceId()` 变了）；
+    **国标推流**也从这张表取流，改地址**下一次 INVITE 就生效**（`Gb28181MediaSource::run()` 每次开流现解析），
+    但国标段自己的身份键与 `source_id` 属"只落盘"——`Gb28181Config::load()` 只在启动时读一次，改了要重启；
     只落盘——视频流的**备注**（touched 判据只看影响解码的十项参数，备注改了不用重开）、
     以及直接手改 `data/config.json` 的任何键（运行中的程序不感知文件，要重启或在页面上动一次该通道配置）；
     `geofence.enabled` 设置页里没有，手改 config 后要么重启、要么在页面上动一次「围栏类别」触发 `loadFromConfig()` 顺带重载；
@@ -540,7 +546,10 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
     （WS 客户端、GB28181 注册、报警上行），只有这一条是别人连进来。默认口 8899、明文 ws、
     **零鉴权、无 Token**（v1 §2.3 当前就不要求 Token）——局域网内任何能连到本机的设备都能
     收到实时报警、拉到历史报警快照与证据地址。所以出厂 `enabled=false`，与 `alarm_uplink`
-    同一条"必须人来打开"的口径；启用前先确认网段隔离范围。三条配套事实：
+    同一条"必须人来打开"的口径；启用前先确认网段隔离范围。唯一的门是**来源检查**：
+    `originAllowed()` 放行空 Origin（原生 App 不发）与 `android-app://*`，带 `http(s)://` Origin
+    的握手回 403——它挡的是"网页 JS 可连"，**不挡**裸 socket，所以这不等于访问控制。
+    三条配套事实：
     ①`QWebSocketServer` 独占一只监听器，v1 §2.1 想让 WS 与 `/api/` 同占 8899 在这套栈上做不到；
     ②证据字节仍由 `media_http_port`（8090）那台文件服务出，开了 `pad_server` 就可能顺带把它
     起起来（`pad_server.media_base_url` 写了外部地址时可不起）；

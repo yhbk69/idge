@@ -52,6 +52,14 @@ ClipWriter 后台线程(报警 +2s 到点) → dump 裸流/MP4 → attachVideoCl
          → 改内存 alarms_ 中同批记录的 videoPath + AlarmDAO::updateVideoPath 落库
          → emit videoClipAttached(ids, 裸流路径, mp4 副本路径)（**当前只有报警上行 url 档是消费者**）
          （UI 不发信号：详情对话框打开时读 alarms() 自然拿到最新路径）
+
+UI/Pad 改状态（acknowledgeAlarmById(id) / markAsFalsePositiveById(id) 成功之后，UI 两条按钮都走这里）
+         → recordForId(id)：先查内存环形列表，查不到回库 queryById
+         → emit alarmStatusChanged(AlarmRecord)（**单条**变更；Pad 靠它立刻下发 alarm_update）
+         → acknowledgeAll() **不发这条**：一次可能几千条，逐条广播会把 GUI 线程钉住，
+           这批增量交给下一次 sync_request 从库里补漏（口径见 src/biz/pad/README.md 第 5 条）
+         → 按下标的老接口 acknowledgeAlarm(int) / markAsFalsePositive(int) **也不发**（全工程零调用方）：
+           要新增状态入口一律用 ById 版，否则 Pad 那侧永远停在旧状态
 ```
 两条判定路径的限流键与窗口**互相独立**：
 
@@ -109,8 +117,9 @@ AlarmManager::instance().attachVideoClip(ids, rawClipPath, mp4Path);
 
 // UI 侧
 int unread = AlarmManager::instance().unacknowledgedCount();
-AlarmManager::instance().acknowledgeAll();
+AlarmManager::instance().acknowledgeAll();                 // 批量：不发 alarmStatusChanged
 connect(&AlarmManager::instance(), &AlarmManager::alarmGenerated, ...);
+connect(&AlarmManager::instance(), &AlarmManager::alarmStatusChanged, ...);  // 单条状态变更（Pad 消费）
 
 // 退出时（src/main.cpp）
 AlarmManager::instance().cleanOldData(30);
@@ -120,7 +129,9 @@ AlarmManager::instance().cleanOldData(30);
 - `src/ai/yolo11/common.hpp`：`object_detect_result(_list)` 检测结果类型、时间戳字段。
 - `src/base/config/ConfigManager.h`：`ingestFenceAlarm` 读 `geofence.throttleSeconds`
   （本模块已不持有任何类别名表，也不再读旧的 `alarm.classes`）。
-- `src/biz/db/alarm_dao.h`：`insertAlarms` / `updateVideoPath` / `cleanOldAlarms`（本模块唯一的写库出口）。
+- `src/biz/db/alarm_dao.h`：`insertAlarms` / `updateVideoPath` / `updateStatus` / `markFalseAlarm` /
+  `queryById` / `cleanOldAlarms`（本模块唯一的写库出口；`queryById` 只服务 `recordForId()`，
+  为的是内存环形列表外的历史行也能标状态并推给 Pad）。
 - `src/base/runtime_paths.h`：`alarmsDir()` —— 抓拍图与视频片段共用的媒体根目录。
 - Qt：`QMutex`/`QVector`/`QMap`/信号槽；`AlarmRecord` 经 `qRegisterMetaType` 支持跨线程。
 

@@ -28,7 +28,7 @@ GB/T 28181（国标）**设备侧**视频推流。本模块让 idge 作为一个
 ```
 main.cpp
   initializeMediaRuntime()                      # avdevice_register_all + avformat_network_init
-  Gb28181Config::load(configPath, &probe)       # 判据：serverHost 非空且至少一条流有 deviceCode
+  Gb28181Config::load(configPath, &probe)       # 判据：serverHost 非空且至少一条流"身份齐 + source_id 引用命中注册表"
         └─ 通过 → Gb28181Manager::start(configPath)   # 否则不启动，主程序照常跑
 
 Gb28181Manager（std::thread eventLoop，200ms 一轮 select）
@@ -47,7 +47,7 @@ Gb28181Manager（std::thread eventLoop，200ms 一轮 select）
 
 Gb28181MediaSource（每路一条 std::thread，run()）
   开流（camera: v4l2 + input_format=mjpeg；rtsp: rtsp_transport=tcp）→ 找视频流
-    ├─ 源已是 H.264 → h264_mp4toannexb 直通（width/height/fps/bitrate 全部不生效）
+    ├─ 源已是 H.264 → h264_mp4toannexb 直通（注册表的宽高帧率与这里的 bitrate 全部不生效）
     └─ 否则 h264/hevc/mjpeg_rkmpp 硬解（建 rkmpp hwdevice 失败退软解；运行中
           DRM_PRIME 同步失败再中途换软解）→ swscale 到目标尺寸
           → h264_rkmpp 硬编（打不开退 libx264 veryfast+zerolatency）
@@ -83,14 +83,19 @@ Gb28181PsMuxer::writeVideoFrame → callback → Gb28181RtpSender::sendPs
       "heartbeatInterval": 30
     },
     "streams": [
-      { "type": "camera", "cameraIndex": 0, "deviceCode": "34020000001320000001",
-        "deviceName": "前门", "width": 1920, "height": 1080, "fps": 25, "bitrate": 2000000 },
-      { "type": "rtsp", "source": "rtsp://192.168.1.200/cam1",
-        "deviceCode": "34020000001320000002" }
+      { "source_id": "csi-cam", "deviceCode": "34020000001320000001",
+        "deviceName": "前门", "bitrate": 2000000 },
+      { "source_id": "net-cam-1", "deviceCode": "34020000001320000002" }
     ]
   }
 }
 ```
+
+> **本段不写取流地址**（2026-11-04 改）：`type` / `source` / `cameraIndex` / `width` / `height`
+> / `fps` / `loop` 这几个键**已从国标段移除**，一律由 `source_id` 指向 `video.sources[]`
+> 里的那条流（与 `video.channels[].source_id` 引用的是同一张表）。原因很具体：同一路摄像头
+> 在配置里出现两次，换一次摄像头要改两处，漏一处的现象是"界面有画、平台点流黑屏"。
+> 现在写了也被忽略，不报错也不回填 —— 两套取流口径并存正是这次要消灭的东西。
 
 ### platform 键
 | 键 | 类型 | 默认 | 说明 |
@@ -111,17 +116,30 @@ Gb28181PsMuxer::writeVideoFrame → callback → Gb28181RtpSender::sendPs
 ### streams[] 键
 | 键 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `type` | string | `camera` | `camera` / `rtsp` / `rtmp` / `mp4` |
-| `source` | string | 空 | 取流地址；`camera` 可留空改用 `cameraIndex` |
+| `source_id` | string | 空 | **引用 `video.sources[]` 的 id**；空、或指向不存在的 id → 这条流被 `load()` 直接丢弃并打一行原因。取流地址/类型/宽高帧率/输入格式/loop/硬解开关全在那条流上 |
 | `deviceCode` | string | 空 | 通道国标编码，**空则这条流被直接丢弃** |
 | `channelCode` / `serverCode` / `password` | string | 回退上层 | |
 | `deviceName` / `serialNumber` | string | `deviceName` 缺省取 `channelCode`；`serialNumber` 缺省空 | 目录/设备信息里回报给平台的名字与序列号 |
 | `ssrc` | string | 空 | 备用 SSRC；INVITE 带合法 `y=` 时以平台给的为准 |
 | `transport` | string | 回退 platform | **由 INVITE 的 SDP 决定实际传输**，此键基本不起作用 |
-| `cameraIndex` | int | `-1` | `type=camera` 且 `source` 空时拼 `/dev/video{index}`，`-1` 视作 0 |
-| `width`/`height`/`fps`/`bitrate` | int | 1920/1080/25/2000000 | **只在需要重编码时生效**；源本身是 H.264 走透传时一个都不看。`camera` 的 `fps` 会被探测到的真实帧率覆盖 |
+| `bitrate` | int | 2000000 | **只在需要重编码时生效**；源本身是 H.264 走透传时不看它。宽高帧率不在这里配（注册表没写时国标侧落回 1920x1080@25） |
 | `enabled` | bool | `true` | false 的流不注册不推流 |
-| `loop` | bool | `true` | 只对 `type=mp4` 有意义 |
+
+注册表侧对国标路径的两条差异：
+- **解析点是 `run()` 开头，不是构造函数**：`Gb28181Manager::start()` 在 `main()` 里跑在
+  `frmMain` 的 `ConfigManager::load()` **之前**，那一批 `Gb28181MediaSource` 构造时注册表还是空的。
+  挪到构造期就会变成"配置没问题，但第一次 INVITE 报引用取不到地址"。
+  副作用是好的：设置页改了 `video.sources[]` 的地址，下一次点流就用新的，不用重启。
+- `timeoutMs` / `reconnectMs` **不生效**：这路的起停由 SIP 会话（INVITE/BYE）控制，
+  接上"打不开就按间隔重试"会变成会话早就结束还在后台连，反把 RTP 端口占住。
+  开流阻塞靠 `interrupt_callback` 由 `stop()` 打断。
+- `type` 为空时国标侧按 url 前缀补型（`/dev/video`→`camera`、`rtsp://`→`rtsp`、
+  `rtmp://`→`rtmp`、其余→`file`），判据与 `FFmpegVideoDecoder` 的嗅探一致；
+  补型是必需的——v4l2 参数、rtsp 强制 tcp、`file` 才看 `loop` 三处都靠它分支。
+- ⚠ **同一路 camera 被某个视频通道和某条国标流同时引用会打不开**：v4l2 采集互斥，
+  平台点流时对 `/dev/videoN` 的第二次 `open` 报 `Device or resource busy`。
+  要么给国标单开一路 rtsp/文件源，要么让那个通道不占它（两侧引用现在会一起计入
+  流管理表格的"被引用"计数，删不掉正是为了拦住误删）。
 
 ## 使用方法
 
@@ -135,8 +153,10 @@ Gb28181PsMuxer::writeVideoFrame → callback → Gb28181RtpSender::sendPs
 # 3. 平台侧查设备是否在线，再点播该 deviceCode
 ```
 
-没有 `gb28181` 段时 `Gb28181Config::load()` 返回 false，`main()` 直接跳过启动，
-不会打印错误——"平台看不到设备"第一件事就是确认这一段存在且 `serverHost`/`deviceCode` 都在。
+没有 `gb28181` 段时 `Gb28181Config::load()` 返回 false，`main()` 直接跳过启动，不打印错误。
+但**段存在而流被丢弃是有日志的**：`GB28181 stream dropped: 第 N 条流…没有 source_id /
+source_id=X 在 video.sources[] 里不存在 / 没有 deviceCode`，逐条一条 —— "平台看不到设备"
+先 `grep dropped` 就能分清是没配、还是配了但引用指错（2026-11-04 起取流字段改在注册表里）。
 
 单独接代码（不使用配置文件时）：
 
@@ -176,7 +196,7 @@ manager.stop();      // 析构会自动调
   同一设备被两处打开，后开的那个失败。
   正式部署建议国标只推 RTSP 拉流，本机摄像头留给业务页。
 - **透传路径无视分辨率**：源是 H.264 时不重编，平台看到的就是源本身的宽高码率；
-  想靠 `width/height/bitrate` 限带宽，必须让源不是 H.264（或换 `camera`/`rtmp`）。
+  想靠注册表的 `width/height` + 国标的 `bitrate` 限带宽，必须让源不是 H.264（或换 `camera`/`rtmp`）。
 - **`psFrames`/`rtpSendErrors` 是普通 `uint64`**：媒体线程自增、SIP 线程在
   `startMedia`/`stopMedia` 读，非原子，只够用来打日志，别当判决条件。
 - **TCP 会话一旦发送失败就关 socket**：`sendPs` 在 TCP 下失败会主动关闭连接，

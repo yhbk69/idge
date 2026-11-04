@@ -174,6 +174,18 @@ public:
     VideoSourceCfg videoSource(const QString &id) const;
 
     /**
+     * @brief 单条 `video.sources[]` 元素的解析口径（键名与归一规则的唯一事实源）
+     *
+     * 公开成静态是为了让"手里只有另一份 JSON 文档"的消费者也能复用同一判据，
+     * 不必先 `load()` 单例：GB28181 的 `Gb28181Config::load()` 在 `main()` 里跑在
+     * `frmMain` 之前（那时单例还是空的），它自己读的那份文档里有 `video.sources[]`。
+     */
+    static VideoSourceCfg videoSourceFromJson(const QJsonObject &o);
+
+    /** @brief 在**给定的**根对象里按 id 查一条流；不命中返回空 cfg（判据与 videoSource() 同一条） */
+    static VideoSourceCfg videoSourceInRoot(const QJsonObject &root, const QString &id);
+
+    /**
      * @brief 新增或按 id 覆盖一条流（id 已存在则原地替换，不存在则追加）
      * @return false = id 或 url 为空，调用方没给够主键/地址，配置不改动
      * @note 只按 id 找**第一条**匹配项替换，并把重复 id 的后续条目一并删掉：
@@ -188,7 +200,12 @@ public:
      */
     void removeVideoSource(const QString &id);
 
-    /** @brief 有多少通道正在引用这条流（删之前给界面确认用） */
+    /**
+     * @brief 有多少处正在引用这条流（删之前给界面确认用）
+     *
+     * 计数包含两类消费者：`video.channels[].source_id` 与
+     * `gb28181.streams[].source_id`（国标侧一条流被引用时删掉它，平台点流就会拿不到地址）。
+     */
     int videoSourceReferrerCount(const QString &id) const;
 
     /** @brief 通道备注（四宫格 OSD），通道号非法返回空串 */

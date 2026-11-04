@@ -9,6 +9,8 @@
  * 具体校验规则和"哪些键现在还是假开关"见 gb28181_config.cpp 与同目录 README.md。
  */
 
+#include "ConfigManager.h"
+
 #include <QString>
 #include <QVector>
 
@@ -29,10 +31,17 @@ struct Gb28181PlatformConfig {
     QString userAgent = QStringLiteral("idge/GB28181");
 };
 
-/// 单路视频流 = 一个国标设备通道（deviceCode 唯一，平台按它点流）
+/**
+ * @brief 单路视频流 = 一个国标设备通道（deviceCode 唯一，平台按它点流）
+ *
+ * 这里**只放国标身份 + 推流编码参数**。"这路从哪儿取流、什么分辨率/帧率/是否循环"
+ * 全部由 `sourceId` 指向的 `video.sources[]` 决定（与 `video.channels[].source_id`
+ * 引用同一张表），因为那是流的属性而不是国标通道的属性：两处各写一遍地址，
+ * 现场改摄像头就要改两个地方，漏一个就是"界面有画、平台点流黑屏"。
+ * 取用时走 `takeSource()`，不要在别处拼判据。
+ */
 struct Gb28181StreamConfig {
-    QString type;         ///< camera | rtsp | rtmp | mp4
-    QString source;       ///< 取流地址；camera 可留空改用 cameraIndex
+    QString sourceId;     ///< 引用 video.sources[] 的 id；空则整条流被 load() 丢弃
     QString deviceCode;   ///< 通道国标编码，空则整条流被 load() 丢弃
     QString channelCode;  ///< 缺省取 deviceCode
     QString serverCode;   ///< 缺省取 platform.serverCode
@@ -41,15 +50,20 @@ struct Gb28181StreamConfig {
     QString password;     ///< 缺省取 platform.password
     QString ssrc;         ///< 备用 SSRC，INVITE 带 y= 时以对方为准
     QString transport;    ///< 媒体侧 UDP/TCP，实际由 INVITE 的 SDP 决定
-    int cameraIndex = -1;  ///< type=camera 且 source 为空时拼 /dev/video{index}，-1 视作 0
-    // 下面四项只在"需要重编码"的路径生效：源已是 H.264 时直接 mp4toannexb 透传，
-    // 宽高码率帧率一概不生效（见 gb28181_media.cpp 的 passthrough 分支）。
-    int width = 1920;
-    int height = 1080;
-    int fps = 25;         ///< type=camera 时会被探测到的真实帧率覆盖；其它源原样使用
+    // 只在"需要重编码"的路径生效：源已是 H.264 时直接 mp4toannexb 透传，
+    // 码率与（注册表没给宽高时）那对默认宽高一个都不看。
     int bitrate = 2000000;
     bool enabled = true;  ///< false 的流仍会被解析，但不注册不推流
-    bool loop = true;     ///< 只对 type=mp4 有意义，其它源忽略
+
+    /**
+     * @brief 这路的取流定义（地址/类型/宽高帧率/输入格式/loop/硬解开关）
+     * @return 命中注册表时是那条流；未命中（id 悬空或注册表被删）返回空 cfg
+     *
+     * 开流时现取，所以设置页改了 `video.sources[]` 之后**下一次 INVITE 就用新地址**，
+     * 不必重启（`load()` 那份快照只用于"要不要启动 manager"和身份字段）。
+     * 宽高/帧率为 0、inputFormat 为空 = 注册表没指定，由媒体层落回国标侧的老默认值。
+     */
+    VideoSourceCfg takeSource() const;
 };
 
 struct Gb28181Config {

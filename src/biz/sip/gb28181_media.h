@@ -25,9 +25,10 @@ struct Gb28181EncodedFrame {
 /**
  * @brief 单路国标媒体源（非 QObject，回调在工作线程上执行）
  *
- * 源类型见 Gb28181StreamConfig::type：camera(v4l2/MJPEG)、rtsp(强制 tcp)、rtmp、mp4。
- * 源本身是 H.264 时只过 h264_mp4toannexb 直通；否则 rkmpp 硬解（失败退软解）
- * → swscale → h264_rkmpp 硬编（失败退 libx264）。详见 .cpp 文件头。
+ * 取流定义来自 `video.sources[]`（`Gb28181StreamConfig::takeSource()`），本类只认
+ * 解析后的那一份：源类型见 `take_.type` = camera(v4l2/MJPEG)、rtsp(强制 tcp)、rtmp、
+ * file(旧称 mp4)。源本身是 H.264 时只过 h264_mp4toannexb 直通；否则 rkmpp 硬解
+ * （失败退软解）→ swscale → h264_rkmpp 硬编（失败退 libx264）。详见 .cpp 文件头。
  */
 class Gb28181MediaSource {
 public:
@@ -54,7 +55,8 @@ public:
     bool running() const { return running_.load(); }
 
 private:
-    Gb28181StreamConfig config_;
+    Gb28181StreamConfig config_;   ///< 国标身份 + 推流码率（不含取流字段）
+    VideoSourceCfg take_;          ///< 每次 run() 开头现解析的取流定义，宽高帧率已补回国标默认值
     FrameCallback frameCallback_;
     ErrorCallback errorCallback_;
     std::atomic<bool> running_{false};

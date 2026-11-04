@@ -844,6 +844,26 @@ target_link_libraries(test_video_sources
 )
 
 # ============================================================================
+# 国标流引用视频流注册表的离线自检（无 GUI、无 FFmpeg）
+# gb28181.streams[] 现在只写身份 + source_id，取流字段全在 video.sources[]。这个目标钉的是
+# 由此新增的三类"只在运行时才暴露"的错：忘写 source_id、指向不存在的 id、进程跑起来之后
+# 注册表被删——三种表现必须不同，否则下次有人加"顺手兜底"就把它们混成一个静默失败。
+# 只编 ConfigManager.cpp + gb28181_config.cpp（后者用 QHostAddress，所以链 Network）。
+# 契约清单见 tests/test_gb28181_source_ref.cpp 文件头；配置读写在 QDir::tempPath() 下。
+#   ./build/build_rk3588_linux/test_gb28181_source_ref，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_gb28181_source_ref
+    tests/test_gb28181_source_ref.cpp
+    src/base/config/ConfigManager.cpp
+    src/biz/sip/gb28181_config.cpp
+)
+
+target_link_libraries(test_gb28181_source_ref
+    Qt5::Core
+    Qt5::Network
+)
+
+# ============================================================================
 # 通道配置热更新自测（真解码器 + 真推理任务，无 GUI）
 # 覆盖四条契约：停止判据 isLoopAlive、releaseTasks 后按新配置重建槽位、
 # 反复重开线程数与 RSS 不涨、每槽生效阈值（slot params 那行日志的 conf/nms）；
@@ -919,3 +939,75 @@ target_link_libraries(test_channel_reload
 target_compile_definitions(test_channel_reload PRIVATE ZERO_COPY)
 
 target_link_options(test_channel_reload PRIVATE "LINKER:--allow-shlib-undefined" "LINKER:--disable-new-dtags")
+
+# ============================================================================
+# 视频流参数板端实测/回归（真解码器 + 无 GUI + 不挂推理）
+# 钉的是 video.sources 那四个"静默失效"的参数：loop 不生效=播完黑屏、timeoutMs 不生效=
+# 界面永远"正在接入…"、reconnectMs 不生效=拔插后永久死路、hardwareDecode=false 不生效=软解档
+# 形同虚设。这四条肉眼各看一眼都判不出来，所以做成可重复的数（判据清单见文件头）。
+# cwd 必须是构建目录；需要一段 3 秒素材，缺了会 SKIP 相关组并打印生成命令。
+#   ./build/build_rk3588_linux/test_stream_params，rc 0=PASS 1=FAIL
+# 源列表与 test_channel_reload 同一套（ffmpeg_video_decoder.cpp 的依赖闭包）
+# ============================================================================
+add_executable(test_stream_params
+    tests/test_stream_params.cpp
+    src/media/reader/ffmpeg_video_decoder.cpp
+    src/media/reader/video_recorder.cpp
+    src/ai/task/ppe_task.cpp
+    src/ai/task/base_task.cpp
+    src/ai/model_repo/model_registry.cpp
+    src/base/config/ConfigManager.cpp
+    src/base/config/parse_config.cpp
+    src/base/buffer/dma_alloc.cpp
+    src/base/buffer/DmaFrameBuffer.cpp
+    src/biz/alarm/alarm_manager.cpp
+    src/biz/session/construction_session.cpp
+    src/biz/db/alarm_dao.cpp
+    src/biz/db/detection_dao.cpp
+    src/biz/db/database_manager.cpp
+    src/biz/geofence/fence_manager.cpp
+    src/biz/geofence/fence_checker.cpp
+    src/base/imaging/image_utils.cpp
+    src/base/imaging/image_drawing.cpp
+    src/base/imaging/draw_utils.cpp
+    src/base/imaging/file_utils.cpp
+    src/biz/service/task_manager.cpp
+)
+
+target_link_directories(test_stream_params PRIVATE
+    ${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg-rkmpp/lib
+    ${CMAKE_SOURCE_DIR}/3rdparty/libyuv/lib
+    ${CMAKE_SOURCE_DIR}/3rdparty/librga/lib
+    ${CMAKE_SOURCE_DIR}/3rdparty/rknpu2/Linux/aarch64
+    ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/lib
+)
+
+target_link_libraries(test_stream_params
+    Qt5::Core
+    Qt5::Gui
+    Qt5::Widgets
+    Qt5::Sql
+    Qt5::Network
+    avformat
+    avcodec
+    avutil
+    swscale
+    swresample
+    pthread
+    dl
+    drm
+    jsoncpp
+    sqlite3
+    rknnrt
+    rga
+    ${OpenCV_LIBS}
+    ${GLES2_LIBRARIES}
+    ${EGL_LIBRARIES}
+    ${LIBJPEG}
+    ${LIBRGA}
+    Threads::Threads
+)
+# 与主目标同宏：零拷贝流水线（DMA-BUF/RGA）在 decodeLoop 里是编译期分支
+target_compile_definitions(test_stream_params PRIVATE ZERO_COPY)
+
+target_link_options(test_stream_params PRIVATE "LINKER:--allow-shlib-undefined" "LINKER:--disable-new-dtags")

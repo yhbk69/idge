@@ -50,6 +50,12 @@
         "  键是库 id 不是通道号：同一个模型挂在几路就几路共用一个阈值（设置页看『被引用通道』列）。",
         "gb28181 段由 Gb28181Config::load 独立读取（程序不会写回它），平台地址/本机地址/SDP c= 必须是 IPv4 字面量，",
         "inet_pton 失败即静默不启用国标链路且无日志；platform.transport 当前不影响发包。",
+        "gb28181.streams[] 只写【国标身份 + 推流码率】，取流一律走 source_id 引用 video.sources[]：",
+        "  同一路摄像头被通道和国标各写一遍地址时，改一次摄像头要改两处，漏一处的现象是『界面有画、平台点流黑屏』。",
+        "  没写 source_id、或它指向的 id 在 video.sources[] 里不存在的流【整条丢弃】并在日志打原因（不回填旧键）。",
+        "  ⚠ 若某条国标流与某个视频通道引用同一路 camera，平台点流时会对 /dev/videoN 二次 open（v4l2 采集互斥），",
+        "    日志是 cannot open ... Device or resource busy —— 要么给国标单开一路 rtsp/文件源，要么让通道不占它。",
+        "  注册表里的 timeoutMs/reconnectMs 对国标路径不生效（这路的起停由 SIP 会话 INVITE/BYE 控制）。",
         "websocket 段留空即整条链路不启动；对 WS 而言本机是【客户端】，不主动监听端口。",
         "  但报警上行开 url 档（alarm_uplink.enabled=true 且 media_transport=\"url\"）时，本机会内嵌起一台",
         "  http 静态文件服务监听 media_http_port（默认 8090）——这是唯一被监听的口，明文零鉴权，",
@@ -260,32 +266,22 @@
         },
         "streams": [
             {
-                "type": "camera",
-                "source": "/dev/video22",
+                "source_id": "csi-cam",
                 "deviceCode": "34020000001320000001",
                 "channelCode": "34020000001320000001",
                 "deviceName": "idge-camera-01",
                 "serialNumber": "idge-camera-01",
-                "width": 1920,
-                "height": 1080,
-                "fps": 25,
                 "bitrate": 2000000,
-                "enabled": true,
-                "loop": true
+                "enabled": true
             },
             {
-                "type": "rtsp",
-                "source": "rtsp://192.168.2.60:554/live/1",
+                "source_id": "net-cam",
                 "deviceCode": "34020000001320000002",
                 "channelCode": "34020000001320000002",
                 "deviceName": "idge-rtsp-01",
                 "serialNumber": "idge-rtsp-01",
-                "width": 1920,
-                "height": 1080,
-                "fps": 25,
                 "bitrate": 2000000,
-                "enabled": false,
-                "loop": true
+                "enabled": false
             }
         ]
     }

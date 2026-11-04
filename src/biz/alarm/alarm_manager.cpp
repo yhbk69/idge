@@ -587,6 +587,10 @@ void AlarmManager::acknowledgeAll()
         dao.acknowledgeAllPending();
     }
     emit statsUpdated();
+    // 这里**故意不发** alarmStatusChanged：这一条是"一句 UPDATE 收掉库里全部未确认"，
+    // 改成逐条发就等于给 Pad 一次推几千帧 alarm_update（而且要先查出那几千个 id）。
+    // 这些行的状态由下一次 sync_result 拉平——P1-2 修好之后那条路才是真的通的。
+    // 单条确认/误报走 alarm_update，见 acknowledgeAlarmById 与 markAsFalsePositiveById。
 }
 
 // 确认单条报警（标记为已确认）
@@ -693,7 +697,16 @@ bool AlarmManager::acknowledgeAlarmById(const QString &id)
         dbOk = dao.updateStatus(id, "rectified");
     }
     emit statsUpdated();
-    return foundInRam || dbOk;
+    const bool changed = foundInRam || dbOk;
+    // 报告 P1-1：状态写成功了就发一条带记录的信号，Pad 靠它把那条从 PENDING 换成
+    // RECTIFIED。以前只有 statsUpdated，对端拿不到"是哪一条"，只能等下次重连补漏。
+    if (changed) {
+        const AlarmRecord snapshot = recordForId(id);
+        if (!snapshot.id.isEmpty()) {
+            emit alarmStatusChanged(snapshot);
+        }
+    }
+    return changed;
 }
 
 // 删除单条报警（按ID）
@@ -742,7 +755,33 @@ bool AlarmManager::markAsFalsePositiveById(const QString &id)
         dbOk = dao.markFalseAlarm(id);
     }
     emit statsUpdated();
-    return foundInRam || dbOk;
+    const bool changed = foundInRam || dbOk;
+    if (changed) {
+        const AlarmRecord snapshot = recordForId(id);
+        if (!snapshot.id.isEmpty()) {
+            emit alarmStatusChanged(snapshot);
+        }
+    }
+    return changed;
+}
+
+// 取某条报警的当前记录（给 alarmStatusChanged 当载荷）
+// 内存窗口里那份是刚改过的、最权威，优先用它；窗口外的历史行只能回库读一次。
+AlarmRecord AlarmManager::recordForId(const QString &id)
+{
+    {
+        QMutexLocker lock(&mutex_);
+        for (const auto &a : alarms_) {
+            if (a.id == id) {
+                return a;
+            }
+        }
+    }
+    if (dbInitialized_) {
+        AlarmDAO dao;
+        return dao.queryById(id);
+    }
+    return AlarmRecord();
 }
 
 // 获取各类别检测统计

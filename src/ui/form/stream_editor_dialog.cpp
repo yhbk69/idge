@@ -73,7 +73,7 @@ void StreamEditorDialog::buildUi()
     root->setSpacing(10);
 
     auto *hint = new QLabel(QStringLiteral(
-        "同一只摄像头/同一路地址只写一次，通道在下拉里引用它。"));
+        "同一只摄像头/同一路地址只写一次，通道与国标推流都按 id 引用它。"));
     hint->setWordWrap(true);
     hint->setStyleSheet(theme::text(theme::TEXT, theme::FS_BODY));
     root->addWidget(hint);
@@ -392,12 +392,16 @@ void StreamEditorDialog::removeStream()
     }
     // 删除前按注册表里的**当前**引用数确认：本对话框改的是工作副本，通道的 source_id
     // 还留在 ConfigManager 里，所以"谁在用这条流"只能问 ConfigManager。
+    // 计数含两处消费者：video.channels[].source_id 与 gb28181.streams[].source_id。
+    // 国标段程序从不写回（它由 Gb28181Config::load 独立读），所以这里只提醒不动它：
+    // 引用被删断的那条国标流下次启动会整条丢弃，日志给出行号与原因。
     const int users = ConfigManager::instance().videoSourceReferrerCount(id);
     if (users > 0) {
         const auto ans = QMessageBox::question(
             this, QStringLiteral("删除视频流"),
-            QStringLiteral("这条流正被 %1 路通道引用。\n删除后这些通道将不再引用任何流"
-                           "（内联地址还在的会继续用内联），确认删除？").arg(users),
+            QStringLiteral("这条流正被 %1 处引用（视频通道 + 国标推流）。\n"
+                           "通道侧的引用会一起清掉（内联地址还在的会继续用内联）；\n"
+                           "国标那段程序不写回，引用断掉的流下次启动会被整条丢弃。\n确认删除？").arg(users),
             QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
         if (ans != QMessageBox::Yes) {
             return;

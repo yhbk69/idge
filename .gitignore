@@ -57,9 +57,11 @@ test_*.cpp
 #   test_geofence_role            —— 电子围栏每形状角色（禁区/岗区域）判定八条离线契约
 #   test_construction_qr          —— 施工信息解析/校验/会话 + 二维码离线解码（登录门的全部契约）
 #   test_pad_wire                 —— Pad 接口 v1 出站 JSON 映射 16 组离线契约
-#   test_pad_sync                 —— Pad 断线补漏的游标查询与已读语义（内存库 8 组）
-#   test_pad_ws_server            —— Pad WS 服务端线上自检（loopback 真服务端+真客户端 12 组）
+#   test_pad_sync                 —— Pad 断线补漏的游标查询与已读语义（内存库 9 组）
+#   test_pad_ws_server            —— Pad WS 服务端线上自检（loopback 真服务端+真客户端 16 组）
 #   test_video_sources            —— 视频流注册表与通道引用解析 5 组离线契约
+#   test_stream_params            —— video.sources 四个静默参数的板端实测/回归
+#   test_gb28181_source_ref       —— gb28181.streams 引用 video.sources 的九条离线契约
 !tests/test_database.cpp
 !tests/test_equipment.cpp
 !tests/test_rollcall.cpp
@@ -72,6 +74,8 @@ test_*.cpp
 !tests/test_pad_sync.cpp
 !tests/test_pad_ws_server.cpp
 !tests/test_video_sources.cpp
+!tests/test_stream_params.cpp
+!tests/test_gb28181_source_ref.cpp
 
 # 测试素材（*.jpg/*.mp4 全局忽略，此处显式放行；*_faces.json 等为运行产物不放行）
 !assets/test/1.mp4

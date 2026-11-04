@@ -302,6 +302,17 @@ signals:
     // 报警生成信号（通知界面显示新报警）
     void alarmGenerated(const AlarmRecord &alarm);
 
+    /**
+     * @brief 报警**状态**变更（确认 / 误报）信号，携带变更后的完整记录
+     *
+     * 为什么不能只靠 statsUpdated：后者只说"数字变了"，带不出是哪一条、变成了什么。
+     * Pad 接口 v1 §3.7 要的是"这条报警的 status/readAt 变了"（对端按 alarmId 就地合并），
+     * 少了这条信号，板端点完「已确认」Pad 那条会一直停在 PENDING，
+     * 只能等下次重连靠 sync_result 拉平（报告 P1-1 的实际表现）。
+     * 发出时机：状态**真的写成功了**（内存窗口命中或库更新成功）之后。
+     */
+    void alarmStatusChanged(const AlarmRecord &alarm);
+
     // 统计更新信号（通知界面刷新统计数据）
     void statsUpdated();
 
@@ -334,6 +345,14 @@ private:
     QSet<int> onlineChannels_;                 // 当前在线通道集合
     std::atomic<bool> screenshotsOn_{true};    // 报警是否截图（原子变量，线程安全）
     std::atomic<bool> dbInitialized_{false};   // 数据库是否已初始化（原子变量，线程安全）
+
+    /**
+     * @brief 取某条报警的**当前**记录（内存窗口命中优先，否则回库读一次）
+     *
+     * 给 alarmStatusChanged 用：状态变更信号要带完整记录，而对端合并时只看字段值。
+     * 找不到（既不在内存窗口也读不到库）返回 id 为空串的默认记录，调用方据此不发。
+     */
+    AlarmRecord recordForId(const QString &id);
 };
 
 #endif // ALARM_MANAGER_H

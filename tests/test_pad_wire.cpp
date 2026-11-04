@@ -18,7 +18,8 @@
 //   4) wireStatus：pending/rectified/未知 → PENDING，false_alarm → FALSE_ALARM
 //   5) wireReadAt：read_time 优先；只有 rectified 时用 update_time 兜底；未读返回空串
 //   6) taskIdOf 取 construction_info 的 construction_id；空/坏 JSON 返回空串
-//   7) typeOf：围栏按 alarmType（fence_in→INTRUSION / fence_out→CROSS），检测按类别名表
+//   7) typeOf：围栏按 alarmType **前缀**认三代（fence/fence_in→INTRUSION、fence_out→CROSS），
+//      检测按类别名表；表里只列违规类，合规类（helmet/vest/workWear）落兜底不带违规标签
 //   8) typeOf 兜底：认不出的类别抬成大写 code + "其他"，绝不给空标签
 //   9) alarmJson 必填键齐全，level 是数字，occurredAt/updatedAt 带偏移
 //  10) alarmJson 的 readAt 未读时是 null（不是缺键也不是空串）
@@ -26,7 +27,7 @@
 //  12) 证据路径在 root 之外 → snapshotUrls 为空数组（不拼越界地址）
 //  13) 片段 .mp4 不存在 → 不写 clipUrl（宁缺勿假）；存在 → 写出来
 //  14) alarmUpdateJson 不含 evidence，updatedAt 必填，dispose 只在有处置文本时出现
-//  15) 信封：alarm/sync_result 带 code=0+message=ok；pong 不带 code；error 的 code 在信封层
+//  15) 信封：alarm/sync_result/pong 一律带 code=0+message=ok（§3.2，P3-1 修正）；error 的 code 在信封层
 //  16) defaultDeviceId：非空、带 EDGE- 前缀、进程内稳定（口径 A17，hello_ack 的必填键）
 //
 // 仓库根运行：./build/build_rk3588_linux/test_pad_wire，rc 0=PASS 1=FAIL
@@ -181,10 +182,29 @@ try {
         check(pad::typeOf(r).code == QLatin1String("INTRUSION"), "fence_in → INTRUSION");
         r.alarmType = QStringLiteral("fence_out");
         check(pad::typeOf(r).code == QLatin1String("CROSS"), "fence_out → CROSS");
+        // 老库的单一 `fence` 行（联调那份实测 25862 行，占 67%）：class_name 是 person，
+        // 精确匹配会把它推成 type="PERSON"——围栏报警在平板上变成一个人。
+        r.alarmType = QStringLiteral("fence");
+        const pad::TypeWire legacy = pad::typeOf(r);
+        check(legacy.code == QLatin1String("INTRUSION")
+                  && legacy.categoryLabel == QStringLiteral("区域违规"),
+              "老 alarm_type='fence' 也要按围栏走（前缀认三代，不落类别名兜底）");
 
         r.alarmType = QStringLiteral("detection");
         r.className = QStringLiteral("cigarette");
         check(pad::typeOf(r).code == QLatin1String("SMOKING"), "cigarette → SMOKING");
+
+        // 合规类不进类型表：helmet/vest/workWear 是"戴了/穿了"，绝不能带违规标签出去
+        r.className = QStringLiteral("helmet");
+        const pad::TypeWire ok1 = pad::typeOf(r);
+        check(ok1.typeLabel != QStringLiteral("未戴安全帽")
+                  && ok1.categoryLabel == QStringLiteral("其他"),
+              "helmet（合规）走兜底，不许显示成\"未戴安全帽\"");
+        r.className = QStringLiteral("vest");
+        const pad::TypeWire ok2 = pad::typeOf(r);
+        check(ok2.typeLabel != QStringLiteral("未穿反光衣")
+                  && ok2.categoryLabel == QStringLiteral("其他"),
+              "vest（合规）走兜底，不许显示成\"未穿反光衣\"");
 
         r.className = QStringLiteral("whatever");
         const pad::TypeWire fb = pad::typeOf(r);
@@ -310,11 +330,16 @@ try {
         check(!alarm.contains(QLatin1String("v")) && !alarm.contains(QLatin1String("requestId")),
               "v1 §3.2：信封没有 v、没有 requestId");
 
+        // P3-1（2026-11-03 修）：§3.2 要求服务端→Pad 的消息**必须带** code/message，
+        // pong 虽然是空 data 也不能例外。这条以前钉的是"pong 不带 code"，
+        // 那是把偏离钉成契约——修代码必须同时改断言，不许反向迁就。
         const QJsonObject pong =
             QJsonDocument::fromJson(pad::pongEnvelope()).object();
         check(pong.value(QLatin1String("type")).toString() == QLatin1String("pong")
-                  && !pong.contains(QLatin1String("code")),
-              "pong 只带 type/ts");
+                  && pong.value(QLatin1String("code")).toInt() == 0
+                  && pong.value(QLatin1String("message")).toString() == QLatin1String("ok")
+                  && pong.contains(QLatin1String("ts")) && !pong.contains(QLatin1String("data")),
+              "pong 带 type/ts/code/message，data 仍不出现（空 data 不插键）");
 
         const QJsonObject err = QJsonDocument::fromJson(
             pad::errorEnvelope(2001, QStringLiteral("未知消息类型"),

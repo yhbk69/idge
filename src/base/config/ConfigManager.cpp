@@ -928,6 +928,16 @@ static QJsonArray sourcesArray(const QJsonObject &root)
     return root["video"].toObject()["sources"].toArray();
 }
 
+// 取国标那份流列表，判据与 Gb28181Config::load() 一致：顶层 streams 非空就用它，
+// 空了才看 gb28181.streams。两边都数会把同一批流计两遍。
+static QJsonArray gbStreamsArray(const QJsonObject &root)
+{
+    const QJsonArray top = root["streams"].toArray();
+    if (!top.isEmpty())
+        return top;
+    return root["gb28181"].toObject()["streams"].toArray();
+}
+
 static void writeSourcesArray(QJsonObject &root, const QJsonArray &arr)
 {
     QJsonObject video = root["video"].toObject();
@@ -962,13 +972,25 @@ QList<VideoSourceCfg> ConfigManager::videoSources() const
 VideoSourceCfg ConfigManager::videoSource(const QString &id) const
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    return videoSourceInRoot(root_, id);
+}
+
+VideoSourceCfg ConfigManager::videoSourceFromJson(const QJsonObject &o)
+{
+    return sourceFromJson(o);
+}
+
+VideoSourceCfg ConfigManager::videoSourceInRoot(const QJsonObject &root, const QString &id)
+{
     if (id.isEmpty())
         return VideoSourceCfg();
-    for (const auto &v : sourcesArray(root_)) {
+    for (const auto &v : sourcesArray(root)) {
         const VideoSourceCfg s = sourceFromJson(v.toObject());
         if (s.id == id)
             return s;
     }
+    // 悬空 id 不回退成"随便挑一条"：调用方拿到空 cfg（id 与 url 都空）就该报错或跳过，
+    // 与 resolveChannelSource() 那条"悬空不 fallback 内联"的口径同一判据。
     return VideoSourceCfg();
 }
 
@@ -1042,9 +1064,12 @@ int ConfigManager::videoSourceReferrerCount(const QString &id) const
     if (id.isEmpty())
         return 0;
     std::lock_guard<std::mutex> lock(mutex_);
-    const QJsonArray channels = root_["video"].toObject()["channels"].toArray();
     int n = 0;
-    for (const auto &v : channels) {
+    for (const auto &v : root_["video"].toObject()["channels"].toArray()) {
+        if (v.toObject()["source_id"].toString().trimmed() == id)
+            ++n;
+    }
+    for (const auto &v : gbStreamsArray(root_)) {
         if (v.toObject()["source_id"].toString().trimmed() == id)
             ++n;
     }

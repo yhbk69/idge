@@ -55,17 +55,17 @@
 
 | 键 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `id` | string | — | **主键**，通道靠它引用。改 id = 换一条流，所有引用变悬空，所以设置页里 id 只读 |
+| `id` | string | — | **主键**，视频通道（`source_id`）与国标流（`gb28181.streams[].source_id`）都靠它引用。改 id = 换一条流，所有引用变悬空，所以设置页里 id 只读 |
 | `type` | string | 空 | `camera`/`file`/`rtsp`/`rtmp`；`mp4` 读入归一成 `file`。**空 = 按地址前缀嗅探**（老口径） |
 | `url` | string | — | 设备节点 / 本地文件 / 流地址。空 id 或空 url 的条目 `setVideoSource()` 直接拒写 |
 | `note` | string | 空 | 备注，下拉与列表用它当显示名 |
-| `width`/`height` | int | `0` | **仅 `camera`**：`<=0` = 不指定，回落 `smartRecognition.camera_size` |
-| `fps` | int | `0` | **仅 `camera`**：`<=0` = 不指定（30） |
+| `width`/`height` | int | `0` | **仅 `camera`**：`<=0` = 不指定，监控那几路回落 `smartRecognition.camera_size`；被国标流引用时国标侧落回 1920x1080 |
+| `fps` | int | `0` | **仅 `camera`**：`<=0` = 不指定（监控路 30、国标路 25） |
 | `inputFormat` | string | 空 | **仅 `camera`**：`mjpeg`/`nv12`/`yuyv`；空 = 三档协商 |
 | `loop` | bool | `false` | **仅 `file`**：读到结尾回到开头继续放 |
 | `hardwareDecode` | bool | `true` | `false` = 不建 rkmpp 设备，走 CPU 软解（帧在系统内存） |
-| `timeoutMs` | int | `0` | `<=0` = 打开/探测不设墙上时钟超时（只受 stop 打断，即旧行为） |
-| `reconnectMs` | int | `0` | `<=0` = 断流/打开失败不再重连（旧行为）；`>0` = 失败后按该间隔重建上下文再试 |
+| `timeoutMs` | int | `0` | `<=0` = 打开/探测不设墙上时钟超时（只受 stop 打断，即旧行为）。**被国标流引用时不生效**（那路的起停由 SIP 会话控制） |
+| `reconnectMs` | int | `0` | `<=0` = 断流/打开失败不再重连（旧行为）；`>0` = 失败后按该间隔重建上下文再试。**同样不对国标路径生效**（没有"会话早结束了还在后台连"那层外环） |
 
 对应 API：`channelSource/Note/Enabled/ModelIds(int ch)`（一律 0-based）+
 `channelSourceId/setChannelSourceId/channelInlineSource` +
@@ -145,10 +145,12 @@ MJPEG**，只认 MJPEG 会把这颗物理摄像头整个漏掉）。只出 10-bi
 两档都不命中，因此不会被选中。节点号随插拔、USB 口、ISP/CSI 接线和内核版本漂移，
 板端曾稳定落在 `/dev/video41`，换环境即打不开——这就是自动探测取代硬编码的原因。
 
-**与其它取流地址互不相干**：监控 4 路走 `video.sources[]`（老配置仍可内联在
-`video.channels[].source`）、国标推流走 `gb28181.streams[].source`、扫码走本段。
-`video.sources[]` 只在监控 4 路**内部**共用（同一条目可被多路引用），不与后两处共表；
-同一台设备被两处同时打开会有一方失败。
+**与其它取流地址的关系**：监控 4 路走 `video.sources[]`（老配置仍可内联在
+`video.channels[].source`），**国标推流也从同一张表取**（`gb28181.streams[].source_id` 引用它，
+2026-11-04 起本段不再自带 `type/source/width/height/fps/loop`）；扫码那路仍独立走 `smartRecognition.camera`。
+注册表解决的是"地址只写一次"，**不是**"设备只开一次"：两路通道引用同一个 `type=camera` 条目、
+或一个通道加一条国标流引用同一颗摄像头，`avformat_open_input` 会有一方拿到 `Device or resource busy`
+（v4l2 采集互斥）。删一条流时的"被引用"计数把通道与国标两处一起数。
 
 ### pad_server 段（Pad 接口 v1 的入站服务端，本轮新增）
 | 键 | 类型 | 默认 | 说明 |
@@ -179,7 +181,7 @@ MJPEG**，只认 MJPEG 会把这颗物理摄像头整个漏掉）。只出 10-bi
 
 | 段 | 读取方 | 说明 |
 | --- | --- | --- |
-| `gb28181` | `src/biz/sip/gb28181_config.cpp` 自己 `QJsonDocument::fromJson` | 国标推流的平台参数与通道列表，见 `src/biz/sip/README.md`；`main()` 用它做"要不要启动 manager"的判据 |
+| `gb28181` | `src/biz/sip/gb28181_config.cpp` 自己 `QJsonDocument::fromJson` | 国标推流的平台参数与通道列表，见 `src/biz/sip/README.md`；`main()` 用它做"要不要启动 manager"的判据。`streams[]` 只写国标身份（`deviceCode`/`channelCode`/`deviceName`/`serialNumber`/`ssrc`/`bitrate`/`enabled`）+ `source_id`，**取流字段一律来自本表的 `video.sources[]`**；引用判据用 `ConfigManager::videoSourceInRoot()` 在**它自己读到的那份文档**里查（`main()` 里这次 load 早于 `ConfigManager::load()`，查单例会把所有流误判成悬空），离线契约 `tests/test_gb28181_source_ref.cpp` |
 
 数据流：
 ```

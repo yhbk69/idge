@@ -434,8 +434,13 @@ void Gb28181Manager::handleBye(Runtime &runtime, const std::string &message, con
 
 void Gb28181Manager::startMedia(Runtime &runtime) {
     stopMedia(runtime);
+    // 取流地址不在这段配置里，日志要把"引用的哪条流"和"解析出来实际开哪个地址"都打出来：
+    // 现场排查平台点流黑屏时，这两行就能分清是 source_id 指错了还是注册表里的 url 本身不对。
+    const VideoSourceCfg take = runtime.config.takeSource();
     qInfo() << "GB28181 starting media" << runtime.config.deviceCode
-            << "source=" << (runtime.config.source.isEmpty() ? QStringLiteral("camera") : runtime.config.source)
+            << "source_id=" << runtime.config.sourceId
+            << "url=" << (take.url.isEmpty() ? QStringLiteral("<注册表里查不到>") : take.url)
+            << "type=" << take.type
             << "rtp=" << runtime.remoteHost << runtime.remotePort << runtime.transport;
     if (!runtime.rtp->open(runtime.remoteHost.toStdString(), runtime.remotePort, runtime.transport.toStdString(), runtime.sessionSsrc.toStdString())) {
         qWarning() << "GB28181 cannot open RTP destination" << runtime.remoteHost << runtime.remotePort;

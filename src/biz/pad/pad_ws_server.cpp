@@ -12,6 +12,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QWebSocket>
+#include <QWebSocketCorsAuthenticator>
 #include <QWebSocketServer>
 
 namespace pad {
@@ -25,6 +26,21 @@ QString peerText(QWebSocket *socket)
 {
     const QHostAddress addr = socket->peerAddress();
     return QStringLiteral("%1:%2").arg(addr.toString()).arg(socket->peerPort());
+}
+
+// P2-3：来源白名单。v1 §2.3 免的是**鉴权**，不是免**来源检查**——
+// 不判的话"现场平板的原生 App 能连"和"局域网里任何一个网页的 JS 都能连进来
+// 实时收报警、按 taskId 拉历史"是同一个风险面，而报警里带人名、位置与截图地址。
+// 判据：空 Origin 放行（原生客户端与 OkHttp 这类不发 Origin 的实现），
+// android-app:// 前缀放行（Qt/WebView 侧 Android 原生容器发的 Origin），其余一律拒。
+// 浏览器一定带 http(s):// Origin，所以这一条把"网页 JS 可连"彻底挡掉。
+// 真需要放行别的来源时改这一个函数，并回来更新 README「网络暴露面」一节。
+bool originAllowed(const QString &origin)
+{
+    if (origin.isEmpty()) {
+        return true;
+    }
+    return origin.startsWith(QLatin1String("android-app://"));
 }
 
 } // namespace
@@ -71,6 +87,23 @@ bool PadWsServer::start(const ServerConfig &cfg, QString *err)
     }
 
     connect(server_, &QWebSocketServer::newConnection, this, &PadWsServer::onNewConnection);
+    // P2-3：来源白名单。Qt 5.12 的 QWebSocket 没有 requestOrigin()，唯一的钩子是
+    // QWebSocketServer::originAuthenticationRequired——它只在客户端**带了非空 Origin** 时发，
+    // 所以原生 App（OkHttp 那类不发 Origin）走不到这里、自然放行；浏览器一定发 http(s):// Origin，
+    // 于是这一处正好把"局域网里任何网页的 JS 都能连进来实时收报警、按 taskId 拉历史"挡掉。
+    // 不连接这个信号 = 所有 Origin 一律接受（本轮之前的实际行为）。
+    connect(server_, &QWebSocketServer::originAuthenticationRequired, this,
+            [this](QWebSocketCorsAuthenticator *authenticator) {
+                const QString origin = authenticator->origin();
+                const bool allow = originAllowed(origin);
+                authenticator->setAllowed(allow);   // 不调这行默认也是 true，必须显式拒
+                if (!allow) {
+                    emit logMessage(QStringLiteral("pad"),
+                                    QStringLiteral("拒绝连接：Origin=%1 不在白名单"
+                                                   "（只放行空 Origin 与 android-app://*；"
+                                                   "要改判据只改 originAllowed 一处）").arg(origin));
+                }
+            });
 
     if (!alarmsWired_) {
         // AutoConnection：alarmGenerated 来自解码线程、videoClipAttached 来自片段线程，
@@ -79,6 +112,11 @@ bool PadWsServer::start(const ServerConfig &cfg, QString *err)
                 this, &PadWsServer::handleAlarmGenerated);
         connect(&AlarmManager::instance(), &AlarmManager::videoClipAttached,
                 this, &PadWsServer::handleVideoClipAttached);
+        // 报告 P1-1：确认/误报后必须把这条的状态变化推出去。以前 pushAlarmUpdate()
+        // 定义了却一个调用方都没有，板端点完「已确认」，Pad 那条还停在 PENDING，
+        // 只能等下次重连靠 sync_result 拉平——违反 §3.7。
+        connect(&AlarmManager::instance(), &AlarmManager::alarmStatusChanged,
+                this, &PadWsServer::handleAlarmStatusChanged);
         alarmsWired_ = true;
     }
 
@@ -226,6 +264,30 @@ void PadWsServer::onTextMessage(const QString &text)
 
 void PadWsServer::handleHello(QWebSocket *socket, const QJsonObject &data)
 {
+    // P3-2：必填项缺失与版本不兼容是两件事，判据必须分开。
+    // 以前缺 deviceId 会因为 toInt(0) 顺带落到 1001，于是 Pad 收到"协议版本不兼容"
+    // 去查版本号，而真正的问题是它没带必填字段——报错方向反了比不报错更难查。
+    // §2.3 不鉴权，所以 token 允许是**空串**，但键必须在（字典校验按必填项判）。
+    QStringList missing;
+    if (data.value(QStringLiteral("deviceId")).toString().trimmed().isEmpty()) {
+        missing << QStringLiteral("deviceId");
+    }
+    if (!data.contains(QStringLiteral("token"))) {
+        missing << QStringLiteral("token");
+    }
+    if (data.value(QStringLiteral("clientVersion")).toString().trimmed().isEmpty()) {
+        missing << QStringLiteral("clientVersion");
+    }
+    if (!missing.isEmpty()) {
+        sendText(socket, errorEnvelope(2001, QStringLiteral("hello 缺少必填项"),
+                                       missing.join(QLatin1Char(','))));
+        emit logMessage(QStringLiteral("pad"),
+                        QStringLiteral("hello 参数错误（%1），已回 2001：%2")
+                            .arg(missing.join(QLatin1Char(',')), peerText(socket)));
+        // 不关连接：参数补齐后重发一次 hello 就行，不必重建 TCP 再走一遍握手。
+        return;
+    }
+
     const int peerVersion = data.value(QStringLiteral("protocolVersion")).toInt(0);
     if (peerVersion != kProtocolVersion) {
         // §3.2：不兼容时 hello_ack 带 code=1001 或直接 close(1000)。这里两个都做，
@@ -248,8 +310,20 @@ void PadWsServer::handleHello(QWebSocket *socket, const QJsonObject &data)
 
 void PadWsServer::handleSyncRequest(QWebSocket *socket, const QJsonObject &data)
 {
-    const QString taskId = data.value(QStringLiteral("taskId")).toString();
+    const QString taskId = data.value(QStringLiteral("taskId")).toString().trimmed();
     const QString cursorWire = data.value(QStringLiteral("lastEventTime")).toString();
+
+    // P3-3：§13.1.5 把 taskId 列为必填，以前"空 = 返回所有计划的报警"是联调期的方便，
+    // 代价是把"Pad 还没进施工计划页"和"这台设备上所有计划的报警都给你"压成同一条响应——
+    // 对端无法区分，现场就会出现"A 班次的平板同步到了 B 班次的报警"。
+    // 现在按 §2.6 判 2001；要跨计划排查请直接用设置页/报警查询页，那条路不走本协议。
+    if (taskId.isEmpty()) {
+        sendText(socket, errorEnvelope(2001, QStringLiteral("sync_request 缺少必填项"),
+                                       QStringLiteral("taskId")));
+        emit logMessage(QStringLiteral("pad"),
+                        QStringLiteral("sync_request 被拒（taskId 为空）：%1").arg(peerText(socket)));
+        return;
+    }
 
     // §3.8：唯一过滤依据是 lastEventTime；lastAlarmId 只是辅助字段，本机不参与判断。
     // 空游标 = 全量。游标认不出来时同样按全量处理（internalTimeFromWire 返回空串）。
@@ -260,13 +334,12 @@ void PadWsServer::handleSyncRequest(QWebSocket *socket, const QJsonObject &data)
     QString maxInternal;
     if (AlarmManager::instance().isDatabaseInitialized()) {
         AlarmDAO dao;
+        // 计划过滤下推进 SQL（报告 §八 P1-2）：以前是"取够 syncLimit 行再在 C++ 里筛"，
+        // 库里几万行历史时这批全是**别的应用最早期**的报警，筛完剩 0 条 → 游标回显 null →
+        // Pad 存 null → 下次还是全量，当前计划的报警永远同步不到，而且一条错误都不出。
         const QVector<AlarmRecord> rows = dao.queryUpdatedSince(
-            sinceInternal, cfg_.syncLimit <= 0 ? 500 : cfg_.syncLimit);
+            sinceInternal, cfg_.syncLimit <= 0 ? 500 : cfg_.syncLimit, taskId);
         for (const AlarmRecord &record : rows) {
-            // taskId 为空 = Pad 还没进施工计划页（未登录联调阶段），不按计划过滤。
-            if (!taskId.isEmpty() && taskIdOf(record) != taskId) {
-                continue;
-            }
             const QString effective = record.updateTime.isEmpty() ? record.alarmTime
                                                                   : record.updateTime;
             if (effective > maxInternal) {
@@ -306,6 +379,18 @@ void PadWsServer::handleSyncRequest(QWebSocket *socket, const QJsonObject &data)
 void PadWsServer::handleAlarmGenerated(const AlarmRecord &alarm)
 {
     pushAlarm(alarm);
+}
+
+void PadWsServer::handleAlarmStatusChanged(const AlarmRecord &alarm)
+{
+    // §3.7：边缘侧「查看」只发 readAt，「处置/误报」要发 status + dispose。
+    // 本机现在没有处置表单（roadmap P1-3），所以这条只带 status/readAt/updatedAt；
+    // **但必须发**——对端按 alarmId 就地合并，不发的那条在 Pad 上永远是旧状态。
+    pushAlarmUpdate(alarm);
+    emit logMessage(QStringLiteral("pad"),
+                    QStringLiteral("已推送 alarm_update：%1 → %2（%3 路在线）")
+                        .arg(alarm.id, wireStatus(alarm))
+                        .arg(clients_.size()));
 }
 
 void PadWsServer::handleVideoClipAttached(const QStringList &alarmIds, const QString &videoPath,

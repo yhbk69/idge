@@ -85,6 +85,7 @@ private slots:
     void onClientDisconnected();
     void onTextMessage(const QString &text);
     void handleAlarmGenerated(const AlarmRecord &alarm);
+    void handleAlarmStatusChanged(const AlarmRecord &alarm);
     void handleVideoClipAttached(const QStringList &alarmIds, const QString &videoPath,
                                  const QString &webPath);
 

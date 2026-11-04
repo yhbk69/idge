@@ -6,17 +6,17 @@
 //
 // 为什么值得单独钉：§12.1 的十条验收全是"对端行为"，纸面实现最容易在这儿翻车——
 //   · hello_ack 迟于 5 秒 = Pad 直接判协议不兼容；
-//   · pong 多带了 code/message 不算错，但 alarm_ack 回了东西会让 Pad 的连接状态机多一跳；
 //   · 未知 type 崩掉 = 现场一个对端版本差就把整机搞挂；
-//   · sync_result 省略 alarms 键（而不是给 []）会让 Pad 保留旧缓存、看起来"补漏成功"。
+//   · sync_result 省略 alarms 键（而不是给 []）会让 Pad 保留旧缓存、看起来"补漏成功"；
+//   · Origin 不判 = 局域网里任何网页的 JS 都能连进来收报警、按 taskId 拉历史。
 //
-// 覆盖十二条契约：
+// 覆盖十六条契约：
 //   1) 端口占用/重复 start 的幂等（第二次 start 直接 true，不把已连的 Pad 踢掉）
 //   2) hello → hello_ack：serverTime 带偏移、protocolVersion=1、capabilities 只有 alarm、
 //      detectionBoxes 恒 false（v1 硬要求）
 //   3) protocolVersion 不匹配 → hello_ack 带 code=1001 且连接被关闭
-//   4) ping → pong，且 pong 只有 type/ts（§3.2 服务端消息可带 code，但 pong 没必要）
-//   5) sync_request（空游标）→ **恰好一个** sync_result，含 alarms:[] 与 cursor 两个键
+//   4) ping → pong，pong 带 type/ts/code/message（§3.2 服务端消息必须带 code，P3-1 修正）
+//   5) sync_request（带 taskId）→ **恰好一个** sync_result，含 alarms:[] 与 cursor 两个键
 //   6) sync_result 的 alarms 是数组而不是缺键（缺键对端=保留旧缓存）
 //   7) 数据库未初始化时不崩、返回空数组 + 回显请求游标
 //   8) 未知 type → error 2001（code/message 在信封层，data.detail 带上那个 type）
@@ -24,6 +24,13 @@
 //  10) AlarmManager 发 alarmGenerated → 连接上收到 type=alarm 的完整快照
 //  11) 没有媒体底址时 evidence.snapshotUrls 是 []（不臆造对端取不到的地址）
 //  12) 配置 device_id 留空时 hello_ack 仍带必填 deviceId（口径 A17）
+//  13) hello 缺 deviceId/token/clientVersion → error 2001 且**不关连接**，补齐后同一条连接
+//      还能握手成功（P3-2：参数错与版本不兼容必须分开判，混了就等于给对端假方向）
+//  14) sync_request 的 taskId 为空 → error 2001，不再返回所有计划的报警（P3-3，§13.1.5 必填）
+//  15) Origin 白名单：http(s):// 的浏览器页被拒（连不上、不计入 clients_），
+//      空 Origin 与 android-app://* 放行（P2-3）
+//  16) 确认/误报 → 立刻推一帧 alarm_update，带 alarmId/status/readAt/updatedAt
+//      （P1-1：以前 pushAlarmUpdate 零调用方，Pad 那条只能等重连才拉平）
 //
 // 仓库根运行：./build/build_rk3588_linux/test_pad_ws_server，rc 0=PASS 1=FAIL
 // ============================================================================
@@ -133,19 +140,37 @@ QJsonObject envelopeOf(const QString &type, const QJsonObject &data)
     return env;
 }
 
-/// 连上本机服务端；port 由调用方给
-QWebSocket *connectTo(quint16 port)
+/// 连上本机服务端；port 由调用方给。
+/// origin 参数默认**空串**：P2-3 之后服务端只放行空 Origin 与 android-app://*，
+/// 而原生 App（OkHttp 这类）本来就不发 Origin，所以"正常客户端"就是空 Origin。
+/// 以前这里写的是任意串 "idge-pad-probe"，那正是"任何来源都收"的现场证据。
+/// 尝试连接并等它进入 ConnectedState；**不成功返回 nullptr，不抛**。
+/// P2-3 之后"被白名单拒掉"的正常表现就是服务端回 403、客户端直接落到 Unconnected，
+/// 所以断言拒绝必须能区分"没连上"和"连不上=测试环境坏了"这两件事——交给调用方判。
+QWebSocket *tryConnectTo(quint16 port, const QString &origin)
 {
-    QWebSocket *socket = new QWebSocket(QStringLiteral("idge-pad-probe"),
-                                        QWebSocketProtocol::VersionLatest);
+    QWebSocket *socket = new QWebSocket(origin, QWebSocketProtocol::VersionLatest);
     socket->open(QUrl(QStringLiteral("ws://127.0.0.1:%1/").arg(port)));
     QElapsedTimer clock;
     clock.start();
-    while (socket->state() != QAbstractSocket::ConnectedState && clock.elapsed() < 2000) {
+    while (socket->state() != QAbstractSocket::ConnectedState
+           && socket->state() != QAbstractSocket::UnconnectedState && clock.elapsed() < 2000) {
         QCoreApplication::processEvents();
     }
     if (socket->state() != QAbstractSocket::ConnectedState) {
         socket->deleteLater();
+        return nullptr;
+    }
+    return socket;
+}
+
+/// 正常客户端口径：origin 默认**空串**。
+/// 原生 App（OkHttp 那类）本来就不发 Origin，所以"合法对端"就是空 Origin；
+/// 以前这里写的是任意串 "idge-pad-probe"，那恰好是"任何来源都收"的现场证据。
+QWebSocket *connectTo(quint16 port, const QString &origin = QString())
+{
+    QWebSocket *socket = tryConnectTo(port, origin);
+    if (!socket) {
         throw std::runtime_error("连不上本机 Pad 服务端");
     }
     return socket;
@@ -236,14 +261,18 @@ try {
               "ping 发送失败");
         check(recorder.waitFor(2) >= 2, "30 秒内要回 pong（这里用 2 秒上限）");
         const QJsonObject pong = recorder.lastOfType(QStringLiteral("pong"));
-        check(pong.contains(QLatin1String("ts")) && !pong.contains(QLatin1String("code")),
-              "pong 只带 type/ts，不必塞 code");
+        // P3-1（2026-11-03 修）：§3.2 要求服务端→Pad 的消息必须带 code/message，pong 不例外。
+        // 这条以前钉的是"pong 不必塞 code"——那是把偏离钉成契约。
+        check(pong.contains(QLatin1String("ts"))
+                  && pong.value(QLatin1String("code")).toInt() == 0
+                  && pong.value(QLatin1String("message")).toString() == QLatin1String("ok"),
+              "pong 带 type/ts/code/message（§3.2 服务端消息必须带 code）");
 
-        // sync_request：空游标 + 空 taskId
+        // sync_request：空游标 + 带 taskId（§13.1.5 必填；空 taskId 现在按 §2.6 判 2001）
         QJsonObject syncData;
         syncData.insert(QStringLiteral("lastAlarmId"), QJsonValue(QJsonValue::Null));
         syncData.insert(QStringLiteral("lastEventTime"), QJsonValue(QJsonValue::Null));
-        syncData.insert(QStringLiteral("taskId"), QString());
+        syncData.insert(QStringLiteral("taskId"), QStringLiteral("SG-2026-11"));
         check(sendJson(socket, envelopeOf(QStringLiteral("sync_request"), syncData)).isEmpty(),
               "sync_request 发送失败");
         const int before = recorder.mark();
@@ -326,7 +355,11 @@ try {
         QWebSocket *socket = connectTo(kPort);
         Recorder recorder(socket);
         QJsonObject helloData;
+        // 必填项齐全，只把 protocolVersion 改坏——否则会被 P3-2 的参数检查先拦掉，
+        // 测不到"版本不兼容"这条分支（那条分支的判据在参数检查之后）。
         helloData.insert(QStringLiteral("deviceId"), QStringLiteral("Old Pad"));
+        helloData.insert(QStringLiteral("token"), QString());
+        helloData.insert(QStringLiteral("clientVersion"), QStringLiteral("0.9.0"));
         helloData.insert(QStringLiteral("protocolVersion"), 2);
         check(sendJson(socket, envelopeOf(QStringLiteral("hello"), helloData)).isEmpty(),
               "hello(v2) 发送失败");
@@ -342,6 +375,147 @@ try {
         }
         check(socket->state() == QAbstractSocket::UnconnectedState, "不兼容的连接要被关闭");
         socket->deleteLater();
+        QCoreApplication::processEvents();
+    }
+
+    // ── 13：hello 缺必填项 → error 2001，且不关连接（P3-2）──────────────────
+    {
+        QWebSocket *socket = connectTo(kPort);
+        Recorder recorder(socket);
+        QJsonObject broken;
+        broken.insert(QStringLiteral("protocolVersion"), 1);   // 只有版本，其余全缺
+        check(sendJson(socket, envelopeOf(QStringLiteral("hello"), broken)).isEmpty(),
+              "缺字段的 hello 发送失败");
+        check(recorder.waitFor(1) >= 1, "缺必填项要回 error");
+        const QJsonObject err = recorder.lastOfType(QStringLiteral("error"));
+        check(err.value(QLatin1String("code")).toInt() == 2001,
+              "缺必填项是 2001（§2.6），不是 1001——两个判据不能混");
+        check(err.value(QLatin1String("data")).toObject()
+                  .value(QLatin1String("detail")).toString().contains(QStringLiteral("deviceId")),
+              "detail 要点名缺的是哪个键");
+        // 参数错**不关连接**：补齐后重发 hello 应当还能握手成功
+        QJsonObject full;
+        full.insert(QStringLiteral("deviceId"), QStringLiteral("Redmi Pad 2 Pro"));
+        full.insert(QStringLiteral("token"), QString());
+        full.insert(QStringLiteral("clientVersion"), QStringLiteral("1.0.0"));
+        full.insert(QStringLiteral("protocolVersion"), 1);
+        check(sendJson(socket, envelopeOf(QStringLiteral("hello"), full)).isEmpty(),
+              "补全后的 hello 发送失败");
+        check(recorder.waitFor(2) >= 2, "同一条连接补齐参数后要能握手");
+        check(recorder.lastOfType(QStringLiteral("hello_ack"))
+                  .value(QLatin1String("code")).toInt() == 0,
+              "第二条 hello 应拿到 code=0 的 hello_ack");
+        check(socket->state() == QAbstractSocket::ConnectedState, "参数错误不该关连接");
+        socket->close();
+        QCoreApplication::processEvents();
+    }
+
+    // ── 14：sync_request 空 taskId → error 2001（P3-3）───────────────────────
+    {
+        QWebSocket *socket = connectTo(kPort);
+        Recorder recorder(socket);
+        QJsonObject syncData;
+        syncData.insert(QStringLiteral("lastEventTime"), QJsonValue(QJsonValue::Null));
+        syncData.insert(QStringLiteral("taskId"), QString());   // 没进施工计划页就是空
+        check(sendJson(socket, envelopeOf(QStringLiteral("sync_request"), syncData)).isEmpty(),
+              "空 taskId 的 sync_request 发送失败");
+        check(recorder.waitFor(1) >= 1, "空 taskId 要回东西（不能静默不回，那是活锁）");
+        const QJsonObject err = recorder.lastOfType(QStringLiteral("error"));
+        check(err.value(QLatin1String("code")).toInt() == 2001
+                  && err.value(QLatin1String("data")).toObject()
+                         .value(QLatin1String("detail")).toString().contains(QStringLiteral("taskId")),
+              "§13.1.5 的 taskId 必填：空值按 2001 拒，不再返回所有计划的报警");
+        check(recorder.count() == 1
+                  && recorder.at(0).value(QLatin1String("type")).toString()
+                         == QLatin1String("error"),
+              "被拒的 sync_request 只能回那一帧 error，不得再发 sync_result");
+        socket->close();
+        QCoreApplication::processEvents();
+    }
+
+    // ── 15：Origin 白名单（P2-3）────────────────────────────────────────────
+    {
+        // 先把前几组关掉的连接排空再取基线：disconnected → clients_.removeAll 要等事件循环，
+        // 立刻数会把"上一组的收尾时序"当成"这一组的行为"（本轮实测：进组时挂着 1 路，
+        // 拒绝动作本身一个都没加进去）。
+        QElapsedTimer drain;
+        drain.start();
+        while (pad::PadWsServer::instance().clientCount() > 0 && drain.elapsed() < 1000) {
+            QCoreApplication::processEvents();
+        }
+        check(pad::PadWsServer::instance().clientCount() == 0, "基线：前序连接应已排空");
+
+        check(tryConnectTo(kPort, QStringLiteral("http://192.168.1.50:8080")) == nullptr,
+              "浏览器 Origin 的连接不该建立（§2.3 免鉴权 ≠ 免来源检查）");
+        // Qt 5.12.8 实测：CORS 判据在 newConnection **之前**生效，被拒的连接根本不会
+        // 进到 clients_，所以这里不需要额外的"死连接清理"逻辑。
+        QCoreApplication::processEvents();
+        check(pad::PadWsServer::instance().clientCount() == 0,
+              "被拒的连接不得挂进 clients_（那会让日志里的连接数说谎）");
+
+        // 反面对照一：原生 App 那种 android-app:// Origin 要放行
+        QWebSocket *ok = tryConnectTo(kPort, QStringLiteral("android-app://com.example.pad"));
+        check(ok != nullptr, "android-app:// 前缀应在白名单内");
+        if (ok) {
+            Recorder okRec(ok);
+            check(sendJson(ok, envelopeOf(QStringLiteral("ping"), QJsonObject())).isEmpty(),
+                  "放行的 Origin 要能发消息");
+            check(okRec.waitFor(1) >= 1, "放行的 Origin 要正常服务");
+            ok->close();
+            QCoreApplication::processEvents();
+        }
+
+        // 反面对照二：不发 Origin（原生客户端的常态）也要放行——前面每一组都走的是这条路
+        QWebSocket *blank = tryConnectTo(kPort, QString());
+        check(blank != nullptr, "空 Origin 必须放行");
+        if (blank) {
+            blank->close();
+            QCoreApplication::processEvents();
+        }
+    }
+
+    // ── 16：确认 / 误报 → 立刻推 alarm_update（P1-1）─────────────────────────
+    {
+        QWebSocket *socket = connectTo(kPort);
+        Recorder recorder(socket);
+
+        // 前置：先造一条报警（没接库也能跑——内存窗口里就取得到完整记录）
+        AlarmManager::instance().storeAndNotify(
+            QVector<AlarmRecord>{makeRecord(QStringLiteral("ALARM-ACK-1"))});
+        const int markGen = recorder.mark();
+        check(recorder.waitFor(markGen + 1) >= markGen + 1, "前置：要先收到那条 alarm 快照");
+
+        check(AlarmManager::instance().acknowledgeAlarmById(QStringLiteral("ALARM-ACK-1")),
+              "确认操作本身要返回成功");
+        const int markAfterAck = recorder.mark();
+        check(recorder.waitFor(markAfterAck + 1) >= markAfterAck + 1,
+              "确认之后必须收到一帧 alarm_update（§3.7；这条以前是死代码，报告 P1-1）");
+        const QJsonObject updData =
+            recorder.lastOfType(QStringLiteral("alarm_update")).value(QLatin1String("data")).toObject();
+        check(updData.value(QLatin1String("alarmId")).toString() == QLatin1String("ALARM-ACK-1"),
+              "alarm_update 的 alarmId 要对得上（对端按它就地合并）");
+        // 口径（wireStatus，与 test_pad_wire 契约 4 同一套）：本机 `rectified` 是
+        // "已确认/已读"，**不等于** v1 的 DISPOSED（已处置），所以 status 仍是 PENDING，
+        // 变化的只有 readAt。这里故意钉住这点：把它"修成"RECTIFIED 就是替处置表单抢跑，
+        // 而处置那条路要等 roadmap P1-3 与 A7 的照片列。
+        check(updData.value(QLatin1String("status")).toString() == QLatin1String("PENDING"),
+              "确认只推进 readAt，status 不因 rectified 变成处置态");
+        const QString readAt = updData.value(QLatin1String("readAt")).toString();
+        check(!readAt.isEmpty() && readAt.contains(QLatin1Char('+')),
+              "readAt 要补出来（本机没有 read_time，按 update_time 兜底）并带时区偏移");
+        check(updData.value(QLatin1String("updatedAt")).toString().contains(QLatin1Char('+')),
+              "updatedAt 必填且带偏移，否则对端按旧值合并会把这条更新吞掉");
+
+        // 误报走同一条信号链
+        check(AlarmManager::instance().markAsFalsePositiveById(QStringLiteral("ALARM-ACK-1")),
+              "标误报要返回成功");
+        const int markAfterFalse = recorder.mark();
+        check(recorder.waitFor(markAfterFalse + 1) >= markAfterFalse + 1, "标误报也要推 alarm_update");
+        check(recorder.lastOfType(QStringLiteral("alarm_update")).value(QLatin1String("data")).toObject()
+                  .value(QLatin1String("status")).toString() == QLatin1String("FALSE_ALARM"),
+              "false_alarm → FALSE_ALARM");
+
+        socket->close();
         QCoreApplication::processEvents();
     }
 
@@ -388,10 +562,13 @@ try {
 
     std::cout << "pad ws server contracts passed: idempotent start / hello_ack shape "
                  "(detectionBoxes=false, serverTime with offset) / 1001 + close on version "
-                 "mismatch / pong without code / exactly one sync_result with alarms+cursor / "
-                 "error 2001 on unknown type / alarm_ack gets no reply / alarmGenerated "
-                 "broadcasts a full snapshot / no media base url means no evidence url / "
-                 "empty device_id still yields the required deviceId\n";
+                 "mismatch / pong carries code+message / exactly one sync_result with "
+                 "alarms+cursor / error 2001 on unknown type / alarm_ack gets no reply / "
+                 "alarmGenerated broadcasts a full snapshot / no media base url means no "
+                 "evidence url / empty device_id still yields the required deviceId / "
+                 "hello missing required fields -> 2001 without closing / "
+                 "empty taskId rejected with 2001 / origin allow-list (browser rejected, "
+                 "empty + android-app accepted) / ack + false-positive both push alarm_update\n";
     return 0;
 } catch (const std::exception &e) {
     std::cerr << "FAIL: " << e.what() << '\n';

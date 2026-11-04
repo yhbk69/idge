@@ -730,28 +730,47 @@ AlarmRecord AlarmDAO::queryById(const QString &id)
     return record;
 }
 
-QVector<AlarmRecord> AlarmDAO::queryUpdatedSince(const QString &sinceInternal, int limit)
+QVector<AlarmRecord> AlarmDAO::queryUpdatedSince(const QString &sinceInternal, int limit,
+                                                 const QString &constructionId)
 {
     QVector<AlarmRecord> results;
     QSqlDatabase db = DatabaseManager::instance().database();
     if (!db.isOpen()) return results;
 
     // 生效更新时间在 WHERE 和 ORDER BY 里各写一遍：SQLite 不认列别名用于这两个子句。
-    // ⚠ 空游标必须走**没有 WHERE 的那条**：Qt 把空 QString 绑成 NULL，
-    //   `表达式 >= NULL` 恒不成立，绑 "" 反而一条都不回（内存库实测），
+    // ⚠ 空游标必须走**不建那半条 WHERE 的路**：Qt 把空 QString 绑成 NULL，
+    //   `表达式 >= NULL` 恒不成立，绑成 "" 反而一条都不回（内存库实测），
     //   症状是"首次连接的全量同步永远返回空"。
-    QSqlQuery query(db);
-    const QString order = QStringLiteral(
-        " ORDER BY COALESCE(NULLIF(update_time, ''), alarm_time) ASC, id ASC LIMIT :limit");
-    if (sinceInternal.isEmpty()) {
-        query.prepare(QStringLiteral("SELECT * FROM alarms") + order);
-    } else {
-        query.prepare(QStringLiteral(
-            "SELECT * FROM alarms WHERE COALESCE(NULLIF(update_time, ''), alarm_time) >= :since")
-            + order);
-        query.bindValue(":since", sinceInternal);
+    // ⚠ 计划过滤也在这条 SQL 里做完再 LIMIT（报告 §八 P1-2）：反过来"先 LIMIT 再在 C++ 里筛"
+    //   在几万行历史上会让当前计划一条都进不了这一批——游标推不动、Pad 永远同步不到、全程零报错。
+    QStringList parts;
+    if (!sinceInternal.isEmpty()) {
+        parts << QStringLiteral("COALESCE(NULLIF(update_time, ''), alarm_time) >= :since");
     }
-    query.bindValue(":limit", limit);
+    if (!constructionId.isEmpty()) {
+        // needle 连引号一起 bind，序列化形状由 ConstructionInfo::toJson 固定（Compact、无空格），
+        // 所以这段子串匹配是精确的；判据与 buildFilterWhere() 的「按施工id」逐字同一套
+        // （本机 QSQLITE 内嵌 SQLite 3.31.1 且没编 JSON1，json_extract 会 "no such function"；
+        //  LIKE 的 %/_ 是通配符，而键名与施工 id 都带下划线，会过度匹配）。
+        parts << QStringLiteral("instr(construction_info, :cid_needle) > 0");
+    }
+
+    QSqlQuery query(db);
+    QString sql = QStringLiteral("SELECT * FROM alarms");
+    if (!parts.isEmpty()) {
+        sql += QStringLiteral(" WHERE ") + parts.join(QStringLiteral(" AND "));
+    }
+    sql += QStringLiteral(
+        " ORDER BY COALESCE(NULLIF(update_time, ''), alarm_time) ASC, id ASC LIMIT :limit");
+    query.prepare(sql);
+    if (!sinceInternal.isEmpty()) {
+        query.bindValue(QStringLiteral(":since"), sinceInternal);
+    }
+    if (!constructionId.isEmpty()) {
+        query.bindValue(QStringLiteral(":cid_needle"),
+                        QStringLiteral("\"construction_id\":\"%1\"").arg(constructionId));
+    }
+    query.bindValue(QStringLiteral(":limit"), limit);
 
     if (query.exec()) {
         while (query.next()) {
@@ -759,6 +778,7 @@ QVector<AlarmRecord> AlarmDAO::queryUpdatedSince(const QString &sinceInternal, i
         }
     } else {
         qWarning() << "Query alarms updated since" << sinceInternal
+                   << "constructionId" << constructionId
                    << "failed:" << query.lastError().text();
     }
 
