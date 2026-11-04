@@ -37,6 +37,22 @@
 #include <cstdio>
 #include <cstring>
 
+// ============================================================================
+// EglImageHelper - EGL DMA-BUF 导入辅助类
+// ============================================================================
+//
+// 【用法与所有权】非 QObject、无锁、无析构负担（它只管缓存 EGLDisplay 和三个
+//   函数指针，不持有任何 EGLImage/纹理）。一个 EGL 上下文配一份，作为值成员
+//   嵌在 GLVideoWidget 里；它的存在意义只剩两件事：init() 做能力检查 +
+//   get*Proc() 把函数指针交给 EglFramePool。
+// 【现状】importRGBA / importRGB / importNV12 / bindToTexture / destroyImage
+//   在全仓**零调用**（每帧走的是 EglFramePool 那条 acquire 路径）。
+//   保留是为了留一份"不池化、直接导"的对照实现；改签名前想清楚是不是真要
+//   再多一条 fd→EGLImage 的路径。
+// 【线程】init() 的线程要求写在它自己头上（必须上下文 current）。display_ 是
+//   缓存值：上下文若被销毁重建，必须重新 init()，否则 import*/destroyImage
+//   拿着旧 EGLDisplay 只会得 EGL_BAD_DISPLAY。
+// ============================================================================
 class EglImageHelper
 {
 public:
@@ -113,6 +129,10 @@ public:
 
     /**
      * 导入 RGBA DMA-BUF 为 EGLImage
+     * NOTE: 上面这行旧说明与实现不符——本函数走的是**单平面 RGB**
+     * （fourcc 硬编码 DRM_FORMAT_BGR888，与 importRGBA 的 ABGR8888 不同），
+     * 且不接 format 入参，传什么都按 BGR888 解释。真要用它，stride 必须
+     * ≥ width*3 且上游确实是 R8G8B8 排法；RGA 那边目前不产这种缓冲，所以全仓零调用。
      */
     EGLImageKHR importRGB(int fd, int width, int height, int stride)
     {
@@ -143,6 +163,11 @@ public:
      *   - Plane 0: Y（亮度）平面
      *   - Plane 1: UV（色度）平面
      *   两个平面在同一块 DMA-BUF 中，UV 紧跟在 Y 后面
+     * 约束：plane1 的 offset 用 stride*height，即"紧凑排布、无竖向对齐填充"；
+     *   上游若把 height 再按 16/64 对齐，这里要换成对齐后的高度，否则色度错位。
+     *   与 EglFramePool::acquire 的区别就在这一条——池只描述 Plane0，
+     *   所以**别拿池去导 NV12**（会花屏）；将来要零拷贝直采解码器 NV12，
+     *   走的应该是这里 + 一份带 BT.601/709 的着色器。
      */
     EGLImageKHR importNV12(int fd, int width, int height, int stride)
     {

@@ -26,6 +26,19 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 
+/**
+ * @class AlarmDAO
+ * @brief alarms 表的数据访问对象：无状态，每个方法各自取一次连接
+ *
+ * 线程安全：本类不持有连接、也不加锁。DatabaseManager 给每个线程返回**它自己的**
+ * QSqlDatabase 连接，所以后台线程（ClipWriter 回填、Pad 同步、GUI 查询）各 new 一个
+ * AlarmDAO 并发调用是安全的；同一个 AlarmDAO 实例跨线程用则不保证。
+ *
+ * 失败口径（所有方法一致，调用方按类型判）：
+ *   库没开 → 写返回 -1/0/false、查询返回空表；SQL 执行失败 → 同上，并 qWarning 一条；
+ *   UPDATE/DELETE 的 false **同时**包含"SQL 失败"和"没有行被影响（id 不存在）"两种情况，
+ *   调用方要区分只能自己先查（AlarmManager 现在不区分，只记一条日志）。
+ */
 AlarmDAO::AlarmDAO(QObject *parent)
     : QObject(parent)
 {
@@ -34,6 +47,8 @@ AlarmDAO::AlarmDAO(QObject *parent)
 // ============================================================================
 // 生成 UUID
 // ============================================================================
+// 32 位十六进制、不带连字符与大括号：与 AlarmManager::makeAlarmRecord 生成 id 的写法
+// 必须逐字一致，否则内存里的 id 和库里的对不上，片段回填与 Pad 状态推送都会认不出行。
 static QString generateUuid()
 {
     return QUuid::createUuid().toString().remove('{').remove('}').remove('-');
@@ -42,6 +57,10 @@ static QString generateUuid()
 // ============================================================================
 // 获取当前时间字符串 (ISO8601格式)
 // ============================================================================
+// Qt::ISODate 在"当前时刻无小数秒"时产出定宽 19 字符 "yyyy-MM-ddTHH:mm:ss"（本地时间、
+// 不带偏移）。这个**定宽**性质是检索层的地基：alarm_time/update_time 的全部范围过滤都靠
+// 文本字典序 BETWEEN（见 buildFilterWhere），一旦格式变成带毫秒或带 +08:00，
+// 新行与老行混着比就会静默错序，而不是报错。改这里之前先读 src/biz/db/README.md。
 static QString currentDateTimeStr()
 {
     return QDateTime::currentDateTime().toString(Qt::ISODate);
@@ -135,6 +154,18 @@ int64_t AlarmDAO::insertAlarm(const AlarmRecord &alarm)
 //
 // 返回：实际成功插入的记录数
 // ============================================================================
+/**
+ * @brief 批量插入报警（一条事务包住整批）
+ * @return 实际执行成功的行数；**提交失败时返回 0**（此时整批已 rollback，
+ *         前面累加的 inserted 一起作废，调用方不必再补写）
+ *
+ * 用 INSERT OR REPLACE 而不是 INSERT：同 id 重写覆盖（重试/回灌同一条报警时不炸主键）。
+ * ⚠ 代价是 REPLACE 语义为"删掉旧行再插新行"，所以**入参必须是完整记录**——
+ * 只填几个字段会把 dispose_*、read_time、remark 一起冲成空值。当前唯一写入口是
+ * AlarmManager::storeAndNotify（刚产生的报警，那些列本来为空），所以安全；
+ * 新增调用方若拿的是从库里读回的记录，走的是 recordFromQuery，字段是全的。
+ * 空列表直接返回 0，不开事务（省一次空 fsync）。
+ */
 int64_t AlarmDAO::insertAlarms(const QVector<AlarmRecord> &alarms)
 {
     if (alarms.isEmpty()) {
@@ -499,6 +530,16 @@ void bindAll(QSqlQuery &query, const QVector<QPair<QString, QVariant>> &binds)
 
 } // namespace
 
+/**
+ * @brief 报警数据页的**唯一**取数入口：组合条件 + 倒序 + 分页
+ * @param filter 条件结构体；语义约定全部写在 alarm_dao.h 的 AlarmFilter 上（时间毫秒、
+ *               空串=不限、status 空=不含误报、channel<0=全部），这里不再重复判据
+ * @return 命中行；库没开 / SQL 失败都是空表（失败多一条 qWarning，便于区分"没数据"与"查崩了"）
+ *
+ * WHERE 与 countByFilter 共用 buildFilterWhere，一条 SQL 两处拼是这条 API 存在的理由。
+ * limit/offset 不在这里校验：SQLite 对负 limit 的处理是"不限制"，界面传错会一次拉回全库
+ * ——调用方（报警查询页）必须保证 limit 是正数，默认 500。
+ */
 QVector<AlarmRecord> AlarmDAO::queryByFilter(const AlarmFilter &filter)
 {
     QVector<AlarmRecord> results;
@@ -528,6 +569,9 @@ QVector<AlarmRecord> AlarmDAO::queryByFilter(const AlarmFilter &filter)
     return results;
 }
 
+// 与 queryByFilter 必须同口径（同一个 buildFilterWhere、同一套绑定），否则分页标签上的
+// "共 N 条"会和列表实际行数不一致——界面看不出差别，只有翻页时才会暴露。
+// 注意这里**不**带 limit/offset：统计的是全部命中数。
 int AlarmDAO::countByFilter(const AlarmFilter &filter)
 {
     QSqlDatabase db = DatabaseManager::instance().database();
@@ -713,6 +757,9 @@ QVector<AlarmRecord> AlarmDAO::queryByLevel(int level, int limit)
     return results;
 }
 
+// 单行按 id 查（Pad 的 recordForId 回退路径 + 片段回填后重读都走这里）。
+// "查不到"的判据是返回的 record.id 为空——AlarmRecord 没有 valid 标志，调用方别去判
+// 其它字段（未登录时 workerName/constructionJson 本来就可能是空串）。
 AlarmRecord AlarmDAO::queryById(const QString &id)
 {
     AlarmRecord record;
@@ -794,6 +841,12 @@ QVector<AlarmRecord> AlarmDAO::queryUpdatedSince(const QString &sinceInternal, i
 //   3. 执行并检查 numRowsAffected() 判断是否真的更新了数据
 //   4. 同时更新 update_time 字段（审计追踪）
 // ============================================================================
+
+// 补充（口径已变，别只读上面那条）：update_time 不是单纯的审计字段，它是 Pad 断线补漏的
+// **唯一游标**——queryUpdatedSince 按 COALESCE(NULLIF(update_time,''), alarm_time) 取数排序。
+// 任何一条 UPDATE 漏写 update_time，等于这次变更对对端永久不可见（不是"晚一点同步"）。
+// 另外这些函数的 false 有双重含义：SQL 失败 / 该行不存在（numRowsAffected==0），
+// 二者在这里分不出来；调用方（AlarmManager）目前也不区分，只记一条日志。
 
 bool AlarmDAO::updateStatus(const QString &id, const QString &status)
 {
@@ -1019,6 +1072,9 @@ bool AlarmDAO::remove(const QString &id)
     return query.numRowsAffected() > 0;
 }
 
+// SQLite 没有 TRUNCATE，DELETE FROM 是全表逐行删：行数大时慢，而且**不归还磁盘空间**
+// （文件只变"可复用"），所以清空之后要真空出来得另调 DatabaseManager::vacuum()。
+// 与 cleanOldAlarms 同样的边界：不动媒体文件。
 int AlarmDAO::clearAll()
 {
     QSqlDatabase db = DatabaseManager::instance().database();
@@ -1033,6 +1089,20 @@ int AlarmDAO::clearAll()
     return query.numRowsAffected();
 }
 
+/**
+ * @brief 按保留期删除历史报警
+ * @param daysToKeep 保留天数，**负数会把截止时间推到未来从而删光全库**，调用方负责夹下限
+ *        （AlarmManager::cleanOldData 与 ConfigManager 的 retention 配置已经夹过）
+ * @return 删除行数；0 可能是"没有过期行"也可能是"库没开/SQL 失败"，判不出区别
+ *
+ * 两个容易踩的点：
+ *   1. 比较的是 **create_time** 而不是 alarm_time：正常路径两者同刻，但补写/回灌的历史
+ *      行 create_time 是入库时刻，会按"新数据"多留一个周期（可接受，反过来更危险——
+ *      按 alarm_time 删会把刚回灌进来的老报警立刻删掉）；
+ *   2. 本函数**不碰磁盘**：抓拍图与视频片段由 AlarmManager::pruneAlarmMedia() 按目录名
+ *      日期另删一套（双闸门，见 src/biz/alarm/README.md）。两边各自失败会留下
+ *      "有记录无文件"或"有文件无记录"，都不影响启动。
+ */
 int AlarmDAO::cleanOldAlarms(int daysToKeep)
 {
     QSqlDatabase db = DatabaseManager::instance().database();
@@ -1062,6 +1132,9 @@ int AlarmDAO::cleanOldAlarms(int daysToKeep)
 // 注意：startTime/endTime 参数预留但当前未使用（简化实现），
 //       如需按时间范围统计，可扩展 WHERE 子句
 // ============================================================================
+// NOTE: 上面那句只对 levelStatistics()/statusStatistics() 成立（它们压根没有时间参数）。
+// channelStatistics / classStatistics / typeStatistics 与 totalAlarmCount 现在都收了
+// startTime/endTime 并真的下进 WHERE，别照着"预留未用"这句话去简化它们。
 
 int AlarmDAO::totalAlarmCount(long startTime, long endTime)
 {
@@ -1256,6 +1329,9 @@ AlarmRecord AlarmDAO::recordFromQuery(QSqlQuery &query)
     record.constructionJson = query.value("construction_info").toString();
 
     // 兼容旧字段
+    // NOTE(边界): alarm_time 不是合法 ISO 文本（NULL/被外部工具改坏）时 fromString 解不出来，
+    // timestamp 得到 0 —— 界面按 0 显示会成"1970-01-01"。列表用的是 alarmTime 文本所以看不出
+    // 问题，只有拿 timestamp 排序/算差值的地方会踩；库内没有写入这类值的合法路径。
     record.timestamp = QDateTime::fromString(record.alarmTime, Qt::ISODate).toMSecsSinceEpoch();
     // 围栏报警有两种角色：fence_in（闯入禁区）/ fence_out（离岗），
     // 老库里存的是不带后缀的 "fence"。前缀判断把三代都认下来 —— 漏掉这条会让

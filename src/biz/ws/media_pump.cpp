@@ -73,6 +73,9 @@ int MediaPump::submit(Request request)
 // 被挤掉的一方必须知道：alarm_info 已经把那个 media_id 承诺给对端了，静默丢
 // 就变成对端无限等一段永远不来的字节。走同一条投递路径回 GUI 线程，回调里
 // 只会看到 error 非空 + 空载荷
+// NOTE(线程安全): submit() 末尾 `return queue_.size()` 是在锁外读队列，与 run() 线程的
+// pop_front 并发。该返回值只可用于观测积压趋势，别拿它当判决条件；要精确深度请调
+// queueDepth()（那个加了锁）。
 void MediaPump::reportDropped(Request &dropped)
 {
     QObject *context = dropped.context;

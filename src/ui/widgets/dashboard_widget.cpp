@@ -36,6 +36,8 @@ DashboardWidget::DashboardWidget(QWidget *parent)
     // 从未被切到过看板页的会话里 hideEvent 永远不会触发，表就一路常驻下去了。
 }
 
+// 进页面：先同步出一版数字（不等第一个 2s，否则切过来看到的是上次的旧值甚至全 0），
+// 再起表。构造期故意不 start —— 从未进过看板的会话里 hideEvent 永远不会触发。
 void DashboardWidget::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
@@ -43,6 +45,8 @@ void DashboardWidget::showEvent(QShowEvent *event)
     refreshTimer_.start(2000);
 }
 
+// 离页面：只停表、不清数据。切回来时 showEvent 会先用旧值填一屏再等下一次刷新，
+// 比"切回来空白两秒"好，也省掉一次同步重建。
 void DashboardWidget::hideEvent(QHideEvent *event)
 {
     refreshTimer_.stop();     // 离开页面就停表，把 GUI 线程还给视频渲染
@@ -243,6 +247,8 @@ void DashboardWidget::onTimer()
     }
 }
 
+// 供 frmMain::closeEvent 显式收表：拆除过程中若看板还在跑，它会一边重建 QLabel
+// 一边读正在退出的 AlarmManager。只停表，不释放资源；showEvent 之后仍会重新起表。
 void DashboardWidget::stop()
 {
     refreshTimer_.stop();

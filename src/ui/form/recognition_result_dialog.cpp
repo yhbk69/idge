@@ -226,13 +226,14 @@ void RecognitionResultDialog::setupUI() {
         .arg(theme::BORDER));
     connect(prev_btn_, &QPushButton::clicked, this, &RecognitionResultDialog::onPrevious);
     bottom_layout->addWidget(prev_btn_);
-    
+
+    // 注意这颗"取消"排到**确认之后**才 addWidget：本项目的口径是确认在左、取消在右，
+    // 而这里是手搭的 QHBoxLayout，排位就是 addWidget 的先后（标准按钮框才有按角色重排）。
     cancel_btn_ = new QPushButton("取消", this);
     cancel_btn_->setMinimumSize(120, 48);
     cancel_btn_->setStyleSheet(prev_btn_->styleSheet());
     connect(cancel_btn_, &QPushButton::clicked, this, &RecognitionResultDialog::onCancel);
-    bottom_layout->addWidget(cancel_btn_);
-    
+
     confirm_btn_ = new QPushButton("确认", this);
     confirm_btn_->setMinimumSize(140, 48);
     confirm_btn_->setStyleSheet(QString(
@@ -252,6 +253,7 @@ void RecognitionResultDialog::setupUI() {
         .arg(theme::SUCCESS_HOVER));
     connect(confirm_btn_, &QPushButton::clicked, this, &RecognitionResultDialog::onConfirm);
     bottom_layout->addWidget(confirm_btn_);
+    bottom_layout->addWidget(cancel_btn_);   // 确认在左、取消在右（见上面那条口径注释）
     
     main_layout->addLayout(bottom_layout);
 }

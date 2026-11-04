@@ -1,3 +1,21 @@
+// ============================================================================
+// alarm_list_widget.cpp - 报警数据页实现（类别报警 / 电子围栏 / 检测明细）
+// ============================================================================
+//
+// 【所属模块】src/ui/widgets。一页三张表共用同一套检索条与同一份分页状态，
+//   差别只在 currentAlarmFilter/currentDetectionFilter 把这份状态翻给哪个 DAO。
+// 【数据流】用户动作（切 Tab、改下拉、点翻页、点刷新）或 300ms 防抖到的新报警
+//   → reloadCurrentTab()（先过 isVisible() 门）→ 按当前 Tab 派给三个 refresh*Table
+//   之一 → countByFilter（定总页数）→ clampPageToTotal() → queryByFilter（取当前页）
+//   → 填表 + 缓存 pageAlarms_/pageFenceAlarms_/pageDetections_。
+//   详情入口读的是这份缓存，**不再回查库、也不查内存队列**
+//   （内存队列只有最近 1000 条，第 3 页以后的行在那里根本找不到）。
+// 【为什么全在 GUI 线程】见头文件【线程/耗时】那一段：一页一屏时 7~35ms，
+//   真正的代价是"别在不可见时干这件事"，所以 isVisible() 门比线程化更值。
+// 【四条硬口径】① count→clamp→取行 的顺序；② 不可见 ⇒ 零 SQL；
+//   ③ 新报警不翻动用户正在读的页（refreshForNewData 在 page_>0 时直接返回）；
+//   ④ 没有任何文字输入框，取值一律点选。逐条实测数据见同目录 README。
+// ============================================================================
 #include "alarm_list_widget.h"
 #include "perf_probe.h"
 #include <QElapsedTimer>
@@ -33,6 +51,10 @@ namespace {
 // 以前的 200（更早是 500，含义还是"总共只画这么多"）在 56px 行高下要连滑二十多屏才够一页，
 // 那不叫分页。留这个常量只作为视口还没布局出来时的兜底。
 constexpr int kPageSizeFallback = 10;
+// 上下限是给"视口高度被算歪"兜底的：1920x1200 上表格区一屏实测 11 行（行高 56），
+// 5 是"再小也没法读"的下界（比它小通常是 viewport 还没布局出来），
+// 50 是上限——超过它就等于回到 200 行/页那次的性能妥协（一次重建 300ms+）。
+// 这两个数只钳 pageSize() 的算式结果，不参与任何业务判据。
 constexpr int kPageSizeMin = 5;
 constexpr int kPageSizeMax = 50;
 
@@ -47,6 +69,10 @@ QString statusLabel(const QString &status)
     return QStringLiteral("未确认");
 }
 
+// 状态色。三个 RGB 是 theme 里那三个语义色的**同一组 Material 取值**
+// （SUCCESS #4caf50 / 中性灰 #9E9E9E / WARNING #ff9800），这里必须用 QColor 而不是
+// theme:: 的字符串常量—— QTableWidgetItem::setForeground 要的是 QColor。
+// 灰是给"误报"的：它不再是待处理项，但又不该看起来像错误，所以不占红也不占橙。
 QColor statusColor(const QString &status)
 {
     if (status == QLatin1String("rectified")) return QColor(76, 175, 80);   // 绿
@@ -101,6 +127,11 @@ void fillCombo(QComboBox *combo, const QString &allText,
     combo->blockSignals(false);
 }
 
+// 读下拉的当前值，空指针与"还没有项"都归一成空 QVariant（= 该维度不限）。
+// 判空不是走形式：构造期与切 Tab 之前，combo 可能还是 nullptr（setupFilterBar 之后
+// 才有的件），直接 currentData() 就是空指针解引用；而 currentIndex() 为 -1
+// （刚 clear 还没灌值那一瞬）时 Qt 给的也是无效 QVariant，这里一并收成空值。
+// 调用方（两个 currentXxxFilter）依赖的正是"空串 = 该字段不限"这一条统一口径。
 QVariant comboData(const QComboBox *combo)
 {
     return (combo && combo->currentIndex() >= 0) ? combo->currentData() : QVariant();
@@ -633,12 +664,19 @@ int AlarmListWidget::pageSize() const
     return qBound(kPageSizeMin, (viewH - 1) / rowH, kPageSizeMax);
 }
 
+// 一共几页：**恒 ≥1**（0 条结果时是"第 1 / 1 页"而不是"第 1 / 0 页"）。
+// totalRows_ 还没被任何一次 countByFilter 写过时是 0，也走这条，
+// 所以调用方可以在首屏刷新前安全地拿它做 qBound 的上界。
 int AlarmListWidget::pageCount() const
 {
     const int per = qMax(1, pageSize());
     return qMax(1, (totalRows_ + per - 1) / per);
 }
 
+// 把当前页钳回合法区间。+1 页减 1 页都当成上界，是因为 pageCount() 至少给 1。
+// 调用点只有一处是"必须的"：三个 refresh*Table 里 countByFilter 之后、取行之前
+// （条件变严使总页数缩小时，page_ 留着旧值就是拿一个不存在的 offset 去查库）。
+// 翻页那两条（onPageStep/gotoPage）自己已经 qBound 过，这里是第二道保险。
 void AlarmListWidget::clampPageToTotal()
 {
     page_ = qBound(0, page_, pageCount() - 1);
@@ -1034,6 +1072,9 @@ void AlarmListWidget::onPageStep(int delta)
     reloadCurrentTab();
 }
 
+// 绝对跳转（跳页菜单用）。target 先钳进 [0, pageCount()-1] 再比，所以传 9999 也安全。
+// "已经在这一页就直接返回"省的是**一整套** count+取行+重建（几十毫秒级），
+// 跳页菜单里点当前页是很常见的动作，别把这行判等当多余优化删掉。
 void AlarmListWidget::gotoPage(int page0)
 {
     const int target = qBound(0, page0, pageCount() - 1);

@@ -1,3 +1,32 @@
+// ============================================================================
+// qthelper.cpp - QtHelper 通用静态工具类的实现（声明与逐项说明见 qthelper.h）
+// ============================================================================
+//
+// 【所属模块】src/ui/core。主体是从 blacksoft（feiyangqingyun）框架移植的通用
+//   代码，本仓只往里面加过两支真正针对 RK3588 触屏的东西：
+//     · 触屏拖动滚动 enableTouchScroll/enableTouchScrollAll + 命中区探针
+//       dumpTouchGeometry（档位取值理由都写在各函数上方那一段）；
+//     · 文案本地化 localizeMessageBoxButtons / localizeButtonBox /
+//       localizeFileDialogLabels + 全局 QEvent::Show 过滤器
+//       （口径见同目录 README「文案与按钮顺序（全局口径，两条）」）。
+//   改这两支之前先读 README，那里的实测数据是这些参数唯一的出处。
+// 【线程】所有函数都只能在 GUI 线程调：它们读 QScreen、改 qApp 的
+//   palette/font/styleSheet、给 widget 装事件过滤器或挂 QScroller。
+//   唯一与线程无关的是纯计算的那几个（getUuid/getOrCode/getCheckCode/
+//   getTimeString/getSizeString/cutString/getRangeValue），但也没人在线程里调。
+// 【两条最容易踩的既有约定】
+//   1) getStyle() 用 `stream >> line` 逐 **token** 读再 join("\n")，于是
+//      `border:1px solid #3d3d4d;` 会被拆成三行、把整条规则打死；
+//      blacksoft.css 因此按"尺寸类声明单 token 并排在最前面"写（README 注意事项）。
+//      修这个 reader 会一次性点亮全仓几百条已死的声明，属刻意不做。
+//   2) setStyle(qssFile) 与 frmMain::initStyle() 都硬编码 qss.mid(20, 7) 取首行
+//      背景色，css 首行的 QPalette{background:#RRGGBB;} 格式不可动。
+// 【移植遗留】initAll / setSystemDateTime / checkRun / runWithSystem /
+//   isVideoCardEnable / initAndroidPermission 等在本目标（Linux + 板子）上零调用
+//   或在本平台上退化（checkRun 非 Windows 是**空函数**，不是"返回 true"，
+//   所以它给不了单实例保护；isVideoCardEnable 只在 Windows 才真去查），
+//   保留只为对照，不等于可用；逐项判据见 README「注意事项」。
+// ============================================================================
 #include "qthelper.h"
 #include <QNetworkInterface>
 #include <QNetworkProxy>
@@ -1116,6 +1145,13 @@ QString QtHelper::getStyle(const QString &qssFile)
         qss = QLatin1String(file.readAll());
 #else
         // 逐行读取,不依赖文件编码
+        // ⚠ 名字是"逐行"，实际是逐 **token**：`stream >> line` 以空白分隔，
+        //   于是 "border:1px solid #3d3d4d;" 变成三行，交给 Qt 后 parseDeclaration
+        //   在 "solid" 上报错、parseStyleRule 直接 skipTo('}')，**整条规则剩下的声明全废**。
+        //   这是本文件最坑的一条，也是 blacksoft.css 必须把尺寸类声明写成单 token
+        //   （padding-top/left/... 分开）并排在规则最前面的原因（README 注意事项）。
+        //   刻意不修 reader：修好会一次性点亮全仓几百条已死声明，等于给所有页面换肤。
+        //   代码里 setStyleSheet() 的内联 QSS 不经本函数，多 token 值正常。
         QStringList list;
         QTextStream stream(&file);
         while (!stream.atEnd()) {
@@ -1369,6 +1405,10 @@ protected:
         }
         if (QMessageBox *box = qobject_cast<QMessageBox *>(watched)) {
             QtHelper::localizeMessageBoxButtons(box);
+        } else if (QDialogButtonBox *box = qobject_cast<QDialogButtonBox *>(watched)) {
+            // 子控件也会各自收到 Show 事件，所以手写 QDialogButtonBox 的对话框
+            // （不是 QMessageBox/QFileDialog 的子树）也能被这一支兜到。
+            QtHelper::localizeButtonBox(box);
         } else if (QFileDialog *dialog = qobject_cast<QFileDialog *>(watched)) {
             localizeFileDialogLabels(dialog);
         }
@@ -1378,7 +1418,8 @@ protected:
 
 } // namespace
 
-// 统一消息框标准按钮为中文（原因见头文件注释：.qm 里 QMessageBox 只译了 OK）
+// 统一消息框标准按钮为中文（原因与实测数据见头文件那条注释：QPlatformTheme 上下文
+// 在自带 .qm 里一条都没译，两类标准框都必须显式改写）
 void QtHelper::localizeMessageBoxButtons(QMessageBox *box)
 {
     if (!box) {
@@ -1411,6 +1452,41 @@ void QtHelper::localizeMessageBoxButtons(QMessageBox *box)
         if (!text.isEmpty()) {
             button->setText(text);
         }
+    }
+}
+
+// QDialogButtonBox 的默认文案汉化。
+// ⚠ 不能按 ButtonRole 猜文案：实测 `QDialogButtonBox(Save|Discard|Help)` 里 Qt 把 **Save 归到
+//   AcceptRole**（只有 Discard 落在 DestructiveRole），按角色映射会把"保存"改成"确定"。
+//   所以这里按 Qt 给的那份英文原文查表——那份文案来自 QPlatformTheme，是固定的那几个词。
+//   排位不用管：实测 Qt 按角色重排，`addButton(Cancel)` 先加也是"确定在左、取消在右"。
+void QtHelper::localizeButtonBox(QDialogButtonBox *box)
+{
+    if (!box) {
+        return;
+    }
+    static const struct { const char *from; const char *to; } kMap[] = {
+        {"OK", "确定"}, {"Cancel", "取消"}, {"Close", "关闭"}, {"Save", "保存"},
+        {"Discard", "丢弃"}, {"Apply", "应用"}, {"Reset", "重置"}, {"Restore", "恢复默认"},
+        {"Help", "帮助"}, {"Yes", "是"}, {"No", "否"}, {"Retry", "重试"},
+        {"Ignore", "忽略"}, {"Abort", "中止"},
+    };
+    for (QAbstractButton *button : box->buttons()) {
+        if (containsCjk(button->text())) {   // 调用方自己写过文案就别覆盖
+            continue;
+        }
+        // Qt 的标准按钮文案带助记符（"&OK"），去掉 & 再比
+        QString key = button->text();
+        key.remove(QLatin1Char('&'));
+        key = key.trimmed();
+        for (const auto &entry : kMap) {
+            if (key.compare(QLatin1String(entry.from), Qt::CaseInsensitive) == 0) {
+                button->setText(QString::fromUtf8(entry.to));
+                break;
+            }
+        }
+        // 表里没有的（NoRole / ActionRole 的自定义英文）不动：那本来就是调用方写的，
+        // 猜一个中文反而把意图改掉。
     }
 }
 

@@ -1,3 +1,21 @@
+/**
+ * @file login_widget.cpp
+ * @brief 扫码登录页实现（主界面放行前的门；头文件的口径与版面说明见 login_widget.h）
+ *
+ * 本页只做三件事：把二维码原文（或伪造 JSON）交给 ConstructionSession::startLogin()、
+ * 把结果作为信号报给 frmMain、把失败原因显示在状态行。
+ * 不解析字段、不判合法性、不存会话——那些全在 src/biz/session，界面上不存第二套规则。
+ *
+ * 线程与设备占用（本页存在的前提）：
+ *   - 全部代码在 GUI 线程跑。QrScanDialog::scan() 是**阻塞式模态**（内部 exec），
+ *     扫码期间主窗事件循环仍在，但本页不再往下走；实时解码在解码线程，
+ *     结果经队列连接回来看（见 src/ui/widgets/qr_scan_dialog.cpp）。
+ *   - 本页**不常驻摄像头**：设备节点只在扫码窗格打开期间被持有。停在登录页时
+ *     进程的 /dev/video* 句柄数为 0（板端实测）——这是"门挡着的时候不碰摄像头"
+ *     能成立的前提，也避免与智能识别页抢同一个 /dev/videoNN。
+ *   - 「测试登录」与扫码走**完全同一条** startLogin(qrText) 路径，没有第二套解析分支；
+ *     测试数据（plan/construction_qr.json）不进仓，多候选路径的找法见 loadFakePayload。
+ */
 #include "login_widget.h"
 
 #include "construction_session.h"
@@ -33,6 +51,11 @@ QString bigButtonQss(const char *bg, const char *fg, const char *pressed)
         .arg(pressed);
 }
 
+// 统一给三颗大按钮上触屏尺寸。72 = T1 档总高（≈8.1mm，岗位戴手套也按得到，
+// 与 theme::TOUCH_MAIN_H 同值；本页这行是改造前写的，值一致就没换常量）。
+// 只给**最小高度** + 横向 Expanding，不 setFixedSize：宽度由按钮列那一层
+// （kButtonColumnWidth）定，这里写死就会和列宽互相顶；高度用 minimum 是因为
+// QSS 的 padding 会把内容顶高，固定高反而可能截字。
 void applyBigButton(QPushButton *button)
 {
     button->setMinimumHeight(72);
@@ -46,6 +69,16 @@ constexpr int kButtonColumnWidth = 480;
 
 } // namespace
 
+/**
+ * @brief 构造登录页：左品牌块 + 右三颗竖排大按钮（GUI 线程，纯建控件，不起定时器）
+ *
+ * 信号出口只有 loginSucceeded / loginFailed / exitProgramRequested 三条，
+ * 本页不认识 frmMain 的任何内部状态——frmMain 把它 insertWidget 成 stackedWidget
+ * 的第 0 页并接这三条线（见 frmmain.cpp 的 initNewPages）。
+ * 末尾必调 resetStatus()：新构造出来的页也要按"本构建有没有编进 ZBar"决定状态行，
+ * 否则缺 ZBar 的构建上会显示一句"请扫描现场施工二维码"这种做不到的事。
+ * 刻意不做的事：不放常驻摄像头预览（会一直占着 /dev/videoNN，见文件头）。
+ */
 LoginWidget::LoginWidget(QWidget *parent) : QWidget(parent)
 {
     auto *root = new QHBoxLayout(this);
@@ -120,6 +153,15 @@ LoginWidget::LoginWidget(QWidget *parent) : QWidget(parent)
     resetStatus();
 }
 
+/**
+ * @brief 把状态行复位到初始提示（frmMain 每次合门时调一次）
+ *
+ * 为什么必须复位：状态行是本页唯一的错误出口，不清的话新来的班次看到的是上一班
+ * "缺字段"的红字，会以为是自己的码坏了。
+ * 优先级：先判 QrScanDialog::available()（编译期没 HAS_ZBAR 时扫码器根本不存在，
+ * 提示要说清"这台构建没编进 ZBar"，让人去查构建而不是去查摄像头），
+ * 不可用就直接显示 unavailableReason() 并停在错误态。
+ */
 void LoginWidget::resetStatus()
 {
     if (!QrScanDialog::available()) {
@@ -129,6 +171,13 @@ void LoginWidget::resetStatus()
     setStatus(QString::fromUtf8("未登录：请扫描现场施工二维码"), false);
 }
 
+/**
+ * @brief 写状态行
+ * @param text  要显示的文本（可以是多行；statusLabel_ 开了 wordWrap）
+ * @param error true=DANGER 色 + 加粗，false=TEXT_MUTED 常规
+ * 空串是允许的（会把状态行清空），但正常流程不要这么用：本页一屏只有这一行提示，
+ * 空白会让人以为按钮点不动。
+ */
 void LoginWidget::setStatus(const QString &text, bool error)
 {
     statusLabel_->setText(text);
@@ -136,6 +185,17 @@ void LoginWidget::setStatus(const QString &text, bool error)
         theme::text(error ? theme::DANGER : theme::TEXT_MUTED, theme::FS_CARD, error));
 }
 
+/**
+ * @brief 「扫码登录」：拉起全屏扫码窗格 → 解出原文 → 交 startLogin()
+ *
+ * QrScanDialog::scan() 是**阻塞式模态**，返回 false 有两种情况，必须分开处理：
+ *   - error 为空 = 用户自己关掉了窗格（不是故障）→ 状态行回到初始提示，
+ *     不发 loginFailed（发了会在 frmMain 日志里留一条"登录失败：（空）"的假事故）；
+ *   - error 非空 = 真的没解出来/设备打不开 → 显示错误 + 发 loginFailed(reason)。
+ * 成功路径：startLogin 已经把会话写好（归属从这一刻起定死），这里只发信号，
+ * 开流/亮导航都是 frmMain::onLoginSucceeded 的事。
+ * 现场口径：验扫码只认真摄像头对真码；要喂假数据请用「测试登录」（同一条 startLogin）。
+ */
 void LoginWidget::onScanClicked()
 {
     QString content;
@@ -159,6 +219,18 @@ void LoginWidget::onScanClicked()
     emit loginFailed(error);
 }
 
+/**
+ * @brief 读「测试登录」的伪造施工信息
+ * @param jsonText [out] 文件原文；**不可为空指针**（命中时直接解引用写入）
+ * @param err      [out] 失败原因，可为空指针（内部每处都判了 if (err)）
+ * @return true = 已把原文写进 jsonText；false = 没读到，原因在 err 里
+ *
+ * 失败有三类，提示各不相同（现场排障全靠这一行，绝不静默）：
+ *   文件不存在（列出**每个试过的路径**）、存在但打不开（带 QFile::errorString）、
+ *   存在但内容空白（"测试信息文件是空的"）。
+ * 中途某个候选路径存在却读失败就**直接返回**，不再试后面的路径——
+ * 这是有意的：空文件/权限问题多半是人为放错位置，继续往下找只会掩盖它。
+ */
 bool LoginWidget::loadFakePayload(QString *jsonText, QString *err)
 {
     // 候选路径按"最可能"排序，**必须多条**：RuntimePaths 全是相对 CWD 的，
@@ -212,6 +284,14 @@ bool LoginWidget::loadFakePayload(QString *jsonText, QString *err)
     return false;
 }
 
+/**
+ * @brief 「测试登录」：读伪造 JSON → 走与扫码**同一条** startLogin()
+ *
+ * 存在的意义是"没有真码也能验会话链路"，不是一条平行实现：解析/校验/落会话
+ * 全部同一个 ConstructionSession::startLogin(qrText,&err)，所以它通过就等于扫码通过。
+ * 失败一律 setStatus(error,true) + emit loginFailed(reason)，与扫码路径同一套出口，
+ * frmMain 侧不需要区分是谁登的录（日志文案由 reason 自己带）。
+ */
 void LoginWidget::onTestLoginClicked()
 {
     QString jsonText;

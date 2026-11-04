@@ -230,6 +230,13 @@ int BusinessDBManager::createTask(const std::string& name, const std::string& ty
     return task_id;
 }
 
+/**
+ * @brief 覆盖写三个计数/标记
+ * @return true 只表示"SQL 跑通了"，**不代表有行被改**：task_id 不存在时 sqlite3_step 同样
+ *         返回 SQLITE_DONE。要确认真的改到了得先 getTask 校验存在性
+ * @note 不是 patch：三列每次都被整体覆盖，传 0 就是清零（头文件已注明，别在这里加"传 -1 跳过"
+ *       这种半吊子语义，调用方（roll_call/equipment 服务）现在都是先读全量再写回）
+ */
 bool BusinessDBManager::updateTask(int task_id, int registered_count, int cancelled_count, int is_cancelled) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) return false;
@@ -281,6 +288,13 @@ bool BusinessDBManager::deleteTask(int task_id) {
     return success;
 }
 
+// 单行查 tasks。列序号硬编码（0..8）依赖 createTables 里的列顺序，加列/换序要同步这里。
+// 判"没有这一行"的方式是返回的 task.id == 0（Task task = {0} 把整个结构体清零），
+// 调用方不能拿 name 空不空当判据——folder_path 是可空列，name 理论上也可能被业务写成空。
+// ⚠ 各列直接 reinterpret_cast 成 const char* 交给 std::string：SQLite 对 SQL NULL 的文本
+// 取法给的是 0 长度空串，所以 folder_path 为 NULL 时拿到空串是安全的；但内存不足或
+// UTF-8 转换失败时 column_text 会返回真 NULL，那时 std::string(nullptr) 是未定义行为。
+// NOTE: 全仓没有做这层防护（各 getter 同此写法），要加就一起加，别只补一个函数。
 Task BusinessDBManager::getTask(int task_id) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     Task task = {0};
@@ -311,6 +325,12 @@ Task BusinessDBManager::getTask(int task_id) {
     return task;
 }
 
+// 全部任务，按 create_time 文本倒序。
+// NOTE(取舍): create_time 是 "%Y-%m-%d %H:%M:%S" 定宽文本，字典序==时间序，所以直接
+// ORDER BY 文本就行；但它**不含时区且来自 localtime()**，墙钟被改过（NTP 回拨）之后
+// 建的任务会排在更早的位置。同一秒内创建的两个任务顺序不定，界面别把它当稳定 id 序列用。
+// 行解析与 getTask/getRegistrationTasks/getTasksByType 是四份重复代码，
+// 改 tasks 表结构时四处都要动（漏一处的现象是列错位而不是报错）。
 std::vector<Task> BusinessDBManager::getAllTasks() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<Task> tasks;
@@ -341,6 +361,8 @@ std::vector<Task> BusinessDBManager::getAllTasks() {
     return tasks;
 }
 
+// 只回 type 恰为 'registration' 的任务：盘点任务（equipment_registration）用 LIKE 会误纳，
+// 这里等值比较所以它不会混进来；注销任务也不是"新任务"，不在这张结果集里（见 service README）
 std::vector<Task> BusinessDBManager::getRegistrationTasks() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<Task> tasks;
@@ -413,6 +435,8 @@ int BusinessDBManager::insertFaceRecord(const FaceRecord& record) {
     return record_id;
 }
 
+// 只删 face_records 表的行，**不删磁盘上的人脸裁剪图**，也不碰 tasks 行。
+// 与 updateTask 同样的返回语义：true 只代表 SQL 成功，删了 0 行也是 true。
 bool BusinessDBManager::deleteFaceRecordsByTask(int task_id) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) return false;
@@ -432,6 +456,11 @@ bool BusinessDBManager::deleteFaceRecordsByTask(int task_id) {
     return success;
 }
 
+// 按 task 取全部人脸（含 is_duplicate=1 的那些，比对页要显示"谁和谁撞脸"就得拿全集）。
+// 每条都会把 feature_blob 还原成 512 个 float（2KB），百人级任务一次几 MB 内存，
+// 这是刻意的"整批取回内存再算"：匹配阶段本来就一轮要扫全集，逐条查会退化成 N 次 SQL。
+// 换识别模型后维度变了也不报错——blobToFeature 按字节数除 4 决定长度，
+// 旧库里的 512 维会和新的向量混着参与点积（结果不可信），所以换模型必须清库重录。
 std::vector<FaceRecord> BusinessDBManager::getFaceRecordsByTask(int task_id) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<FaceRecord> records;
@@ -522,6 +551,9 @@ std::vector<float> BusinessDBManager::blobToFeature(const void* blob, int size) 
     return feature;
 }
 
+// 特征向量 → 裸字节。空向量返回空 blob（bind_blob 传 size=0 是合法的，列会是 0 长度 BLOB
+// 而不是 NULL，读回来是空 feature —— 与"没写过特征"在库里区分不开）。
+// 与 blobToFeature 一样是 memcpy 语义：隐含同机 IEEE754 + 同字节序，跨端导入不可移植。
 std::vector<uint8_t> BusinessDBManager::featureToBlob(const std::vector<float>& feature) {
     std::vector<uint8_t> blob;
     if (feature.empty()) return blob;
@@ -651,6 +683,10 @@ bool BusinessDBManager::replaceCancellationData(
     return true;
 }
 
+// 两张表分别 DELETE（matches 先、photos 后），两条都是自动提交的独立语句、**不在事务里**：
+// 中途失败会留下"matches 已删、photos 还在"的半删态。可以接受是因为它只在两处被用到——
+// deleteTask()（整个任务都要消失，重删幂等）和 replaceCancellationData()（外面套了
+// BEGIN IMMEDIATE，失败整体 ROLLBACK）。单独调它请自己保证调用序。
 bool BusinessDBManager::deleteCancellationDataByTask(int task_id) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!initialized_) return false;
@@ -672,6 +708,10 @@ bool BusinessDBManager::deleteCancellationDataByTask(int task_id) {
     return matches_deleted && photos_deleted;
 }
 
+// 这两条注销查询按**列名**SELECT（不像 tasks 那几条用 SELECT *），
+// 所以顺序与建表列序无关，改表结构不会错位——新增列时记得同时改这里的列表。
+// ORDER BY id 即插入顺序（replaceCancellationData 是按入参数组顺序逐条插的），
+// 界面据此回显时可以认为与用户提交的照片顺序一致。
 std::vector<CancellationPhotoRecord>
 BusinessDBManager::getCancellationPhotosByTask(int task_id) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -698,6 +738,9 @@ BusinessDBManager::getCancellationPhotosByTask(int task_id) {
     return photos;
 }
 
+// 匹配结果全集：status 的三个取值（1 匹配 / 0 未注销 / 2 未登记）都在这里，本层不筛。
+// similarity 是 REAL 读回再窄化成 float（库里的 double 精度更高），比对阈值 0.8 的判定
+// 在上层做，这里的窄化不影响排序与显示。
 std::vector<CancellationMatchRecord>
 BusinessDBManager::getCancellationMatchesByTask(int task_id) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -728,6 +771,8 @@ BusinessDBManager::getCancellationMatchesByTask(int task_id) {
     return matches;
 }
 
+// type 走 bind 的等值比较（无 LIKE、无大小写折叠——SQLite 的 = 对 TEXT 默认区分大小写，
+// 'Registration' 查不出东西且不报错）。type 上没有索引，任务数量级（几十条）无所谓。
 std::vector<Task> BusinessDBManager::getTasksByType(const std::string& type) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<Task> tasks;
@@ -882,6 +927,9 @@ bool BusinessDBManager::replaceEquipmentData(
     return true;
 }
 
+// phase 必传：登记(0)与注销(1)两阶段共用同一个 task_id，不带 phase 会把两次盘点混成一堆。
+// 返回的 photo.id 就是真实 rowid，可直接喂给 getEquipmentDetectionsByPhoto()
+// （入库时入参那个"数组下标"已经被 replaceEquipmentData 重映射过，两者不是一个东西）。
 std::vector<EquipmentPhotoRecord>
 BusinessDBManager::getEquipmentPhotosByTask(int task_id, int phase) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -908,6 +956,9 @@ BusinessDBManager::getEquipmentPhotosByTask(int task_id, int phase) {
     return photos;
 }
 
+// 按父行取检测框：坐标是入库时那份**原图像素空间**的整数（AI 侧已换算过），本层不再缩放。
+// 一次盘点一张图一次查询，界面回显时是 N+1 次 SELECT（照片数 × 1）——量级几十张可接受，
+// 要做批量渲染时在这里换成按 task 一次 JOIN 取回，别在调用方循环里加 SQL。
 std::vector<EquipmentDetectionRecord>
 BusinessDBManager::getEquipmentDetectionsByPhoto(int photo_id) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);

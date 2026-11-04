@@ -25,6 +25,16 @@
 
 namespace uplink {
 
+/**
+ * @brief 生成本引擎内部的各类 id（对端只当唯一键用，不解析内容）
+ * @param prefix "a-"=alarm_info 的 message_id、"s-"=抓拍 media_id、"c-"=片段 media_id、
+ *               "m-"=媒体相关报文（begin/end/failed）自己的 message_id。前缀由调用点决定，
+ *               本函数不校验——写错只会让日志里的种类看不出来，不影响协议
+ * @return 前缀 + 16 位十六进制（约 1.8e19 分之一空间内的碰撞概率可忽略）
+ *
+ * 取 UUID 的**前 16 个十六进制位**而不是整串：整串 32 位会把每条日志行撑宽一倍，
+ * 而这些 id 的用途只是"对端去重 + 本机排障"，16 位在单机单进程的生成速率下够用。
+ */
 QString newMediaId(const char *prefix)
 {
     // 36 位带连字符的 UUID → 去掉分隔符取前 16 位：够唯一，又不至于把日志行撑爆
@@ -33,6 +43,18 @@ QString newMediaId(const char *prefix)
     return QString::fromLatin1(prefix) + hex.left(16);
 }
 
+/**
+ * @brief 把"文件多大"换算成"要发几帧"
+ * @param totalBytes 真实字节数；<=0 返回全 0 计划（调用方据此当"没有媒体可发"）
+ * @param chunkSize  单帧载荷，来自配置 alarm_uplink.chunk_size；这里只 qMax(1,·) 兜 0
+ * @return 向上取整的块数，末块是余数，恒落在 [1, chunkSize]
+ *
+ * 这是全工程唯一的分块换算处（Qt 5.12 的 QWebSocket 不做出站分片，见 ChunkPlan 注释）。
+ * 约束：totalChunks 是 int，(totalBytes + chunkSize - 1)/chunkSize 只在"MB 级文件 +
+ * KB 级块"这个量级内安全——当前唯一调用方是 submitMedia，喂进来的是 MediaPump 读好的
+ * 抓拍图(~365KB)与片段(≤1.5MB)。NOTE: 没有对 totalBytes 的上限检查，若将来用它切
+ * 几十 MB 的文件要把块数改成 qint64 并重新核对对端上限。
+ */
 ChunkPlan planChunks(qint64 totalBytes, int chunkSize)
 {
     ChunkPlan plan;
@@ -272,6 +294,10 @@ QJsonObject buildMediaEndMessage(const QString &mediaId,
 // ----------------------------------------------------------------------------
 // AlarmUplinkEngine
 // ----------------------------------------------------------------------------
+// 线程约定：整类**不加锁**。queue_/slots_/clipPromises_ 只允许在调用方所在的单一线程
+// （产品里是 GUI 线程，测试里是主线程）上访问；submit/submitMedia*/pumpOut/handleAck
+// 全部由 AlarmUplink 在 GUI 线程串起来调。跨线程的只有媒体字节本身——MediaPump 读好后
+// 用 QMetaObject::invokeMethod 投回 GUI 线程才进这里（见 src/biz/ws/media_pump.cpp）。
 
 void AlarmUplinkEngine::logMsg(const char *category, const QString &message) const
 {
@@ -280,6 +306,21 @@ void AlarmUplinkEngine::logMsg(const char *category, const QString &message) con
     }
 }
 
+/**
+ * @brief 按 (kind, 批次键) 取媒体 slot：命中就复用并登记 alarmId，没命中就新建 media_id
+ * @param kind        kKindSnapshot | kKindClip，决定 media_id 前缀 s-/c-
+ * @param batchKey    同批报警共享的那份媒体的键（submit 里传的是抓拍图路径，没图时是 "alarm:<id>"）
+ * @param fresh       可空出参：true = 本次新建（调用方据此决定"该去读盘了"，只读一次）
+ * @return slot 的**值拷贝**，不是引用
+ *
+ * 键分隔符用 '\x01' 而不是 ':' 或 '/'：批次键本身是文件路径，路径里出现冒号（时间戳命名）
+ * 很常见，用可见字符拼会撞键；'\x01' 不可能出现在 UTF-8 路径里。
+ * 按值返回是必须的：下面插入/淘汰都会改动 QHash（rehash 让所有迭代器与引用失效），
+ * 返回引用等于给调用方留一个悬垂口子。命中分支只做 alarmIds.append（不插入 → 不 rehash），
+ * 所以那里敢用 it->。
+ * 封顶淘汰的代价写在下面的行注释里：被淘汰的同一批次再来一次会拿到**新的** media_id，
+ * 对端要靠 sha256 去重，这是明确接受的取舍（换取 slot 表不无界增长）。
+ */
 AlarmUplinkEngine::MediaSlot AlarmUplinkEngine::touchSlot(const QString &kind,
                                                           const QString &batchKey,
                                                           const QString &alarmId,
@@ -313,6 +354,16 @@ AlarmUplinkEngine::MediaSlot AlarmUplinkEngine::touchSlot(const QString &kind,
     return *it;
 }
 
+/**
+ * @brief 入队前把队列压回 maxPending 以内（丢最旧）
+ *
+ * 必须在**每个** push 之前调用（submit / submitMedia / submitMediaUrl / submitMediaFailed
+ * 四处都调），否则队列会在断线期间无界增长。qMax(1, settings_.maxPending) 让配置写成
+ * 0 或负数时退化成"容量 1、每条挤掉上一条"，而不是死循环或整条链路停摆。
+ * 副作用：被丢的媒体项**只记日志、不补发 media_failed**——对端手里确实会留一条
+ * 永远兑现不了的 planned，这是"丢最旧"策略已知的后果（见下面 error 级日志的措辞），
+ * 不是漏实现；真要闭环得把 dropped 的 media_id 再排一次队，而那又会先把队列填满。
+ */
 void AlarmUplinkEngine::trimQueueToFit()
 {
     const int maxPending = qMax(1, settings_.maxPending);
@@ -353,6 +404,15 @@ void AlarmUplinkEngine::rememberClipPromise(const QString &alarmId, const QStrin
     clipPromises_.insert(alarmId, mediaId);   // 同 id 再来一次（slot 被淘汰后重建）就地覆盖
 }
 
+/**
+ * @brief 按报警 id 反查它们在 alarm_info 里承诺过的片段 media_id
+ * @return **第一个**非空命中；全空 = 这批报警没承诺过片段（调用方据此什么也不发）
+ *
+ * 同批多条共享同一个 media_id，所以取第一个认得的就够了——但如果调用方传进来的
+ * ids 跨了两个批次（AlarmManager 的 ids 是按批给的，正常不会），这里只会认领前一批，
+ * 后一批的承诺由 forgetClipPromises 清掉，不会再有 media_begin。
+ * 表在引擎侧封顶淘汰（kMaxClipPromises），被淘汰的 id 走到这里就是"没承诺过"。
+ */
 QString AlarmUplinkEngine::clipMediaIdFor(const QStringList &alarmIds) const
 {
     for (const QString &id : alarmIds) {
@@ -364,6 +424,9 @@ QString AlarmUplinkEngine::clipMediaIdFor(const QStringList &alarmIds) const
     return QString();
 }
 
+// 必须在 clipMediaIdFor 之后调（先取 id 再清），反过来会先把承诺清掉、让调用方拿不到 id。
+// 顺序表 promiseOrder_ 也在这里一起挤掉已清的 id：它只用来决定"谁最老"，
+// 留着墓碑会让淘汰速度比实际承诺数快一倍以上。
 void AlarmUplinkEngine::forgetClipPromises(const QStringList &alarmIds)
 {
     for (const QString &id : alarmIds) {
@@ -565,6 +628,18 @@ QString AlarmUplinkEngine::submitMediaUrl(const MediaJob &job, const QString &ur
     return job.mediaId;
 }
 
+/**
+ * @brief 撤掉一段在 alarm_info 里承诺过的媒体，通知对端别再等
+ * @param mediaId 空 = 这批根本没承诺过（上行接入前产生的报警、或 slot 已被淘汰），直接返回
+ * @param reason  人机可读的中文原因，**绝不含文件内容或字节**
+ *
+ * 三个来源（都汇到 AlarmUplink 的对应槽里）：MediaPump 读盘失败/被挤掉、
+ * ClipWriter 丢最旧、裸流或 .mp4 副本 dump 失败。
+ * 为什么发报文放在引擎而不是调用方：两档 transport 都需要它——url 档更糟，
+ * 对端会真的去取一个没人写出来的地址（404），只打本机日志等于把故障留给对端猜。
+ * 队列仍可能把它挤掉（trimQueueToFit 里那条 error 日志），此时承诺就彻底没人撤，
+ * 属已知残留：这条报文只有一帧、排在队尾，被挤掉的概率远低于媒体分块项。
+ */
 void AlarmUplinkEngine::submitMediaFailed(const QString &mediaId, const QString &alarmId,
                                           const QString &kind, const QString &reason)
 {
@@ -591,6 +666,25 @@ void AlarmUplinkEngine::submitMediaFailed(const QString &mediaId, const QString 
                           .arg(mediaId, kind, reason));
 }
 
+/**
+ * @brief 唯一的发生动作：按发送水位把队首往外推
+ * @return 本轮**完整发完并出队**的项数；半截的媒体项不计入（它的帧已部分发出，游标已推进）
+ *
+ * 四条不变量，改这段代码时必须一起保住：
+ *   1. 严格顺序：只有队首会被发送，任何一帧失败（written<=0）就 break 保位，
+ *      后面的项不许插队——顺序本身就是协议（begin → N 块 → end）。
+ *   2. 水位闸门只在这里判 transport_->readyForMore()，调用方不需要再看写缓冲。
+ *   3. 断线（transportConnected=false）直接返回 0，队列原地保留，重连后由
+ *      AlarmUplink::onLinkConnected 再泵一次；本机不落库 outbox，进程重启即重新开始。
+ *   4. media_end 不预渲染，只在这里游标越过 frames.size() 时现组（seqs_sent 要取
+ *      **实际**发出的二进制帧数，与 total_chunks 不等就是对端该怀疑的信号）。
+ *
+ * expect_ack 打开时，项发完不出队而是转 awaitingAck 并设 deadline（默认关着：
+ * 现在的 Pad 不回 uplink_ack，当成必经状态会把队列一直堵到超时）。
+ *
+ * 线程要求：只能在 GUI 线程调（与 socket 同线程），且**不可重入**——head 是对 deque
+ * 首元素的引用，pop_front 之后立即失效，所以下面 pop 之后那几行绝不再碰 head。
+ */
 int AlarmUplinkEngine::pumpOut()
 {
     if (!transport_ || queue_.empty() || !transport_->transportConnected()) {
@@ -670,6 +764,16 @@ int AlarmUplinkEngine::pumpOut()
     return completed;
 }
 
+/**
+ * @brief 队首走一次失败处理：还能重发就置退避时刻，超过 maxAttempts 就判失败出队
+ * @param why 只用于日志（"等确认超时" / 对端给的 error），不参与判断
+ * @return true = 已置退避（稍后整项重发）；false = 已丢弃出队，或队列本来就是空
+ *
+ * attempts 先自增再比较，所以实际发送次数是 maxAttempts+1（首发的第 0 次不计）。
+ * 重发是**整项重头**（cursor/binarySent 归零），不做断点续传：半截流对端拼不出来。
+ * 退避用 backoffMs(attempts-1, kRetryBaseMs) → 2/4/8/16/30s 封顶，
+ * 这一段只在 expect_ack=true 时才走得到（发送失败本身不重试，靠下轮 pumpOut 保位）。
+ */
 bool AlarmUplinkEngine::retryFront(const QString &why)
 {
     if (queue_.empty()) {
@@ -696,6 +800,19 @@ bool AlarmUplinkEngine::retryFront(const QString &why)
     return true;
 }
 
+/**
+ * @brief 处理对端回来的 uplink_ack（只在 expect_ack=true 时有意义）
+ * @param phase "media" 时用 mediaId 认领队首，其余一律用 messageId——**只与队首对账**，
+ *              发送是严格顺序的，队首之外不可能有别的东西在等确认
+ * @param status ok=出队；reject=出队并记 warning（重发只会再来一次 reject）；
+ *               retry=走 retryFront；其他取值当作噪声忽略，不做默认重试
+ *
+ * 三种"对不上"的情况都是静默返回或一条 warning，不抛不断链：
+ *   队列空 = 迟到的确认（那项早已超时重发或判失败丢弃）；
+ *   队首没在 awaitingAck = 开关关着 / 队首还没发完；
+ *   id 不等 = 对端实现写错，这条 warning 是唯一线索，所以不能省。
+ * 副作用：认领成功后本函数会出队，调用方（AlarmUplink::onUplinkAcked）紧接着 pump 一次。
+ */
 void AlarmUplinkEngine::handleAck(const QString &messageId, const QString &mediaId,
                                   const QString &phase, const QString &status,
                                   const QString &error)
@@ -732,6 +849,17 @@ void AlarmUplinkEngine::handleAck(const QString &messageId, const QString &media
     }
 }
 
+/**
+ * @brief 告诉调用方下一次 pumpOut 该等多久（定时器时长唯一的来源）
+ * @return 0 = 队列空，调用方应停掉定时器；否则 [kFlushWaitMs, kBackoffCapMs] 之间的毫秒数
+ *
+ * 三种节奏的来源不同，别混成一个常数：等确认 → 剩下的 deadline；退避中 → 剩下的退避；
+ * 都只是写缓冲水位没退下来 → kFlushWaitMs(20ms)。
+ * qBound 的下限是刻意的：deadline 与 now 相等时算出 0，而 flushTimer_ 是单发定时器，
+ * start(0) 会立刻回来再泵一次，等确认期间就变成事件循环里的空转。
+ * 上限压到 kBackoffCapMs 只为了给出一个可预期的帽（ackTimeoutMs 被配成天文数字时，
+ * 定时器不会挂到 int 溢出），实际节奏由队首决定。
+ */
 int AlarmUplinkEngine::nextWaitMs() const
 {
     if (queue_.empty()) {
@@ -751,6 +879,16 @@ int AlarmUplinkEngine::nextWaitMs() const
     return static_cast<int>(qBound<qint64>(kFlushWaitMs, until, kBackoffCapMs));
 }
 
+/**
+ * @brief 重连后把"正在传"的那一段媒体退回第一块
+ *
+ * 只管队首一项：pumpOut 的严格顺序决定了**只可能有队首**处于半截发送状态，
+ * 其余项的 cursor 都还是 0，不需要动。`head.cursor == 0` 因此既是"没发过"的判断，
+ * 也顺带跳过了 alarm_info / media_failed 这些非媒体项。
+ * 不做断点续传（半截流对端拼不出来），整段重发后靠 media_begin 里的 sha256 让对端去重；
+ * url 模式的项 media=false，本来就不在这条路径上（地址重发一次没有副作用）。
+ * 由 AlarmUplink::onLinkConnected 在每次 connected 信号里调，重复调用幂等。
+ */
 void AlarmUplinkEngine::restartInFlightMedia()
 {
     if (queue_.empty()) {
@@ -768,6 +906,13 @@ void AlarmUplinkEngine::restartInFlightMedia()
     head.failLogged = false;
 }
 
+/**
+ * @brief 清空全部状态：待发队列 + 媒体 slot 表 + 片段承诺表
+ *
+ * 三张表必须一起清（见函数体内注释），单独清队列会让下次 attach 复用旧 media_id。
+ * 调用点是 AlarmUplink::detach()（退出流程）；运行期没有"只清队列"的入口。
+ * 副作用：正在传的那一段被丢弃且不通知对端（detach 之后链路本来就要断了）。
+ */
 void AlarmUplinkEngine::clear()
 {
     queue_.clear();

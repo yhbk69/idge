@@ -2,6 +2,21 @@
 // ⚠ 本文件没有 include guard / #pragma once：只能被单个编译单元包含一次，
 //   重复包含会触发类重定义编译错误。属遗留/备用实现，主流渲染路径见
 //   gl_video_widget.cpp + eglimage_helper.h。若需多处包含请补充保护宏。
+//
+// ============================================================================
+// 【所属模块】src/ui/widgets（零拷贝渲染三件套之一的存档件）
+// 【当前状态】全仓零引用：没有 .cpp include 它（grep 过），也不会被编译检查。
+//   留着的原因是它是唯一一份"把 NV12 在片段着色器里转 RGB"的参考实现，
+//   主流水线（RGA 已经转成 RGBA、着色器只做一次 texture2D 采样）用不到它。
+// 【职责与分工】与 GLVideoWidget 的关系是"同一件事的两种做法"：本类自带
+//   着色器、VBO/EBO、EGLImage 与尺寸状态，是一个不依赖 Qt 的裸 GLES2 渲染器
+//   ——调用方要自己保证 GL 上下文已 current、自己排布 viewport 与 swap。
+// 【所有权】本类持有：一张 EGLImage、一个纹理、两个缓冲、一个 program。
+//   它**没有析构函数**：成员资源不会随对象销毁自动回收，必须显式调 destroy()，
+//   而且 destroy() 也得在上下文 current 时调（GL 对象删除走的是当前上下文）；
+//   漏掉就靠"上下文销毁"兜底，而 EGLImage 不属于上下文资源、兜不住（同 EglFramePool）。
+//   fd 一律不接管：updateFrame 只把 fd 交给 eglCreateImageKHR，close 归调用方。
+// ============================================================================
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
@@ -92,6 +107,14 @@ public:
           modifier - 内存布局修饰符（用于压缩格式）
     返回值：成功返回true，失败返回false
     硬件概念：DMA-BUF导入允许GPU直接访问视频解码器输出的内存
+    【时序：先毁后建】和 EglFramePool::acquire 的"先建新、成功再毁旧"相反，
+      这里是先 destroy 旧 image 再 create 新的。副作用是导入失败时既丢了旧帧
+      又没拿到新帧：egl_image_ 变成 EGL_NO_IMAGE_KHR，下一次 render() 在开头
+      判空直接 return，屏幕上是一整帧黑，而不是"停在上一帧"。
+    【fd 不接管】本函数不 dup 也不 close fd，调用方按自己的协议回收；
+      create 成功时驱动已另持一份内核引用，所以之后 close 原 fd 不影响这张图。
+    【线程】只能在 GL/EGL 上下文 current 的线程调；width_/height_ 会被 render()
+      和 aspect 计算读，所以这两个成员跟着 image 一起在同一个线程更新，无需加锁。
     ====================================================
     */
     bool updateFrame(int fd, int width, int height, int stride,
@@ -134,6 +157,17 @@ public:
     性能提示：每帧都重建顶点数组、glBufferData 重传 VBO/EBO 并两次
       glGetAttrib/UniformLocation 查询—— quad 是静态几何，只有 sx/sy
       随宽高比变化，稳态运行属可避免的上传开销（帧池/常量 VBO 可优化）。
+    【两个除零入口】viewport_h 由调用方给：widget 还没布局出来（0 高）时
+      view_aspect 除零得 inf，sy 变 0，quad 退化成一条线；height_ 为 0 只在
+      "updateFrame 成功但传了 height=0"这种上游出错的场合出现。两条都不会崩，
+      只是画不出来——排查时先看 viewport 而不是先看 EGL。
+    【viewport 语义】glViewport 用的是**设备像素**，不是逻辑尺寸；
+      QOpenGLWidget 下要传 framebufferSize()（HiDPI 时比 size() 大），传错会得到
+      画面只占左上角一块。
+    【状态泄漏】结尾只关了属性 0/1、纹理与 program，没关 GL_ARRAY_BUFFER/
+      ELEMENT_ARRAY_BUFFER 绑定，也没关 glEnableVertexAttribArray 之外的东西
+      —— 与别的渲染器混用时记得自己复位（对照 gl_video_widget.cpp 的 drawQuad，
+      它把两个 buffer 也解绑了）。
     ====================================================
     */
     void render(int viewport_w, int viewport_h)
@@ -243,6 +277,12 @@ public:
     ====================================================
     作用：销毁渲染器
     说明：释放所有OpenGL和EGL资源
+    【调用时机】必须在 GL 上下文仍然 current 时调（GLVideoWidget 的做法是析构里
+      先 makeCurrent()、清完再 doneCurrent()）；上下文没了之后再调，GL 对象是
+      空删、EGLImage 才是真漏（它不随上下文回收）。
+    【可重复调用】每个分支都先判非 0/非 EGL_NO_IMAGE_KHR 再置回初值，
+      二次调用无害；但 init() 之前调也安全——所有句柄都是 0 起步。
+    【不是析构函数】本类没有 ~EglImageRenderer，忘调 destroy() 编译器不会提醒。
     ====================================================
     */
     void destroy()
@@ -274,6 +314,15 @@ private:
           modifier - 内存布局修饰符
     返回值：EGLImage句柄，失败返回EGL_NO_IMAGE_KHR
     硬件概念：DMA-BUF导入是零拷贝的关键，避免CPU内存拷贝
+    【attrs[48] 够用】最长路径 = 6(宽高+fourcc) + 6(plane0) + 6(plane1)
+      + 4(plane0 modifier) + 4(plane1 modifier) + 1(EGL_NONE) = 27 个槽，
+      48 是拍脑袋的保守值（egl_dma_buf.h 那边写的是 64，两处各自独立，
+      加分支时得分别重算，不存在"改一处两边同步"）。
+    【与 egl_dma_buf.h 的两处漂移】① 这里 NV12 时给 plane1 也写了 modifier，
+      那边只写 plane0；② 这里每次现场 eglGetCurrentDisplay()，那边用 init()
+      缓存的 display_。两份实现都无人引用，别把其中一份的修复当另一份也修好了。
+    【不校验指针】直接解引用 eglCreateImageKHR_：init() 没调过就是空指针调用，
+      本函数返回 bool 与否都救不了，调用方（updateFrame）也没判。
     ====================================================
     */
     EGLImageKHR importDmaBuf(int fd, int width, int height,
@@ -355,6 +404,13 @@ private:
     ====================================================
     作用：编译着色器程序
     说明：创建顶点着色器和片段着色器，用于NV12到RGB转换
+    【线程】glCreateShader/glLinkProgram 都作用于当前上下文的"program 对象"，
+      所以只能在 init() 的那次 current 期间调用（init 里就是这个位置）。
+    【没有错误检查】既不查 GL_COMPILE_STATUS 也不查 GL_LINK_STATUS：编译失败时
+      program_ 仍是个有效的 0 之外句柄但不可用，render() 里 glUseProgram 静默失败。
+      与 init() 的注释是同一条已知缺陷，两处一起看。
+    【顺带建了 VBO/EBO】函数名只说"编译着色器"，却还 glGenBuffers 两个缓冲对象
+      —— 这是本文件里唯一一处"名字与职责不符"，接手时别只盯着着色器部分改。
     ====================================================
     */
     void compileShaders()

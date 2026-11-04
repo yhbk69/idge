@@ -508,9 +508,10 @@ void SmartRecognitionWidget::showOcrPhotoDialog() {
         auto* accept = new QPushButton(QStringLiteral("确认"), &confirm);
         cancel->setMinimumHeight(46);
         accept->setMinimumHeight(46);
-        confirmButtons->addWidget(cancel);
+        // 口径：确认在左、取消在右（与 QMessageBox/QDialogButtonBox 实测出来的排位一致）
         confirmButtons->addStretch();
         confirmButtons->addWidget(accept);
+        confirmButtons->addWidget(cancel);
         confirmLayout->addLayout(confirmButtons);
         connect(cancel, &QPushButton::clicked, &confirm, &QDialog::reject);
         connect(accept, &QPushButton::clicked, &confirm, &QDialog::accept);
@@ -703,6 +704,9 @@ void SmartRecognitionWidget::showOcrResultDialog(const QStringList& texts) {
     QtHelper::enableTouchScroll(scrollArea);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok, &dialog);
+    // 默认文案是 QPlatformTheme 给的英文 "OK"（项目带的 .qm 那个上下文没译，实测），
+    // 这里不写就露出一颗英文按钮。
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("确定"));
     buttons->button(QDialogButtonBox::Ok)->setMinimumHeight(46);
     buttons->button(QDialogButtonBox::Ok)->setStyleSheet(QString(
         "QPushButton { background:%1; color:%2; border:none; border-radius:12px; padding:0 24px; font-size:%3px; font-weight:700; }"

@@ -1,6 +1,20 @@
 #ifndef DASHBOARD_WIDGET_H
 #define DASHBOARD_WIDGET_H
 
+// ============================================================================
+// dashboard_widget.h - 数据看板页（统计卡片 + 系统资源 + 类别排行）
+// ============================================================================
+//
+// 【所属模块】src/ui/widgets，纯展示页：没有任何写动作，只读两个源——
+//   AlarmManager 单例（内部有锁，GUI 线程直接遍历）与 /proc（同步小 I/O）。
+// 【刷新模型】2s QTimer 驱动 refreshStats()，全部在 GUI 线程，一次实测 60~105ms
+//   （抢 AlarmManager 锁 + 读 /proc + 重建类别统计行的 QLabel 树）。
+//   定时器由 showEvent/hideEvent 开关，不在槽里判 isVisible()——连 2s 一次的
+//   唤醒本身也要省（详见下面 showEvent 的注释）。
+// 【CPU 差分基线是函数级 static】见 .cpp 的 readCpuUsage：多实例会互相污染，
+//   本仓只有 frmMain 建一个，所以成立；要复用这一页成多实例，先把基线改成成员。
+// ============================================================================
+
 #include <QWidget>
 #include <QLabel>
 #include <QVBoxLayout>
@@ -34,6 +48,9 @@ public:
     ====================================================
     */
     void refreshStats();
+    // 显式停表：与 hideEvent 里那句是同一件事，留给"页面还看得见但已经要收摊"的
+    // 关闭流程用（frmMain::closeEvent 先 stop() 再拆别的件，避免看板一边重建、
+    // 一边 AlarmManager 正在退）。重复调用无害；停了之后 showEvent 仍会把它重新起起来。
     void stop();
 
 protected:
@@ -48,6 +65,8 @@ protected:
     ====================================================
     */
     void showEvent(QShowEvent *event) override;
+    // 只停表，不擦数据：卡片留在原位，切回来时 showEvent 立刻用旧值先填一屏，
+    // 再等下一次 2s 刷新覆盖——比"切回来先空白两秒"好，也省掉一次同步重建。
     void hideEvent(QHideEvent *event) override;
 
 private slots:

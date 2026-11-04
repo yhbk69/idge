@@ -25,6 +25,10 @@
  * limitations under the License.
  */
 
+// NOTE: 头文件保护宏的 #ifndef 与 #define **名字不一致**（ALLOC_H__ vs HEAP_ALLOC_H__，
+//   自上游 rknn_samples 带过来），所以本头实际不具备重复包含保护——同一个 TU 里
+//   include 两次就会因 inline/函数原型之外的符号重复而报错。目前每个 TU 只经
+//   DmaBufferPool.h 间接包含一次，故未暴露；要动包含关系时先补齐，别在这儿叠加 include。
 #ifndef __RGA_SAMPLES_ALLOCATOR_DMA_ALLOC_H__
 #define __RGA_SAMPLES_ALLOCATOR_DMA_HEAP_ALLOC_H__
 

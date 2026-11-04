@@ -41,10 +41,24 @@ class RecognitionResultDialog : public QDialog {
     Q_OBJECT
 
 public:
+    /**
+     * @brief 建对话框并**推迟启动**后台识别（singleShot(0)）
+     * @param task_id   点名任务 id（由 RollCallService 分配；构造时任务已落库）
+     * @param photo_paths 待识别的照片绝对路径，来自 PhotoSelectionDialog::getSelectedPhotos()
+     * @param service   点名服务；**允许为空**——startRecognition() 判空后弹错并 reject()
+     * @param parent    父窗；调用方（RollCallWidget）传 this 并以 exec() 模态使用
+     *
+     * photo_paths 为空集合不会在这里被拦下：会照常起线程、照常跑 processPhotos，
+     * 结果表就是一片空。调用方（RollCallWidget::onCreateTask）已保证非空才往下走。
+     */
     explicit RecognitionResultDialog(int task_id, 
                                     const QStringList& photo_paths,
                                     std::shared_ptr<RollCallService> service,
                                     QWidget* parent = nullptr);
+    /**
+     * @brief 析构：识别线程仍在跑就 quit()+wait()（等不可中断的 NPU 推理结束）
+     * ⚠ 关窗可能卡数秒，这是已知取舍；不要改成 terminate()（NPU 上下文会漏）。
+     */
     ~RecognitionResultDialog();
 
 signals:
@@ -55,12 +69,19 @@ private slots:
     void onCancel();            ///< 确认后 service 删任务并 done(2)（外层据 2 只提示不再删）
     void onConfirm();           ///< saveTaskResult 成功才 accept()
     void onEditTotalCount();    ///< 总人数标签 <-> QSpinBox(0~10000) 就地切换编辑
+    /// 后台线程经**队列连接**回 GUI 线程：这里可以动控件
+    /// ⚠ 收到的 result 是值拷贝（TaskProcessResult 已 qRegisterMetaType），
+    ///   不要改成传引用/指针——工作线程的对象在信号派发时可能已析构
     void onRecognitionFinished(const TaskProcessResult& result);
+    /// 识别失败：藏忙碌条、恢复"上一步/取消"可用（**不恢复确认**），弹错后留在界面
     void onRecognitionError(const QString& message);
 
 private:
-    void setupUI();
+    void setupUI();   ///< 一次性搭界面（标题+人数/忙碌条/编辑钮 / 2 列结果表 / 三颗底部钮）
     void startRecognition();  ///< singleShot(0) 延迟启动：先绘制 loading（忙碌条+禁用按钮）
+    /// 逐张把后处理图与"不重复人数"填进结果表。
+    /// 板端 Qt JPEG 插件与图像流水线用的 libjpeg ABI 冲突，图片**必须**经
+    /// loadPixmapSafe 解码；解码失败退化为"已识别 N 张人脸"文字占位而不是崩。
     void displayResults();
     void drawFaceBoxes();     ///< ⚠ 遗留声明：无实现无调用，勿新接
     QPixmap drawBoxesOnImage(const QString& image_path,      ///< ⚠ 遗留实现：无调用（框已由服务层画好）

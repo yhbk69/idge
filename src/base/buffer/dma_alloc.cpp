@@ -1,3 +1,20 @@
+/**
+ * @file dma_alloc.cpp
+ * @brief base/buffer 域 —— Linux DMA-BUF Heap 分配器实现（零拷贝链路的内存底座）
+ *
+ * 所属模块：src/base/buffer（无业务依赖，被 media/rga、media/reader、渲染链路引用）。
+ * 核心职责：把 /dev/dma_heap/* 分配出的物理连续内存变成一对 (fd, va)——
+ *           fd 给硬件（RGA importbuffer_fd、EGL eglCreateImageKHR、NPU 输入），
+ *           va 给 CPU（只在画框、软件兜底转换时触点）。
+ *
+ * 本文件的两条硬约定（新增调用点前必读）：
+ *   1. 全工程实际只用 DMA_HEAP_UNCACHE_PATH（system-uncached）。理由不是"性能"，
+ *      而是 cached 堆上的缓存同步在本机内核**不管用**——见下面两个 sync 函数的注释。
+ *   2. 一对 (fd, va) 只能释放一次；跨线程/跨设备共享一律 dup(fd)，各持者各自 close，
+ *      由 dma-buf 的内核引用计数保证最后一个关闭者回收（见 buffer/README.md 的
+ *      "fd 所有权"条目）。
+ */
+
 /*
  * Copyright (C) 2022 Rockchip Electronics Co., Ltd.
  *
@@ -74,6 +91,12 @@ typedef  unsigned int __u32;
 //   - fd: 分配成功后返回的文件描述符
 //   - fd_flags: fd 的打开标志（通常 O_CLOEXEC | O_RDWR）
 //   - heap_flags: 堆标志（通常为 0）
+// 【来源】本结构与下面的 DMA_HEAP_IOCTL_ALLOC / DMA_BUF_IOCTL_SYNC / DMA_BUF_SYNC_*
+//   都是 uapi/linux/dma-heap.h、uapi/linux/dma-buf.h 的原样复刻（含 DMA_BUF_SYNC_WRITE
+//   这个看起来写错、实际是上游字面量的 `(2 << 0)`）。刻意不 include 内核头：
+//   本 TU 同时 include 了 <sys/ioctl.h>/<linux/videodev2.h> 等 glibc 头，混用 uapi
+//   头会撞 __u32/__u64 重定义。字段顺序与宽度即 ABI，改动会让 ioctl 直接错读，
+//   需要对齐内核版本时才动。
 // ============================================================================
 struct dma_heap_allocation_data {
 	__u64 len;
@@ -114,6 +137,8 @@ struct dma_buf_sync {
 #define DMA_BUF_BASE		'b'
 #define DMA_BUF_IOCTL_SYNC	_IOW(DMA_BUF_BASE, 0, struct dma_buf_sync)
 
+// NOTE: 从 Rockchip 样例带过来的宏，本仓全工程零引用（CMA 堆没被任何调用方使用，
+//   分配尺寸也不由它决定）。留着只为对齐上游，别把它当成"CMA 分配的默认大小"来读。
 #define CMA_HEAP_SIZE	1024 * 1024
 
 // ============================================================================
@@ -128,7 +153,23 @@ struct dma_buf_sync {
 //
 // 注意：在纯 GPU 操作（如 RGA→RGA）时不需要同步，
 //       只有 CPU 参与读写时才需要
+//
+// ⚠【实测：cached 堆上这两个函数拦不住脏读】本文件唯一的调用侧证据在
+//   `src/media/reader/ffmpeg_video_decoder.cpp` 的 `SnapWriter::convertByRga()`
+//   注记：同一块 cached 缓冲被 CPU 先摸过（哪怕只是 memset 清零）再交给 RGA 写，
+//   事后 CPU 仍读到自己的过期缓存（1280×720 抽查 20 万像素 2.9% 不符），
+//   而这两个 ioctl 在这台内核上是空操作。所以本工程的零拷贝链路一律走
+//   DMA_HEAP_UNCACHE_PATH（4 组组合实测 0 不符），与 DmaBufferPool 同源。
+//   → 新增调用点请继续用 uncached 堆；给 uncached 缓冲调这两个函数不报错，
+//     但纯属白付一次 ioctl 系统调用，不要为了"保险"到处加。
 // ============================================================================
+/**
+ * @brief 设备写完 → CPU 读之前的同步（START + RW）
+ * @param fd DMA-BUF 的 fd，需来自本文件 dma_buf_alloc() 的分配；不校验，传错 fd
+ *           只会让 ioctl 失败并原样返回
+ * @return ioctl 原值：0=成功，-1=失败（失败原因只在 errno 里，本函数不透传）
+ *         调用方普遍只打日志不中止——uncached 堆上即使失败也不影响数据正确性。
+ */
 int dma_sync_device_to_cpu(int fd) {
     struct dma_buf_sync sync = {0};
 
@@ -137,6 +178,15 @@ int dma_sync_device_to_cpu(int fd) {
     return ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
 }
 
+/**
+ * @brief CPU 写完 → 设备读之前的同步（END + RW）
+ * @param fd 同 dma_sync_device_to_cpu()
+ * @return ioctl 原值：0=成功，-1=失败
+ * @note 与 device_to_cpu 是**成对**语义：一次 CPU 读写段两头各调一次，
+ *       只调一半会让内核的同步窗口处于错误状态（uncached 堆上无实际后果，
+ *       但代码换到 cached 堆时就是隐性脏数据）。camera_preview_decoder.cpp
+ *       画框那段是目前唯一成对使用的位置，可作参照。
+ */
 int dma_sync_cpu_to_device(int fd) {
     struct dma_buf_sync sync = {0};
 
@@ -174,6 +224,21 @@ int dma_sync_cpu_to_device(int fd) {
 //   3. mmap() → 将 GPU 内存映射到 CPU 地址空间
 //   4. close(heap_fd) → 关闭 Heap 设备（DMA-BUF fd 仍然有效）
 // ============================================================================
+/**
+ * @brief 从 DMA Heap 分配一块物理连续内存并映射到 CPU
+ * @param path 堆设备节点，必须是已存在的 /dev/dma_heap/* 全路径；本工程只用
+ *             DMA_HEAP_UNCACHE_PATH（理由见文件头与本函数上方"实测"注记）
+ * @param size 字节数，>0；无需调用方对齐（内核向上取整到页）
+ * @param fd   [out] 不可为 null；**仅在成功路径被写**，失败时保持调用方原值，
+ *             所以传进来前必须先置 -1（见 DmaBufferPool.h 里那条"缺省 0 会关掉 stdin"的教训）
+ * @param va   [out] 不可为 null；同上，失败不写
+ * @return 0=成功；负数=失败。⚠ 三条失败路径的取值口径并不统一
+ *         （open 失败返回 -1、ioctl 失败返回 -1、mmap 失败返回 -errno），
+ *         调用方只能判 `!= 0`，不要拿返回值区分失败原因或做 errno 换算。
+ *         失败信息目前只走 printf，没进 Qt 日志树——排障时要在 stdout/idge_*.log 里找。
+ * @note 线程安全：可并发调用（open/ioctl/mmap 各自独立），但同一 size 的高频分配
+ *       正是本工程改用 DmaBufferPool 池化的原因（每次 3 次系统调用）。
+ */
 int dma_buf_alloc(const char *path, size_t size, int *fd, void **va) {
     int ret;
     int prot;
@@ -243,6 +308,18 @@ int dma_buf_alloc(const char *path, size_t size, int *fd, void **va) {
 //   虚拟地址区间持续占用进程地址空间。调用方必须保证
 //   size/fd/va 三者与分配时一致，且只释放一次。
 // ============================================================================
+/**
+ * @brief 释放 dma_buf_alloc() 得到的映射与 fd
+ * @param size 必须与分配时**完全一致**的字节数（不是内核取整后的页对齐值；
+ *             munmap 只需区间起始页正确，但传 0 或小值会留下未解除的映射）
+ * @param fd   [in/out] 指向存放 fd 的变量；关闭后本函数把它置 -1，
+ *             所以调用方要传自己的成员地址（传临时变量的地址等于没置，双释放风险）
+ * @param va   分配时返回的映射起始地址
+ * @note 只置 *fd，**不会**把 *va 置空（与 dma_alloc.h 声明处的描述不一致）。
+ *       调用方若需要"释放后判空"，得自己复位——DmaBuffer::reset() 就是为此存在的。
+ * @note 幂等性：二次调用会对 *fd=-1 再 close（EBADF，被忽略），并对同一区间再
+ *       munmap（EINVAL）。两者都静默，所以"重复释放"在这里不会崩，只会掩盖 bug。
+ */
 void dma_buf_free(size_t size, int *fd, void *va) {
     int len;
 

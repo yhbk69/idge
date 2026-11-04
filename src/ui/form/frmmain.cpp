@@ -83,6 +83,16 @@
 // 构造 / 析构
 // ==========================================
 
+/**
+ * @brief 构造主窗（顺序约束见 frmmain.h 的 @brief）
+ *
+ * 五个 init* 调用之间的依赖：initForm 第 9 步才 load 配置，后面每一步都在读它；
+ * initNewPages 里两处按**索引** insertWidget(1/2) 插看板与报警列表，initBusinessPages
+ * 是尾追加智能识别页 —— 两者对调不会让功能坏（切页一律按控件指针），但页序会变。
+ * enableTouchScrollAll 与 showLoginGate 必须排在最末：前者只扫"此刻已存在"的子件，
+ * 后者要求所有页面都已建好才盖得住。
+ * 四路视频不在构造里开：原第 11 步已挪到 onLoginSucceeded() → startAllStreams()。
+ */
 frmMain::frmMain(QWidget *parent) : QWidget(parent), ui(new Ui::frmMain)
 {
     ui->setupUi(this);
@@ -120,6 +130,15 @@ frmMain::frmMain(QWidget *parent) : QWidget(parent), ui(new Ui::frmMain)
     showLoginGate();
 }
 
+/**
+ * @brief 析构只做 delete ui（停流已在 closeEvent 完成，见 frmmain.h 的说明）
+ *
+ * delete ui 会连带拆掉对象树里的业务页与两个宿主 QDialog；如果那时还有模态识别框
+ * 在跑，它的析构里 quit()+wait() 会等 NPU 收尾（那类对话框都是 exec() 模态，
+ * 正常流程走不到这里，所以不必在这里额外做停线程处理）。
+ * 成员里的 shared_ptr 服务在本函数返回后才析构，顺序上晚于所有页面 —— 页面析构
+ * 期间服务仍然存活，这是它们敢于在析构里回调服务的原因。
+ */
 frmMain::~frmMain()
 {
     delete ui;
@@ -134,6 +153,10 @@ frmMain::~frmMain()
  * @param qss   完整的 QSS 样式表字符串
  * @param flag  颜色标记（如 "TextColor:"）
  * @param color [out] 提取到的颜色值
+ *
+ * 只认 **7 个字符的 #RRGGBB**（mid 的长度写死 7）：皮肤层里所有标记都按这个格式写。
+ * 遇到 rgba(...)、#RRGGBBAA 或 6 位不带 # 的写法会截出错的串而**不报错**；
+ * 找不到 flag 时 color 保持调用方传进来的原值（不清空），所以调用前要自己给默认色。
  */
 void frmMain::getQssColor(const QString &qss, const QString &flag, QString &color)
 {
@@ -391,6 +414,13 @@ void frmMain::initForm()
 /**
  * @brief 加载 QSS 样式表并提取主题颜色
  * 样式表文件: :/qss/blacksoft.css（黑色主题）
+ *
+ * ⚠ 两处按字符位置硬取色，都依赖 blacksoft.css 的**头部写法不变**：
+ *   - qss.mid(20, 7) 取全局调色板底色（跳过文件开头那条注释行的固定长度）；
+ *   - getQssColor() 从标记后再截 7 个字符（只认 #RRGGBB）。
+ * CSS 一改版（换行、加 BOM、改成 rgba）这两处就会静默取到错色，不会报错也不会崩——
+ * 长期方向是改用 theme:: 常量（本目录新写的控件都走那边），这两个取值只剩
+ * 给老导航栏（initLeftMain 那条链）用。
  */
 void frmMain::initStyle()
 {
@@ -406,6 +436,10 @@ void frmMain::initStyle()
     getQssColor(qss, textColor, panelColor, borderColor, normalColorStart, normalColorEnd, darkColorStart, darkColorEnd, highColor);
 
     // 保存颜色到成员变量（供导航栏使用）
+    // NOTE: darkTextColor 取的是 normalTextColor（不是上面任何 darkColorStart/End），
+    // 于是这两项恒等。qtemplate 模板遗留写法，唯一的消费者是 initLeftMain 的
+    // IconHelper::StyleColor；要改配色请改 theme:: 常量，别在这里"顺手修成 dark*"，
+    // 那会让那条已经没人走的左侧导航链跟着变颜色。
     this->borderColor = highColor;
     this->normalBgColor = normalColorStart;
     this->darkBgColor = panelColor;
@@ -413,6 +447,29 @@ void frmMain::initStyle()
     this->darkTextColor = normalTextColor;
 }
 
+/**
+ * @brief 装配动态页面 + 集中建立全部跨域信号连接（本类的"接线板"）
+ *
+ * 干的事：注册跨线程元类型 → 顶部导航改文本（去 icon，字号 FS_NAV_TOUCH）→
+ * 动态插页（0=登录门、1=看板、2=报警列表，末尾追加智能识别页）→
+ * 报警 toast/角标/面板节流 → AlarmManager / WsClient / FenceManager / AlarmUplink /
+ * PadWsServer 的连接与服务启动 → 首次刷角标。
+ *
+ * 时序与线程要点：
+ *   - 必须在 initForm()（已 load 配置）之后调用：导航文本、看板与报警列表都要读配置；
+ *   - 页面切换一律按**控件指针**（setCurrentWidget），插页导致索引漂移也不怕；
+ *   - AlarmManager::alarmGenerated 由**解码线程**发出，这里所有 lambda 都经自动
+ *     队列连接回到 GUI 线程才跑，所以可以安全动 ui->；
+ *   - 报警面板节流的 lambda 引用的 alarmRefreshTimer_ 要到本函数后半段才 new：
+ *     同一趟 GUI 线程里信号不会在 connect 与 new 之间派发，所以成立。
+ *     **别把这段拆成两次调用**，拆了就变成"先连接、后建对象"的真悬垂；
+ *   - btnExit 在这里只改文本，分派靠对象身份（见 buttonClick）：按文字匹配的链
+ *     一旦文本改了就会静默失配（点了没反应，最难查的一类坏法）。
+ *
+ * 副作用：启动 WsClient（配置里有地址就会一直重连）、按需启动内嵌 HTTP 文件服务
+ * 与 Pad 服务端。后两者的 stop 在 src/main.cpp 的事件循环之后，与本函数刻意不成对
+ * （mk_env_init 是进程级一次，停了不能再起）。
+ */
 void frmMain::initNewPages()
 {
     // 跨线程队列连接需要注册元类型
@@ -636,6 +693,22 @@ void frmMain::initNewPages()
     updateAlarmBadge();
 }
 
+/**
+ * @brief 显示一条悬浮报警提示（右下角 toast）
+ * @param alarm 报警记录；channel 是 0-based，文案里 +1 显示
+ *
+ * 线程：槽经队列连接在 GUI 线程执行（发方是解码线程的 storeAndNotify）。
+ * 措辞分三种口径是**有意的**，别合并成一条模板：
+ *   - 围栏 vs 类别："检测到 person"会让现场以为围栏那几路的 COCO 也在按类别报警，
+ *     而那个模型的 alarm_class 明明为空（只画框不报警）；
+ *   - 围栏内部再分闯入禁区 / 离岗（alarmType == "fence_out"）：都写成"围栏侵入"
+ *     就会把人往反方向找；
+ *   - 负责人只在不为空时才拼（未登录期间根本不会有报警，空的多半是历史回读）。
+ * 副作用与限制：toast 是 this 的子件、盖在整窗之上，adjustSize + move 每次重算，
+ * 位置按**当前窗口尺寸**取右下角（全屏切换后下一条报警自然会重定位，不用额外处理）；
+ * 连发多条只显示最后一条（3s 单发定时器被反复重置）；alarmTime 解析失败时
+ * QDateTime::fromString 返回非法值，时间段会显示为空而不报错。
+ */
 void frmMain::showAlarmToast(const AlarmRecord &alarm)
 {
     if (!alarmToast_) return;
@@ -675,6 +748,18 @@ void frmMain::showAlarmToast(const AlarmRecord &alarm)
     updateAlarmBadge();
 }
 
+/**
+ * @brief 刷新导航「报警数据」按钮上的未确认角标
+ *
+ * 数据源是 AlarmManager::unacknowledgedCount()（纯内存窗口内的计数，不是 DB 总数）。
+ * 边界与取舍：
+ *   - >99 一律显示 99：角标 min-width 24 / max-width 48，三位数会把钮撑破并把字挤走；
+ *   - 定位每次都用 btnEquipCheck->width() 重算（不是写死坐标）：导航钮从"图上字下"
+ *     改成纯文字后文字矩形上移，写死就会压字（README 里"探针看不见这种重叠"那条）；
+ *   - 0 条时整颗 hide，而不是显示 "0"——留着会让人以为"有报警但没内容"。
+ * 调用点有四处：statsUpdated 信号、VideoAlarmWidget::alarmUpdated（面板刷新一并带上）、
+ * 新报警到达（showAlarmToast 末尾）、initNewPages 末尾的首次刷新。
+ */
 void frmMain::updateAlarmBadge()
 {
     if (!alarmBadge_) return;
@@ -693,6 +778,18 @@ void frmMain::updateAlarmBadge()
     }
 }
 
+/**
+ * @brief 处理对端（Aibox 服务端）经 WebSocket 下发的一条报警
+ * @param data 报警 JSON：alarm_id / alarm_type / timestamp / image_url / video_url
+ *
+ * 当前实现**只打日志 + 回 ack**：不入 AlarmManager、不入库、不弹 toast、不动角标。
+ * 理由：下行报警与本机检测报警是两条独立链路，混进同一个列表会让现场分不清
+ * "这条是我这几路看到的，还是对端推给我的"。要真展示得先决定归属与去重口径。
+ * 边界：
+ *   - alarm_id 为空就不发 ack（对端按 id 记账，空 id 回了也没意义）；
+ *   - timestamp 只读不用（Q_UNUSED）——它是 double 转 long 的秒/毫秒口径未确认值，
+ *     按它排序之前得先跟服务端对齐量纲，别猜。
+ */
 void frmMain::onWsAlarmReceived(const QJsonObject &data)
 {
     QString alarmId = data["alarm_id"].toString();
@@ -821,6 +918,15 @@ void frmMain::showRollCallDialog()
     rollCallDialog_->activateWindow();
 }
 
+/**
+ * @brief 弹出设备盘点任务页（窗口级模态）
+ *
+ * 与 showRollCallDialog() 同一条口径：先 refreshTaskList() 再 show()，
+ * 因为任务可能被点名侧改动（两个服务共用同一张 task 表）。
+ * 用 show()+WindowModal 而不是 exec()：点名/盘点的详情页是**非模态顶层窗口**，
+ * 应用级模态会把它一起锁死。判空针对的是"initBusinessPages() 还没走到/中途失败"，
+ * 正常情况下宿主对话框一定存在（服务失败时卡片直接置灰、点不动，见 initBusinessPages）。
+ */
 void frmMain::showEquipmentDialog()
 {
     if (!equipmentDialog_) return;
@@ -877,6 +983,17 @@ std::vector<EquipmentModelConfig> frmMain::equipmentModelConfigsFromLibrary()
     return models;
 }
 
+/**
+ * @brief 创建设备盘点服务并加载模型
+ * @return false = 模型库里既没有 yolo11n-coco 也没有明火模型（调用方弹警告、卡片置灰）
+ *
+ * ⚠ 必须在 initRollCallService() **之后**调用：构造时把 rollCallService_ 交给它，
+ *   两者共用 roll_call.db 的同一张 task 表（盘点任务 type="equipment_registration"），
+ *   task_id 两侧可互用。点名服务为空时这里**不判空**也不报错——服务层明许可传空
+ *   （见 equipment_inventory_service.h 构造注释：此时所有库操作静默返回默认值），
+ *   真正致命的只有"模型清单为空"这一条，所以只检它。
+ * 失败时 equipmentService_ 仍是一个"存在但未 ready"的实例，页面按 isReady() 置灰创建钮。
+ */
 bool frmMain::initEquipmentService()
 {
     equipmentService_ = std::make_shared<EquipmentInventoryService>(rollCallService_);
@@ -964,6 +1081,13 @@ void frmMain::buttonClick()
 /**
  * @brief 初始化视频监控页左侧导航
  * 图标：相机(0xf030)、图片(0xf03e)、USB(0xf247)
+ *
+ * NOTE: **当前整条链不产生任何可见效果**。btnsMain 从未被填过（.ui 里唯一的候选容器
+ * widgetLeftMain 只装了一个 verticalSpacer，且 maximumWidth 锁死 10px，frmmain.ui:408），
+ * 所以下面那个 for 一次都不进、IconHelper::setStyle() 收到的是空列表；
+ * iconsMain 的三个 glyph 也没有落点。这三个 glyph 与"左侧导航"的描述属模板遗留文案，
+ * 别按它去找界面上不存在的按钮。要恢复左侧图标导航得先在 .ui 里给 widgetLeftMain 加件，
+ * 或在代码里建按钮后 append 进 btnsMain（本目录约定不手改 .ui，所以走后者）。
  */
 void frmMain::initLeftMain()
 {
@@ -992,6 +1116,12 @@ void frmMain::initLeftMain()
 // 左侧导航点击处理
 // ==========================================
 
+/**
+ * @brief 左侧导航按钮互斥选中（只改 checked 状态，不切页面）
+ * NOTE: 随 btnsMain 一起失效（见 initLeftMain），循环体一次都不进。
+ * 它与顶部导航的 buttonClick() 是两条独立的链：本函数只负责"选中态"，
+ * 不动 stackedWidget —— 重建左侧导航时别顺手把切页逻辑接到这里。
+ */
 void frmMain::leftMainClick()
 {
     QAbstractButton *b = (QAbstractButton *)sender();
@@ -1056,6 +1186,13 @@ void frmMain::on_btnMenu_Max_clicked()
     setProperty("canMove", !isFullScreen());
 }
 
+/**
+ * @brief 标题栏 × = 退出整个程序（不是退出登录）
+ *
+ * 走 systemExit() 的确认框，因此登录页上也按得到它（widgetMenu 在合门时**不收起**，
+ * 与登录页那颗「退出程序」同义、不冲突）。与导航「退出登录」（只回登录页、进程不死）
+ * 是两件事，改这两处文案时别把它们合并。
+ */
 void frmMain::on_btnMenu_Close_clicked()
 {
     systemExit();
@@ -1102,6 +1239,25 @@ void frmMain::systemExit()
 // 门挡的是"检测与报警产生"（四路解码器 + 报警限流），**不是整个进程的网络出口**：
 // GB28181 与 WebSocket 连接在门外照常按配置跑，详见 src/ui/form/README.md。
 
+/**
+ * @brief 开门：按当前配置把该开的通道拉起来（幂等）
+ *
+ * 调用点只有 onLoginSucceeded()；与 stopAllStreams() 成对，守卫 streamsRunning_。
+ * 前提：ConfigManager::load() 已跑过（initForm 第 9 步），所以本函数**不能**挪到
+ * initForm 之前，也不能在登录页被提前调。
+ * 失败/跳过场景（都不算错误、都不弹提示，只体现在日志与四宫格占位上）：
+ *   - channelEnabled(ch)==false → 整路不开；
+ *   - resolveChannelSource(ch) 解析不出地址（未配置，或 source_id 悬空）→ 不开，
+ *     悬空告警由 openVideo 那侧统一打，避免两处各说一套。
+ * 通道数这里用 cfg.channelCount()，其余处（停流、状态回调连接、围栏）写死 4：
+ * 两者当前等价（channelCount() 恒返回 4，与 .ui 里四个 PlayerWidget 同数）。
+ * 真要扩路数，瓶颈是 .ui 的四宫格而不是这个常量。
+ * ⚠ 本函数在 GUI 线程逐个 openVideo（解码器内部起线程，不阻塞等待）。
+ *   日志里"已开流 N 路"只代表**已提交**：FFmpegVideoDecoder::start() 是 void，
+ *   上一轮 stop 超时遗弃了解码线程时它会拒绝重启（liveLoops_>0，只 emit error），
+ *   这里无从分辨。表现为该路仍挂着占位文案，去设置页动一下本路的启用/选流
+ *   （走 applyChannelConfigNow）即可重试。
+ */
 void frmMain::startAllStreams()
 {
     if (streamsRunning_) {
@@ -1132,6 +1288,19 @@ void frmMain::startAllStreams()
                       .arg(opened).arg(cfg.channelCount()));
 }
 
+/**
+ * @brief 停看板刷新 + 两阶段停四路解码（退出登录与关窗共用同一段）
+ *
+ * 线程：只在 GUI 线程调，且**会阻塞整个界面**直到四路真退出（单路有界：
+ * 3s+10s+1.5s×槽位，驱动卡住时更久）。因此不能挂在报警/帧回调路径上。
+ * 幂等：streamsRunning_ 为 false 时直接返回，closeEvent 与退出登录连着调两次
+ * 也只停一次（重复停虽无害，但会打出误导性的第二遍日志）。
+ * 顺序：先 dashboardWidget_->stop()——看板每 2s 重建一次并读 AlarmManager，
+ * 流停掉后报警还在收尾时继续刷会看到半套数据；下一次切到看板页由它自己的
+ * showEvent 重启，这里不需要显式 start()。
+ * 上限写死 4（不是 cfg.channelCount()）：这四路是 .ui 里的四个 PlayerWidget，
+ * 与配置侧的通道数当前等价。
+ */
 void frmMain::stopAllStreams()
 {
     // 停止时序（两阶段并行停止，避免串行等待导致关闭时间叠加）：
@@ -1164,6 +1333,15 @@ void frmMain::stopAllStreams()
     streamsRunning_ = false;
 }
 
+/**
+ * @brief 合门：显示登录页、收起顶部导航、清掉登录态显示
+ *
+ * 调用点两处：构造的**最后一步**（门必须盖住所有已建好的页面）与退出登录后。
+ * login_ 为空直接返回——它是在 initNewPages() 里建的，构造顺序若被打乱（比如有人
+ * 把合门提前到 initForm 末尾），这里就会静默什么都不做，表现是"启动直接进主页"。
+ * resetStatus() 不能省：否则新来的班次看到的是上一班的"缺字段"红字。
+ * 只收 widgetTop、不收 widgetMenu：× 就是退出程序，与登录页那颗按钮同义、不冲突。
+ */
 void frmMain::showLoginGate()
 {
     if (!login_) {
@@ -1187,6 +1365,17 @@ void frmMain::showLoginGate()
     ui->stackedWidget->setCurrentWidget(login_);
 }
 
+/**
+ * @brief 按当前会话刷新标题栏右上角的登录人角标
+ *
+ * 只在 GUI 线程调（动控件）。合门/开门时都要**单独调它**：sessionBadge_ 是
+ * widgetTitle 的直接子件，不在被 hide() 的那块 widgetTop 里面，showLoginGate()
+ * 收不到它；漏掉这一句，登录页右上角就还挂着一颗"登录人 …"，看着像仍登着。
+ * 文本只放负责人姓名一项（其余字段点进 ConstructionDetailDialog 看）；未登录是
+ * **整颗 hide**而不是清空文字——留一颗空钮在右上角会被当成"能点的按钮"。
+ * 这一颗是全机唯一的常驻登录态显示——报警归属在 makeAlarmRecord() 就定死了，
+ * 换班没点「退出登录」会继续记到上一班名下，只有一行会滚走的日志可看不够。
+ */
 void frmMain::updateSessionBadge()
 {
     if (!sessionBadge_) {
@@ -1205,6 +1394,15 @@ void frmMain::updateSessionBadge()
     sessionBadge_->raise();
 }
 
+/**
+ * @brief 点登录人角标 → 弹出当前施工信息详情框
+ *
+ * dialog 是栈上对象，本函数返回即析构（不需要 deleteLater，也没有残留窗口）。
+ * ⚠ 「退出登录」不能由详情框自己直接调 onLogoutRequested()：那样就是两层模态
+ * ——登出确认框会被压在详情框下面，岗位上按不到。所以详情框只置一个
+ * logoutRequested 标志，由这里在 exec() **返回之后**再走登出。
+ * 前提：本函数只在已登录时被触发（角标未登录是隐藏的）。
+ */
 void frmMain::openSessionDetail()
 {
     ConstructionDetailDialog dialog(this);
@@ -1216,6 +1414,19 @@ void frmMain::openSessionDetail()
     }
 }
 
+/**
+ * @brief 开门：登录成功（扫码或测试登录同一条路径）后的恢复动作
+ *
+ * 由 LoginWidget::loginSucceeded 触发（GUI 线程；扫码器也在 GUI 线程的模态框里跑）。
+ * 顺序：先亮回 widgetTop → 刷登录人角标 → 切到视频监控页 → startAllStreams()。
+ *   切页在开流之前，报警面板因此先就位：alarmGenerated 的节流 lambda 里有
+ *   "当前页 == pageMonitor 才刷面板"的判据，反过来就会把开门最初几秒的报警
+ *   只留在 DB 里（切页时 buttonClick() 会补一次 refreshAlarms，所以不是丢数据，
+ *   只是晚一步显示）。
+ * 这里用 ui->btnMain->click() 而不是直接 setCurrentWidget：走按钮既有分派才顺带
+ * 把 setChecked 归位和右侧报警面板刷新一起做掉（与启动时同一条路径，少一套逻辑）。
+ * 幂等由 startAllStreams() 自己保证，重复信号不会开第二遍流。
+ */
 void frmMain::onLoginSucceeded()
 {
     if (ui->widgetTop) {
@@ -1232,6 +1443,21 @@ void frmMain::onLoginSucceeded()
                       .arg(session::ConstructionSession::instance().summary()));
 }
 
+/**
+ * @brief 导航「退出登录」：确认 → 停流 → 清限流窗口 → 登出 → 合门
+ *
+ * 进程**不死**，只回到登录页（真正的退出程序是 × 与登录页那颗按钮，走 systemExit）。
+ * 清什么：四路解码、AlarmManager 的限流内存 map、会话、上一班的 toast 与角标显示。
+ * 不清什么（都是有意保留，别"顺手加clean"）：
+ *   - DB 历史与 data/alarms 文件——归属在 makeAlarmRecord() 就写死了，属于上一班；
+ *   - FenceManager 的围栏——配置态不是会话态；
+ *   - WsClient 连接与**待发上行队列**——施工信息在报警产生时就定死了，发送时不再
+ *     回查会话，所以重传的那条仍带着它产生时的归属，清空反而会丢上报。
+ * resetThrottles() 不是可选的：不清的话重登后 2s（类别）/围栏窗口期内的第一条
+ * 报警会被静默吞掉，界面一条都不出（现象像"重新登录就再也不报警了"）。
+ * 副作用：stopAllStreams() 阻塞 GUI 数秒；确认框必须按主窗所在屏居中（双屏口径同
+ * systemExit()，弹到没触摸的那块屏等于把人锁在原地）。
+ */
 void frmMain::onLogoutRequested()
 {
     QMessageBox box(QMessageBox::Question, tr("退出登录"),
@@ -1270,6 +1496,16 @@ void frmMain::onLogoutRequested()
     log("system", "已退出登录：四路已停、限流窗口已清、施工信息已作废");
 }
 
+/**
+ * @brief 关窗：先停四路，再退事件循环
+ *
+ * ⚠ 顺序不能倒：stopAllStreams() 必须在 qApp->quit() **之前**跑完，
+ *   这样 delete ui 拆 PlayerWidget 时四条解码线程都已退出（QThread 还在跑就被
+ *   销毁会直接 abort）。event->accept() 放在停流之后也是有意的：GUI 线程这期间
+ *   阻塞数秒，用户看到的"卡一下"是等解码退出，不是关窗没生效。
+ * 未登录时这里等于空转（streamsRunning_ 为 false）。
+ * 注：析构 ~frmMain() 不再负责停流，见那边的说明。
+ */
 void frmMain::closeEvent(QCloseEvent *event)
 {
     // 停流序列抽到 stopAllStreams()（与"退出登录"共用同一段，见那边的说明）
@@ -1278,6 +1514,13 @@ void frmMain::closeEvent(QCloseEvent *event)
     qApp->quit();
 }
 
+/**
+ * @brief 空实现（.ui 对象名自动连接的遗留槽，当前不会被触发）
+ * NOTE: pageRoll 没有设 contextMenuPolicy，Qt 只在 CustomContextMenu 下才发
+ *   customContextMenuRequested，所以这条连接永不触发；触屏也没有右键可弹上下文菜单。
+ *   pageRoll 这一页本身也不再挂载业务内容（点名已改为智能识别卡片 + 弹窗）。
+ *   保留只为不动 .ui；要清理就把 .ui 的 pageRoll 与这条声明一起摘掉。
+ */
 void frmMain::on_pageRoll_customContextMenuRequested(const QPoint &pos)
 {
 }
@@ -1330,6 +1573,11 @@ constexpr int kLogLineH = 24;           ///< 16px 字的行高
 // 取设置页滚动区的内容布局（定义在本文件后面，initDebugPage 要先用一次）
 static QVBoxLayout *settingsContentLayout(QWidget *page);
 
+/// 上面的说明块讲"装什么"，这里补一条"怎么插"：本函数第一件事就是把 pageSettings 的
+/// 原控件整体搬进 QScrollArea，此后**所有**分组框都必须经 settingsContentLayout()
+/// 插进滚动内容里。直接 addWidget 到 pageSettings 自己的布局 = 钉在滚动区之外
+/// （不参与滚动、白占一屏高度），还会打破"第 0 项是滚动区"这个前提，
+/// 后面每个分组框都只 qWarning 一句就静默加不进来（看着像功能消失）。
 void frmMain::initDebugPage()
 {
     ConfigManager &cfg = ConfigManager::instance();
@@ -2488,11 +2736,21 @@ void frmMain::initGeofenceUi()
     gl->addWidget(labThrottle, 1, 0);
 
     QSpinBox *throttleSpin = new QSpinBox;
+    // 1..600 秒（10 分钟）是本目录给的可选档。⚠ 已知不一致：手改 JSON 写出范围外的值
+    // （例如 5000）时，setValue() 会被 QSpinBox **静默夹到 600**，而 connect 在这行之后，
+    // 所以 config 里仍是 5000、界面显示 600 —— 判定端读的是 config，表现就是
+    // "界面上 10 分钟、实际半小时才报一次"。要支持更宽的窗口得先抬这个上限。
     throttleSpin->setRange(1, 600);
     throttleSpin->setValue(cfg.geofenceThrottleSeconds());
     throttleSpin->setStyleSheet(theme::field(theme::PANEL));
     gl->addWidget(throttleSpin, 1, 1);
 
+    // NOTE: 这两条链与设置页其余下拉的口径**不一样**：其余连 activated（只有用户动作才发），
+    // 这里连的是 currentTextChanged / valueChanged，程序化灌值同样会发。
+    // 当前成立的前提是"所有 addItems/setCurrentText/setValue 都排在 connect 之前"。
+    // 以后若要在本函数后半段（或模型库变更后）重灌一次候选，必须 blockSignals 包住，
+    // 否则每次刷新都白写一次盘（ConfigManager::save() 是持锁整份 JSON 截断重写、非原子），
+    // 2026-10-31 板上就是按 mtime 抓出过这类重复写盘。
     connect(clsCombo, &QComboBox::currentTextChanged, this, [this](const QString &cls) {
         ConfigManager &c = ConfigManager::instance();
         c.setGeofenceAlarmClass(cls.trimmed());
@@ -2871,6 +3129,10 @@ void frmMain::testSelectedModel()
 
 // 给"浏览添加"生成一个不撞车的流 id：local-chN，被占用就递增后缀。
 // id 是注册表主键，撞车等于把另一路正在用的流改掉，所以宁可一路试到 99 再退到时间戳。
+// NOTE: "是否被占用"判的是 videoSource(id).url 为空 —— 注册表里若真存在一条
+// **同 id 但地址为空**的条目（只能由手改 JSON 造出来），这里会当成没占用并整条覆盖。
+// StreamEditorDialog::onAccept() 会当场拦下空地址，所以正常操作造不出这种条目；
+// 若以后放开"允许暂存空地址"，这个判据必须换成"按 id 查存在性"。
 static QString freeStreamIdFor(ConfigManager &c, int channel)
 {
     const QString base = QStringLiteral("local-ch%1").arg(channel + 1);
@@ -2925,6 +3187,10 @@ void frmMain::browseChannelSource(int channel)
     applyChannelConfigNow(channel);
 }
 
+// 四颗 .ui 里的浏览按钮（on_<对象名>_clicked 自动连接）。
+// 必须是四个独立槽而不是一个带参函数：自动连接按对象名匹配，没有"带控件参数的槽"这条路。
+// 1 基对象名 → 0 基通道号的换算只在这里做一次，往下传的都是 0-based。
+// 这四颗钮仍在设置页上（initDebugPage 只摘掉了同排的四颗手填地址框）。
 void frmMain::on_btnBrowseCh1_clicked() { browseChannelSource(0); }
 void frmMain::on_btnBrowseCh2_clicked() { browseChannelSource(1); }
 void frmMain::on_btnBrowseCh3_clicked() { browseChannelSource(2); }
@@ -2971,8 +3237,14 @@ void frmMain::on_spinBoxNmsThresh_valueChanged(double value)
 // ==========================================
 
 /**
- * @brief 追加日志到文本框（简单文本，无颜色）
+ * @brief 追加日志到文本框（简单文本，无颜色、无时间戳/类别前缀）
  * @param msg 日志消息
+ *
+ * 与 log()/logWithColor() 的区别不只是"没颜色"：这里走 QTextBrowser::append()
+ * 自己的插入路径，**不受 logWithColor() 那套"只在贴底时才跟随"的条件控制**。
+ * 所以它只适合偶发的用户级提示（当前唯一调用点是登录失败），
+ * 接到报警/围栏这类每秒级路径上就会把视图每次拽回底部——"日志划不动"的老事故。
+ * 要带颜色和类别就用 log()。
  */
 void frmMain::appendLog(const QString &msg)
 {

@@ -1,3 +1,7 @@
+/**
+ * @file rga_converter.h
+ * @brief media/rga 域 —— RGA2/RGA3 硬件 2D 加速的静态封装（零拷贝三条路径都在这里）
+ */
 // ============================================================================
 // RGA Converter - Rockchip RGA 硬件加速色彩转换和缩放
 // ============================================================================
@@ -31,6 +35,32 @@
 #include <QElapsedTimer>     // 可选耗时分段出参用
 #include <rga/RgaUtils.h>    // RGA 工具函数（get_bpp_from_format 等）
 
+/**
+ * @brief RGA 硬件作业的一层薄封装：全静态、无成员、无状态，因此本类自身没有
+ *        线程安全约束——约束全部落在**入参口径**和**驱动全局状态**上。
+ *
+ * 两条等价但开销不同的 API 风格（选哪条取决于缓冲是不是常驻）：
+ *   - 轻量版（直接把 fd 塞进 rga_buffer_t.fd）：nv12_to_rgba / nv12_to_xrgb /
+ *     nv12_to_rgba_async / nv12_to_rgb_resize / resize。每次作业都由驱动现场
+ *     pin 一次 fd，且**不显式 release**，注册会累积到进程退出才由内核兜底
+ *     （dmesg "Destroy handle[...] when the user exits"）。
+ *   - 句柄版（importbuffer_fd → wrapbuffer_handle → im* → releasebuffer_handle）：
+ *     convertNV12ToRGBAbyRGA / convertNV12ToRGBbyRGA / rgba_to_nv12 /
+ *     rgba_to_rgb_resize。驱动缓存 fd→物理地址表，适合逐帧反复使用的同一块缓冲。
+ *
+ * 三条必须记住的口径（都有板端实测依据，详见各函数与 rga/README.md）：
+ *   1. **wstride 一律是"像素/行"，不是字节 pitch**——内核按
+ *      wstride*hstride*bpp/8 计算所需字节再 map dma_buf，误传字节 pitch 时
+ *      报的是 "required ... byte but only got ..."，用户态只看到笼统的
+ *      "Failed to call RockChipRga interface"。
+ *   2. NV12 的宽高必须是**偶数**（4:2:0 色度 2×2 共享一个 UV），
+ *      且 format 必须与缓冲的实际内存排布一致，否则是按字节错读而不是报错。
+ *   3. 轻量版把 hstride 硬写成 height，因此**不认 vstride > height 的 MPP 帧**
+ *      （MPP 会把 UV 平面按对齐向上取整）；这类帧要走句柄版并显式传 ver_stride。
+ *
+ * ⚠ 本类的 rgba_to_rgb_resize 会调 imconfig()，那是**进程级全局**调度器状态，
+ *   一次生效于后续所有 im* 调用，多线程下后写者覆盖前者——不是本函数私有。
+ */
 class RgaConverter
 {
 public:
@@ -50,6 +80,23 @@ public:
     //   3. 不同尺寸：调用 improcess()（缩放 + 色彩转换）
     //
     // ============================================================================
+    /**
+     * @brief NV12 DMA-BUF → RGBA DMA-BUF（轻量 fd 直填版，同步返回）
+     * @param src_fd/src_w/src_h 源 NV12 缓冲；宽高**必须为偶数**（4:2:0 色度 2×2 共享），
+     *             奇数尺寸在驱动侧是参数非法，不是"少一列"
+     * @param src_stride 源行跨度，**像素/行口径**（NV12 一字节一像素时才与字节 pitch 同值）；
+     *             本函数直接塞进 wstride，不做任何换算，传字节 pitch 会得到
+     *             "required N byte but only got M" 这种难以归因的内核错误
+     * @param dst_fd/dst_w/dst_h/dst_stride 目标 RGBA 缓冲；dst_stride 同样按像素口径
+     * @return true = 作业成功（IM_SYNC，返回时像素已落盘）；false = 驱动失败，
+     *         目标缓冲内容未定义（可能是上一帧残留，调用方不可"部分使用"）
+     * @note hstride 被写死成 height：不认 vstride>height 的帧，MPP 输出请用
+     *       convertNV12ToRGBAbyRGA()。
+     * @note 目标格式固定 RGBA_8888，不做格式选择；且本函数**不调 imsetColorSpace**，
+     *       色彩矩阵走驱动默认，而句柄版显式设成 BT.709 limited → RGB full。
+     *       两条路径混用同一段帧会看到轻微色偏——本仓监控主链路只走句柄版，
+     *       本函数当前无调用方（grep `RgaConverter::nv12_to_rgba` 零命中）。
+     */
     static bool nv12_to_rgba(int src_fd, int src_w, int src_h, int src_stride,
                              int dst_fd, int dst_w, int dst_h, int dst_stride)
     {
@@ -106,6 +153,31 @@ public:
     //   本函数每帧都 import+release，而目标缓冲其实全程只有两个、fd 不变，
     //   所以要先知道 import 占比，才能判断缓存句柄值不值（见调用侧探针）。
     // ============================================================================
+    /**
+     * @brief NV12 DMA-BUF → RGBA DMA-BUF（句柄版，同步；监控主链路每帧走这一条）
+     * @param src_dma_fd 源 NV12 的 DMA-BUF fd（AVFrame->buf[0] 派生出来的那个，
+     *             **归 FFmpeg 所有，禁止在本函数之外或之内 close**）
+     * @param dst_dma_fd 目标 RGBA 的 DMA-BUF fd（通常是 DmaFrameBuffer 的双缓冲之一）
+     * @param width/height 目标尺寸，同时被当源尺寸用 —— **本函数不做缩放**，
+     *             src/dst 尺寸不同要走 nv12_to_rgb_resize 那类带 rect 的接口
+     * @param src_hor_stride 源 Y 平面行跨度（像素口径；NV12 数值上等于字节 pitch）
+     * @param src_ver_stride 源垂直跨度（行数），同时进 hstride 与导入字节数。
+     *             正口径是 MPP 的真实 vstride（planes[1].offset-planes[0].offset
+     *             再除 pitch，见 camera_preview_decoder 的做法）；现网
+     *             ffmpeg_video_decoder.cpp 传的是 frame->height，隐含"MPP 输出无垂直
+     *             填充"的假设，该风险已在调用侧注释登记（有填充时表现为偏色/横条纹）。
+     * @param source_rga_format 源格式，默认 NV12(RK_FORMAT_YCbCr_420_SP)；
+     *             只允许与缓冲实际排布一致的 FourCC，传错是错读像素而非报错
+     * @param t_import_ns/t_cvt_ns 可选出参（可为 nullptr）：分别回填"两次 importbuffer_fd"
+     *             与"imcvtcolor 本体"的耗时纳秒，两者互斥地只在至少传了一个时才起表
+     * @return true = 全链成功；false = import 失败 / imcheck 参数非法 / 转换失败，
+     *         三种都只在 stdout 打一行，**不区分原因**；无论走到哪一步失败，
+     *         已 import 的两个句柄都由 release_buffer 标签统一归还（无句柄泄漏）
+     * @note 目标导入尺寸按 `width*height*4` 紧凑算，**没有** dst stride 入参——
+     *       目标缓冲必须是紧凑 RGBA；若将来要支持有 stride 的 dst，得加参数而不是改常量。
+     * @note 每次调用都 import+release 一对句柄：常驻双缓冲其实只有两块、fd 不变，
+     *       这是刻意的保守做法还是该缓存句柄，由 t_import_ns 的数据决定（见上面的探针说明）。
+     */
     static bool convertNV12ToRGBAbyRGA(int src_dma_fd, int dst_dma_fd, int width, int height,
                                       int src_hor_stride, int src_ver_stride,
                                       int source_rga_format = RK_FORMAT_YCbCr_420_SP,
@@ -198,6 +270,17 @@ public:
     //   输出缓冲若按 width*3 紧凑分配可能触发 imcheck 失败（现在调用方
     //   能通过返回 false 感知）。
     // ============================================================================
+    /**
+     * @brief NV12 DMA-BUF → RGB888 DMA-BUF（句柄版；与 RGBA 版同一条链，只是目标 3 字节/像素）
+     * @param src_dma_fd/dst_dma_fd/width/height/src_hor_stride/src_ver_stride
+     *             口径与 convertNV12ToRGBAbyRGA() **完全一致**（那份注释里的约束同样适用），
+     *             区别是本函数没有 source_rga_format 入参 —— 源格式**写死 NV12**，
+     *             NV21 之类的流走这里会静默错读色度顺序，需要时得先加参数。
+     * @return true = 成功；false = import/imcheck/转换任一失败（句柄仍已归还）
+     * @note 本函数当前无调用方（推理输入实际由 rgba_to_rgb_resize 从已画框的 RGBA 产出）。
+     *       RGB888 的 dst 导入尺寸按 width*height*3 紧凑算，没有 stride 入参，
+     *       所以目标缓冲必须满足 RGA 对 3 字节行的对齐要求，否则只在 imcheck 处失败。
+     */
     static bool convertNV12ToRGBbyRGA(int src_dma_fd, int dst_dma_fd, int width, int height,
                                       int src_hor_stride, int src_ver_stride)
     {
@@ -298,6 +381,29 @@ public:
     //   在驱动里。import 拿到 handle、用完 release 与 convertNV12ToRGBAbyRGA
     //   的既有口径一致，且 handle 让驱动缓存 fd→物理地址表，省掉重复 pin/unpin。
     // ============================================================================
+    /**
+     * @brief 已画框的 RGBA DMA-BUF → NV12 DMA-BUF（硬编前处理，同步返回）
+     * @param src_fd/src_w/src_h 源 RGBA 缓冲（DmaFrameBuffer，内容是"这一帧 + 检测框"）
+     * @param src_wstride_px RGBA 行跨度，**像素/行**：调用方给的是字节 pitch，
+     *             必须 /4 之后再传（32bpp）。见 VideoRecorder::encodeFrame() 的换算。
+     * @param dst_fd/dst_w/dst_h 目标 NV12 缓冲（rkmpp 编码器帧池里的那一个）
+     * @param dst_wstride_px NV12 Y 平面行跨度（像素）。Y 平面 1 字节/像素，
+     *             所以 AVDRM 的 planes[0].pitch（字节）数值上可直接传。
+     * @param dst_hstride_lines NV12 垂直跨度（行数），用 planes[1].offset-planes[0].offset
+     *             反推，**不要传 height**：MPP 会把 UV 平面按对齐向上取整，
+     *             传小了会让导入字节数不足、内核 map 失败。
+     * @return true = 转换成功（IM_SYNC，返回即像素可用）；false = 入参不合理 /
+     *         import 失败 / 驱动作业失败。三种都只 printf 一行，不区分。
+     *         返回 false 时目标缓冲内容未定义 —— 调用方（VideoRecorder）按
+     *         "丢这一帧并计入 droppedFrameCount()"处理，绝不重试也不阻塞解码线程。
+     * @note 入口的三条区间检查（src_wstride_px<src_w 等）就是字节/像素口径搞混的
+     *       防呆：字节 pitch 误传进来时 wstride 恰是宽度的 4 倍，只会在内核里留下
+     *       一条 "map 失败" 日志，现场无法归因，所以在用户态先拦。
+     *       检查只兜住"传大了"，**传小了（比如按 height 传了 vstride）拦不住**，
+     *       那种情况仍要靠上面的 dst_hstride_lines 口径。
+     * @note 4 路常驻时 RGA 作业会排队，本函数偶发返回 false（实测 12s 内约 1 次量级），
+     *       属预期噪声，不要在这里加循环重试（见 rga/README.md 最后一条）。
+     */
     static bool rgba_to_nv12(int src_fd, int src_w, int src_h, int src_wstride_px,
                              int dst_fd, int dst_w, int dst_h,
                              int dst_wstride_px, int dst_hstride_lines)
@@ -351,6 +457,15 @@ public:
     // ============================================================================
     // XRGB = 32 位，最高字节未使用（X = padding）
     // ============================================================================
+    /**
+     * @brief NV12 → XRGB(RGBX_8888) 转换，轻量 fd 直填
+     * @param 参数口径同 nv12_to_rgba()（stride 为像素口径、hstride 写死 height）
+     * @return status == IM_STATUS_SUCCESS；失败时目标缓冲内容未定义
+     * @note 与 nv12_to_rgba 的唯一区别是目标 FourCC（RK_FORMAT_RGBX_8888 vs RGBA_8888），
+     *       两者在 RGA 侧都是 32bpp、通道排布不同。选错**不会报错**，只会按字节
+     *       错读通道（颜色不对），与本类"format 必须与内存排布一致"的总口径同一条。
+     * @note 全工程零调用方；直填 fd 会累积驱动注册（见类头"轻量版"那条）。
+     */
     static bool nv12_to_xrgb(int src_fd, int src_w, int src_h, int src_stride,
                              int dst_fd, int dst_w, int dst_h, int dst_stride)
     {
@@ -387,6 +502,16 @@ public:
     //   nv12_to_rgba（IM_SYNC）使用的同步语义由驱动隐式保证——
     //   任何使用本异步函数的代码都必须自行显式调用 imsync()。
     // ============================================================================
+    /**
+     * @brief NV12 → RGBA 的**异步入队**版本
+     * @param 参数口径同 nv12_to_rgba()
+     * @return true 只代表"作业已进驱动队列"，**不代表转换完成**；
+     *         false = 连入队都失败（参数非法/驱动拒绝）
+     * @note ⚠ 返回 true 后立刻读 dst_fd 会拿到半成品像素。必须自行 imsync()，
+     *       本类的 sync() 是空实现（imsync 被注释），拿它当栅栏等于没有栅栏。
+     * @note 全工程零调用方。留着的唯一价值是"将来要做 RGA 流水线"时的入口；
+     *       真要启用，同步点得连调用方一起设计，不能只改这里。
+     */
     static bool nv12_to_rgba_async(int src_fd, int src_w, int src_h, int src_stride,
                                    int dst_fd, int dst_w, int dst_h, int dst_stride)
     {
@@ -435,6 +560,23 @@ public:
     //   src/dst 尺寸不同时结果取决于驱动行为，"直接拉伸"预期不成立；
     //   需要拉伸应走 improcess（同函数 letterbox 分支的做法）。
     // ============================================================================
+    /**
+     * @brief NV12 → RGB888 + 缩放（一步完成，零拷贝），YOLO 模型输入的预处理入口之一
+     * @param src_fd/src_w/src_h/src_stride 源 NV12；stride 像素口径，hstride 写死 height
+     * @param dst_fd/dst_w/dst_h/dst_stride 目标 RGB888（现网是 640×640、stride=640*3）
+     *             【640 的来源】YOLO11 导出时固定的输入 attr（.rknn 的 width×height），
+     *             不是可调参数；改它要连同 .rknn 一起重新转换，否则 NPU 侧直接拒。
+     * @param letterbox true（默认）= 等比缩放 + 居中补 0x727272；false = 走 imcvtcolor，
+     *             见上方 ⚠：那条分支其实**不缩放**，别当成"拉伸模式"用。
+     * @return 0 = 成功；-1 = 驱动作业失败（打印 imStrError）。**不返回 IM_STATUS 原值**，
+     *         调用方只能判"成/败"，想知道原因得看 stdout。
+     * @note 目标缓冲不会被本函数清零：letterbox 分支先 imfill 整幅补灰再写 dst_rect，
+     *       所以无边残留；但 fd 直填路径每次都在驱动里注册缓冲，逐帧用会累积
+     *       （模型输入这条路径现网走的是 rgba_to_rgb_resize，见 ffmpeg_video_decoder 4.7 节）。
+     * @note (int) 截断 new_w/new_h 可能比理论值小 1px，居中偏移随之有 1px 抖动；
+     *       叠加 NV12 要求偶数宽高，奇数源尺寸时会有 1px 级别的坐标失配 —— 
+     *       坐标还原靠 letterbox_t{x_pad,y_pad,scale}，别按"整数对齐"去反推。
+     */
     static int nv12_to_rgb_resize(int src_fd, int src_w, int src_h, int src_stride,
                                    int dst_fd, int dst_w, int dst_h, int dst_stride,
                                    bool letterbox = true)
@@ -509,6 +651,29 @@ public:
     // ⚠ src_buf_size/dst_buf_size 计算后未使用（importbuffer_fd 走的是
     //   宽高+格式重载），保留自旧版本，勿据此推断缓冲尺寸校验存在。
     // ============================================================================
+    /**
+     * @brief RGBA → RGB888 + letterbox 缩放（一步完成），**监控主链路每帧走这一条**
+     * @param src_fd/src_w/src_h 源 RGBA（已画框的显示缓冲，或抓拍用的原始显示帧）
+     * @param src_stride 名义上是源行跨度，但本函数把它只用于那条"算完没用的
+     *             src_buf_size"（importbuffer_fd 走的是 (fd,w,h,format) 重载），
+     *             所以现网两个调用点分别传字节 pitch 与 w*4 都"没出事"。
+     *             NOTE: 这是运气而不是契约——一旦改用带 stride 的重载，两处口径必须
+     *             同时换成像素口径，否则就是本文件第一条实测结论里那个 map 失败。
+     * @param dst_fd/dst_w/dst_h 目标 RGB888（640×640，来自 DmaBufferPool，模型输入）
+     * @param dst_stride 同上，当前未参与导入尺寸计算，但被拿去做那条无用乘法。
+     * @param letterbox true=等比缩放居中（**不补边**，理由见上方"不可用 imfill"）；
+     *             false=imcvtcolor 纯转换不缩放，SnapWriter 用这一档做同尺寸 RGBA→RGB。
+     * @return 0=成功；-1=任一失败（import/imcheck/作业）。两种失败都经
+     *         release_buffer 标签归还句柄，调用方可以且应当判返回值。
+     * @note 目标格式在本函数里**写死 RK_FORMAT_RGB_888**，而两个调用点的池是按
+     *       RK_FORMAT_BGR_888 建的（只用于算 size，3 字节/像素与 RGB 相同，
+     *       所以分配不会出错）。也就是说缓冲池元信息里的 format 与实际像素排布
+     *       不一致，下游一律按 image_buffer_t::format = IMAGE_FORMAT_RGB888 读；
+     *       要改成真 BGR 得同时改这里的 wrapbuffer 与 RKNN 输入约定，别只改池参数。
+     * @note letterbox=true 时 dst 的边条残留的是池内**上一帧**像素（没有 imfill），
+     *       属已接受的轻微噪声；若哪天要求干净补边，得先解决 imfill 对
+     *       importbuffer_fd 句柄缓冲返回 EINVAL 那个问题。
+     */
     static int rgba_to_rgb_resize(int src_fd, int src_w, int src_h, int src_stride,
                                    int dst_fd, int dst_w, int dst_h, int dst_stride,
                                    bool letterbox = true)
@@ -605,6 +770,16 @@ public:
     // 参数：
     //   - src_fmt/dst_fmt: 源/目标格式（如 RK_FORMAT_RGB_888）
     // ============================================================================
+    /**
+     * @brief 纯缩放（imresize），格式由调用方给
+     * @param src_fd/src_w/src_h/src_stride/src_fmt 源缓冲与其几何、FourCC
+     * @param dst_fd/dst_w/dst_h/dst_stride/dst_fmt 目标缓冲与其几何、FourCC
+     * @return 0 = 成功；-1 = 驱动失败（注意：本函数**不打印** imStrError，
+     *         失败时现场什么都看不到，只有返回值）
+     * @note src_fmt/dst_fmt 必须与各自缓冲的真实排布一致：imresize 不做色彩转换，
+     *       格式写错是按字节错读（画面花），不会返回错误。
+     *       stride 口径同本类其它轻量版（像素/行），hstride 写死 height。全工程零调用方。
+     */
     static int resize(int src_fd, int src_w, int src_h, int src_stride, int src_fmt,
                       int dst_fd, int dst_w, int dst_h, int dst_stride, int dst_fmt)
     {
@@ -631,6 +806,14 @@ public:
     // ============================================================================
     // sync - 同步等待 RGA 硬件完成（当前为空实现）
     // ============================================================================
+    /**
+     * @brief 占位：当前是**空函数**，imsync() 被注释掉了
+     * @note ⚠ 不要把它当同步栅栏用——调它等于什么都不做。
+     *       本类现有被调用的转换全部带 IM_SYNC（同步语义由驱动保证），所以现状是安全的；
+     *       一旦有人启用 nv12_to_rgba_async()，必须在这里恢复 imsync() 或让调用方自调，
+     *       否则会读到半成品像素而不是报错（这类 bug 在现场表现为"偶发半帧画面"）。
+     *       刻意留着注释而非删掉本函数：它是"异步路径欠一个栅栏"的可见提醒。
+     */
     static void sync()
     {
         // imsync();

@@ -1,3 +1,20 @@
+/**
+ * @file qt_image_utils.h
+ * @brief base/imaging 域 —— Qt 侧图片安全解码（header-only，全部 inline）
+ *
+ * 所属模块：src/base/imaging。核心职责：让 UI/业务拿到 QPixmap 时**绕开板端 Qt
+ * 图像插件**，解码统一走 OpenCV，失败再兜底 ImageMagick；顺带管抓拍缩略图的
+ * sidecar 命名与"按目标框等比缩放"的读取。
+ *
+ * 为什么要有这个文件（而不是直接 QPixmap(path)）：板端 Qt 的 JPEG 插件与链进来的
+ * libjpeg 存在 ABI 冲突，整幅解码现场照片会直接把进程崩掉；这不是"偶发解码失败"
+ * 而是崩溃，所以 UI 侧展示照片一律走 loadPixmapSafe/loadThumbnailScaled，
+ * 保存则走 QImage::save —— 不要绕开这几个封装再调 cv::imread/QPixmap(path)
+ * （口径见 imaging/README.md 注意事项第 4 条）。
+ *
+ * 无状态、无锁：QPixmapCache 与 QProcess 各自线程安全，但 QPixmap 本身必须在
+ * GUI 线程构造，所以这三个函数只应在界面线程调用。
+ */
 // 文件职责：Qt 图像安全读取工具。用 OpenCV 解码图片再转 QPixmap，规避板端 Qt JPEG
 // 插件与 libjpeg 的 ABI 冲突；OpenCV 解码失败时回退调用 ImageMagick convert 命令。
 #pragma once
@@ -12,6 +29,18 @@
 #include <algorithm>
 #include <opencv2/opencv.hpp>
 
+/**
+ * @brief 整幅安全解码一张图片 → QPixmap
+ * @param path 图片路径（本地文件；空串/不存在不报错，直接落到失败返回）
+ * @return 解码后的 QPixmap；**两条兜底都失败时返回空 QPixmap**（isNull()==true），
+ *         调用方需自备占位图。不抛异常。
+ * @note 同步阻塞：cv::imread 整幅解码 + 失败时最多等 5000ms 的 QProcess。
+ *       5000ms 是给外部 `convert` 进程留的余量，也是"UI 卡住 5 秒"的上限——
+ *       列表/批量场景请改用 loadThumbnailScaled()，别在这里循环解整幅图。
+ * @note 兜底依赖板子上真的装了 ImageMagick 的 `convert`；没装时 waitForFinished
+ *       直接返回 false，表现与"图片坏了"完全一样，只能靠前一行 qInfo 区分。
+ *       排查"照片显示不出来"时先 `which convert`。
+ */
 // Decode images with OpenCV to avoid Qt JPEG plugin/libjpeg ABI conflicts.
 inline QPixmap loadPixmapSafe(const QString& path) {
     qInfo() << "[image] loadPixmapSafe path=" << path
@@ -31,12 +60,18 @@ inline QPixmap loadPixmapSafe(const QString& path) {
         return QPixmap();
     }
     cv::cvtColor(bgr, bgr, cv::COLOR_BGR2RGB);
+    // QImage 这里只是**引用** bgr.data（零拷贝构造），而 bgr 是本函数局部变量、
+    // return 即析构，所以末尾的 image.copy() 不是优化而是必需——去掉它就是悬垂指针。
+    // 传 bgr.step 而不是假定 w*3：IMREAD_COLOR 出来本来就是连续的 8UC3，但按 step
+    // 写才对得上 loadThumbnailScaled 的同一套形状，将来换解码 flags 不会埋雷。
     QImage image(bgr.data, bgr.cols, bgr.rows, static_cast<int>(bgr.step), QImage::Format_RGB888);
     return QPixmap::fromImage(image.copy());
 }
 
 // 抓拍 sidecar 缩略图路径：与整幅抓拍图同目录、同名加 "_thumb"。
 // 写侧（ffmpeg_video_decoder.cpp 的 SnapWriter）与读侧都经本函数，命名规则只有一份。
+// ⚠ 改这里的后缀等于同时改读写两侧：老数据是按 _thumb.jpg 落的盘，
+//   改名后读侧找不到 sidecar 会静默退成整幅解码（变慢但不报错），很难归因。
 inline QString thumbnailSidecarPath(const QString& path) {
     const QFileInfo fi(path);
     return fi.dir().filePath(fi.completeBaseName() + QStringLiteral("_thumb.jpg"));
@@ -59,6 +94,14 @@ inline QString thumbnailSidecarPath(const QString& path) {
 // （面板走增量刷新，已有条目不会重建，所以稳态下基本全是 miss）。
 //
 // 返回空 QPixmap 表示图片读不出来，调用方自行显示占位文案。
+/**
+ * @param path 原抓拍图路径（sidecar 由 thumbnailSidecarPath(path) 推导，不要传 sidecar 本身）
+ * @param w/@h 目标框的宽高（像素）
+ * @return 等比缩放后装进 w×h 框内的 QPixmap；读不到图返回空 QPixmap
+ * @note ⚠ w 或 h 传 0 会让 ratio 算成 0，进而走到 cv::resize(dsize=0×0, fx=fy=0)，
+ *       OpenCV 在那儿是断言失败直接 abort 整个进程——本函数**不做**这层防御，
+ *       调用方（报警面板）传的必须是布局里量出来的正数尺寸。
+ */
 inline QPixmap loadThumbnailScaled(const QString& path, int w, int h) {
     const QString key = path + QLatin1Char('@') +
                         QString::number(w) + QLatin1Char('x') + QString::number(h);

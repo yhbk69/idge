@@ -1,3 +1,19 @@
+// ============================================================================
+// video_alarm_widget.cpp - 视频监控页右侧"最近报警"卡片面板实现
+// ============================================================================
+//
+// 【所属模块】src/ui/widgets。数据源是 AlarmManager 的**内存窗口**（最近 1000 条
+//   里取最新 20 条，滤掉误报），不是数据库 —— 全量历史检索在 alarm_list_widget。
+// 【一条不变式】items_ 的 key 集合 ≡ shownIds_，且 shownIds_ 的顺序就是布局里
+//   从上到下的顺序（新→旧）。refreshAlarms() 的全部工作就是让这个不变式重新成立。
+//   注意判重比的是**id 序列**：卡片内容变了而 id 集合没变（比如类别名被回填）不会
+//   重绘——目前成立是因为卡片显示的类别/置信度/时间/通道在报警产生后就不再改，
+//   状态变化（确认/误报）里只有"误报"会动这个集合（被过滤掉→id 少一个）。
+// 【耗时口径】稳态一次刷新 = 一次 alarms() 快照拷贝（1~3ms）；
+//   全拆重建实测 600~765ms（会挤掉四路 paintGL 8~10 帧），增量化之后剩下的
+//   大头是抓拍图解码 —— 所以缩略图必须走 loadThumbnailScaled，不能用 QPixmap(path)。
+// 【线程】全部 GUI 线程；没有定时器，刷新时机由外部（frmMain 的 300ms 防抖）驱动。
+// ============================================================================
 #include "video_alarm_widget.h"
 #include "alarm_detail_dialog.h"
 #include "theme.h"
@@ -20,12 +36,19 @@
 #include <QScreen>
 #include <QGuiApplication>
 
+// 构造只做骨架（setupUi），**不查库**：本面板建好时可能一直不被切到，
+// 第一次数据由 showEvent 带进来（外部防抖调 refreshAlarms 时也会被 isVisible() 挡）。
 VideoAlarmWidget::VideoAlarmWidget(QWidget *parent)
     : QWidget(parent)
 {
     setupUi();
 }
 
+// 骨架：标题 + QScrollArea + 一个装卡片的 contentWidget。
+// 布局末尾那条 addStretch() 是**必须的**：卡片少于 20 张时它把条目顶在上面，
+// 否则多出来的竖向空间会被均分成条目之间的空档（卡片是 setFixedHeight，
+// 自己不会长大，但会在各自分到的格子里居中）。
+// refreshAlarms 的 insertWidget(i, …) 下标也默认这条 stretch 恒在末尾，删掉它就会错位。
 void VideoAlarmWidget::setupUi()
 {
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
@@ -73,6 +96,11 @@ void VideoAlarmWidget::setupUi()
     mainLayout->addWidget(scrollArea_, 1);
 }
 
+// 增量对齐（详见文件头【一条不变式】）。三步的顺序不能换：
+//   算 wanted（倒着扫内存窗口，滤误报，攒够 20 就停）→ 与 shownIds_ 比，一样就 return
+//   → 删消失的、建新增的。倒着扫是因为 alarms() 是时间升序追加的，
+//   最新在末尾，所以这里从 size()-1 往前取，取出来天然就是"新→旧"。
+// 只在新报警真的到来时才付建 widget 的代价；已存在的条目一律原地不动。
 void VideoAlarmWidget::refreshAlarms()
 {
     // 面板不可见（切到别的页面、窗口被隐藏）时重建毫无意义，而这件事发生在 GUI
@@ -139,6 +167,8 @@ void VideoAlarmWidget::refreshAlarms()
     }
 }
 
+// 这是隐藏期间漏掉的那次刷新唯一的补口：不可见时 refreshAlarms 直接 return，
+// 外部再怎么防抖都不会把数据带进来，全靠这里补一次。
 void VideoAlarmWidget::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
@@ -146,6 +176,11 @@ void VideoAlarmWidget::showEvent(QShowEvent *event)
     refreshAlarms();
 }
 
+// 建一张卡片：缩略图 + 两行文字，登记进 items_ 后交给调用方落位。
+// 调用约束：只在 refreshAlarms 里被调（那里负责 insert 进布局并保证同一 id 只建一次），
+// 别处直接调会得到一张"已登记但不在布局里"的隐形卡片 —— items_ 判重会把它当已存在，
+// 于是这条报警在界面上永远不出现。
+// 内存：parent 为空，靠布局持有；refreshAlarms 删除时是 removeWidget + delete 成对做。
 QWidget *VideoAlarmWidget::createAlarmItem(const AlarmRecord &alarm)
 {
     // 样式一律靠 objectName 命中 setupUi() 里那份集中样式表，
@@ -252,6 +287,14 @@ bool VideoAlarmWidget::eventFilter(QObject *watched, QEvent *event)
     return QWidget::eventFilter(watched, event);
 }
 
+// 卡片点击 → 详情框。三点值得知道：
+//   1) 按 id 在**内存窗口**里找（不是库）：卡片本来就来自这份快照，
+//      找不到只有一种情况——这条已被裁出最近 1000 条，此时静默返回（不弹错框，
+//      现场"点了没反应"通常是这张卡片已经过期了一瞬）。
+//   2) dlg 是栈上对象 + exec()：GUI 线程在模态循环里**仍然**会跑防抖定时器，
+//      但本面板的 refreshAlarms 会照常被调（本窗体此时仍可见），这是可接受的重复劳动。
+//   3) 两条 connect 是本面板与 AlarmManager 之间唯一的写路径：详情框自己不认识
+//      AlarmManager，标误报/确认都要经这里回到单例。
 void VideoAlarmWidget::onAlarmClicked(const QString &alarmId)
 {
     QVector<AlarmRecord> alarms = AlarmManager::instance().alarms();

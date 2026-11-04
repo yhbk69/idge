@@ -5,9 +5,25 @@
 
 class QAbstractScrollArea;   // enableTouchScroll 的入参类型，这里只传指针，前置声明即可
 
+/**
+ * @file qthelper.h
+ * @brief src/ui/core 的通用静态工具类声明（实现见 qthelper.cpp）。
+ *
+ * 本仓自己往这个移植进来的类里加过的只有三支，都在"触屏/文案"口径上：
+ *   enableTouchScroll(All)（QScroller 挂 viewport）、dumpTouchGeometry
+ *   （IDGE_TOUCHDUMP 命中区探针）、localizeMessageBoxButtons/localizeButtonBox/
+ *   askConfirm/installMessageBoxTextFilter（标准按钮必须显式改中文，理由与实测
+ *   数据见同目录 README「文案与按钮顺序」）。
+ * 其余是 blacksoft 通用件：屏幕/DPI、居中、字体/编码/翻译、QSS 读取、
+ * 文件对话框、格式化、无边框窗体等。取值档（字号/尺寸）一律在 theme.h，
+ * 本类不定义任何设计令牌，别在这里加新常量。
+ */
+
 // ============================================================================
 // QtHelper - Qt通用工具类
 // 作用：封装常用的屏幕信息、窗口管理、文件操作、加密校验、样式设置等实用方法
+// 线程：除纯计算那几个（getUuid/getOrCode/getCheckCode/getTimeString/
+//   getSizeString/cutString/getRangeValue）外，全部只能在 GUI 线程调用。
 // ============================================================================
 class QtHelper
 {
@@ -75,6 +91,12 @@ public:
 
     // 从ini配置文件读取指定key的值
     static QString getIniValue(const QString &fileName, const QString &key);
+    // 另一个重载：路径按 "程序所在目录 / dir + name + .ini" 拼，file 非空时覆盖 name。
+    // ⚠ dir 是拼在文件名**前面的前缀**（中间没有 '/'），不是目录层级，别指望它能指到子目录。
+    // 两个重载都**不报错**：文件不存在/没有这个 key 一律返回空串，调用方自己判空。
+    // NOTE: 匹配用的是 startsWith(key)，所以 key="ip" 会连 "ip2=..." 一起命中——
+    // 取前缀互相包含的多个 key 时要把名字写全。本仓配置全走 ConfigManager，
+    // 上面这两个重载目前零调用。
     static QString getIniValue(char *argv[], const QString &key, const QString &dir = QString(), const QString &file = QString());
 
     // ========================================================================
@@ -186,20 +208,38 @@ public:
     // 加载翻译文件(.qm)
     static void setTranslator(const QString &qmFile);
 
-    // 统一消息框标准按钮为中文。Qt 自带的 zh_CN 词典只译了 QMessageBox 上下文里的
-    // "OK"，Cancel / Yes / No / Close / Save 等都仍是英文（同一个 .qm 里只有
-    // QDialogButtonBox 上下文译全了，而 QMessageBox 取文案用的是自己的上下文），
-    // 所以凡是带这些角色的框都必须显式改写，不能指望翻译文件。
+    /**
+     * @brief 统一消息框标准按钮为中文
+     *
+     * 实测（本机 5.12.8，装了 src/ui/core/qrc/qm/qt_zh_CN.qm，用 qApp->translate 逐上下文验证）：
+     *   - `QPlatformTheme` 这个上下文**一条都没译**（Cancel/&Yes/&No 原样返回英文），
+     *     而 QMessageBox 与 QDialogButtonBox 的默认按钮文案都从这里取——所以两类框都是英文，
+     *     "QDialogButtonBox 上下文被词典译全了"那条老判断不成立（它根本没被用到）。
+     *   - QMessageBox 上下文只有 "OK"→"确定" 这一条对得上。
+     * 结论：凡是标准按钮，**必须显式改写**，不能指望 .qm；细节见同目录 README「文案与按钮顺序」。
+     */
     static void localizeMessageBoxButtons(QMessageBox *box);
 
+    /**
+     * @brief 统一 QDialogButtonBox 的角色默认文案为中文（判据同 localizeMessageBoxButtons）
+     *
+     * 只改"文案还是 Qt 那份英文"的按钮；调用方自己写过中文的（含 &助记符）一律不动，
+     * 这样信息框里"确认误报 / 不是误报"这类专用文案不会被改成通用的"是 / 否"。
+     * 顺序不用管：Qt 按 ButtonRole 排位，实测 `addButton(Cancel)` 再 `addButton(Ok)`
+     * 出来的仍是「确定在左、取消在右」，正好是本项目的口径。
+     */
+    static void localizeButtonBox(QDialogButtonBox *box);
+
     // 询问框：固定"确定/取消"两个按钮，返回 QMessageBox::Ok 表示用户确认。
-    // 别用 QMessageBox::question 静态版——那会给出英文的 Yes/No。
+    // 新增询问一律走这里，不要直接 QMessageBox::question（那会给英文 Yes/No，
+    // 靠全局过滤器兜底也只能译成"是/否"，与本项目的"确定/取消"文案不一致）。
     static QMessageBox::StandardButton askConfirm(QWidget *parent, const QString &title,
                                                   const QString &text);
 
-    // 挂一个全局事件过滤器：任何 QMessageBox 显示前自动走上面那个改写函数。
-    // 静态版 QMessageBox::information/warning/critical 一堆调用点没法逐个改，
-    // 靠过滤器兜底；已显式写成中文的按钮不会被覆盖。
+    // 挂一个全局事件过滤器：任何 QMessageBox / QDialogButtonBox / QFileDialog 显示前
+    // 自动走上面几个改写函数。静态版 QMessageBox::information/warning/critical 与
+    // getOpenFileName 一堆调用点没法逐个改，靠过滤器兜底；
+    // 已显式写成中文的按钮不会被覆盖。
     static void installMessageBoxTextFilter();
 
     // ========================================================================
@@ -390,6 +430,12 @@ public:
 
     // 设置开机自启动(写入注册表)
     static void runWithSystem(bool autoRun = true);
+    // 另一个重载：登记的是指定程序（fileName 作注册表键名、filePath 作值）。
+    // 上面那个不带文件名的版本只是拿 qApp 的 applicationName/applicationFilePath
+    // 转调这里，两者行为完全一致。
+    // ⚠ 只有 Q_OS_WIN 有实现体：在本板（Linux）上两个重载都是**空函数**——
+    //   不报错、不写任何配置、也不返回成败。板上要配自启得改 systemd/桌面 autostart，
+    //   别在这个类里加 Linux 分支（那是平台集成，不是本类的职责）。
     static void runWithSystem(const QString &fileName, const QString &filePath, bool autoRun = true);
 
     // 启动外部程序(已在运行则不重复启动)

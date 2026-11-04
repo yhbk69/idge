@@ -92,17 +92,50 @@ private:
 // ============================================================================
 // 单项取值：独立函数便于逐条自测，也让上面的三条实测口径有各自的落点
 // ============================================================================
+// 共同约定：这些函数都是**无锁、无状态**的纯读取，可在任意线程调用；
+// 读不到的一律返回 false / 0，**不猜值、不返回上一个数**（"报 0"会被对外解释成
+// "负载真的很低"，那是假数据；见文件头第 1 条同一判断）。
+// 出参指针为 null 时直接返回 false（不崩、不写），调用方不需要先判空但也不能忽略返回值。
+// ----------------------------------------------------------------------------
 // /proc/stat 首行的累计时间（单位换算成毫秒：Hz=100 → 1 tick = 10ms）。false = 读不到。
+// 【数字来源】tick→毫秒的换算按 sysconf(_SC_CLK_TCK) 现算，读不到才退回 100；
+// 列固定取第 4/5 列（idle/iowait），求和只累加 0..7 共 8 列（user…steal）——
+// 再往后的 guest/guest_nice 已含在 user 里，加进去会重复计一次。
 bool readCpuTicks(qint64 *idleMs, qint64 *totalMs);
 // 两次快照求百分比。时间没往前走（首次调用、或 procfs 异常）返回 false。
+// ⚠ 必须传**上一次 readCpuTicks 得到的那一对**（同一只采样器、同一份基线）；
+//   混用不同基线或把顺序传反会得到负增量，那种情况本函数返回 false 而不是回 0%。
 bool cpuPercentFromTicks(qint64 prevIdleMs, qint64 prevTotalMs,
                          qint64 idleMs, qint64 totalMs, double *outPercent);
+// /proc/meminfo 的 MemTotal，MB（整除截断）。读不到返回 0 —— 调用方要判 0。
 qint64 memTotalMb();
+// 已用内存 MB = MemTotal - MemAvailable（与看板同一口径，与 free 的算法不同）。
+// ⚠ MemAvailable 是 3.14+ 才有的键；本机有，但**缺键时本函数直接返回 0**，
+//   不退到 free+buffers+cached 的老算法——0 会被 hasMemory 那条判据挡掉（total>0 且 used>=0
+//   才成立，所以 used=0 时仍会被当成"有用量"上报 0），换内核时先确认这个键还在。
 qint64 memUsedMb();      ///< total - MemAvailable
+// 读 /sys/class/power_supply/bat 的 present/capacity/status。
+// false 的条件有三个：present != "1"、capacity 读不出整数、capacity 不在 0..100——
+// 判 present 而不是"读不到就当 0"是刻意的：没装电芯时报一个 0% 会被读成"电量耗尽"。
+// percent/charging 允许传 nullptr（只想要"有没有电池"时）。
 bool   readBattery(int *percent, bool *charging);
+// SoC 温度（摄氏度，由毫度 /1000 换算）。按 type == "soc-thermal" 找 zone，
+// 找不到才用第一个能读到 temp 且 type 不是 "bat" 的 zone 兜底——
+// 按下标取会随机核到电池温度区（本机 zone7 就是 bat 25.0℃，见文件头第 3 条）。
+// ⚠ 列目录必须用 QDir::AllEntries：thermal_zone* 是符号链接，
+//   Dirs|NoSymLinks 在本机列回来是空表，温度项会静默变成"没来源"。
 bool   readSocTempC(double *outC);
+// NPU 使用率：只读 /sys/kernel/debug/rknpu/load（按核百分比，取各核最大值）。
+// ⚠ **本机恒返回 false** —— debugfs 对 uid 1000 是"权限不够"，且这台内核没挂出来。
+//   绝不要"顺手"改成读 /sys/class/devfreq/fdab0000.npu/load：那个节点空闲时恒为
+//   `100@1000000000Hz`（连采 6 次、机上无任何推理进程），拿它当使用率就是对外报假数
+//   （文件头第 1 条）。要出这个数只能以 root 跑并确认 debugfs 可见。
 bool   readNpuLoadPercent(double *outPercent);   ///< 见文件头第 1 条：本机恒 false
+// /proc/uptime 第一列（秒，向下取整）。false = 读不到或解析失败或为负。
 bool   readUptimeSec(qint64 *outSec);
+// /etc/os-release 的 PRETTY_NAME（实测本机 "Ubuntu 24.04.2 LTS"）。
+// 返回空串 = 没有这个键；这是本文件里**唯一没有 has* 标志**的一项，
+// 调用方按"空则省略该字段"处理，与其余各项同一口径。
 QString osPrettyName();
 
 } // namespace sysinfo

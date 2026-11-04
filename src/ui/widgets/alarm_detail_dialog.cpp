@@ -1,3 +1,16 @@
+// ============================================================================
+// alarm_detail_dialog.cpp - 单条报警详情框实现
+// ============================================================================
+//
+// 【所属模块】src/ui/widgets。这个框存在的唯一理由是"判是不是误报"，
+//   所以版面把绝大部分高度让给抓拍预览（setStretch 3:1），信息网格只占一小条。
+// 【渲染口径的两处外部依赖】
+//   - 施工信息按 construction_info 的键**逐行**渲染，标签/顺序来自
+//     ConstructionInfo::fieldsFromJson()，与 ConstructionDetailDialog 同一份口径
+//     ⇒ 协议加字段时这里不用改。
+//   - 配色/字阶一律走 theme::，不写死色值（见 src/ui/core/theme.h 的第一条约定）。
+// 【只读不改】状态变化一律 emit 信号给调用方，本文件里没有任何写库/写单例的调用。
+// ============================================================================
 #include "alarm_detail_dialog.h"
 #include "construction_session.h"
 #include "qthelper.h"
@@ -13,6 +26,8 @@
 #include <QGuiApplication>
 #include <QVector>
 
+// 构造：记录按值存进 alarm_（之后外部再改这份记录不会影响已打开的框），
+// 然后建 UI、读一次盘上的抓拍。全程 GUI 线程，耗时点只有那次图片解码。
 AlarmDetailDialog::AlarmDetailDialog(const AlarmRecord &alarm, QWidget *parent)
     : QDialog(parent), alarm_(alarm)
 {
@@ -20,6 +35,11 @@ AlarmDetailDialog::AlarmDetailDialog(const AlarmRecord &alarm, QWidget *parent)
     loadScreenshot();
 }
 
+// 版面装配。几处不能照字面"简化"的写法：
+//   · 尺寸按父窗所在屏取（见下面注释），不用 primaryScreen；
+//   · 行序固定为 通道/类别/报警级别/置信度/状态/视频，时间和 uuid 两行已按要求撤下；
+//   · 底部三颗钮是手搭的 QHBoxLayout，所以"确认在左、取消在右"这条口径
+//     要靠 addWidget 的先后自己保证（Qt 只对标准框按 ButtonRole 重排）。
 void AlarmDetailDialog::setupUi()
 {
     setWindowTitle("报警详情");
@@ -175,6 +195,9 @@ void AlarmDetailDialog::setupUi()
     mainLay->addLayout(btnLay);
 }
 
+// 读盘上的抓拍图。两个失败分支都只改文案、不打扰用户：
+// 报警图片是按天/按容量清理的，"图没了"是常态而不是错误。
+// snapshot_ 存的是原图，缩放交给 rescaleScreenshot（多次 resize 不重复读盘、不逐级劣化）。
 void AlarmDetailDialog::loadScreenshot()
 {
     if (alarm_.imagePath.isEmpty() || !QFile::exists(alarm_.imagePath)) {
@@ -206,12 +229,22 @@ void AlarmDetailDialog::rescaleScreenshot()
     imageLabel_->setPixmap(snapshot_.scaled(box, Qt::KeepAspectRatio, Qt::SmoothTransformation));
 }
 
+// 转发给 rescaleScreenshot——本框的尺寸来源有三条（构造时的 resize、全屏/窗口切换、
+// 用户拖拽），只有接事件这一条路能让图跟得上。
 void AlarmDetailDialog::resizeEvent(QResizeEvent *event)
 {
     QDialog::resizeEvent(event);
     rescaleScreenshot();
 }
 
+// 「确认误报」：唯一的二次确认。三点注意：
+//   1) parent 传 nullptr + WindowStaysOnTopHint：确认框要压在本详情框之上，
+//      否则岗位上点不到（两层模态的老坑，见 construction_detail_dialog.h 文件头）；
+//   2) localizeMessageBoxButtons：板上的 qt_zh_CN.qm 没译 QPlatformTheme 上下文，
+//      标准按钮默认是英文 Yes/No/Cancel。全局 QEvent::Show 过滤器本来也会兜这一层
+//      （qthelper 的 installMessageBoxTextFilter），这里显式再调一次是"在 show 之前
+//      就把文案定稿"，adjustSize() 才能量到中文宽度，也让读代码的人不用去找过滤器。
+//   3) 居中按"本框所在屏"算，不是 primaryScreen——调试机上 primary 是外接屏。
 void AlarmDetailDialog::onMarkFalsePositive()
 {
     QMessageBox box(QMessageBox::Question, tr("确认误报"), tr("确定将此报警标记为误报？\n标记后状态将变为误报。"),

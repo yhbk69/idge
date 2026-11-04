@@ -96,6 +96,15 @@ static const char* FS_SRC = R"(
     }
 )";
 
+// ============================================================================
+// 构造函数
+// ============================================================================
+// 这里就把 surface format 定成 OpenGLES 2.0：RK3588 上 Mali 只暴露 GLES 上下文，
+// 留默认值的话 Qt 会先试桌面 GL 配置，在板子上表现为"上下文创建失败→initializeGL
+// 不跑→永远黑屏"。main.cpp 里 QtHelper::initOpenGL(2, …) 设的是全局 attribute，
+// 这里设的是本 widget 的格式，两层都指 GLES 才是板子上的正确姿势。）
+// 只做纯赋值，不碰 GL —— 构造期还没有上下文，任何 GL 调用都是错的。
+// ============================================================================
 GLVideoWidget::GLVideoWidget(QWidget* parent)
     : QOpenGLWidget(parent)
 {
@@ -104,9 +113,24 @@ GLVideoWidget::GLVideoWidget(QWidget* parent)
     fmt.setRenderableType(QSurfaceFormat::OpenGLES);
     fmt.setVersion(2, 0);
     setFormat(fmt);
+    // NOTE: 320x240 是移植期的常用下限，仓里没有出处。现在的作用只是"别让外层布局
+    // 把这格压成 0 高"——尺寸 0 就没有可绘制的表面，重绘请求全是空转。
+    // 真实尺寸由 PlayerWidget 的栅格与 frmMain 的视图档决定，改这个数不影响画面比例。
     setMinimumSize(320, 240);
 }
 
+// ============================================================================
+// 析构 —— 顺序不能改
+// ============================================================================
+// makeCurrent() → 释放 GL/EGL 资源 → doneCurrent() → 再关残留 fd。
+// 前两步必须在同一个 current 区间里：glDeleteTextures/eglDestroyImageKHR 都是
+// 对"当前上下文"生效的调用，Qt 在 widget 析构后就把上下文拆了，晚一步就删不掉。
+// doneCurrent() 放在关 fd 之前是有意的：close 与 GL 无关，不必占着上下文。
+// 这里的 shutdown() 是 EGLImage 唯一的收尸点（纹理会随上下文消失，EGLImage 不会），
+// 漏掉它 = 每次销毁一个视频格就漏至多 MAX_FRAMES 块显存引用。
+// ⚠ 不解决的事：在途的 frameReady 队列信号。widget 已析构而解码线程仍在发，
+//   那份 dup fd 无人签收 → 泄漏。契约在调用方："先 stopDecoder 再销毁窗体"。
+// ============================================================================
 GLVideoWidget::~GLVideoWidget()
 {
     // 帧池的 EGLImage 必须显式销毁（不随 GL 上下文回收），纹理一并删除
@@ -132,6 +156,11 @@ GLVideoWidget::~GLVideoWidget()
 //   1. 初始化 EGL DMA-BUF 导入扩展
 //   2. 编译着色器
 //   3. 初始化帧池（预创建纹理，复用避免逐帧 ioctl）
+// 【egl_.init() 失败 = 这一路永久黑屏，但是不崩】这里 return 之后
+//   initialized_ 保持 false：paintGL 每帧只 glClear 就返回，VBO/EBO 与帧池都没建，
+//   所以不会在 acquire 里踩空指针。代价是**没有重试**——同一个上下文生命周期内
+//   不会因为驱动后来支持了而自动恢复；日志只有 "EGL DMA-BUF import not available"
+//   一行，现场看到"格子长黑但程序不崩"就先去查这一行。
 // ============================================================================
 void GLVideoWidget::initializeGL()
 {
@@ -165,6 +194,19 @@ void GLVideoWidget::initializeGL()
     qDebug() << "GLVideoWidget initialized with EglFramePool";
 }
 
+// ============================================================================
+// createShaderProgram —— RGBA 直贴的最简着色器（无颜色空间转换）
+// ============================================================================
+// 只在 initializeGL 里调一次；调用时上下文已 current（QOpenGLShaderProgram 会
+// 直接编译/链接 GL 对象，早于 initializeGL 调就是无效句柄）。
+// 属性位置被**硬绑**成 aPos=0 / aTexCoord=1：drawQuad 里的 glVertexAttribPointer
+// 用的是同样的字面量 0 和 1，两处必须一起改，改错的表现不是报错而是画面错位/全黑。
+// 为什么要绑：不绑就由驱动分配，跨设备/跨驱动可能变，而本文件的 16 字节 stride
+// 与 (void*)8 偏移是按这个布局写死的。
+// ⚠ link() 的返回值没判：编译失败（着色器被改坏）时 program 无效，
+//   表现是 shader_->bind() 返回 false、画面永远是 glClearColor 的黑，日志里只有一行
+//   QOpenGLShaderProgram 自己的告警。改着色器时务必在板子上看一眼有没有那行。
+// ============================================================================
 void GLVideoWidget::createShaderProgram()
 {
     shader_ = new QOpenGLShaderProgram(this);
@@ -453,6 +495,15 @@ void GLVideoWidget::drawQuad()
 
 }
 
+// ============================================================================
+// resizeGL —— 视口 + 内容矩形通知
+// ============================================================================
+// glViewport 拿的是 w/h 这两个**设备像素**（QOpenGLWidget 已经把 devicePixelRatio
+// 乘进去了），不要再乘一次。
+// 这里的 notifyContentRect() 不能省：没帧可画时 paintGL 根本不会因尺寸变化而跑到
+// 消费分支（pending_frame_ 为空就直接 return），围栏层只能靠这次通知拿到新几何。
+// 判重在 notifyContentRect 内部，所以尺寸抖动不会真发事件。
+// ============================================================================
 void GLVideoWidget::resizeGL(int w, int h)
 {
     glViewport(0, 0, w, h);

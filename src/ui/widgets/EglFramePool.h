@@ -1,3 +1,24 @@
+// ============================================================================
+// EglFramePool.h - EGL 帧槽对象池（header-only，零拷贝渲染三件套之一）
+// ============================================================================
+//
+// 【所属模块】src/ui/widgets。唯一的消费者是 GLVideoWidget（值成员 framePool_，
+//   见 gl_video_widget.h），paintGL 每帧 acquire/release 一次。
+// 【一句话职责】把"每帧 eglCreateImageKHR + 建纹理"里贵的那一半（纹理对象）
+//   池化掉，fd→EGLImage 仍逐帧建（这一步省不掉：帧缓冲是轮换的）。
+// 【三件套分工】eglimage_helper.h 负责抓 EGL 扩展函数指针并持有 display_；
+//   本池不用 EglImageHelper 对象本身，而是由 GLVideoWidget::initializeGL 把它的
+//   三个 Proc 指针 init() 进来——所以**先 egl_.init() 成功、再 pool_.init()**。
+//   本池不校验传入指针是否为空、也不记录"init 有没有被调过"，nullptr 传进来就是
+//   第一次 acquire 段错误；挡这一步的是调用方（GLVideoWidget 在 egl_.init() 失败时
+//   直接 return，initialized_ 保持 false，paintGL 根本走不到 acquire）。
+//   egl_dma_buf.h / EglImageRenderer.h 是两份零引用的存档实现，与本池无依赖关系。
+// 【所有权】池对每帧持有一份自己 dup 的 fd 与一张 EGLImage；close 与 destroy
+//   各恰好一次，分别发生在 release() 和下一次 acquire()/shutdown()。
+//   调用方传进来的原 fd 永远不归池管（解码侧自己 close）。
+// 【线程与并发】无锁，仅供拥有该 GL 上下文的那一个线程（GUI 线程，paintGL 期间）
+//   独用；init/acquire/release/shutdown 跨线程调用是 UB，详见 acquire() 上方段落。
+// ============================================================================
 #pragma once
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -30,6 +51,13 @@
 class EglFramePool {
 public:
     // 最大帧槽数量，限制同时缓存的帧数
+    // 4 的口径：调用方任意时刻只持 1 个活动槽（见类头【槽位用量】），所以 1 就够"对"，
+    // 多出来的是 paintGL 落后于解码节奏时的余量 + 将来改三缓冲的空间；
+    // 再往上抬只是多占几块显存引用，没有别的收益。
+    // 槽位耗尽时 acquire() 返回 0 —— 表现是丢这一帧，不会崩、不会卡；
+    // 若日志里频繁出现 "[EglPool] ... failed"，那是导入失败在回滚，不是池满。
+    // NOTE: 这个 4 与解码/RGA 侧的缓冲环深度**没有**对应关系（仓里没找到那个数），
+    // 别把它当"与上游对齐"的约束来维护。
     static constexpr int MAX_FRAMES = 4;
 
     /* 
@@ -53,6 +81,12 @@ public:
           destroyImg - EGL销毁图像的函数指针
           bindImg - OpenGL绑定EGL图像到纹理的函数指针
     硬件概念：OpenGL ES纹理是GPU可访问的图像数据格式
+    【线程/时机】这里有 glGenTextures，所以必须在上下文 current 时调用一次
+      （GLVideoWidget::initializeGL）；重复调用会再生成一批纹理并丢掉旧 ID，
+      旧纹理既不删除也无人引用＝显存泄漏。本函数无返回值，也不检查传入指针非空。
+    【纹理参数为什么是 LINEAR + CLAMP_TO_EDGE】视频是"恰好铺满"的一张图，
+      放大到 widget 尺寸时用线性插值（NEAREST 会看出马赛克），且永远不该跨界
+      重复采样——一旦有半像素越界，REPEAT 会把对边那条像素带进来成一条边线。
     ====================================================
     */
     void init(PFNEGLCREATEIMAGEKHRPROC createImg,
@@ -174,6 +208,13 @@ public:
     作用：释放帧槽
     说明：将指定纹理对应的槽位标记为空闲，并关闭文件描述符
     参数：texture - 要释放的纹理ID
+    【texture 从哪来】只能是 acquire() 的返回值；传 0 或传别的池的纹理 ID
+      会在这里静默走完循环什么都不做（不报错、不断言）——写错的地方要到
+      "fd 越积越多"时才暴露，所以调用方务必把 acquire 的返回值原样存好。
+    【一次 acquire 配一次 release】重复 release 同一槽会再 close 一次它已经置 -1
+      的 fd（有 fd>=0 判断挡住，安全），但真正的风险是提前 release：槽位被下一帧
+      acquire 走、销毁的正是仍在被显示的 image。GLVideoWidget 的顺序是
+      "先 acquire 新槽、成功后才 release 旧槽"，就是为了不错在这一步。
     ====================================================
     */
     void release(GLuint texture)

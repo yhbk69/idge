@@ -45,6 +45,8 @@ bool originAllowed(const QString &origin)
 
 } // namespace
 
+// Meyers 单例：第一次调用（frmMain 装配处）决定归属线程，之后所有槽都在那根线程跑。
+// 本类不加锁——clients_/cfg_ 只在创建线程访问，跨线程的 AlarmManager 信号靠排队投递进来。
 PadWsServer &PadWsServer::instance()
 {
     static PadWsServer s;
@@ -58,6 +60,18 @@ PadWsServer::~PadWsServer()
     stop();
 }
 
+/**
+ * @brief 起监听并（首次）订阅 AlarmManager
+ *
+ * 三条 connect 用 Qt::AutoConnection 的默认语义（未显式指定连接类型）：
+ * alarmGenerated 来自解码线程、videoClipAttached 来自片段线程，跨线程时自动排队到
+ * 本对象所在的 GUI 线程，所以 handlers 里可以安全地碰 clients_ 与 DAO。
+ * 前置条件：AlarmRecord 必须已 Q_DECLARE_METATYPE + 注册，否则跨线程投递在运行时告警并丢事件。
+ *
+ * 失败路径用 deleteLater 而不是 delete：server_ 是以 this 为 parent 建的，
+ * 直接 delete 会在本次调用栈里就把正在被引用的对象拆掉；同时把 server_ 置空，
+ * 免得 running() 还认这只已关掉的服务器。
+ */
 bool PadWsServer::start(const ServerConfig &cfg, QString *err)
 {
     // 先验参数再判幂等：否则"已经在跑了"会把一个根本不能用的配置（port=0）也回成 true，
@@ -126,6 +140,18 @@ bool PadWsServer::start(const ServerConfig &cfg, QString *err)
     return true;
 }
 
+/**
+ * @brief 关监听 + 关掉所有已连 Pad；与 start() 成对，可重复调用
+ *
+ * 不解除 AlarmManager 的三个 connect（alarmsWired_ 一直是 true）：stop 之后信号还会进来，
+ * 但 pushAlarm/pushAlarmUpdate/handleVideoClipAttached 开头都有 running() 判据，一律静默丢。
+ * 这样做的代价是"停掉的服务仍然在收报警回调"，换来的是再次 start() 不需要处理
+ * 重复 connect（Qt 的 connect 会真的重复投递，得先 disconnect 才能防住）。
+ *
+ * NOTE(未验证的边界)：nextPendingConnection() 交出来的 QWebSocket **不是** server_ 的子对象，
+ * 析构责任在本类。这里只 close + 清表，删除交给 onClientDisconnected；若某根连接因为异常
+ * 没能发出 disconnected，这只 socket 就再也没人 deleteLater。
+ */
 void PadWsServer::stop()
 {
     for (QWebSocket *socket : clients_) {
@@ -150,11 +176,24 @@ int PadWsServer::clientCount() const
     return clients_.size();
 }
 
+// port() 在未监听时故意返回 0 而不是 cfg_.port：设置页拿它显示"当前监听端口"，
+// 报出配置值会掩盖"服务其实没起来"这种状态。
 quint16 PadWsServer::port() const
 {
     return running() ? cfg_.port : 0;
 }
 
+/**
+ * @brief 组装 hello_ack 的 data（serverTime / protocolVersion / deviceId / capabilities）
+ *
+ * 三个"诚实位"是评审定下来的口径，改之前先看 pad/README.md 第 4 条：
+ *   - `detectionBoxes` 恒 false：v1 硬要求，本机不通过 WS 传检测框；
+ *   - `evidenceUrl` 反映的只是 mediaBaseUrl 配了没有（那台静态服务在不在），
+ *     不为了凑规约谎报 true——服务起不来时报 false 是"证据不可用"，不是协议违规（A17b）；
+ *   - `deviceId` 配置为空时按 /etc/machine-id 派生（defaultDeviceId()，进程内只算一次），
+ *     因为配置文件会被拷到别的板子，写死会撞车。
+ * serverTime 走 wireNow()：v1 §2.2 要带时区，这里就是唯一补偏移的地方（落库格式不带）。
+ */
 QJsonObject PadWsServer::helloAckData() const
 {
     QJsonObject alarm;
@@ -176,6 +215,18 @@ QJsonObject PadWsServer::helloAckData() const
     return data;
 }
 
+/**
+ * @brief 把 server_ 的 pending 连接**全部**取干并登记
+ *
+ * 必须 while 循环：newConnection 每来一根发一次，若一次事件循环里同时到达多根
+ * （Pad 断网重连时会连发），只 nextPendingConnection() 一次会让其余连接卡在 pending，
+ * 握手完成却永远收不到 hello_ack。
+ * 被 Origin 白名单拒掉的连接不会走到这里——Qt 5.12.8 上 originAuthenticationRequired
+ * 在 newConnection 之前生效（板端实测，见 pad/README.md 第 6 条），所以 clients_ 里
+ * 只有真正放行的。
+ * 这三条 connect 的接收者一个是 this、一个是 socket 自己（错误回调），后者随
+ * deleteLater 自动解除，不需要手工 disconnect。
+ */
 void PadWsServer::onNewConnection()
 {
     while (server_ && server_->hasPendingConnections()) {
@@ -214,6 +265,16 @@ void PadWsServer::onClientDisconnected()
                     QStringLiteral("Pad 断开，剩余 %1 路").arg(clients_.size()));
 }
 
+/**
+ * @brief v1 消息面唯一入口：解析 → 按 type 分派
+ *
+ * 用 sender() 反查是哪根连接（三个槽都挂在 socket 上，没有带上下文的绑定），
+ * qobject_cast 失败即返回——理论上不会发生，宁可不回包也不崩在陌生 sender 上。
+ * 判失败的口径统一是"回 2001，不关连接"（§3.3 要求不能崩溃；关了反而让 Pad 走一遍
+ * 重连+hello 流程，比补一个字段贵得多）。
+ * 非 JSON 时 detail 只给 **len=字符数**、不给原文：现场码/对端实现可能是别系统载荷，
+ * 打进日志等于把别人的数据抄进本机日志。
+ */
 void PadWsServer::onTextMessage(const QString &text)
 {
     QWebSocket *socket = qobject_cast<QWebSocket *>(sender());
@@ -308,6 +369,24 @@ void PadWsServer::handleHello(QWebSocket *socket, const QJsonObject &data)
                              data.value(QStringLiteral("clientVersion")).toString()));
 }
 
+/**
+ * @brief 处理 sync_request：按游标 + taskId 从库里补漏，回一条 sync_result
+ *
+ * 三条实现约束（协议语义见 pad/README.md 与 plan/idge-pad-v1.md §3.8）：
+ *   - **这条 SQL 是本机唯一按 update_time 取数的路径**，计划过滤下推进 SQL 而不是
+ *     取一批再在 C++ 里筛（原因见下面那段注释，报告 §八 P1-2）；
+ *   - 游标取的是行内 `max(update_time，空则 alarm_time)`：update_time 是"补漏游标"，
+ *     老行可能为 NULL（见 src/biz/db/README.md 的列口径），退回报警时间才不会漏推；
+ *   - 没有命中行时**原样回显请求里的 lastEventTime**（可为 null）：回一个比请求更早的
+ *     值会让对端游标倒退，下次同步把已同步过的报警再拉一遍。
+ *
+ * 线程/性能：AlarmDAO 在这里是**同步查库**，跑在 GUI 线程上。syncLimit 上限 500 行
+ * 加一次 JSON 组装；同层 SQL 在 35383 行的库上实测 28~34ms（src/biz/db/README.md），
+ * 按这个量级一次同步可以接受。把上限调大或往这条查询加 JOIN 之前要重新量一次，
+ * 别把 GUI 钉住。cfg_.syncLimit <= 0 时按 500 兜底（配置里写 0 不等于"不限"）。
+ * 库没初始化（isDatabaseInitialized 为 false）时回**空数组 + 回显游标**而不是报错，
+ * 对端读成"这段时间没有新报警"，比重试更合理。
+ */
 void PadWsServer::handleSyncRequest(QWebSocket *socket, const QJsonObject &data)
 {
     const QString taskId = data.value(QStringLiteral("taskId")).toString().trimmed();
@@ -393,6 +472,18 @@ void PadWsServer::handleAlarmStatusChanged(const AlarmRecord &alarm)
                         .arg(clients_.size()));
 }
 
+/**
+ * @brief 片段落盘回调：逐条按 id 从库里重读，再广播一条完整 alarm
+ * @param alarmIds 空列表直接返回；没连着 Pad（running() 为 false）也直接返回，不做排队
+ * @param videoPath / webPath 刻意不用（见下面 Q_UNUSED）：路径以库里读回来的那份为准，
+ *        信号里的裸流路径只是"刚写到哪里"，与 alarms.video_path 的入库口径不保证相同
+ *
+ * 为什么要多一次 queryById：对端合并只看 updatedAt（§3.8），而 update_time 只被
+ * AlarmDAO::updateVideoPath 在**库里**推前过；直接用内存记录会让对端看到同一个
+ * updatedAt 的两条 alarm，第二次的 clipUrl 被丢弃。
+ * 代价是每个 id 一次单行查询（N 通常 1~2 条，走主键，量级可忽略）。
+ * 记录已被清理/尚未落库时 record.id 为空 → 跳过该条，不广播半截 alarm。
+ */
 void PadWsServer::handleVideoClipAttached(const QStringList &alarmIds, const QString &videoPath,
                                           const QString &webPath)
 {
@@ -417,6 +508,8 @@ void PadWsServer::handleVideoClipAttached(const QStringList &alarmIds, const QSt
     }
 }
 
+// 两个 push 都以 running() 打底：stop() 不解除 AlarmManager 的信号连接（见 start 注释），
+// 所以停服后仍然会进到这里，必须在这里丢掉，否则会往已经关掉的 socket 上写。
 void PadWsServer::pushAlarm(const AlarmRecord &record)
 {
     if (!running()) {
@@ -434,6 +527,9 @@ void PadWsServer::pushAlarmUpdate(const AlarmRecord &record)
     broadcast(envelope(QStringLiteral("alarm_update"), alarmUpdateJson(record)));
 }
 
+// 单播的尽力而为：state 不是 Connected 就静默丢掉，不记日志也不返错——调用方都是
+// "事件已经发生、错过就错过"的语义（Pad 靠 sync_request 拉平），这里返错只会诱导
+// 上层去做本机没有的重试队列。
 void PadWsServer::sendText(QWebSocket *socket, const QByteArray &frame)
 {
     if (!socket || socket->state() != QAbstractSocket::ConnectedState) {

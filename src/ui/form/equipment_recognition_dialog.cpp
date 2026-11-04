@@ -137,8 +137,9 @@ void EquipmentRecognitionDialog::setupUi() {
     confirm_button_->setEnabled(false);
     buttons->addWidget(previous_button_);
     buttons->addStretch();
-    buttons->addWidget(cancel_button_);
+    // 口径：确认在左、取消在右（手搭的 QHBoxLayout 不会按角色重排，先后就是 addWidget 顺序）
     buttons->addWidget(confirm_button_);
+    buttons->addWidget(cancel_button_);
     root->addLayout(buttons);
     connect(previous_button_, &QPushButton::clicked, this, &EquipmentRecognitionDialog::onPrevious);
     connect(cancel_button_, &QPushButton::clicked, this, &EquipmentRecognitionDialog::onCancel);

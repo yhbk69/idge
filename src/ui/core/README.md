@@ -30,6 +30,27 @@
 | `qrc/qm.qrc` + `qrc/qm/` | Qt 自带控件中文翻译（`:/qm/qt_zh_CN.qm` 由 `main.cpp` 加载；`widgets.qm` 只被零调用的 `QtHelper::initAll` 引用） |
 | `qrc/wasm.qrc` | 与 `font.qrc` 同一份 `DroidSansFallback.ttf` 的第二个注册入口（`qthelper.cpp` 按 `:/font/DroidSansFallback.ttf` 取用） |
 
+## 文案与按钮顺序（全局口径，两条）
+
+1. **界面文案一律中文，标准按钮必须显式改写。** 板端实测（5.12.8，用 `qApp->translate()` 逐上下文验证）：
+   `QMessageBox` 与 `QDialogButtonBox` 的默认按钮文案都取自 **`QPlatformTheme`** 上下文，而项目带的
+   `qt_zh_CN.qm` **一条都没译这个上下文**（`Cancel`/`&Yes`/`&No` 原样返回英文）；`QDialogButtonBox`
+   上下文虽然译全了却没有被使用。所以"给了 .qm 就自然是中文"是错的：
+   - `QMessageBox` → `QtHelper::localizeMessageBoxButtons()`，由 `installMessageBoxTextFilter()`
+     在 `QEvent::Show` 上自动调（静态版 `QMessageBox::information/warning/...` 那一大批调用点没法逐个包）；
+   - `QDialogButtonBox` → `QtHelper::localizeButtonBox()`，同一支过滤器覆盖；**新建框仍推荐显式
+     `setText`**，读代码的人不用去猜有没有过滤器；
+   - `QFileDialog` → `localizeFileDialogLabels()`（只补词典没覆盖的 Accept/Reject）。
+   新增"是/否"式询问一律走 `QtHelper::askConfirm()`（确定/取消两颗），不要裸用
+   `QMessageBox::question`——过滤器只能把它译成"是/否"，与全站"确定/取消"不一致。
+2. **成对出现的确认/取消：确认在左、取消在右。** 标准框不用管：实测 `QMessageBox(Yes|No)`、
+   `QMessageBox(Ok|Cancel)`、`QDialogButtonBox(Ok|Cancel)` 都是确认在左，且 `addButton(Cancel)`
+   先于 `addButton(Ok)` 也一样——Qt 按 `ButtonRole` 重排。**手搭的 `QHBoxLayout` 没有这个待遇**，
+   排位就是 `addWidget` 的先后，所以每个自建按钮对要自己排成"确认、取消"
+   （已按这条改过：`equipment_recognition_dialog`、`recognition_result_dialog`、
+   `smart_recognition_widget` 的拍照确认框）。
+   单颗按钮（关闭/保存/确定）不构成"对"，不参与这条判据。
+
 已随死代码清理删除（零 include、零调用）：`appdata.*`、`customstyle.*`、`delegate.*`（`DelegateComboBox`）、
 `base64helper.*`。注意旧 README 把 `frmMain::initStyle()` 当成 `CustomStyle` 的使用者，那是错的——它是 frmMain 自己的私有函数。
 

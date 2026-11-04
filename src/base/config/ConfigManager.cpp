@@ -201,6 +201,24 @@ static QJsonObject makeVideoDefaults()
     };
 }
 
+/**
+ * @brief 载入整份 config.json 到 root_，并按需跑一次性迁移
+ * @param path 路径；相对路径按**当前工作目录**解析（RuntimePaths::configFile() 就是相对
+ *             路径，所以经 run.sh 起时会读到构建目录那份，见 runtime_paths.h 文件头）
+ * @note 全程持 mutex_，因此本函数内的所有迁移分支**不得**回调任何会回头取本类锁的对象
+ *       （ModelRegistry::resolveChannelSlots()/referenceCount() 首当其冲）——
+ *       std::mutex 不可重入，那就是启动死锁。ConfigManager.h 顶部第 2 条是同一条教训。
+ * @note ⚠ 三条失败路径的结果**并不都是"空配置"**，别按"load 失败就是默认值"理解：
+ *       - 文件不存在：写入整套 schema V2 默认并 saveUnsafe() 落盘后**直接 return**
+ *         （连 updateCache() 都不走，缓存值仍是构造期的 0.25/0.45/true/30——
+ *          恰好与刚写进去的默认值相同，所以现状无害，但改默认值时这几格要一起改）；
+ *       - JSON 语法错/文件损坏：root_ 被置空 → 全部 getter 走内置兜底，
+ *         原文件内容被静默丢弃（下一次 save() 会把兜底结果覆盖回去）；
+ *       - 打不开（权限/只读挂载）：只 qWarning，**root_ 保持上一次 load 的内容不变**——
+ *         进程内重复调用 load() 时这一条会让人误以为"配置回滚了"。
+ * @postcondition root_ 至多多出被补齐的那几段；迁移有改动就立即落盘（幂等：
+ *                第二次启动 hasSchemaV2() 为真，整段迁移被跳过）。
+ */
 void ConfigManager::load(const QString &path)
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -340,6 +358,16 @@ static QString migrateOneModelPath(QString p)
     return p;
 }
 
+/**
+ * @brief 把 root_ 里 V1 的模型路径就地归一（只在 !hasSchemaV2() 时被 load() 调用）
+ * @return true=root_ 里至少有一个路径串被改写过（调用方据此决定是否 saveUnsafe()）
+ * @note 前置：调用方必须已持有 mutex_。
+ * @note TODO: 本函数是"读改写整个 cascade 段"，所以**即使 root_ 里原本没有 cascade**
+ *       也会被写回一个 {"models": []} 空对象（末尾那两行是无条件赋值的）。
+ *       现网触发条件很窄：只有 JSON 解析失败使 root_ 变空、或 V1 之前那种怪文件，
+ *       且 changed=false 时不落盘，所以只在"有人随后调 save()"时把空段写进文件。
+ *       不改行为，先登记；要修就把末尾赋值改成"仅当原段存在时回写"。
+ */
 bool ConfigManager::migrateModelPaths()
 {
     bool changed = false;
@@ -434,6 +462,15 @@ static bool libraryHasClass(const QString &libId, const QString &cls)
     return false;
 }
 
+/**
+ * @brief root_ 是否已是 V2 schema
+ * @return 判据是 video.channels 这一个键存在（不是"键非空数组"）
+ * @note 用作一次性闸门：migrateSchemaV2() 迁移完会把 V1 的 model/cascade/alarm/
+ *       video.channelN/video.notes 全删掉，所以这里一旦为真就永久为真，
+ *       第二次启动直接跳过整段迁移（可用 md5sum 对比两次启动后的文件验证幂等）。
+ *       ⚠ 手工把 "channels": [] 删空但留着键，也会被这里判成"已迁移"——
+ *       这个键是闸门而不是内容校验，别改成判空。
+ */
 bool ConfigManager::hasSchemaV2(const QJsonObject &root)
 {
     return root["video"].toObject().contains(QStringLiteral("channels"));
@@ -684,6 +721,19 @@ bool ConfigManager::migrateVideoSourcesDefaults()
 // 将高频访问的配置值缓存到成员变量，getter 直接返回缓存值
 // 避免每次调用 getter 都做 root_["xxx"].toObject()["yyy"] 的临时对象创建
 // ============================================================================
+/**
+ * @brief 把 4 个高频值从 root_ 刷进成员缓存
+ * @note ⚠ 唯一调用点是 load() 的末尾。也就是说缓存只在"载入"这一刻与 root_ 对齐一次，
+ *       此后 root_ 与 confThreshold_/nmsThreshold_/storeDetections_/
+ *       detectionRetentionDays_ 的一致性**全靠那四个 setter 同时写两边**。
+ *       绕过 setter 直接改 root_（例如新增迁移分支里写 detect.conf_threshold）
+ *       会得到"JSON 里是新值、confThreshold() 还是旧值"的现象——
+ *       这也是为什么只有这 4 个键有缓存、其余 getter 一律现读 root_。
+ * @note 缺键时的兜底值写死在这里（0.25/0.45/true/30），与 ConfigManager.h 里那四个
+ *       缓存成员的类内默认值必须同数（0.25/0.45/true/30）；否则"从没 load 过"与
+ *       "load 了但缺键"两种情况会给出不同的数，而这两种在测试里都会出现。
+ *       detect 段的出厂值另在 load() 的文件不存在分支里写一遍，改默认时三处一起看。
+ */
 void ConfigManager::updateCache()
 {
     QJsonObject detect = root_["detect"].toObject();
@@ -698,6 +748,18 @@ void ConfigManager::updateCache()
 // ============================================================================
 // 将当前配置保存到 JSON 文件（内部不加锁版本）
 // ============================================================================
+/**
+ * @brief 把 root_ 整体序列化写回 configPath_（**调用方必须已持有 mutex_**）
+ * @note ⚠ 前置条件违反就是死锁：std::mutex 不可重入，公开接口（save/getter/setter）
+ *       内部已加锁，在那些路径上再调本函数会二次加锁自锁。
+ *       这也是 saveUnsafe() 不放进 public 的原因——见 ConfigManager.h 顶部第 2 条。
+ * @note 非原子写：QIODevice::WriteOnly 是**截断覆写**，进程在 write 中途崩溃会留下
+ *       半截 JSON。下一次 load() 解析失败会把 root_ 置空并全走内置兜底，
+ *       等于用一次崩溃换掉整份现场配置（本仓没有备份/原子改名机制，已知取舍）。
+ * @note 失败静默：打开文件失败既不返回错误也不打日志（与 load() 有 qWarning 不同），
+ *       所以"改了没存上"只能靠落盘时间戳确认；调用方须自行保证路径可写
+ *       ——configPath_ 是相对路径，取决于进程 cwd（见 runtime_paths.h）。
+ */
 void ConfigManager::saveUnsafe()
 {
     QFile file(configPath_);
@@ -764,6 +826,17 @@ static void patchChannelField(QJsonObject &root, int ch, const QString &key, con
     root["video"] = video;
 }
 
+/**
+ * @brief 读第 ch 个通道的完整配置（一次加锁读全，避免多次取锁被中途改写）
+ * @param ch 通道号，**0-based**；越界不报错，返回全默认值的 cfg
+ *            （source/sourceId/note 空、enabled=true、modelIds 空）——
+ *            调用方拿到"enabled=true 且 source 为空"要自己分辨"没配"与"配了空"
+ * @note 解析口径：source/sourceId/每个模型 id 都做 trimmed()，所以 JSON 里写
+ *       `" /dev/video0 "` 与 `"/dev/video0"` 等价；note **不 trim**（给人看的原文）。
+ *       models 里的空串被直接丢弃，因此列表长度恒等于"真正配了的槽位数"，
+ *       与 ModelRegistry::resolveChannelSlots() 的"紧凑下标=槽位号=0-based"约定对齐。
+ * @note 缺键 = 该字段取结构体默认，enabled 缺键按 true（与 V1"四路全开"等价）。
+ */
 VideoChannelCfg ConfigManager::channelCfg(int ch) const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -856,6 +929,17 @@ QStringList ConfigManager::channelModelIds(int ch) const
     return channelCfg(ch).modelIds;
 }
 
+/**
+ * @brief 写第 ch 个通道的有序模型库 id 列表
+ * @param ch 0-based；越界直接 return（不改内存，也不报错）
+ * @param ids 顺序即级联槽位顺序（= result_id = 画面上的 M1/M2/…）
+ * @note 写入前逐个 trimmed 并**丢空串 + 去重**（保留首次出现的顺序）：
+ *       空串会在解析时变成一个"什么都不指向"的槽位，重复 id 会让同一个模型
+ *       占两个推理任务、两份 NPU 上下文。所以这里传进去的条数可能小于 ids.size()，
+ *       而槽位号按**过滤后**的下标算——不要拿调用方自己的下标去对报警里的 result_id。
+ * @note 只改内存；本函数不判断"该路要不要重开"，那是设置页的职责
+ *       （见 config/README.md 的"热更新分三级"）。
+ */
 void ConfigManager::setChannelModelIds(int ch, const QStringList &ids)
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -904,6 +988,15 @@ static VideoSourceCfg sourceFromJson(const QJsonObject &o)
     return s;
 }
 
+/**
+ * @brief VideoSourceCfg → JSON 对象（sourceFromJson 的逆操作，键名与归一规则同源）
+ * @note ⚠ 必须与 sourceFromJson() 的字段清单**一一对齐**：这里少写一个键，
+ *       setVideoSource() 就会把它静默落掉（写盘是整条替换，不是 patch），
+ *       下次 load 出来该字段回到默认值——表现是"设置页改过重开就没了"。
+ * @note 不做归一：type 的 "mp4→file" 只在读侧做（见 sourceFromJson），所以本函数
+ *       会把调用方传进来的原始 type 原样写盘；界面回填时看到的可能是 "mp4"。
+ * @note id/url 的 trim 由调用方（setVideoSource）负责，这里不重复处理。
+ */
 static QJsonObject sourceToJson(const VideoSourceCfg &s)
 {
     QJsonObject o;
@@ -945,6 +1038,12 @@ static void writeSourcesArray(QJsonObject &root, const QJsonArray &arr)
     root["video"] = video;
 }
 
+/**
+ * @brief 注册表里出现过的 id 列表（数组顺序即界面下拉顺序）
+ * @return **可能含重复 id**：手改 JSON 留下同 id 两条时这里就出两条。
+ *         去重收口在 setVideoSource()（只认第一条），所以下拉框用本函数拼模型
+ *         要自己防重；id 为空的条目被直接跳过，不出现在列表里。
+ */
 QStringList ConfigManager::videoSourceIds() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -957,6 +1056,12 @@ QStringList ConfigManager::videoSourceIds() const
     return ids;
 }
 
+/**
+ * @brief 注册表全部条目（数组顺序即界面下拉顺序）
+ * @return **id 为空的条目被直接跳过**，不出现在结果里（也没有"未命名"占位），
+ *         所以 out.size() 可能小于 JSON 里 sources 数组的长度；
+ *         同 id 的重复条目会**都**返回（去重只在 setVideoSource 写侧做）
+ */
 QList<VideoSourceCfg> ConfigManager::videoSources() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1059,6 +1164,17 @@ void ConfigManager::removeVideoSource(const QString &id)
     root_["video"] = video;
 }
 
+/**
+ * @brief 有多少处正在引用这条流（删之前给界面确认用）
+ * @param id 流 id；空串直接返回 0（不遍历）
+ * @return 引用处数量，两类消费者合并计数：video.channels[].source_id
+ *         + 国标流列表里的 source_id
+ * @note 国标那半边的取段判据与 Gb28181Config::load() **同一条**（见 gbStreamsArray：
+ *       顶层 streams 非空就用它，否则才看 gb28181.streams），两处都数会把同一批流
+ *       计两遍，让删除守卫报出"被引用 2 次"这种根本对不上的数。
+ * @note 只做字符串相等比较（trim 后），不解析 gb28181 段的 enabled——
+ *       一条禁用的国标流仍然算在引用，这是刻意的：它一旦在平台侧被启用就会立刻悬空。
+ */
 int ConfigManager::videoSourceReferrerCount(const QString &id) const
 {
     if (id.isEmpty())
@@ -1180,6 +1296,11 @@ static void eraseModelParamField(QJsonObject &root, const QString &libId, const 
     root["video"] = video;
 }
 
+/**
+ * @brief 参数表里出现过的库 id
+ * @return 按 key **升序**（QJsonObject 内部就是有序 map，与 JSON 里的书写顺序无关），
+ *         所以设置页展示的模型顺序不等于现场添加顺序；video 段或 models 段不存在时返回空
+ */
 QStringList ConfigManager::modelParamKeys() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1290,6 +1411,18 @@ QList<int> ConfigManager::modelParamUsers(const QString &libId) const
 // 调低：检测更多目标，但误检增多
 // 调高：检测更少目标，但漏检增多
 // ============================================================================
+/**
+ * @brief 全局置信度阈值，返回**缓存值** confThreshold_
+ * @note 实际取值区间是 [0.05, 1.0]，由 setConfThreshold() 与
+ *       ModelRegistry::resolveConfThreshold() **两处**夹出来（setter 挡 UI，
+ *       resolver 挡"手改 JSON 后直接 load"那条路）。下限 0.05 是安全闸不是审美：
+ *       量化模型把阈值打到 u8 网格上比较，0 会让 score_sum 预筛整体失效、
+ *       候选爆到上限，接着是 O(N²) NMS，推断线程冻死且没有看门狗。
+ * @note 本函数读的是缓存不是 root_：绕过 setter 直接改 detect.conf_threshold，
+ *       这里不会变（缓存只在 load() 末尾的 updateCache() 刷一次）。
+ * @note 它是回落链的**底座**：真正生效的每模型阈值请读
+ *       ModelRegistry::resolveConfThreshold()，别直接拿本函数当"生效值"。
+ */
 double ConfigManager::confThreshold() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1322,6 +1455,13 @@ void ConfigManager::setConfThreshold(double val)
 // 调低：更激进地合并重叠框
 // 调高：保留更多重叠框
 // ============================================================================
+/**
+ * @brief 全局 NMS 阈值，返回缓存值 nmsThreshold_；**只有全局一档**，无每模型覆盖
+ * @note 不设下限（setter 只夹 [0.0,1.0]）：调低是"合并得更狠"，方向上是变少不是变多，
+ *       不存在置信度那条"预筛失效→候选爆炸"的失败模式，所以故意不给它编一个假护栏。
+ *       不加每模型覆盖同理：NMS 是 IoU 合并口径，跨模型基本一致。
+ * @note 与 confThreshold() 一样读缓存，缓存只在 load() 末尾刷一次。
+ */
 double ConfigManager::nmsThreshold() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1476,13 +1616,24 @@ void ConfigManager::setGeofenceAlarmClass(const QString &cls)
     root_["geofence"] = gf;
 }
 
-/** @brief 围栏报警节流窗口（秒，默认 10） */
+/**
+ * @brief 围栏报警节流窗口（秒），缺省 10
+ * @note 缺键与"写了但类型不对"都会得到 10（QJsonValue::toInt(10)）；
+ *       本 getter **不夹区间**，负数会被原样透传给 AlarmManager::ingestFenceAlarm——
+ *       想关节流请去关 geofence.enabled，别指望写 0 或负数。
+ */
 int ConfigManager::geofenceThrottleSeconds() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return root_["geofence"].toObject()["throttleSeconds"].toInt(10);
 }
 
+/**
+ * @brief 写围栏节流窗口
+ * @param seconds >0 时原样写入；**<=0 一律写成 10**，不是"存 0 表示不节流"。
+ *        想缩短到 1 秒就传 1；传 0 得到的还是 10（与本键的缺省值同一个数，
+ *        刻意不给"关掉"这个语义，因为 0 秒节流 = 每帧一条报警，那是事故不是配置）。
+ */
 void ConfigManager::setGeofenceThrottleSeconds(int seconds)
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1557,18 +1708,31 @@ void ConfigManager::setDetectionRetentionDays(int days)
 // 运行期改动不会重建编码器，因此不提供 setter（避免"改了不生效"的假接口）。
 // 读取内存 root_，缺键回退到 makeRecordingDefaults() 的同一份默认值。
 // ============================================================================
-
+/**
+ * @brief recording 段的取值辅助（本段五个 getter 都走它）
+ * @note 每次现读 root_、不做缓存，所以与 updateCache() 那四个键不同：
+ *       这里不存在"改了 JSON 但 getter 还是旧值"的窗口，只有"改了内存没 save"的窗口。
+ */
 static QJsonObject recordingSection(const QJsonObject &root)
 {
     return root["recording"].toObject();
 }
 
+/** @brief 是否开录制（缺键默认 **true**：报警必带片段是需求验收项，见 README §三①） */
 bool ConfigManager::recordingEnabled() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return recordingSection(root_).value("enabled").toBool(true);
 }
 
+/**
+ * @brief 编码器选择，返回值**只可能是 "h264" 或 "hevc"**
+ * @note 归一方向是刻意的：除 "h264" 外的一切取值（含拼错的 "H265"/"hevc_rkmpp"/空串）
+ *       都落到 hevc。理由是这两个值最终只是拼成 "<codec>_rkmpp" 去查编码器，
+ *       透传一个拼错的值会得到"打开编码器失败"这种很难归因的错误，
+ *       而归一到主用档（带宽减半的那一个）最坏也只是"跟配置预期不一致"。
+ *       ⚠ 大小写敏感："H264" 会被归一成 hevc，不是 h264。
+ */
 QString ConfigManager::recordingCodec() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1576,18 +1740,57 @@ QString ConfigManager::recordingCodec() const
     return codec == "h264" ? codec : QStringLiteral("hevc");
 }
 
+/**
+ * @brief 环形缓冲区时长（秒），qBound(1, 缺省 8, 60)
+ * @note 【8 的来源】报警窗口是"前 3 + 后 2 = 5 秒"，但环按**包数**算
+ *       （buffer_seconds × 流报帧率），入包节拍被 pacer 限到 ≤30fps，
+ *       再叠加 gop_seconds=1 的关键帧对齐最坏吃掉前向 1 秒 —— 5 秒是零余量卡边，
+ *       所以缺省给 8。⚠ config_example.json 模板里写的是 5，照模板装的新板拿到 5
+ *       （模板值优先于缺省兜底）；这条不一致本轮只记录、未改值。
+ * @note 上界 60 是内存护栏：环按**包数**存（maxPackets_ = bufferSeconds × cfg_.fps），
+ *       60 秒 × 2Mbps ≈ 15MB/通道，四路常驻就是这个量级；下界 1 保证环里至少装得下
+ *       一个 GOP（gop_seconds 缺省 1）。
+ * @note ⚠ 兜底值有两处且**不同数**：本 getter 缺键回 8，VideoRecorder 构造函数里
+ *       `bufferSeconds<=0` 回的是 5。后者只在手工拼 RecorderConfig（不经本 getter）时
+ *       才命中——从 config.json 这条链进不来（本函数恒 ≥1）。改默认时两处一起看。
+ * @note 与片段窗口的匹配只在 setRecordingConfig() 里做一次 qWarning 提示，
+ *       不自动抬升——真配小了，报警片段的"前 3 秒"会被新包覆盖而截断。
+ */
 int ConfigManager::recordingBufferSeconds() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return qBound(1, recordingSection(root_).value("buffer_seconds").toInt(8), 60);
 }
 
+/**
+ * @brief CBR 目标码率（bps），qBound(200000, 缺省 2000000, 16000000)
+ * @note 区间即 config/README.md 里 recording.bitrate 声明的"20 万~1600 万"。
+ * @note ⚠ **这一档是本仓唯一的护栏**：本段四个数值键里只有 bitrate 在
+ *       VideoRecorder 构造函数里没有 <=0 兜底（那里只兜 fps/bufferSeconds/gopSeconds），
+ *       值又被直接赋给 codecCtx_->bit_rate 且 rc_mode=1（CBR）——
+ *       透传一个 0 或负数进去，CBR 拿到的目标码率就是无意义的，
+ *       表现为编码器 init 失败→整条录制被 reset() 关掉，而日志只说 "recording disabled"。
+ *       所以出格值必须在配置层就死掉，不能指望下游。
+ * @note 默认 2 Mbps 是"1080p 片段够看清工服/人脸"的那一档，不是画质最优值；
+ *       调它之前先想清楚环容量（buffer_seconds×fps 按包数存）与 eMMC 写带宽。
+ */
 int ConfigManager::recordingBitRate() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return qBound(200000, recordingSection(root_).value("bitrate").toInt(2000000), 16000000);
 }
 
+/**
+ * @brief 关键帧间隔（秒），qBound(1, 缺省 1, 10)
+ * @note 缺省取 1 的理由是**报警片段起点对齐误差 ≤1 秒**：dump 时窗口会自动对齐到
+ *       窗口内第一个 IDR，GOP 越大截得越短（见 video_recorder.cpp 里
+ *       `gop_size = fps * gopSeconds` 那行的注释）。
+ * @note 下界 1 不是编码器约束：video_recorder.cpp 自己还会把 <=0 兜成 1，
+ *       这里再夹一层是为了让"配置里看到的数"与"进编码器的数"是同一个，
+ *       不然会出现 JSON 写 0、日志打 1 的两套口径。
+ * @note 上界 10 的实际风险在别处：GOP 秒数若大于 buffer_seconds，环里可能
+ *       一个关键帧都没有，片段起点就找不到 IDR 可对齐。
+ */
 int ConfigManager::recordingGopSeconds() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1607,53 +1810,96 @@ int ConfigManager::recordingGopSeconds() const
 //   永远看不到 media_transport/media_http_port/media_base_url 这三键，靠的就是上面的缺键回退。
 // ============================================================================
 
+/**
+ * @brief 本段的共享取值辅助；下面十个 getter 全部"每次现读 root_ + qBound 夹区间"
+ * @note ⚠ 本段**没有任何 setter**，且 migrate 只补整段缺失的 alarm_uplink
+ *       （见 migrateAlarmUplinkDefaults 注释）。所以现场那台跑过一次的 config.json
+ *       里永远不会自动出现 media_transport/media_http_port/media_base_url 三键，
+ *       它们全靠这里的缺省值兜住——"改了 JSON 没生效"要区分是键没写进去还是没重启。
+ */
 static QJsonObject alarmUplinkSection(const QJsonObject &root)
 {
     return root["alarm_uplink"].toObject();
 }
 
+/** @brief 总开关（缺省 **false**：链路明文零鉴权且是往外发数据，必须人来打开；
+ *         false 时 AlarmUplink 不订阅信号、不建线程、零分配） */
 bool ConfigManager::alarmUplinkEnabled() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return alarmUplinkSection(root_).value("enabled").toBool(false);
 }
 
+/** @brief 第一段（报警信息）是否申报抓拍图（缺省 true；false = 只发文字，不发媒体计划） */
 bool ConfigManager::alarmUplinkSendSnapshot() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return alarmUplinkSection(root_).value("send_snapshot").toBool(true);
 }
 
+/**
+ * @brief 第二段是否申报视频片段（缺省 true）
+ * @note 本 getter **不**判断 recording.enabled。"录制关了就自动降级为不发片段"这件事
+ *       发生在上行侧（见 config/README.md 的 alarm_uplink.send_clip 一条），
+ *       base 域不去读另一个模块的开关，否则这里就成了第二个真值来源。
+ */
 bool ConfigManager::alarmUplinkSendClip() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return alarmUplinkSection(root_).value("send_clip").toBool(true);
 }
 
+/**
+ * @brief ws_binary 档的单个二进制帧字节数，qBound(65536, 缺省 262144, 1048576)
+ * @note 区间与默认值见 config/README.md（64KB~1MB、256KB）。默认 256KB 的依据是
+ *       "Qt 出站按一次调用=一个整帧"的写法：分块大小就是帧大小，所以只有对端
+ *       maxFrameSize 更小时才需要调小，不需要在代码里加切分逻辑。
+ * @note 仅 media_transport="ws_binary" 时被读；url 档一次都不会用到这个值。
+ *       夹区间的原因与 recording.bitrate 同一条：透传一个 0 或负数进去，
+ *       下游切分循环会直接退化成死循环或空帧，而那不是本模块能看出来的错。
+ */
 int ConfigManager::alarmUplinkChunkSize() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return qBound(65536, alarmUplinkSection(root_).value("chunk_size").toInt(262144), 1048576);
 }
 
+/**
+ * @brief 等 uplink_ack 的超时（毫秒），qBound(2000, 缺省 15000, 60000)
+ * @note **只有 expect_ack=true 才有意义**，而当前对端不回 ack、expect_ack 出厂 false，
+ *       所以这个值今天不影响任何行为——改它之前先确认 expect_ack 真的开了。
+ * @note 下界 2000：局域网内一次往返远小于此，再短就是在本机也在忙的时候误判超时重投。
+ */
 int ConfigManager::alarmUplinkAckTimeoutMs() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return qBound(2000, alarmUplinkSection(root_).value("ack_timeout_ms").toInt(15000), 60000);
 }
 
+/**
+ * @brief 同一项最多重投几次，qBound(1, 缺省 3, 10)
+ * @note 下界 1 = "至少试一次"，0 次没有语义（等价于关掉上行，那该由 enabled 决定）；
+ *       超过上限判 failed 并打 warning，不会无限重试。
+ */
 int ConfigManager::alarmUplinkMaxAttempts() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return qBound(1, alarmUplinkSection(root_).value("max_attempts").toInt(3), 10);
 }
 
+/**
+ * @brief 待发队列上限，qBound(1, 缺省 16, 64)
+ * @note 满了**丢最旧**（与 ClipWriter/SnapWriter 同口径）。上界 64 是内存与
+ *       "丢了也别丢太多"的折中：一条 alarm_info 只是 JSON，64 条不构成压力，
+ *       但队列一深就说明链路早就断了，再攒下去只会发出一批过期报警。
+ */
 int ConfigManager::alarmUplinkMaxPending() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return qBound(1, alarmUplinkSection(root_).value("max_pending").toInt(16), 64);
 }
 
+/** @brief 是否要求对端回 uplink_ack 才算完成（缺省 false：当前对端不回，开了会把每项都吊住） */
 bool ConfigManager::alarmUplinkExpectAck() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1693,17 +1939,32 @@ QString ConfigManager::alarmUplinkMediaBaseUrl() const
 //   前者是 WS 入站，后者是媒体字节出站；两者都想用 8899 时只能挑一个（报告歧义 A4）。
 // ============================================================================
 
+/**
+ * @brief pad_server 段的共享取值辅助（六个 getter 都是"现读 root_ + 缺键兜底"）
+ * @note 全段**只有 getter**：监听口开开关关要走重启，运行期"改了立刻生效"只会让现场
+ *       看不出 Pad 到底连的是哪个口（理由见本函数上方注释与 config/README.md）。
+ *       加 setter 之前先解决"已连的 Pad 怎么办"，否则就是个假开关。
+ */
 static QJsonObject padServerSection(const QJsonObject &root)
 {
     return root["pad_server"].toObject();
 }
 
+/** @brief 是否启用 Pad 入站服务端（缺省 false：明文零鉴权的**入站**监听口，风险比 alarm_uplink 更大） */
 bool ConfigManager::padServerEnabled() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return padServerSection(root_).value("enabled").toBool(false);
 }
 
+/**
+ * @brief Pad WS 监听端口，qBound(1024, 缺省 8899, 65535)
+ * @note 下界 1024 与 alarmUplinkMediaHttpPort() 同一条理由：板端 uid 1000 +
+ *       net.ipv4.ip_unprivileged_port_start=1024，特权口 bind 不上，挡在配置层。
+ * @note ⚠ 8899 是 v1 §2.1 的**占位值**，且与 alarm_uplink.media_http_port(8090)
+ *       是两个不同的口（前者 WS 入站、后者媒体字节出站）。v1 想让 WS 与 /api/
+ *       同占 8899 在这套栈上做不到：QWebSocketServer 独占一只监听器。
+ */
 int ConfigManager::padServerPort() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1711,6 +1972,12 @@ int ConfigManager::padServerPort() const
     return qBound(1024, padServerSection(root_).value("port").toInt(8899), 65535);
 }
 
+/**
+ * @brief Pad WS 路径，返回值**保证以 '/' 开头**（空串回落 "/"）
+ * @note ⚠ 这个值只进日志。QWebSocketServer 不按路径筛连接，Pad 连哪条路径都能握手成功，
+ *       所以写 "/ws" **不会**把别的路径挡掉——不要把它当访问控制来配。
+ * @note 补前导 '/' 是为了日志与 v1 文档里的写法对得上（文档一律写带斜杠的路径）。
+ */
 QString ConfigManager::padServerPath() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1721,18 +1988,37 @@ QString ConfigManager::padServerPath() const
     return raw.startsWith(QLatin1Char('/')) ? raw : QStringLiteral("/") + raw;
 }
 
+/**
+ * @brief hello_ack.deviceId 的显式覆盖值
+ * @return **空串 = 不覆盖**，由 pad::defaultDeviceId() 按 /etc/machine-id 前 12 位派生
+ *         （本机实测 EDGE-1030A3F99414）。该键在报文里**一定出现**——v1 §13.1.3 规定必填，
+ *         "留空"只是"用派生值"而不是"不发这个字段"。填了就赢。
+ */
 QString ConfigManager::padServerDeviceId() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return padServerSection(root_).value("device_id").toString().trimmed();
 }
 
+/**
+ * @brief 证据 URL 前缀覆盖（空 = 复用内嵌 http 文件的自动地址）
+ * @note 与 alarmUplinkMediaBaseUrl() 是两个独立键，读谁由消费者决定；
+ *       都留空时两者都会指向同一个内嵌服务，写了哪个就以哪个为准。
+ *       对端只能经 NAT/反代访问时必须写死——自动口径取的是本机网卡地址，够不到。
+ */
 QString ConfigManager::padServerMediaBaseUrl() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return padServerSection(root_).value("media_base_url").toString().trimmed();
 }
 
+/**
+ * @brief 一次 sync_result 最多带几条，qBound(1, 缺省 500, 5000)
+ * @note 500 与上界 5000 都是本仓自定的数（config/README.md：v1 没给分页规则，先设上限），
+ *       **不是协议里的值**——将来 v1 补了分页口径要以协议为准重看这两个数。
+ * @note 游标取"本次返回里的最大 update_time"，所以截断不会漏下一批：
+ *       下界夹到 1 语义仍然正确，只是要多来回几次。
+ */
 int ConfigManager::padServerSyncLimit() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1743,12 +2029,22 @@ int ConfigManager::padServerSyncLimit() const
 // WebSocket 配置
 // ==========================================
 
+/**
+ * @brief Pad↔Aibox 客户端的服务器地址（如 "ws://192.168.1.100:8765"）
+ * @return 缺键/未配返回**空串**，空串 = 整条链路不启动（这是"关"的唯一种写法）
+ * @note ⚠ 只能填 `ws://`。`wss://` 在本机不可用：Qt 的 OpenSSL 符号缺口未适配
+ *       （见根 README 第 11 条），填了会连不上而不是报"不支持 TLS"。
+ *       因此这条链路是明文 + 零鉴权，配置层不做校验也不拦。
+ * @note 本键是 websocket 段里**唯一有 setter** 的（调试设置页可直接编辑），
+ *       另两个间隔键没有控件、只能改 JSON。
+ */
 QString ConfigManager::wsServerUrl() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return root_["websocket"].toObject()["server_url"].toString();
 }
 
+/** @brief 写服务器地址；本函数不判空也不校验 scheme，空串同样能写进内存再 save() 落盘 */
 void ConfigManager::setWsServerUrl(const QString &url)
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1757,12 +2053,27 @@ void ConfigManager::setWsServerUrl(const QString &url)
     root_["websocket"] = ws;
 }
 
+/**
+ * @brief 应用层心跳周期（秒），缺省 30
+ * @note ⚠ **本键没有 qBound**（与 recording/alarm_uplink 那些数值键不同口径）：
+ *       写 0 会得到 0，而消费侧是 `heartbeatTimer_->start(interval * 1000)`
+ *       （ws_client.cpp:224），QTimer 传 0 就是连发 —— 等于把心跳变成忙循环。
+ *       这里没夹是历史现状，要加区间请先想清楚"0 到底该是关心跳还是 1 秒"，
+ *       别顺手写个 qBound 把语义改掉。
+ * @note 无界面控件，只能改 JSON 后重启。
+ */
 int ConfigManager::wsHeartbeatInterval() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return root_["websocket"].toObject()["heartbeat_interval"].toInt(30);
 }
 
+/**
+ * @brief 非主动断开后的重连延时（秒），缺省 5
+ * @note 与 wsHeartbeatInterval() 同一条"没夹区间"的现状：0 会走到
+ *       `reconnectTimer_->start(0)`（ws_client.cpp:251），表现是断开后疯狂重连。
+ *       只在 !stopping_（非用户主动停）时被读，主动 stop 不会重连。
+ */
 int ConfigManager::wsReconnectInterval() const
 {
     std::lock_guard<std::mutex> lock(mutex_);

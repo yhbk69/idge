@@ -60,12 +60,37 @@ QString trimmedPrefix(const QString &url)
 
 }  // namespace
 
+/**
+ * @brief 进程级单例（函数内 static，C++11 起懒汉初始化本身线程安全）
+ * @note 刻意**不是** QObject：没有线程亲和、没有信号槽，内部只有 C API 调用与
+ *       QNetworkInterface 查询，所以哪个线程调都行；真正的约束是下面那条"起停时序"。
+ */
 HttpFileService &HttpFileService::instance()
 {
     static HttpFileService svc;
     return svc;
 }
 
+/**
+ * @brief 初始化 ZLM 运行时并把静态文件服务起在 port 上
+ * @param rootDir **必须是绝对路径**。传相对（RuntimePaths::alarmsDir() 就是相对的）
+ *        会被 ZLM 退回它自己的默认根（可执行文件目录 /www），
+ *        症状是"URL 全 404，但本地文件明明在"——正口径见调用侧
+ *        `QFileInfo(RuntimePaths::alarmsDir()).absoluteFilePath()`。
+ * @param port 期望端口；0 视为参数不完整直接失败
+ * @return true = 已在监听（**含"上一次已经起来了"这种幂等重入**）；
+ *         false = 根目录空 / port 为 0 / 库已初始化过但没起成功 / bind 失败。
+ *         失败都已 qWarning，调用方**不需要**再打一条。
+ * @note ⚠ 三条不可绕过的库约束：
+ *       1) `mk_env_init1` 进程级只许一次。envReady_ 一旦置真，本函数后面再也返回 false，
+ *          所以"改端口必须重启"不是保守说法而是硬结果；
+ *       2) `stop()` 之后本函数也不会再成功（同样撞 envReady_ 这条早退）；
+ *       3) `mk_env_init1` 的返回值**没有被检查**——envReady_=true 表示"调过了"，
+ *          不表示"库起来了"。真失败会一路走到 mk_http_server_start 拿到 0，
+ *          表现与端口被占完全一样，只能靠前面那行 qInfo 回读判断键有没有生效。
+ * @note 线程要求：现网 start 在 frmMain 构造（GUI 线程）、stop 在 main 事件循环之后，
+ *       两者时序串行且没有并发；类内**没有锁**，别把它改成运行期可重开的服务。
+ */
 bool HttpFileService::start(const QString &rootDir, quint16 port)
 {
     if (running()) {
@@ -110,6 +135,16 @@ bool HttpFileService::start(const QString &rootDir, quint16 port)
     return true;
 }
 
+/**
+ * @brief 关掉 ZLM 的全部服务器（mk_stop_all_server），并把 port_ 归零
+ * @note 幂等：envReady_ 为假（出厂态 alarm_uplink 关着，一次都没 start 过）时直接返回，
+ *       **一次都不碰 mk_***。这是刻意的——库没初始化就调它的清理入口是未定义行为。
+ * @note ⚠ 调完本进程**不支持再 start**（见 start() 的约束第 2 条），所以这一对
+ *       跨作用域不成对：start 在 frmMain 构造、stop 在 main 的事件循环之后。
+ *       别"顺手"把 stop 挪进 ~HttpFileService 或 ~frmMain —— frmMain 是 main 的栈对象，
+ *       析构点在事件循环之后、WS 清理之前，挪进去等于把停服务提到还没关 WS 的时刻。
+ * @note 无返回值，失败不可感知；本函数只在退出路径上跑一次。
+ */
 void HttpFileService::stop()
 {
     if (!envReady_) {
@@ -120,6 +155,17 @@ void HttpFileService::stop()
     qInfo() << "HttpFileService: 已停止（本进程不能再起）";
 }
 
+/**
+ * @brief 取第一个可用的非回环 IPv4
+ * @return 地址字符串；一个都没有返回**空串**（调用方据此不申报媒体地址）
+ * @note 判据四道：IsUp && IsRunning && !IsLoopBack、网卡名不撞 kSkipIfaceNames、
+ *       是 IPv4 且非回环、不在 169.254/16（没拿到 DHCP 时自己编的地址，对端够不着）。
+ * @note ⚠ **best-effort，不是"正确的那张网卡"**：多网卡时返回的是
+ *       QNetworkInterface::allInterfaces() 枚举顺序里的第一个命中项，
+ *       顺序不保证等于"对外口"。所以配置里留了 media_base_url 这个逃生口——
+ *       现场一旦报"图片下载不到"，先手填前缀而不是来改这里的判据。
+ * @note 与 ui 域的 QtHelper::getLocalIPs 同一判据，但不 include ui 头（分层方向）。
+ */
 QString HttpFileService::firstUsableIpv4()
 {
     for (const QNetworkInterface &iface : QNetworkInterface::allInterfaces()) {

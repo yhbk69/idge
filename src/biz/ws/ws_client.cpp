@@ -75,6 +75,14 @@ void WsClient::stop()
     }
 }
 
+/**
+ * @brief 读配置里的 server_url 并异步发起握手
+ *
+ * 每次连接都现读 ConfigManager（不缓存地址）：设置页改完 url 之后 stop()+start() 就会
+ * 走新地址，不需要重启进程。地址为空/URL 非法只发 logMessage，不置任何错误状态——
+ * 本类的"失败"只体现为"连不上 + 日志"，调用方没有可查询的错误码。
+ * open() 是异步的：返回时还没连上，成功与否只能等 connected/error 信号。
+ */
 void WsClient::connectToServer()
 {
     QString url = ConfigManager::instance().wsServerUrl();
@@ -94,6 +102,8 @@ void WsClient::connectToServer()
     socket_->open(qurl);
 }
 
+// 四个发送方的报文形状都在这里定死：字段名与对端约定一致（alarm_id / last_alarm_id /
+// stream_id / fence），未连接时一律走 sendJson 的"丢弃 + warning"，本机不排队。
 void WsClient::sendPing()
 {
     QJsonObject obj;
@@ -124,6 +134,9 @@ void WsClient::sendGetStreams()
     sendJson(obj);
 }
 
+// 注意 stream_id 发的是**字符串**（QString::number）而不是 JSON number——这是服务端当时的
+// 解析口径，本类没有做校验，改这里要先确认对端。x1/y1/x2/y2 是矩形对角点，
+// 与本机 geofence 的任意多边形模型不兼容（见 ws_client.h），所以全工程零调用方。
 void WsClient::sendSetFence(int streamId, double x1, double y1, double x2, double y2)
 {
     QJsonObject obj;
@@ -143,6 +156,14 @@ bool WsClient::isConnected() const
     return socket_->state() == QAbstractSocket::ConnectedState;
 }
 
+/**
+ * @brief 唯一的出站文本出口：未连接即丢弃
+ *
+ * 这个"丢弃"语义只属于 ping/ack/sync_request/get_streams/set_fence 这五个发送方，
+ * 报警上行那一路要的是排队，走下面 UplinkTransport 那组接口，不共用此函数。
+ * 无返回值：调用方无法感知丢包，所以别把需要可靠送达的东西接到这里。
+ * 序列化用 Compact（无缩进无换行）：一行一帧，对端按整段 JSON 解析。
+ */
 void WsClient::sendJson(const QJsonObject &obj)
 {
     if (socket_->state() != QAbstractSocket::ConnectedState) {
@@ -187,6 +208,14 @@ qint64 WsClient::sendBinary(const QByteArray &bytes)
     return socket_->sendBinaryMessage(bytes);
 }
 
+/**
+ * @brief 连上之后：起心跳表 + 补一次 sync_request
+ *
+ * 心跳间隔每次连接都从配置现读并重新 start()，所以改 heartbeat_interval 后
+ * 下一次重连即生效（运行期不会主动重读，定时器一直跑到断开）。
+ * lastAlarmId_ 为空（本机从没收到过 alarm）时不补发同步请求：
+ * 对空 id 的 sync_request 服务端行为未定，别拿它当"上线打招呼"。
+ */
 void WsClient::onConnected()
 {
     emit logMessage("system", "WebSocket: 已连接");
@@ -201,6 +230,15 @@ void WsClient::onConnected()
     }
 }
 
+/**
+ * @brief 断开：停心跳，非主动停时挂一次重连定时器
+ *
+ * 重连表是**单发**的：一次只约一次尝试，下一轮要等再次收到 disconnected() 才会再挂。
+ * NOTE(未核实): 若某次连接尝试只发了 error() 而没发 disconnected()（Qt 在握手失败时
+ * 的信号次序没在本机核实过，onError 里也不挂表），重连链会断在这里、只剩一条日志；
+ * 现场遇到"服务端重启后本机再也不连"就先查这一条。
+ * stopping_ 是唯一区分"主动 stop"与"链路掉"的依据，所以 stop() 里必须先置它再 close()。
+ */
 void WsClient::onDisconnected()
 {
     heartbeatTimer_->stop();
@@ -214,6 +252,17 @@ void WsClient::onDisconnected()
     }
 }
 
+/**
+ * @brief 收到的文本帧按 type 分发（本机这条链路的唯一入站口）
+ *
+ * 三条与"宽容协议"有关的口径：
+ *   - 解析失败/未知 type 都只记日志，**不回错误也不断连**：这条链是旁路观测，
+ *     对端实现不严格时不该把连接搞死；
+ *   - alarm 分支先记 lastAlarmId_ 再转发，且 alarm_id 为空时**不覆盖**旧值
+ *     （否则一条脏数据会把补漏游标清掉，重连后的 sync_request 变成全量）；
+ *   - 不校验 data 的结构，原样透传给 frmMain：本机是 Pad 侧的显示方，字段解释归它。
+ * uplink_ack 同样只拆五个字段就转发，认领与重试判断在 AlarmUplinkEngine 里。
+ */
 void WsClient::onTextMessageReceived(const QString &message)
 {
     QJsonParseError err;
@@ -251,6 +300,8 @@ void WsClient::onTextMessageReceived(const QString &message)
     }
 }
 
+// 主动 stop 过程中的失败是预期的（close 之后还会来一个 error），所以按 stopping_ 静音，
+// 免得退出流程刷一屏红字被当成故障。error 参数本身不区分类型，一律靠 errorString() 给人看。
 void WsClient::onError(QAbstractSocket::SocketError error)
 {
     Q_UNUSED(error);

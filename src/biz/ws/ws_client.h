@@ -44,6 +44,8 @@ class WsClient : public QObject, public uplink::UplinkTransport
     Q_OBJECT
 
 public:
+    /// 函数内 static：第一次调用决定它归属哪根线程（frmMain 构造 = GUI 线程），
+    /// 之后所有 socket/定时器操作都必须在那根线程上，本类不加锁也不校验
     static WsClient &instance();
 
     /// 读 websocket.server_url 后异步发起连接；地址为空只打一条 warning 日志即返回
@@ -59,7 +61,9 @@ public:
     /// 矩形围栏协议（与本机 geofence 的多边形模型不兼容），当前无调用方
     void sendSetFence(int streamId, double x1, double y1, double x2, double y2);
 
+    /// 当前是否处于 ConnectedState（握手完成且未断）；异步 open 期间是 false
     bool isConnected() const;
+    /// 最后一条收到的 alarm_id，只用于重连后补 sync_request；未收到过时为空串
     QString lastAlarmId() const { return lastAlarmId_; }
 
     // ===== UplinkTransport（报警上行的出站口）=====
@@ -81,7 +85,9 @@ signals:
      */
     void uplinkAcked(const QString &messageId, const QString &mediaId, const QString &phase,
                      const QString &status, const QString &error);
+    /// 握手完成（含每次重连）。AlarmUplink 挂它来泵积压，别把它当"只发一次"的信号用
     void connected();
+    /// 链路断（含主动 stop() 那一次）；订阅方要能接受"stop 时也来一发"
     void disconnected();
     /// (category, message)，frmMain 接到自己的调试页日志区
     void logMessage(const QString &category, const QString &message);

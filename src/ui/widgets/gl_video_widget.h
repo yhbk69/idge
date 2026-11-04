@@ -1,4 +1,25 @@
 // gl_video_widget.h
+// ============================================================================
+// gl_video_widget.h - GLVideoWidget：QOpenGLWidget 上的零拷贝视频画面
+// ============================================================================
+//
+// 【所属模块】src/ui/widgets，是零拷贝链路（FFmpeg 硬解 → RGA 转 RGBA 的
+//   dma-buf fd → EGLImage → GLES 纹理）的**终点**：本文件之下再无拷贝，
+//   本文件之上（PlayerWidget/frmMain）只见 widget 不见 fd。
+// 【三件套关系】头文件里两个值成员把渲染分成了两层：
+//   EglImageHelper egl_  —— 只负责"拿到 EGL 扩展函数指针 + 缓存 EGLDisplay"；
+//   EglFramePool framePool_ —— 纹理槽位池，由 initializeGL 用 egl_ 的 Proc 指针初始化。
+//   实际每帧走的是池，egl_ 的 importRGBA/bindToTexture 在这条路径上不再被调用
+//   （留着是给备用路径与将来接 NV12 用的）。egl_dma_buf.h 与 EglImageRenderer.h
+//   是两份零引用的存档实现，与本 widget 无编译依赖。
+// 【谁拥有 EGL 上下文】QOpenGLWidget 自己拥有（它内部建 QOpenGLContext + FBO），
+//   本类只是使用者：所有 GL/EGL 调用只能发生在 initializeGL/paintGL/resizeGL
+//   或显式 makeCurrent() 之间——析构里就是先 makeCurrent() 清资源再 doneCurrent()。
+//   上下文不归本类销毁，Qt 负责；本类负责的是 EGLImage（不随上下文回收，见
+//   EglFramePool::shutdown）。
+// 【fd 的所有权】见下面 RenderFrame 的协议与 gl_video_widget.cpp 文件头那段：
+//   每个 dup 副本恰好一次 close，本 widget 是接收侧的唯一收口人。
+// ============================================================================
 #ifndef GL_VIDEO_WIDGET_H
 #define GL_VIDEO_WIDGET_H
 
