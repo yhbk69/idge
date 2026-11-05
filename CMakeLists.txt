@@ -815,6 +815,11 @@ add_executable(test_pad_http_api
     src/base/config/ConfigManager.cpp
     src/base/sysinfo/device_stats.cpp
     src/ai/model_repo/model_registry.cpp
+    # pad_http_api.cpp 现在引用 RtspLiveService（§6.1 liveUrl 优先指带框 RTSP 直播源），
+    # 所以把它的实现 + ZLM 环境门 + HttpFileService（firstUsableIpv4）一并拉进测试目标。
+    src/media/server/rtsp_live_service.cpp
+    src/media/server/zlm_env.cpp
+    src/media/server/http_file_service.cpp
 )
 
 target_include_directories(test_pad_http_api PRIVATE
@@ -830,8 +835,15 @@ target_include_directories(test_pad_http_api PRIVATE
     ${CMAKE_SOURCE_DIR}/src/base/sysinfo
     ${CMAKE_SOURCE_DIR}/src/ai/model_repo
     ${CMAKE_SOURCE_DIR}/src/ai/yolo11
+    ${CMAKE_SOURCE_DIR}/src/media/server
+    ${CMAKE_SOURCE_DIR}/3rdparty/zlmediakit/include
     ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/include
     ${CMAKE_SOURCE_DIR}/3rdparty/sqlite
+)
+
+target_link_directories(test_pad_http_api PRIVATE
+    ${CMAKE_SOURCE_DIR}/3rdparty/zlmediakit/aarch64
+    ${CMAKE_SOURCE_DIR}/3rdparty/openssl1.1.0/lib
 )
 
 target_link_libraries(test_pad_http_api
@@ -842,6 +854,8 @@ target_link_libraries(test_pad_http_api
     Qt5::WebSockets
     sqlite3
     ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/lib/libjsoncpp.a
+    mk_api        # RtspLiveService / HttpFileService 依赖
+    ssl crypto    # libmk_api.so 运行期需要 OpenSSL 1.1
     pthread
 )
 
@@ -982,6 +996,11 @@ add_executable(test_channel_reload
     src/base/imaging/draw_utils.cpp
     src/base/imaging/file_utils.cpp
     src/biz/service/task_manager.cpp
+    # ffmpeg_video_decoder.cpp 现在引用 RtspLiveService（带框码流推 RTSP 直播），
+    # 所以把它的实现 + ZLM 环境门 + HttpFileService（firstUsableIpv4）补进本目标的依赖闭包。
+    src/media/server/rtsp_live_service.cpp
+    src/media/server/zlm_env.cpp
+    src/media/server/http_file_service.cpp
 )
 
 # 主目标的库搜索路径是 target_link_directories(${PROJECT_NAME})，不会传给本目标，
@@ -992,6 +1011,8 @@ target_link_directories(test_channel_reload PRIVATE
     ${CMAKE_SOURCE_DIR}/3rdparty/librga/lib
     ${CMAKE_SOURCE_DIR}/3rdparty/rknpu2/Linux/aarch64
     ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/lib
+    ${CMAKE_SOURCE_DIR}/3rdparty/zlmediakit/aarch64
+    ${CMAKE_SOURCE_DIR}/3rdparty/openssl1.1.0/lib
 )
 
 target_link_libraries(test_channel_reload
@@ -1012,6 +1033,8 @@ target_link_libraries(test_channel_reload
     sqlite3
     rknnrt
     rga
+    mk_api
+    ssl crypto
     ${OpenCV_LIBS}
     ${GLES2_LIBRARIES}
     ${EGL_LIBRARIES}
@@ -1056,6 +1079,10 @@ add_executable(test_stream_params
     src/base/imaging/draw_utils.cpp
     src/base/imaging/file_utils.cpp
     src/biz/service/task_manager.cpp
+    # 同 test_channel_reload：ffmpeg_video_decoder.cpp 依赖 RtspLiveService
+    src/media/server/rtsp_live_service.cpp
+    src/media/server/zlm_env.cpp
+    src/media/server/http_file_service.cpp
 )
 
 target_link_directories(test_stream_params PRIVATE
@@ -1064,6 +1091,8 @@ target_link_directories(test_stream_params PRIVATE
     ${CMAKE_SOURCE_DIR}/3rdparty/librga/lib
     ${CMAKE_SOURCE_DIR}/3rdparty/rknpu2/Linux/aarch64
     ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/lib
+    ${CMAKE_SOURCE_DIR}/3rdparty/zlmediakit/aarch64
+    ${CMAKE_SOURCE_DIR}/3rdparty/openssl1.1.0/lib
 )
 
 target_link_libraries(test_stream_params
@@ -1084,6 +1113,8 @@ target_link_libraries(test_stream_params
     sqlite3
     rknnrt
     rga
+    mk_api
+    ssl crypto
     ${OpenCV_LIBS}
     ${GLES2_LIBRARIES}
     ${EGL_LIBRARIES}

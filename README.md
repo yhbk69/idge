@@ -9,7 +9,7 @@
 ## 1. 一键运行
 
 ```bash
-/build-linux.sh -t rk3588 -b Release
+./build-linux.sh -t rk3588 -b Release
 
 # 仅做两件事：cd 进 build/build_rk3588_linux，然后执行 ./idge
 ./run.sh

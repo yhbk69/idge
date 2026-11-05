@@ -489,6 +489,16 @@ public:
     void setPadHttpFenceFrames(bool render);
     void setPadHttpDisposeOptions(const QJsonArray &options);
 
+    // ========== Pad RTSP 直播（带检测框视频） ==========
+    // 与 pad_http/pad_server 是第三台独立服务：本机把画好检测框的画面硬编码后，
+    // 由 ZLM 分发成 RTSP，§6.1 的 liveUrl 优先指向它（详见 src/media/server/rtsp_live_service.h）。
+
+    /** @brief 是否启用 RTSP 直播分发（默认 **true**；关掉则 liveUrl 回落到原始视频源地址） */
+    bool padRtspEnabled() const;
+
+    /** @brief RTSP 监听端口（默认 8554，范围 1024~65535；554 需 root，默认避开） */
+    int padRtspPort() const;
+
     // ========== WebSocket 配置 ==========
 
     /** @brief WebSocket 服务器地址（如 "ws://192.168.1.100:8765"） */
@@ -611,6 +621,15 @@ private:
      * @return true=root_ 有改动（调用方负责 saveUnsafe 落盘）
      */
     bool migratePadHttpDefaults();
+
+    /**
+     * @brief 老配置缺少 pad_rtsp 段时补齐默认值（load 内持锁调用，勿单独使用）
+     *
+     * 默认 enabled=true、port=8554。补齐本身会让 §6.1 的 liveUrl 改指本机 RTSP 直播源
+     * （带检测框画面），而不再是原始摄像头地址。
+     * @return true=root_ 有改动（调用方负责 saveUnsafe 落盘）
+     */
+    bool migratePadRtspDefaults();
 
     /**
      * @brief 老配置没有 video.sources 时补一个空数组（load 内持锁调用）

@@ -280,6 +280,17 @@
         "fence_frames": true,
         "dispose_options": []
     },
+    "pad_rtsp": {
+        "enabled": true,
+        "port": 8554,
+        "_readme": [
+            "Pad RTSP 直播（带检测框画面）：本机把画好框的码流经 rkmpp 硬编码后由 ZLM 分发，",
+            "§6.1 的 liveUrl 优先指向 rtsp://<本机IP>:<port>/live/CHx，Pad 拉到的就是有框画面。",
+            "端口默认 8554（554 需 root）；enabled=false 时 liveUrl 回落到原始视频源地址（无框）。",
+            "复用 recording 段的编码器：recording.enabled 必须为 true，否则无码流可推。",
+            "codec 跟随 recording.codec（hevc/h264），Pad 端播放器需支持对应格式。"
+        ]
+    },
     "qr_login": {
         "_readme": [
             "扫码登录的校验档，契约见 plan/qr-login-edge-v1.md，示例码 plan/qr-login.json。",

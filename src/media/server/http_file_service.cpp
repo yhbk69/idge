@@ -12,25 +12,17 @@
 #include <QVector>
 #include <QDebug>
 
-// 只取用到的那部分 C API：环境初始化/配置项/http 服务器。
+#include "zlm_env.h"   // mk_env_init1 的进程级一次性门（与 RtspLiveService 共享）
+
+// 只取用到的那部分 C API：配置项/http 服务器。
 // 注意这些键**只能对照库内字符串**——mk_set_option 对未知键静默忽略，
 // 上一轮我按 config.ini 里的 `http.directory` 找就白找了半天，真名是 `http.dirMenu`。
 #include "mk_common.h"
 
 namespace {
 
-// ZLM 的 IO 线程数。0 会取 hardware_concurrency，在本板就是 8 个线程与 4 路解码/推理
-// 抢 CPU；静态文件服务只服务"报警后取一次图和一段 mp4"这种突发小流量，2 个够。
-// 实测若仍抢占节拍就降到 1（见 src/media/server/README.md 的性能条目）。
-constexpr int kIoThreads = 2;
-
-// 日志级别 0~4 = Trace/Debug/Info/Warn/Error。取 Warn(3)：
-// Info 会给每个客户端连接/断开各打一条，多浏览器标签时把 idge 自己的检测日志刷掉。
-constexpr int kLogLevelWarn = 3;
-
-// 只往控制台打（run.sh 会把 stdout tee 进 logs/idge_*.log，等于已经落盘了）。
-// 不给 ZLM 单独开文件日志：它会按自己的规则切文件，和本工程的日志放一起只会添乱。
-constexpr const char *kLogFileNone = nullptr;
+// IO 线程数/日志级别由 zlm_env.cpp 统一决定（HttpFileService 与 RtspLiveService 共享），
+// 这里不再重复定义。
 
 // 网卡名黑名单：这些口上的地址对端大概率到不了（容器网桥/回环/虚拟口）。
 // 判据不精是有意为之——猜错的代价由配置项 media_base_url 兜住，写在这里就够。
@@ -107,9 +99,9 @@ bool HttpFileService::start(const QString &rootDir, quint16 port)
         return false;
     }
 
-    // 参数顺序照 mk_common.h:100 的 mk_env_init1；ini/ssl 全给空 = 用库内默认值。
-    mk_env_init1(kIoThreads, kLogLevelWarn, LOG_CONSOLE, kLogFileNone, 0,
-                 0, nullptr, 0, nullptr, nullptr);
+    // mk_env_init1 走 zlm::ensureEnvInit 这道进程级门：RtspLiveService 可能已经先调过了，
+    // 这里只需要"保证已就绪"，不能自己再调一次（库硬约束：第二次是 UB）。
+    zlm::ensureEnvInit();
     envReady_ = true;
 
     const QByteArray rootUtf8 = rootDir.toUtf8();

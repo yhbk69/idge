@@ -232,24 +232,38 @@ void VideoRecorder::collectPackets()
 }
 
 // ============================================================================
-// pushPacket: 存入环形缓冲区（满则丢最旧）
+// pushPacket: 存入环形缓冲区（满则丢最旧），并把同一份包推给 onPacket 回调
 // ============================================================================
 void VideoRecorder::pushPacket(AVPacket *pkt)
 {
-    QMutexLocker lock(&mutex_);
+    const bool keyFrame = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
+    // 编码器 time_base = 1/fps，pts 是帧序号，换算成毫秒给直播侧（dts==pts）。
+    const uint64_t pts_ms = cfg_.fps > 0
+        ? static_cast<uint64_t>(lastPts_) * 1000 / static_cast<uint64_t>(cfg_.fps)
+        : 0;
 
-    if (static_cast<int>(ringBuffer_.size()) >= maxPackets_) {
-        ringBuffer_.erase(ringBuffer_.begin());
+    {
+        QMutexLocker lock(&mutex_);
+
+        if (static_cast<int>(ringBuffer_.size()) >= maxPackets_) {
+            ringBuffer_.erase(ringBuffer_.begin());
+        }
+
+        BufferedPacket bp;
+        // 同一帧可能产出多个包（参数集 + slice），它们共用该帧的时间戳，
+        // 时间戳取"最近一次成功送入编码器的帧"，因为收到的包必属于它之前的帧。
+        bp.data.assign(pkt->data, pkt->data + pkt->size);
+        bp.pts = lastPts_;
+        bp.wall_ms = lastWallMs_;
+        bp.isKeyFrame = keyFrame;
+        ringBuffer_.push_back(std::move(bp));
     }
 
-    BufferedPacket bp;
-    // 同一帧可能产出多个包（参数集 + slice），它们共用该帧的时间戳，
-    // 时间戳取"最近一次成功送入编码器的帧"，因为收到的包必属于它之前的帧。
-    bp.data.assign(pkt->data, pkt->data + pkt->size);
-    bp.pts = lastPts_;
-    bp.wall_ms = lastWallMs_;
-    bp.isKeyFrame = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
-    ringBuffer_.push_back(std::move(bp));
+    // 锁外回调：pkt 在本函数返回后才会被 collectPackets unref，所以 pkt->data
+    // 此刻仍有效；ZLM 的 mk_media_input_* 同步拷走，无需再 copy 一份。
+    if (onPacket) {
+        onPacket(pkt->data, pkt->size, pts_ms, keyFrame);
+    }
 }
 
 // ============================================================================

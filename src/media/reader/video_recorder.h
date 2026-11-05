@@ -155,6 +155,14 @@ public:
     /** @brief 实际使用的编码器名（init 后有效），便于日志与网页展示 */
     QString encoderName() const { return encoderName_; }
 
+    /// 每个编码包（Annex-B，含起始码）的回调。当前用途：把"已画检测框"的码流
+    /// 转发给 RtspLiveService，让 Pad 通过 rtsp://... 看到带框画面。
+    /// - 调用时机：pushPacket 内、释放 ringBuffer_ 锁之后，不阻塞编码主线；
+    /// - data 只在回调返回前有效（指向本次 AVPacket 的 buffer），回调内需立即推送/拷走；
+    /// - pts_ms 已换算成毫秒（编码器 time_base=1/fps → pts_ms = pts*1000/fps）；
+    /// - 留空 = 不转发（仅保留环形缓冲供报警切片）。
+    std::function<void(const uint8_t *data, int len, uint64_t pts_ms, bool keyFrame)> onPacket;
+
 private:
     struct BufferedPacket
     {

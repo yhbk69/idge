@@ -21,6 +21,7 @@
 #include <functional>
 #include "runtime_paths.h"
 #include "frmmain.h"
+#include "rtsp_live_service.h"   // 进程退出前释放 RTSP 直播源
 #include "appinit.h"
 #include "qthelper.h"
 
@@ -392,6 +393,9 @@ int main(int argc, char *argv[])
     // 程序退出前清理和同步
     qInfo() << "Shutting down, cleaning up...";
     if (gb28181) gb28181->stop();
+    // 先释放 RTSP 直播源（mk_media_release），再停 ZLM 全部服务器；
+    // 顺序反了会导致 mk_stop_all_server 已经把 media source 销毁、再 release 就 UAF。
+    RtspLiveService::instance().stop();
     // 内嵌 http 文件服务（报警上行 url 模式）。停在这里而不是 ~frmMain：
     // mk_env_init 是进程级一次、mk_stop_all_server 之后不能再起，
     // 生命周期必须覆盖整个进程，而 frmMain 是 main 的栈对象、析构点比这早

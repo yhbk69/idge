@@ -120,6 +120,7 @@
 #undef Null
 #undef Bool
 #include "ConfigManager.h"
+#include "rtsp_live_service.h"   // 带检测框视频的 RTSP 直播分发（复用 VideoRecorder 的硬编码码流）
 #include <fstream>
 #include <arm_neon.h>   // ARM NEON SIMD 加速
 
@@ -1479,6 +1480,24 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
             // 硬编不可用只关掉录制，检测/显示主流程照常
             qWarning() << "Video recorder unavailable, recording disabled for ch" << channel_;
             videoRecorder_.reset();
+        } else {
+            // ===== 把"已画检测框"的码流挂到 RTSP 直播服务（Pad 看带框画面）=====
+            // streamId 与 §6.1 /api/streams 完全一致：CH1..CH4 = 通道号+1。
+            // createSource 用的是编码器快照的参数（codec/宽高/fps/码率），
+            // 这些在 init() 里已确定；onPacket 每帧推给 RtspLiveService。
+            const QString streamId = QStringLiteral("CH%1").arg(channel_ + 1);
+            const RecorderConfig &rc = recordingCfg_;
+            RtspLiveService::instance().createSource(
+                streamId, rc.codec, vid_w, vid_h, rc.fps, rc.bitRate);
+            videoRecorder_->onPacket =
+                [streamId, codec = rc.codec](const uint8_t *data, int len,
+                                             uint64_t pts_ms, bool /*keyFrame*/) {
+                    if (codec.compare(QStringLiteral("hevc"), Qt::CaseInsensitive) == 0) {
+                        RtspLiveService::instance().pushH265(streamId, data, len, pts_ms);
+                    } else {
+                        RtspLiveService::instance().pushH264(streamId, data, len, pts_ms);
+                    }
+                };
         }
     }
 
@@ -2487,6 +2506,12 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
     software_scaler = nullptr;
 
     emit statusChanged(channel_, 0);
+
+    // 注销本路的 RTSP 直播源：解码循环结束后不再有 encodeFrame，
+    // 但 videoRecorder_ 可能被报警片段任务持有（shared_ptr），所以只在源侧摘掉，
+    // 不碰 recorder。后续 onPacket 即便被触发也会因源不存在而静默丢弃。
+    RtspLiveService::instance().removeSource(
+        QStringLiteral("CH%1").arg(channel_ + 1));
 
     // ===== 步骤5: 清理资源 =====
     //

@@ -35,6 +35,7 @@
 #include "ws_client.h"
 #include "alarm_uplink.h"
 #include "http_file_service.h"   // 报警媒体的内嵌文件服务（url 模式；装配点在此）
+#include "rtsp_live_service.h"    // 带检测框视频的 RTSP 直播分发（§6.1 liveUrl 优先指它）
 #include "pad_ws_server.h"        // Pad 接口 v1 的入站 WS 服务端（本机是服务端；装配点在此）
 #include "pad_wire.h"             // defaultDeviceId()：HTTP 面的 device_id 与 WS 那条同源
 #include "pad_http_server.h"      // Pad 接口 v1 的入站 HTTP `/api/` 服务端（§4~§7；装配点在此）
@@ -699,6 +700,21 @@ void frmMain::initNewPages()
                 log("info", QStringLiteral("§6.1 的 liveUrl 已剥掉视频源口令"
                                           "（要保留请打开 pad_http.expose_stream_credentials）"));
             }
+        }
+    }
+
+    // Pad RTSP 直播（带检测框画面）：本机把画好框的码流经 ZLM 分发，
+    // §6.1 的 liveUrl 优先指到这里。默认开（pad_rtsp.enabled 出厂 true）。
+    // 与 HttpFileService 共享 mk_env_init1（zlm_env），谁先起谁初始化运行时。
+    if (uplinkCfg.padRtspEnabled()) {
+        const quint16 rtspPort = static_cast<quint16>(uplinkCfg.padRtspPort());
+        if (!RtspLiveService::instance().start(rtspPort)) {
+            log("warning", QStringLiteral("Pad RTSP 直播没起来 port=%1，"
+                                          "§6.1 的 liveUrl 将回落到原始视频源地址").arg(rtspPort));
+        } else {
+            log("system", QStringLiteral("Pad RTSP 直播已监听 rtsp://0.0.0.0:%1/live/<CHx>"
+                                         "（带检测框画面；关闭请写 pad_rtsp.enabled=false）")
+                              .arg(rtspPort));
         }
     }
 

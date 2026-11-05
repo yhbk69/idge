@@ -320,6 +320,13 @@ void ConfigManager::load(const QString &path)
         saveUnsafe();
     }
 
+    // 缺 pad_rtsp 段时补齐默认值（enabled=true, port=8554）：补齐后 §6.1 的 liveUrl
+    // 会改指本机带框 RTSP 直播源，而不是原始摄像头地址。
+    if (migratePadRtspDefaults()) {
+        qInfo() << "[ConfigManager] 已补齐 Pad RTSP 直播默认配置 (pad_rtsp/)，默认监听 8554";
+        saveUnsafe();
+    }
+
     // 缺 video.sources 段时补一个空数组（不改各通道已有的内联 source）
     if (migrateVideoSourcesDefaults()) {
         qInfo() << "[ConfigManager] 已补齐视频流注册表空段 (video.sources)";
@@ -732,6 +739,27 @@ bool ConfigManager::migratePadHttpDefaults()
         return false;
     }
     root_["pad_http"] = makePadHttpDefaults();
+    return true;
+}
+
+// pad_rtsp 段：把"已画检测框"的画面作为 RTSP 直播流对外发布（Pad 看带框画面）。
+// 默认 enabled=true：与 pad_server/pad_http 同一天定案的口径——这台设备的用途就是被 Pad 连。
+// 端口 8554：RTSP 默认 554 要 root（uid 1000 + ip_unprivileged_port_start=1024 bind 不上），
+// 取一个不与 8090(媒体文件)/8899(http api)/8900(ws) 冲突的非特权口。
+static QJsonObject makePadRtspDefaults()
+{
+    return QJsonObject{
+        {"enabled", true},
+        {"port", 8554},
+    };
+}
+
+bool ConfigManager::migratePadRtspDefaults()
+{
+    if (root_.contains("pad_rtsp")) {
+        return false;
+    }
+    root_["pad_rtsp"] = makePadRtspDefaults();
     return true;
 }
 
@@ -2204,6 +2232,26 @@ void ConfigManager::setPadHttpDisposeOptions(const QJsonArray &options)
     QJsonObject http = padHttpSection(root_);
     http["dispose_options"] = options;
     root_["pad_http"] = http;
+}
+
+// ============================================================================
+// pad_rtsp 段：带检测框视频的 RTSP 直播分发（详见 src/media/server/rtsp_live_service.h）
+// ============================================================================
+static QJsonObject padRtspSection(const QJsonObject &root)
+{
+    return root["pad_rtsp"].toObject();
+}
+
+bool ConfigManager::padRtspEnabled() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return padRtspSection(root_).value("enabled").toBool(true);
+}
+
+int ConfigManager::padRtspPort() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return qBound(1024, padRtspSection(root_).value("port").toInt(8554), 65535);
 }
 
 /**

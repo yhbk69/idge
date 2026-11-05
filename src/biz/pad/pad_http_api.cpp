@@ -8,6 +8,7 @@
 #include "pad_http_api.h"
 
 #include "ConfigManager.h"
+#include "rtsp_live_service.h"   // 带检测框的 RTSP 直播源（§6.1 liveUrl 优先指它）
 
 namespace pad {
 
@@ -86,6 +87,26 @@ ChannelIdentity channelIdentity(int channel, bool exposeCredentials)
 
     const QString raw = src.url.trimmed();
     const QString protocol = detectProtocol(raw);
+
+    // 优先返回"带检测框"的 RTSP 直播地址：本机把画好框的画面经 rkmpp 硬编码后
+    // 由 ZLM 分发，Pad 拉到的就是有框的实时画面（见 RtspLiveService）。
+    // 前提三道全满足才给：通道启用 + RTSP 服务在跑 + 该路编码器真的注册了源。
+    // 编码器 init 失败（无 rkmpp）会导致源不存在，hasSource 返回 false → 走原始地址回落。
+    if (id.enabled) {
+        RtspLiveService &rtsp = RtspLiveService::instance();
+        if (rtsp.running() && rtsp.hasSource(id.streamId)) {
+            const QString base = rtsp.baseUrl();
+            if (!base.isEmpty()) {
+                id.playable = true;
+                id.liveProtocol = QStringLiteral("RTSP");
+                id.liveUrl = QStringLiteral("%1/live/%2").arg(base, id.streamId);
+                return id;
+            }
+        }
+    }
+
+    // 回落：原始视频源地址（无标注）。file://、/dev/videoN、GB28181 通道 id 等
+    // "局域网另一台设备取不到"的源 detectProtocol 返回空，下面 playable 仍为 false。
     if (!protocol.isEmpty() && id.enabled && !raw.isEmpty()) {
         id.playable = true;
         id.liveProtocol = protocol;
