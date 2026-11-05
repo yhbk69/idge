@@ -237,6 +237,18 @@
         "max_pending": 16,
         "expect_ack": false
     },
+    "alarm": {
+        "_readme": [
+            "报警等级按【报警类型】配置（1紧急 2重要 3一般 4提示），等级由服务端下发。",
+            "所有报警（普通检测 detection / 围栏闯入 fence_in / 围栏离岗 fence_out）都从 alarm.levels 取等级，",
+            "代码里不再硬编码。键名 = alarmType，未配置的类型兜底为 3（一般），并夹到 [1,4]。"
+        ],
+        "levels": {
+            "detection": 3,
+            "fence_in": 1,
+            "fence_out": 1
+        }
+    },
     "pad_server": {
         "enabled": true,
         "_readme": [

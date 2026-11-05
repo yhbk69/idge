@@ -158,6 +158,7 @@ ConfigManager &ConfigManager::instance()
 static QJsonObject makeRecordingDefaults();
 static QJsonObject makeAlarmUplinkDefaults();
 static QJsonObject makePadServerDefaults();
+static QJsonObject makeAlarmDefaults();
 // 流注册表的 JSON 互转（定义在"视频流注册表"一节，makeVideoDefaults 要先用一次）
 static QJsonObject sourceToJson(const VideoSourceCfg &s);
 
@@ -248,6 +249,10 @@ void ConfigManager::load(const QString &path)
         // 的监听口必须人来决定。
         root_["pad_server"] = makePadServerDefaults();
 
+        // 报警等级：按报警类型（alarmType）配置等级（1紧急 2重要 3一般 4提示）。
+        // 等级由服务端下发，所有报警都从这里取，不再在代码里硬编码。
+        root_["alarm"] = makeAlarmDefaults();
+
         // 智能识别/扫码：用哪个节点 + 采多大分辨率。两个键都有 getter，所以写出来；
         // 此前这段根本不进默认配置，"用哪只摄像头、多少像素"全靠运行时猜、现场无法改。
         // camera 留空 = 走 probeCameraNode() 实探测；camera_size 是帧率与清晰度的旋钮。
@@ -324,6 +329,13 @@ void ConfigManager::load(const QString &path)
     // 会改指本机带框 RTSP 直播源，而不是原始摄像头地址。
     if (migratePadRtspDefaults()) {
         qInfo() << "[ConfigManager] 已补齐 Pad RTSP 直播默认配置 (pad_rtsp/)，默认监听 8554";
+        saveUnsafe();
+    }
+
+    // 缺 alarm 段时补齐默认等级：detection=3、fence_in/out=1。
+    // 等级从服务端下发，缺段/缺类型都兜底到 3，保证所有报警都有等级。
+    if (migrateAlarmDefaults()) {
+        qInfo() << "[ConfigManager] 已补齐报警等级默认配置 (alarm.levels)";
         saveUnsafe();
     }
 
@@ -760,6 +772,29 @@ bool ConfigManager::migratePadRtspDefaults()
         return false;
     }
     root_["pad_rtsp"] = makePadRtspDefaults();
+    return true;
+}
+
+// alarm 段：报警等级按类型配置。键 = alarmType（"detection" / "fence_in" / "fence_out" …），
+// 值 = 1~4（1紧急 2重要 3一般 4提示）。等级由服务端下发，getter 对未配置的类型兜底到 3，
+// 保证"所有报警都有等级"。
+static QJsonObject makeAlarmDefaults()
+{
+    return QJsonObject{
+        {"levels", QJsonObject{
+            {"detection", 3},   // 普通检测报警：一般
+            {"fence_in", 1},    // 围栏闯入禁区：紧急
+            {"fence_out", 1},   // 围栏离岗：紧急
+        }},
+    };
+}
+
+bool ConfigManager::migrateAlarmDefaults()
+{
+    if (root_.contains("alarm")) {
+        return false;
+    }
+    root_["alarm"] = makeAlarmDefaults();
     return true;
 }
 
@@ -2252,6 +2287,29 @@ int ConfigManager::padRtspPort() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return qBound(1024, padRtspSection(root_).value("port").toInt(8554), 65535);
+}
+
+// ============================================================================
+// alarm 段：报警等级按类型配置（alarm.levels，键 = alarmType）
+// ============================================================================
+static QJsonObject alarmSection(const QJsonObject &root)
+{
+    return root["alarm"].toObject();
+}
+
+/**
+ * @brief 取某报警类型的等级（1紧急 2重要 3一般 4提示）
+ * @param alarmType 报警类型，如 "detection" / "fence_in" / "fence_out"
+ * @return 配置的等级；未配置的类型回落 3（一般），并夹到 [1,4] 区间。
+ *         目的：等级从服务端下发到 config.json 的 alarm.levels，保证所有报警都有等级，
+ *         代码里不再硬编码。
+ */
+int ConfigManager::alarmLevel(const QString &alarmType) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const QJsonObject levels = alarmSection(root_)["levels"].toObject();
+    const int lv = levels.value(alarmType).toInt(3);
+    return qBound(1, lv, 4);
 }
 
 /**

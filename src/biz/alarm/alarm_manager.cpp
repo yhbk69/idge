@@ -333,7 +333,8 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
             lastAlarmTime_[key] = steadyNow;  // 记录本次报警的单调时钟值
 
             AlarmRecord alarm = makeAlarmRecord(channel, det, className, results.time,
-                                                QStringLiteral("detection"), 3);
+                                                QStringLiteral("detection"),
+                                                ConfigManager::instance().alarmLevel(QStringLiteral("detection")));
 
             // 调试输出
             qDebug() << "AlarmManager: Creating alarm - id:" << alarm.id
@@ -388,8 +389,10 @@ QVector<AlarmRecord> AlarmManager::ingestFenceAlarm(int channel, const object_de
             return newAlarms;   // 节流窗口内：进入沿抖动或多人几乎同时违规，只留第一条
         lastAlarmTime_[key] = steadyNow;
 
+        const QString fenceType = QStringLiteral("fence_") + roleTag;
         AlarmRecord alarm = makeAlarmRecord(channel, det, className, timeNs,
-                                            QStringLiteral("fence_") + roleTag, 2);
+                                            fenceType,
+                                            ConfigManager::instance().alarmLevel(fenceType));
         alarm.isFenceAlarm = true;
 
         qDebug() << "AlarmManager: Creating fence alarm - id:" << alarm.id

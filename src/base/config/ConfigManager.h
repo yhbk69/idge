@@ -499,6 +499,17 @@ public:
     /** @brief RTSP 监听端口（默认 8554，范围 1024~65535；554 需 root，默认避开） */
     int padRtspPort() const;
 
+    // ========== 报警等级配置（alarm.levels） ==========
+
+    /**
+     * @brief 某报警类型的等级（1紧急 2重要 3一般 4提示）
+     * @param alarmType 报警类型（如 "detection" / "fence_in" / "fence_out"）
+     * @return 配置的等级；未配置的类型兜底 3，并夹到 [1,4]
+     * @note 等级由服务端下发到 config.json 的 alarm.levels，所有报警都从这里取，
+     *       代码里不再硬编码。
+     */
+    int alarmLevel(const QString &alarmType) const;
+
     // ========== WebSocket 配置 ==========
 
     /** @brief WebSocket 服务器地址（如 "ws://192.168.1.100:8765"） */
@@ -630,6 +641,16 @@ private:
      * @return true=root_ 有改动（调用方负责 saveUnsafe 落盘）
      */
     bool migratePadRtspDefaults();
+
+    /**
+     * @brief 老配置缺少 alarm 段时补齐默认等级（load 内持锁调用，勿单独使用）
+     *
+     * alarm.levels 按报警类型（detection/fence_in/fence_out）配置 1~4 等级，
+     * 由服务端下发；缺段时补默认值（detection=3, fence_in/out=1），
+     * 已存在 alarm 段时不做任何修改（现场配置不会被启动流程覆盖）。
+     * @return true=root_ 有改动（调用方负责 saveUnsafe 落盘）
+     */
+    bool migrateAlarmDefaults();
 
     /**
      * @brief 老配置没有 video.sources 时补一个空数组（load 内持锁调用）
