@@ -72,24 +72,30 @@ struct AlarmRecord {
     float confidence;         // 置信度
     QString imagePath;        // 报警图片路径
     QString videoPath;        // 报警视频路径
-    QString status = "pending";  // 状态: pending/rectified/false_alarm
+    QString status = "pending";  // 状态: pending/rectified/disposed/false_alarm（disposed 只由 AlarmDAO::dispose() 写，对端即 v1 的 DISPOSED）
     QString disposeResult;    // 处置结果
     int disposeUserId = 0;    // 处置人ID
     QString disposeUserName;  // 处置人姓名
+    QString disposePersonId;  // 处置人/误报人工号**原文**（v1 的 dispose.personId，例 "05-0101"）。
+                              // 与 disposeUserId 分两列是因为后者是 INTEGER，装不下带横线的工号
     QString disposeTime;      // 处置时间
-    QString disposePhoto;     // 现场处置照片路径
+    QString disposePhoto;     // 处置整改照片：路径的 **JSON 数组文本**（0~5 个相对路径）。
+                              // ⚠ 老行可能是单张裸路径，读侧两种形状都要认（见 pad_wire.cpp 的 photoUrls）
     QString remark;           // 补充说明
     QString readTime;         // 已读时间
     QString createTime;       // 入库时间
     QString updateTime;       // 更新时间
 
     // 施工信息（扫码登录时定死，报警产生那一刻打戳；未登录/历史行为空）
-    //   workerName: 列表那一列按它显示，也是将来按人筛选的落点
-    //   constructionJson: 整份载荷（含电话/工号/工作内容/施工id），详情框按 JSON 逐键渲染、
+    //   workerName: 列表那一列按它显示，也是将来按人筛选的落点（取自 person.name）
+    //   constructionJson: 整份载荷（person/plan 嵌套，含人员与计划时间窗），详情框按 JSON 逐键渲染、
     //                     WebSocket 上行作为 data["construction"] 子对象——
     //                     **字段增删只改 ConstructionInfo，这两列与这两处显示都不用动**
+    //   taskId: 这一条属于哪个施工计划 ＝ v1 的 taskId（B2 定案：就是载荷里的 plan.taskId）。
+    //           单独成列是为了让 Pad 的 sync 过滤走等值而不是解 JSON；未登录时是空串
     QString workerName;
     QString constructionJson;
+    QString taskId;
 
     // 兼容旧字段
     long timestamp = 0;       // 时间戳(毫秒)
@@ -244,8 +250,45 @@ public:
     // 标记为误报（按索引）
     bool markAsFalsePositive(int index);
 
-    // 标记为误报（按ID）- 推荐使用
-    bool markAsFalsePositiveById(const QString &id);
+    /**
+     * @brief 标记为误报（按ID）- 推荐使用；v1 §4.3 走带后三个参数的那一档
+     * @param personId/personName/markedAtInternal 三个都传空串时**与改动前的行为相同**
+     *        （本机界面的「误报」按钮就是这样调的）。markedAtInternal 是库内那套
+     *        定宽无偏移文本，由 HTTP 路由先把对端的 ISO-8601 换算好再传进来。
+     * @return false = id 空 / 库里没这条 / 已是终态（disposed 或已误报，见 §3.7 不回退）
+     */
+    bool markAsFalsePositiveById(const QString &id, const QString &personId = QString(),
+                                 const QString &personName = QString(),
+                                 const QString &markedAtInternal = QString());
+
+    /**
+     * @brief v1 §4.2 的处置入口（Pad 提交处置表单，含 0~5 张整改照片）
+     * @param photoPathsJson 已落盘的整改照片**相对路径**的 JSON 数组文本；空串按 `[]` 存
+     * @param disposedAtInternal 对端报的处置时间（库内定宽文本），空 = 本机此刻
+     * @param err 可选出参，false 时的中文原因（"库里没有这条报警" / "已经是终态"）
+     * @return true = 库里的行真的被改成 disposed 了
+     *
+     * 为什么必须走这里而不是让 HTTP 路由直接调 AlarmDAO::dispose()：
+     *   内存窗口 alarms_ 里那 1000 条是**同一批记录的另一个副本**，
+     *   关机时 syncToDatabase() 会把它们整批 INSERT OR REPLACE 回去。
+     *   只改库不改这份副本，处置就在第二天早上被静默撤销
+     *   ——与 task_id 回填被打回 NULL 是同一个病灶（实测过一次，见 db/README.md）。
+     * 成功后照发 alarmStatusChanged，Pad 那边由 WS 收到 alarm_update。
+     */
+    bool disposeAlarmById(const QString &id, const QString &measure, const QString &remark,
+                          const QString &personId, const QString &personName,
+                          const QString &photoPathsJson, const QString &disposedAtInternal,
+                          QString *err = nullptr);
+
+    /**
+     * @brief v1 §4.4 的已读入口：**不改状态**，只推 read_time（保留最早）与 update_time
+     * @param readAtInternal 对端报的已读时间（库内定宽文本），空 = 本机此刻
+     *
+     * 与 acknowledgeAlarmById 的区别要说清：那条是本机「我看过了」，会把状态写成
+     * `rectified`；这条只是记录"什么时候被打开过"，状态一动不动
+     * （§4.4 明写"读一条报警不改状态"）。同一条报警两者可以都有。
+     */
+    bool markAlarmReadById(const QString &id, const QString &readAtInternal);
 
     // 获取各类别检测统计
     QMap<QString, int> classStatistics() const;
@@ -262,6 +305,13 @@ public:
     // 跟踪哪些通道在线，用于界面显示通道状态
     // ============================================================================
     void setChannelOnline(int channel, bool online);
+
+    /**
+     * @brief 这一路现在在线吗（§6.1 的 stream.status 与 §7.1 的 cameras[].online 用它）
+     * @note 判据与 onlineChannelCount() 同一份表（onlineChannels_），所以两处不会读出不同的数。
+     *       没人调过 setChannelOnline 的通道就是"不在线"——那是事实，不是错误。
+     */
+    bool isChannelOnline(int channel) const;
     int onlineChannelCount() const;
 
     // ============================================================================

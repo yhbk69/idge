@@ -36,6 +36,7 @@ constexpr const char *TEXT_MUTED    = "#9CA3AF";  ///< 次要文字/提示
 constexpr const char *DANGER        = "#f44336";  ///< 危险/报警
 constexpr const char *SUCCESS       = "#4caf50";  ///< 成功/正常
 constexpr const char *WARNING       = "#ff9800";  ///< 警告
+constexpr const char *INFO          = "#2196f3";  ///< 已办结（报警「已处置」）：区别于 SUCCESS 的"已确认＝看过"
 constexpr const char *BTN_SECONDARY = "#4a6fa5";  ///< 次级按钮底
 
 // ========== 交互态（hover/pressed，来自点名/盘点批次并全站收敛） ==========

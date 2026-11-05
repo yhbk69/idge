@@ -218,6 +218,17 @@ private slots:
     /// 信号不会在 connect 与 new 之间派发，所以是安全的，但别把这段拆成两次调用。
     /// 末尾还会起 WsClient 与（按配置的）HttpFileService/PadWsServer，二者 stop
     /// 在 src/main.cpp 的事件循环之后，与本函数刻意不成对。
+    /// 按当前配置起一台 Pad WS 服务端（含它依赖的证据文件服务 8090）。
+    /// initNewPages 启动时调一次；调试页「保存并应用」重启服务时再调。
+    /// 只负责**起**：停由调用方先做（PadWsServer::stop()），媒体服务是进程级的、从不停。
+    bool startPadServerFromConfig(QString *err);
+
+    /// 按当前配置起一台 Pad HTTP `/api/` 服务端（v1 §4~§7，默认 8899）。
+    /// 与上面那条同一形状：启动时调一次，调试页「保存并应用」先 stop 再调它。
+    /// 只负责**起**（含按配置装配路由）；媒体文件服务 8090 仍由 startPadServerFromConfig 那侧管，
+    /// 本函数只在它没起来时补起一次（围栏画面与整改照片都从那个口出字节）。
+    bool startPadHttpFromConfig(QString *err);
+
     void initNewPages();
     void buttonClick();            ///< 顶部导航按钮点击处理
     /// 悬浮报警提示：右下角 toast，3 秒自动消失（toastTimer_ 单发，只保留最后一条）

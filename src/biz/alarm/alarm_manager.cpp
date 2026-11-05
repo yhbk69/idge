@@ -227,8 +227,10 @@ AlarmRecord makeAlarmRecord(int channel, const object_detect_result &det,
     // 未登录时 snapshot 是空对象，两列都留空 ⇒ 门挡住的正是这里。
     const session::ConstructionInfo construction =
         session::ConstructionSession::instance().snapshot();
-    alarm.workerName = construction.workerName;
-    if (!construction.raw.isEmpty() || !construction.constructionId.isEmpty()) {
+    alarm.workerName = construction.personName;
+    // 施工计划身份（v1 的 taskId）＝二维码里的 plan.taskId（B2 定案：对外只叫 taskId）
+    alarm.taskId = construction.taskId;
+    if (!construction.raw.isEmpty() || !construction.taskId.isEmpty()) {
         alarm.constructionJson = QString::fromUtf8(
             QJsonDocument(construction.toJson()).toJson(QJsonDocument::Compact));
     }
@@ -512,6 +514,13 @@ void AlarmManager::setChannelOnline(int channel, bool online)
         onlineChannels_.remove(channel);
 }
 
+// 这一路在不在线（v1 §6/§7 的 status 判据）
+bool AlarmManager::isChannelOnline(int channel) const
+{
+    QMutexLocker lock(&mutex_);
+    return onlineChannels_.contains(channel);
+}
+
 // 获取在线通道数量
 int AlarmManager::onlineChannelCount() const
 {
@@ -574,7 +583,7 @@ void AlarmManager::acknowledgeAll()
     {
         QMutexLocker lock(&mutex_);
         for (auto &a : alarms_) {
-            if (a.status != "rectified") {
+            if (a.status != "rectified" && a.status != "disposed") {
                 a.status = "rectified";
                 a.updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
             }
@@ -733,7 +742,9 @@ bool AlarmManager::removeAlarmById(const QString &id)
 }
 
 // 标记为误报（按ID）- 推荐使用
-bool AlarmManager::markAsFalsePositiveById(const QString &id)
+bool AlarmManager::markAsFalsePositiveById(const QString &id, const QString &personId,
+                                           const QString &personName,
+                                           const QString &markedAtInternal)
 {
     if (id.isEmpty()) return false;
     bool foundInRam = false;
@@ -741,9 +752,14 @@ bool AlarmManager::markAsFalsePositiveById(const QString &id)
         QMutexLocker lock(&mutex_);
         for (auto &a : alarms_) {
             if (a.id == id) {
+                foundInRam = true;
                 a.status = "false_alarm";
                 a.updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
-                foundInRam = true;
+                // 只在真给了处置人时才覆盖：本机那条路径三个参数全空，
+                // 无脑写空串会把 Pad 之前落进去的工号抹掉（内存副本会随关机回写进库）。
+                if (!personId.isEmpty()) a.disposePersonId = personId;
+                if (!personName.isEmpty()) a.disposeUserName = personName;
+                if (!markedAtInternal.isEmpty()) a.disposeTime = markedAtInternal;
                 break;
             }
         }
@@ -752,9 +768,15 @@ bool AlarmManager::markAsFalsePositiveById(const QString &id)
     bool dbOk = false;
     if (dbInitialized_) {
         AlarmDAO dao;
-        dbOk = dao.markFalseAlarm(id);
+        dbOk = dao.markFalseAlarm(id, QString(), personId, personName, markedAtInternal);
     }
     emit statsUpdated();
+    // changed 的判据沿用改造前那条（内存命中**或**库改成功都算）：
+    // 刚产生的报警可能还在 AlarmDbWriter 的队列里，库里查不到但内存里有，
+    // 那种情况下判 false 会让本机「误报」按钮按下去没反应。
+    // ⚠ 「库里这条已经是终态所以 UPDATE 了 0 行」在这里仍可能被 foundInRam 顶成 true ——
+    //   那是刻意的（UI 那条路径要照旧能点），而 §4.3 的 409/2003 由 HTTP 路由
+    //   先 queryById 判出来，不依赖这里的返回值。
     const bool changed = foundInRam || dbOk;
     if (changed) {
         const AlarmRecord snapshot = recordForId(id);
@@ -763,6 +785,97 @@ bool AlarmManager::markAsFalsePositiveById(const QString &id)
         }
     }
     return changed;
+}
+
+// v1 §4.2 的处置入口：先改库、改成了才动内存副本，最后发信号
+bool AlarmManager::disposeAlarmById(const QString &id, const QString &measure,
+                                    const QString &remark, const QString &personId,
+                                    const QString &personName, const QString &photoPathsJson,
+                                    const QString &disposedAtInternal, QString *err)
+{
+    if (id.isEmpty()) {
+        if (err) *err = QString::fromUtf8("alarmId 是空的");
+        return false;
+    }
+    if (!dbInitialized_) {
+        if (err) *err = QString::fromUtf8("报警库没开，处置无法落库");
+        return false;
+    }
+    bool dbOk = false;
+    {
+        AlarmDAO dao;
+        // WHERE 里带了"非终态"那条守卫（见 AlarmDAO::dispose），所以库里已是 disposed /
+        // false_alarm 的行返回 0 行 → 这里就是 false，处置不会被写进去。
+        dbOk = dao.dispose(id, measure, personId, personName, remark, photoPathsJson,
+                           disposedAtInternal);
+    }
+    if (!dbOk) {
+        // 库里没改成，就**不动内存、也不发信号**。
+        // 顺序为什么是"库优先"而不是像 acknowledgeAlarmById 那样两头各写各的：
+        // 处置是一次有表单的写（照片已经落盘、Pad 已经把界面切成已处置了），
+        // 让内存副本先动而库没跟上，关机时 syncToDatabase() 会把这份"没落库的处置"
+        // 连带照片路径一起 INSERT OR REPLACE 进去——那等于伪造一次成功的处置。
+        // 反过来（现在的写法）最坏只是这次没写成，对端拿到 500 重试即可。
+        if (err) {
+            *err = QString::fromUtf8("库里没有这条报警，或它已经是终态（disposed/false_alarm 不再改）");
+        }
+        return false;
+    }
+    {
+        QMutexLocker lock(&mutex_);
+        for (auto &a : alarms_) {
+            if (a.id != id)
+                continue;
+            a.status = QStringLiteral("disposed");
+            a.disposeResult = measure;
+            a.disposePersonId = personId;
+            a.disposeUserName = personName;
+            a.disposePhoto = photoPathsJson;
+            a.disposeTime = disposedAtInternal.isEmpty()
+                ? QDateTime::currentDateTime().toString(Qt::ISODate) : disposedAtInternal;
+            if (!remark.isEmpty())
+                a.remark = remark;
+            a.updateTime = QDateTime::currentDateTime().toString(Qt::ISODate);
+            break;
+        }
+    }
+    emit statsUpdated();
+    const AlarmRecord snapshot = recordForId(id);
+    if (!snapshot.id.isEmpty())
+        emit alarmStatusChanged(snapshot);   // §4.2 成功后广播 alarm_update
+    return true;
+}
+
+// v1 §4.4 的已读入口：先改库、改成了才动内存副本，最后发信号（与 disposeAlarmById 同一顺序）
+bool AlarmManager::markAlarmReadById(const QString &id, const QString &readAtInternal)
+{
+    if (id.isEmpty() || !dbInitialized_)
+        return false;
+    const QString now = QDateTime::currentDateTime().toString(Qt::ISODate);
+    const QString candidate = readAtInternal.isEmpty() ? now : readAtInternal;
+    bool dbOk = false;
+    {
+        AlarmDAO dao;
+        // 库里那条 CASE WHEN 保证"保留最早"，所以重复上报同一句 readAt 是安全的空转
+        dbOk = dao.markRead(id, candidate);
+    }
+    if (!dbOk)
+        return false;   // 库里没这条：不报成功，也不发信号
+    {
+        QMutexLocker lock(&mutex_);
+        for (auto &a : alarms_) {
+            if (a.id != id)
+                continue;
+            // 内存侧同样"保留最早"：库里那条 CASE WHEN 是同一个判据，
+            // 两处不一致就会出现"库里的已读比界面上的晚"这种对不上号的现象
+            if (a.readTime.isEmpty() || a.readTime > candidate)
+                a.readTime = candidate;
+            a.updateTime = now;
+            break;
+        }
+    }
+    emit alarmStatusChanged(recordForId(id));   // §4.4 要边缘设备把已读同步给其他端
+    return true;
 }
 
 // 取某条报警的当前记录（给 alarmStatusChanged 当载荷）

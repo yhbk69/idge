@@ -18,7 +18,8 @@
 ## 核心类与数据流
 - **ConfigManager**（单例）：`load()` 读入 `QJsonObject root_`；各 setter 只改内存，
   `save()` 才整体序列化写回文件。配置节：`video`（含 `models` 参数表与 `channels` 列表）/
-  `detect` / `geofence` / `recording` / `database` / `websocket` / `smartRecognition`
+  `detect` / `geofence` / `recording` / `database` / `websocket` / `smartRecognition` /
+  `alarm_uplink` / `pad_server`（WS 入站）/ `pad_http`（HTTP `/api/` 入站）/ `qr_login`
   （另有一整段 `gb28181` 由国标模块自己读，见下）。文件不存在时按 **schema V2** 写入内置默认并
   `save()`；JSON 解析失败置空 `root_`，getter 回退默认值（0.25 / 0.45 / "person" / 10 …，
   遗留的 `"inside_alarm"` 只在迁移分支里出现）。
@@ -155,17 +156,49 @@ MJPEG**，只认 MJPEG 会把这颗物理摄像头整个漏掉）。只出 10-bi
 ### pad_server 段（Pad 接口 v1 的入站服务端，本轮新增）
 | 键 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `enabled` | bool | **`false`** | 总开关。开着才 `listen()` 并订阅 `AlarmManager`。默认关的理由与 `alarm_uplink` 一致而风险更大：这是**入站**的明文零鉴权监听口，局域网内任何设备都能连进来收报警 |
-| `port` | int | `8899`（1024~65535） | Pad WS 监听口，取 v1 §2.1 的占位值。⚠ v1 想让 WS 与 `/api/` 同占 8899，在这套栈上做不到（`QWebSocketServer` 独占一只监听器）；也与 `alarm_uplink.media_http_port`（8090，媒体字节出站）不是同一个口 |
+| `enabled` | bool | **`true`**（2026-11-04 起） | 总开关。开着才 `listen()` 并订阅 `AlarmManager`，同时把证据用的 8090 文件服务起起来。这是**入站**的明文零鉴权监听口，局域网内任何设备都能连进来收报警、按 URL 取证据；不想要就显式写 `false` |
+| `port` | int | `8900`（1024~65535） | Pad WS 监听口。A4 于 2026-11-04 定案：`http://<host>:8899/api/` 归 HTTP、`ws://<host>:8900/` 归 WS（规约 §2.1 原本两个都写 8899，`QWebSocketServer` 独占监听器做不到同口）。与 `alarm_uplink.media_http_port`（8090，媒体字节出站）是第三个口。⚠ 现场 config.json 显式写了本键时，改默认值无效 |
 | `ws_path` | string | `/` | **只进日志**。`QWebSocketServer` 不按路径筛连接，Pad 连哪条路径都收；写 `/ws` 不会把别的路径挡掉 |
 | `device_id` | string | 空 | `hello_ack.data.deviceId`（例 `EDGE-05-007`）；**空 = 按本机派生**（`/etc/machine-id` 前 12 位，本机实测 `EDGE-1030A3F99414`），该键 §13.1.3 规定必填、不会省略；现场要固定值就填这里，填了赢 |
 | `media_base_url` | string | 空 | 证据 URL 前缀。空 = 复用内嵌文件服务的自动地址（并在需要时把它起起来）；写了就一切按它来，本机服务可以不起——对端经 NAT/反代访问的场景就靠它 |
 | `sync_limit` | int | `500`（1~5000） | 一次 `sync_result` 最多带几条。v1 没给分页规则，先设上限；游标取本次返回里的最大 `update_time`，所以截断不会漏下一批 |
 
-全是只读 getter（`padServerEnabled/Port/Path/DeviceId/MediaBaseUrl/SyncLimit`），**没有 setter**：
-监听口开开关关要走重启，运行期"改了立刻生效"只会让现场看不出连的是哪个口。
+六个 getter + 六个 setter（`padServerEnabled/Port/Path/DeviceId/MediaBaseUrl/SyncLimit`），
+2026-11-05 起 setter 供调试设置页的「Pad 服务端（WS 入站）」分组使用：点「保存并应用」= 写配置 +
+`PadWsServer::stop()` 再按新配置 `start()`（QWebSocketServer 可以重开；已连的 Pad 会被断开，
+它自己会重连）。端口/同步上限在 setter 里 qBound，与 getter 同一条判据。
 `migratePadServerDefaults()` 只补**整段缺失**的 `pad_server`，不往已有段里加键（与 `alarm_uplink` 同一条口径），
 老库上的缺键一律由 getter 回退到上面这份默认值。落点在 `src/biz/pad/`，报文形状与口径见那份 README。
+
+### pad_http 段（Pad 接口 v1 的 HTTP `/api/` 入站面，2026-11-05 新增）
+| 键 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | bool | **`true`** | 总开关。开着才 `listen()` 8899。这是**写**面：局域网内任何设备都能改报警状态（处置/误报/已读）与围栏（建/改/下发/停用）。规约 §2.3 认了"默认不做 Token 鉴权"，本机照做；关掉是**不 bind**，不是 bind 了再拒 |
+| `port` | int | `8899`（1024~65535） | A4 定案：8899=`/api/`、8900=WS、8090=媒体字节。HTTP 用自建 `QTcpServer`，**可以重绑**（与 8090 那台 ZLM 进程级一次监听不同），所以调试页能改口并立即生效 |
+| `max_body_mb` | int | `26`（1~100） | 单个请求正文的字节上限，来由是 §4.2 的五张 5MB 照片 + JSON 余量。⚠ 判据在**收之前**：`Content-Length` 声明超限直接拒，不先收 26MB 再嫌大——否则一句请求就能把整机内存顶到上限。照片张数/单张大小那两条业务上限仍由路由自己判（`400/4001`） |
+| `expose_stream_credentials` | bool | **`false`** | §6.1 的 `liveUrl` 是否保留 `rtsp://user:pass@host` 里的口令。默认剥掉：那是每台摄像头的口令整份发给局域网，不属于"免鉴权收报警"的范围。剥完对端多半播不起来，是**可见的失败** |
+| `fence_frames` | bool | `true` | §5.3 `apply` 要不要渲合成画面 PNG 并回填 `frameUrl`。关掉后 `apply` 一律 `503/3003`（规约把缺 `frameUrl` 定为失败，所以宁可显式报错，不返回一个没有画面却标 ACTIVE 的版本） |
+| `dispose_options` | array | `[]` | §4.1 的处置措施选项，元素形如 `{"id":1,"label":"已现场纠正","sortOrder":1,"enabled":1}`。**非空即整组替换**内置那两条；单项形状不合就跳过该项，全部跳过才回落内置值（不会退成空列表）。`alarmType` 入参不参与分组（见 pad 的 README） |
+
+六个 getter + 六个 setter（`padHttpEnabled/Port/MaxBodyMb/ExposeStreamCredentials/FenceFrames/DisposeOptions`
+与对应 `setPadHttp*`），前五个供调试设置页「Pad HTTP 服务端（/api/ 入站）」分组使用：
+点「保存并应用」= 五个 setter + `save()` + `PadHttpServer::stop()` 再按新配置 `start()`。
+`setPadHttpDisposeOptions()` 有实现但**界面上没控件**——处置选项属于安装期配置，改它不该在现场点两下就发生。
+`migratePadHttpDefaults()` 同样只补**整段缺失**的 `pad_http`。
+⚠ **默认 `enabled=true` 意味着老配置在这次启动之后就开始监听 8899**——这一条与 `pad_server`
+"出厂默认开"是同一个决定，但 HTTP 是写面，所以启动日志里那句是一整句中文说明而不是"started"。
+落点在 `src/biz/pad/`（路由）与 `src/biz/geofence/`（围栏存储与渲图），报文形状与口径见 `src/biz/pad/README.md`。
+
+### qr_login 段（扫码登录校验，2026-11-04 引入）
+| 键 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `expected_task_id` | string | 空 | **§6.6 计划比对**：非空时二维码的 `plan.taskId` 必须与它相等，否则拒绝登录（`二维码施工计划与当前设备任务不一致`）。空 = 不比对（扫码即换计划，这是当前现场的用法） |
+
+只有这一个键。契约见 `plan/qr-login-edge-v1.md`；**§6.4 有效期与 §6.5 ECDSA 验签本轮不做**
+（2026-11-04 裁定），所以没有 `require_signature` / `ecdsa_public_key` 之类的开关——
+`issuedAt/expiresAt/signature*` 仍照原样解析并随会话保存，只是不据此拒绝登录。
+将来补验签时公钥随安装配置下发、**不能放进二维码**（§7）。装配点在
+`frmmain.cpp` 的启动第 9.5 步（`setLoginPolicy`），必须在登录页出现之前。
 
 ### websocket 段（Pad↔Aibox 客户端）
 | 键 | 类型 | 默认 | 说明 |

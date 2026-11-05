@@ -15,7 +15,7 @@
 //   1) wireTime 补本机时区偏移，且对已带偏移/带 Z 的输入幂等
 //   2) wireTime 对空串与坏文本回落到"现在"（updatedAt 不能为空）
 //   3) internalTimeFromWire 与 wireTime 往返一致；认不出的形状返回空串（= 按全量处理）
-//   4) wireStatus：pending/rectified/未知 → PENDING，false_alarm → FALSE_ALARM
+//   4) wireStatus：pending/rectified/未知 → PENDING，disposed → DISPOSED，false_alarm → FALSE_ALARM
 //   5) wireReadAt：read_time 优先；只有 rectified 时用 update_time 兜底；未读返回空串
 //   6) taskIdOf 取 construction_info 的 construction_id；空/坏 JSON 返回空串
 //   7) typeOf：围栏按 alarmType **前缀**认三代（fence/fence_in→INTRUSION、fence_out→CROSS），
@@ -23,10 +23,10 @@
 //   8) typeOf 兜底：认不出的类别抬成大写 code + "其他"，绝不给空标签
 //   9) alarmJson 必填键齐全，level 是数字，occurredAt/updatedAt 带偏移
 //  10) alarmJson 的 readAt 未读时是 null（不是缺键也不是空串）
-//  11) evidence.snapshotUrls 只 1 个元素，且 URL = baseUrl + root 内相对路径
-//  12) 证据路径在 root 之外 → snapshotUrls 为空数组（不拼越界地址）
-//  13) 片段 .mp4 不存在 → 不写 clipUrl（宁缺勿假）；存在 → 写出来
-//  14) alarmUpdateJson 不含 evidence，updatedAt 必填，dispose 只在有处置文本时出现
+//  11) evidence 按 §13.2.1 平铺在 alarm 顶层：evidenceSnapshotUrl（必填单字符串）+ clipUrl
+//  12) 路径越界 / 没有 baseUrl → evidenceSnapshotUrl 给空串（键必须在）、不拼越界地址
+//  13) 片段 .mp4 不存在 → clipUrl=null（不预告取不到的地址）；存在 → 指向它
+//  14) alarmUpdateJson 不带证据字段、updatedAt 必填、syncState=SUBMITTED、dispose 只在有处置时出现
 //  15) 信封：alarm/sync_result/pong 一律带 code=0+message=ok（§3.2，P3-1 修正）；error 的 code 在信封层
 //  16) defaultDeviceId：非空、带 EDGE- 前缀、进程内稳定（口径 A17，hello_ack 的必填键）
 //
@@ -139,6 +139,10 @@ try {
         r.status = QStringLiteral("rectified");
         check(pad::wireStatus(r) == QLatin1String("PENDING"),
               "rectified 是“已确认/已读”，不许映射成 DISPOSED");
+        // DISPOSED 必须存在且只由 disposed 出（v1 §3.10/§13.3.2）；没有这条路径时
+        // 对端的处置闭环验收项永远停在"待处置"，所以它不是可选值而是必须可达。
+        r.status = QStringLiteral("disposed");
+        check(pad::wireStatus(r) == QLatin1String("DISPOSED"), "disposed → DISPOSED");
         r.status = QStringLiteral("false_alarm");
         check(pad::wireStatus(r) == QLatin1String("FALSE_ALARM"), "false_alarm → FALSE_ALARM");
         r.status = QStringLiteral("whatever");
@@ -219,9 +223,11 @@ try {
     // ── 9/10：完整快照的必填项 ─────────────────────────────────────────────
     {
         const QJsonObject data = pad::alarmJson(makeRecord(), QString(), QString());
+        // §13.2.1 的必填表：alarmId/taskId/level/type/typeLabel/categoryLabel/status/
+        // occurredAt/updatedAt/evidenceSnapshotUrl。confidence 是可选（本机总是给）。
         static const char *kRequired[] = {"alarmId", "taskId", "level",    "type",
                                           "typeLabel", "categoryLabel", "status",
-                                          "occurredAt", "updatedAt", "confidence", "evidence"};
+                                          "occurredAt", "updatedAt", "evidenceSnapshotUrl"};
         for (const char *key : kRequired) {
             check(data.contains(QLatin1String(key)), "alarm 快照缺必填键");
         }
@@ -254,18 +260,28 @@ try {
         r.imagePath = snap;
         const QString base = QStringLiteral("http://192.168.124.29:8090");
         QJsonObject evidence = pad::evidenceOf(r, base, root);
-        const QJsonArray snaps = evidence.value(QLatin1String("snapshotUrls")).toArray();
-        check(snaps.size() == 1, "v1 §3.6：snapshotUrls 只放 1 个元素");
-        check(snaps.at(0).toString()
+        // §3.5/§13.2.1（2026-11-05 改版）：证据两字段**平铺在 alarm 顶层**，
+        // evidenceSnapshotUrl 是单字符串（必填），不再有 evidence 对象、也不再有 snapshotUrls 数组。
+        check(!evidence.contains(QLatin1String("snapshotUrls"))
+                  && !evidence.contains(QLatin1String("evidence")),
+              "不发 snapshotUrls 数组、也不发 evidence 对象（§13.2.1 末条）");
+        check(evidence.value(QLatin1String("evidenceSnapshotUrl")).toString()
                   == base + QStringLiteral("/20261102/ch1_un_helmet_173000_045.jpg"),
-              "URL = baseUrl + root 内的相对路径");
-        check(!evidence.contains(QLatin1String("clipUrl")),
-              "片段还没落盘时不写 clipUrl（预告了取不到比对端更坏）");
+              "evidenceSnapshotUrl = baseUrl + root 内的相对路径（单字符串）");
+        check(evidence.contains(QLatin1String("clipUrl"))
+                  && evidence.value(QLatin1String("clipUrl")).isNull(),
+              "片段还没落盘时 clipUrl 写 null（§13.2.1 的 string?，不是缺键）");
+
+        // alarm 顶层必须**平铺**这两个键（sync_result.alarms[] 用的是同一份快照）
+        const QJsonObject alarmData = pad::alarmJson(r, base, root);
+        check(alarmData.contains(QLatin1String("evidenceSnapshotUrl"))
+                  && !alarmData.contains(QLatin1String("evidence")),
+              "alarm 顶层直接带 evidenceSnapshotUrl，没有 evidence 包裹");
 
         r.videoPath = day + QStringLiteral("/ch1_un_helmet_173000_045.h265");
         evidence = pad::evidenceOf(r, base, root);
-        check(!evidence.contains(QLatin1String("clipUrl")),
-              "同名 .mp4 不存在时依旧不写 clipUrl");
+        check(evidence.value(QLatin1String("clipUrl")).isNull(),
+              "同名 .mp4 不存在时 clipUrl 仍是 null，不预告一个取不到的地址");
         {
             QFile mp4(day + QStringLiteral("/ch1_un_helmet_173000_045.mp4"));
             check(mp4.open(QIODevice::WriteOnly), "mp4 测试文件写不出来");
@@ -279,16 +295,17 @@ try {
         // 越界：root 之外的路径一个字节都不许给出去（服务是零鉴权的）
         AlarmRecord outside = makeRecord();
         outside.imagePath = QStringLiteral("/etc/hostname");
-        const QJsonArray none =
-            pad::evidenceOf(outside, base, root)
-                .value(QLatin1String("snapshotUrls")).toArray();
-        check(none.isEmpty(), "证据路径越界必须返回空数组，不拼地址");
+        check(pad::evidenceOf(outside, base, root)
+                  .value(QLatin1String("evidenceSnapshotUrl")).toString().isEmpty(),
+              "证据路径越界时给空串，不拼地址");
 
-        // 媒体服务没起来（baseUrl 空）→ 只给空数组，不臆造地址
-        const QJsonArray noBase =
-            pad::evidenceOf(r, QString(), root)
-                .value(QLatin1String("snapshotUrls")).toArray();
-        check(noBase.isEmpty(), "没有 baseUrl 时不给证据地址");
+        // 媒体服务没起来（baseUrl 空）→ 必填键仍在，但值是空串（省略=必填缺失，会被整条拒收）
+        const QJsonObject noBase = pad::evidenceOf(r, QString(), root);
+        check(noBase.contains(QLatin1String("evidenceSnapshotUrl"))
+                  && noBase.value(QLatin1String("evidenceSnapshotUrl")).toString().isEmpty(),
+              "没有 baseUrl 时 evidenceSnapshotUrl 是空串（键必须在）");
+        check(noBase.value(QLatin1String("clipUrl")).isNull(),
+              "没有 baseUrl 时 clipUrl 是 null");
     }
 
     // ── 14：alarm_update 的取舍 ────────────────────────────────────────────
@@ -296,24 +313,54 @@ try {
         AlarmRecord r = makeRecord();
         r.status = QStringLiteral("false_alarm");
         r.updateTime = QStringLiteral("2026-11-02T18:20:00");
-        const QJsonObject data = pad::alarmUpdateJson(r);
-        check(!data.contains(QLatin1String("evidence")),
-              "v1 §13.2.3 的 alarm_update 不带 evidence");
+        const QJsonObject data = pad::alarmUpdateJson(r, QString(), QString());
+        check(!data.contains(QLatin1String("evidence"))
+                  && !data.contains(QLatin1String("evidenceSnapshotUrl"))
+                  && !data.contains(QLatin1String("clipUrl")),
+              "§13.2.2 的 alarm_update 不带任何证据字段");
         check(data.value(QLatin1String("status")).toString() == QLatin1String("FALSE_ALARM"),
               "update 里的状态同样走三值映射");
         check(data.value(QLatin1String("updatedAt")).toString()
                   == QStringLiteral("2026-11-02T18:20:00") + offset,
-              "updatedAt 必填且反映本次变更（§3.7）");
+              "updatedAt 必填且反映本次变更（§13.2.2）");
+        check(data.value(QLatin1String("syncState")).toString() == QLatin1String("SUBMITTED"),
+              "syncState 恒 SUBMITTED（本机没有上传环节，不报 UPLOADED）");
         check(!data.contains(QLatin1String("dispose")), "没有处置文本就不该有 dispose 对象");
 
         r.disposeResult = QStringLiteral("已现场纠正");
         r.disposeUserName = QStringLiteral("张伟");
+        r.disposePersonId = QStringLiteral("05-0101");
         r.disposeTime = QStringLiteral("2026-11-02T18:20:00");
+        r.disposePhoto = QStringLiteral("[\"dispose/x/dispose1.jpg\"]");
         const QJsonObject dispose =
-            pad::alarmUpdateJson(r).value(QLatin1String("dispose")).toObject();
+            pad::alarmUpdateJson(r, QString(), QString()).value(QLatin1String("dispose")).toObject();
         check(dispose.value(QLatin1String("measure")).toString() == QStringLiteral("已现场纠正")
                   && dispose.contains(QLatin1String("disposedAt")),
-              "处置记录带 measure 与 disposedAt（§13.2.4）");
+              "处置记录带 measure 与 disposedAt（§13.2.3）");
+        check(dispose.value(QLatin1String("personId")).toString() == QStringLiteral("05-0101"),
+              "处置人工号（§13.2.3 的 personId）");
+        check(dispose.contains(QLatin1String("photoUrls")),
+              "部分更新也带 photoUrls（丢了照片，别的 Pad 永远补不上）");
+
+        // 片段落盘后**用 alarm_update 补视频**（2026-11-05 现场流程）。
+        // mp4 在盘上才带 clipUrl；给不出时**整个键不出现**——发 null 会清掉对端已拿到的视频。
+        const QString clipDir = QDir::tempPath() + QStringLiteral("/idge_wire_update");
+        QDir().mkpath(clipDir);
+        {
+            QFile mp4(clipDir + QStringLiteral("/a.mp4"));
+            check(mp4.open(QIODevice::WriteOnly), "update 用的 mp4 测试文件写不出来");
+            mp4.write("x");
+        }
+        AlarmRecord withClip = makeRecord();
+        withClip.videoPath = clipDir + QStringLiteral("/a.h265");
+        const QString clipBase = QStringLiteral("http://192.168.124.29:8090");
+        check(pad::alarmUpdateJson(withClip, clipBase, clipDir)
+                  .value(QLatin1String("clipUrl")).toString()
+                  == clipBase + QStringLiteral("/a.mp4"),
+              "片段到位后 alarm_update 带 clipUrl");
+        const QJsonObject noBaseUpdate = pad::alarmUpdateJson(withClip, QString(), clipDir);
+        check(!noBaseUpdate.contains(QLatin1String("clipUrl")),
+              "没有底址时 update 里没有 clipUrl 键（缺键≠null）");
     }
 
     // ── 15：信封形状 ──────────────────────────────────────────────────────

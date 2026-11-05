@@ -307,9 +307,16 @@ void ConfigManager::load(const QString &path)
         saveUnsafe();
     }
 
-    // 缺 pad_server 段时补齐默认值（enabled=false，出厂不开监听口）
+    // 缺 pad_server 段时补齐默认值（enabled=true：这台设备的用途就是被 Pad 连）
     if (migratePadServerDefaults()) {
         qInfo() << "[ConfigManager] 已补齐 Pad 服务端默认配置 (pad_server/)";
+        saveUnsafe();
+    }
+
+    // 缺 pad_http 段时补齐默认值。⚠ 默认 enabled=true，所以这一句补齐本身就意味着
+    // 老配置在本次启动之后开始监听 8899（写面）——与 pad_server 那句"出厂默认开"同一个决定。
+    if (migratePadHttpDefaults()) {
+        qInfo() << "[ConfigManager] 已补齐 Pad HTTP 面默认配置 (pad_http/)，默认监听 8899";
         saveUnsafe();
     }
 
@@ -672,15 +679,18 @@ bool ConfigManager::migrateAlarmUplinkDefaults()
     return true;
 }
 
-// Pad 接口 v1 的服务端（plan/idge-pad-v1.md §2–§3）。enabled 默认 false 与 alarm_uplink
-// 同理：这是**新开一个明文零鉴权的入站监听口**——局域网里任何设备都能连进来收报警、
-// 拿证据地址，必须人来打开（审查报告冲突 B5）。
+// Pad 接口 v1 的服务端（plan/edge-pad-v1.md §2–§3）。enabled **默认 true**（2026-11-04 现场定：
+// 这台设备的用途就是被 Pad 连，出厂就该能连），所以缺键的老配置也会直接开始监听。
+// 代价说清楚：这是一个明文零鉴权的入站口，局域网里任何设备都能连进来收报警、拿证据地址；
+// 唯一的门是握手时的 Origin 白名单（见 pad_ws_server.cpp 的 originAllowed），
+// 不想要就显式写 `"enabled": false`。
 static QJsonObject makePadServerDefaults()
 {
     return QJsonObject{
-        {"enabled", false},        // false = 不 listen、不订阅 AlarmManager
-        {"port", 8899},            // v1 §2.1 的占位口。⚠ 与 /api/ 同口做不到：QWebSocketServer
-                                   //   自己占一只监听器，HTTP 层要另起一口（报告歧义 A4）
+        {"enabled", true},         // true = listen 并订阅 AlarmManager；false = 完全不占口
+        {"port", 8900},            // A4 已定（2026-11-04）：**WS 走 8900，8899 留给 /api/ HTTP**。
+                                   //   两只监听器本来就不能同口（QWebSocketServer 独占一只），
+                                   //   对方给的分配把这件事解开了；改默认值不动 media_http_port(8090)
         {"ws_path", "/"},          // 只进日志：QWebSocketServer 不按路径筛连接，Pad 连哪条路径都收
         {"device_id", ""},         // hello_ack.deviceId（例 EDGE-05-007）；空 = 该键省略
         {"media_base_url", ""},    // 证据 URL 前缀；空 = 用内嵌 http 服务的自动地址，
@@ -696,6 +706,32 @@ bool ConfigManager::migratePadServerDefaults()
         return false;
     }
     root_["pad_server"] = makePadServerDefaults();
+    return true;
+}
+
+// Pad 接口 v1 的 HTTP `/api/` 面（plan/edge-pad-v1.md §4~§7、§9）。
+// enabled 默认 **true** 与 pad_server 同一条判断：这台设备的用途就是被 Pad 连。
+// 代价必须说清：这是**写**面——局域网内任何设备都能改报警状态（处置/误报/已读）
+// 与围栏（建/改/下发/停用）。规约 §2.3 认了"默认不做 Token 鉴权"，本机照做，
+// 但不想要就显式写 `"enabled": false`（关掉是不 bind，不是 bind 了再拒）。
+static QJsonObject makePadHttpDefaults()
+{
+    return QJsonObject{
+        {"enabled", true},                  // 总开关
+        {"port", 8899},                     // A4：8899=/api/、8900=WS、8090=媒体文件
+        {"max_body_mb", 26},               // §4.2 五张 5MB 照片 + JSON 余量
+        {"expose_stream_credentials", false},  // §6.1 的 liveUrl 默认剥掉视频源口令
+        {"fence_frames", true},             // §5.3 apply 要渲染合成画面 PNG
+        {"dispose_options", QJsonArray()},  // 空 = §4.1 用代码内置那两条措辞
+    };
+}
+
+bool ConfigManager::migratePadHttpDefaults()
+{
+    if (root_.contains("pad_http")) {
+        return false;
+    }
+    root_["pad_http"] = makePadHttpDefaults();
     return true;
 }
 
@@ -1936,7 +1972,8 @@ QString ConfigManager::alarmUplinkMediaBaseUrl() const
 // 与 alarm_uplink 同为只读 getter，不给 setter：监听口开开关关要走重启，
 // 运行期"改了立刻生效"反而会把已连的 Pad 踢掉却看不出原因。
 // ⚠ port 与 alarm_uplink.media_http_port（内嵌 http 文件服务）不是同一个口：
-//   前者是 WS 入站，后者是媒体字节出站；两者都想用 8899 时只能挑一个（报告歧义 A4）。
+//   前者是 WS 入站（8900），后者是媒体字节出站（8090）。对方给的 A4 分配是
+//   「8899 给 /api/ HTTP、WS 走 8900」，所以本机三个口各管一件事，谁也不抢谁。
 // ============================================================================
 
 /**
@@ -1950,26 +1987,223 @@ static QJsonObject padServerSection(const QJsonObject &root)
     return root["pad_server"].toObject();
 }
 
-/** @brief 是否启用 Pad 入站服务端（缺省 false：明文零鉴权的**入站**监听口，风险比 alarm_uplink 更大） */
+/** @brief 是否启用 Pad 入站服务端（缺省 **true**，2026-11-04 起；显式 false 才关。
+ *         这是明文零鉴权的**入站**监听口，唯一的门是握手 Origin 白名单） */
 bool ConfigManager::padServerEnabled() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    return padServerSection(root_).value("enabled").toBool(false);
+    // 缺键 = true（2026-11-04 起）：本机用途就是被 Pad 连，默认开着；关掉要显式写 false。
+    return padServerSection(root_).value("enabled").toBool(true);
 }
 
 /**
- * @brief Pad WS 监听端口，qBound(1024, 缺省 8899, 65535)
+ * @brief Pad WS 监听端口，qBound(1024, 缺省 8900, 65535)
  * @note 下界 1024 与 alarmUplinkMediaHttpPort() 同一条理由：板端 uid 1000 +
  *       net.ipv4.ip_unprivileged_port_start=1024，特权口 bind 不上，挡在配置层。
- * @note ⚠ 8899 是 v1 §2.1 的**占位值**，且与 alarm_uplink.media_http_port(8090)
- *       是两个不同的口（前者 WS 入站、后者媒体字节出站）。v1 想让 WS 与 /api/
- *       同占 8899 在这套栈上做不到：QWebSocketServer 独占一只监听器。
+ * @note A4（2026-11-04 对方答复）：**8899 归 `http://<host>:8899/api/`，WS 用 `ws://<host>:8900/`**。
+ *       规约 §2.1 原文把两个都写成 8899 占位，在这套栈上做不到（`QWebSocketServer` 独占一只监听器），
+ *       现在按拆口解决。媒体字节出站仍是 `alarm_uplink.media_http_port`（8090），第三个口，互不冲突。
+ * @warning 现场 `data/config.json` 里若**显式写了 `"port": 8899`**，改默认值对它无效，
+ *          WS 会继续占住对方分配给 `/api/` 的口——换口必须连那份配置一起改。
  */
 int ConfigManager::padServerPort() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     // 与 media_http_port 同一条下界理由：1024 以下在本机 bind 不上，不如挡在配置层
-    return qBound(1024, padServerSection(root_).value("port").toInt(8899), 65535);
+    return qBound(1024, padServerSection(root_).value("port").toInt(8900), 65535);
+}
+
+/**
+ * @brief qr_login 段（扫码登录校验档；缺段 = 全默认，即不比对本机当前计划）
+ * @note §6.4 有效期与 §6.5 验签本轮不做（2026-11-04 裁定），所以这里只有一个键。
+ *       将来补验签时，公钥随安装配置下发、**不能放进二维码**（§7）。
+ */
+static QJsonObject qrLoginSection(const QJsonObject &root)
+{
+    return root["qr_login"].toObject();
+}
+
+QString ConfigManager::qrLoginExpectedTaskId() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return qrLoginSection(root_).value("expected_task_id").toString().trimmed();
+}
+
+// ========== pad_server 的 setter（调试设置页用，2026-11-05） ==========
+// 六个键一次写进同一段再 save()：界面点一次"保存并应用"要么全生效、要么全不生效。
+// 范围键在这里 qBound，与 getter 同一条判据（下界 1024 的理由见 padServerPort）。
+void ConfigManager::setPadServerEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject pad = padServerSection(root_);
+    pad["enabled"] = enabled;
+    root_["pad_server"] = pad;
+}
+
+void ConfigManager::setPadServerPort(int port)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject pad = padServerSection(root_);
+    pad["port"] = qBound(1024, port, 65535);
+    root_["pad_server"] = pad;
+}
+
+void ConfigManager::setPadServerPath(const QString &path)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QString raw = path.trimmed();
+    if (raw.isEmpty())
+        raw = QStringLiteral("/");
+    if (!raw.startsWith(QLatin1Char('/')))
+        raw.prepend(QLatin1Char('/'));
+    QJsonObject pad = padServerSection(root_);
+    pad["ws_path"] = raw;
+    root_["pad_server"] = pad;
+}
+
+void ConfigManager::setPadServerDeviceId(const QString &deviceId)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject pad = padServerSection(root_);
+    pad["device_id"] = deviceId.trimmed();
+    root_["pad_server"] = pad;
+}
+
+void ConfigManager::setPadServerMediaBaseUrl(const QString &baseUrl)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject pad = padServerSection(root_);
+    pad["media_base_url"] = baseUrl.trimmed();
+    root_["pad_server"] = pad;
+}
+
+void ConfigManager::setPadServerSyncLimit(int limit)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject pad = padServerSection(root_);
+    pad["sync_limit"] = qBound(1, limit, 5000);
+    root_["pad_server"] = pad;
+}
+
+// ============================================================================
+// pad_http 段：Pad 接口 v1 的 HTTP `/api/` 面（§4 处置 / §5 围栏 / §6 视频 / §7 设备）
+// ----------------------------------------------------------------------------
+// 与 pad_server 分开的理由不是"两个开关好看"，是**两台服务端生命周期不同**：
+//   pad_server = QWebSocketServer，能关能开；pad_http = QTcpServer，也能关能开；
+//   但两者端口不同、失败原因不同，混在一个开关里就会出现"想关报警面却把围栏写面也关了"。
+// 三条 getter 的范围判据都写在这里而不是界面里，理由与 padServerPort 相同：
+//   下界 1024（板端 uid 1000 + ip_unprivileged_port_start=1024，特权口 bind 不上），
+//   上界由本函数 qBound，界面那侧的 QSpinBox 只是让它点不出越界的值，不是第二道判据。
+// ============================================================================
+
+static QJsonObject padHttpSection(const QJsonObject &root)
+{
+    return root["pad_http"].toObject();
+}
+
+/** @brief 是否启用 HTTP `/api/` 面（缺键 **true**，与 pad_server 同一天定案的口径） */
+bool ConfigManager::padHttpEnabled() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return padHttpSection(root_).value("enabled").toBool(true);
+}
+
+/**
+ * @brief HTTP 监听端口，qBound(1024, 缺省 8899, 65535)
+ * @note 8899 是 A4（2026-11-04 对方答复）分给 `http://<host>:8899/api/` 的那个口。
+ *       规约 §2.1 原文把 WS 与 `/api/` 都写成 8899 占位，那在这套栈上做不到
+ *       （两只监听器不能同口），所以本机现在是三个口：
+ *       8899=HTTP `/api/`、8900=Pad WS、8090=报警媒体静态文件。
+ */
+int ConfigManager::padHttpPort() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return qBound(1024, padHttpSection(root_).value("port").toInt(8899), 65535);
+}
+
+/** @brief 请求正文上限（MB），qBound(1, 缺省 26, 100)。26 = §4.2 五张 5MB 照片 + JSON 余量 */
+int ConfigManager::padHttpMaxBodyMb() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return qBound(1, padHttpSection(root_).value("max_body_mb").toInt(26), 100);
+}
+
+/**
+ * @brief liveUrl 是否保留 `user:pass@`，缺省 **false**（剥掉）
+ * @note 为什么默认关：§6.1 让 Pad 直接播这个地址，于是它会出现在对端的日志、缓存与界面里。
+ *       "局域网零鉴权"是 §2.3 认了的**这台设备**的口径，不等于把每台摄像头的口令也发出去。
+ *       关掉之后 Pad 拿到的是无凭据地址，多半播不起来——那是可见的失败，比口令出门好处理。
+ */
+bool ConfigManager::padHttpExposeStreamCredentials() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return padHttpSection(root_).value("expose_stream_credentials").toBool(false);
+}
+
+/** @brief 围栏 apply 时是否渲染合成画面 PNG，缺省 true（§5.3 要求 apply 必返 frameUrl） */
+bool ConfigManager::padHttpFenceFrames() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return padHttpSection(root_).value("fence_frames").toBool(true);
+}
+
+/**
+ * @brief §4.1 的处置选项数组；**空数组 = 调用方用代码内置那两条**
+ * @note 这里不校验元素形状：校验在 §4.1 的路由里做一次（那里能直接回 500/3001 并说清是哪条），
+ *       在配置层校验就只能打一条 qWarning，现场对着配置文件看不出哪个键拼错了。
+ */
+QJsonArray ConfigManager::padHttpDisposeOptions() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return padHttpSection(root_).value("dispose_options").toArray();
+}
+
+void ConfigManager::setPadHttpEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject http = padHttpSection(root_);
+    http["enabled"] = enabled;
+    root_["pad_http"] = http;
+}
+
+void ConfigManager::setPadHttpPort(int port)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject http = padHttpSection(root_);
+    http["port"] = qBound(1024, port, 65535);
+    root_["pad_http"] = http;
+}
+
+void ConfigManager::setPadHttpMaxBodyMb(int megabytes)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject http = padHttpSection(root_);
+    http["max_body_mb"] = qBound(1, megabytes, 100);
+    root_["pad_http"] = http;
+}
+
+void ConfigManager::setPadHttpExposeStreamCredentials(bool expose)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject http = padHttpSection(root_);
+    http["expose_stream_credentials"] = expose;
+    root_["pad_http"] = http;
+}
+
+void ConfigManager::setPadHttpFenceFrames(bool render)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject http = padHttpSection(root_);
+    http["fence_frames"] = render;
+    root_["pad_http"] = http;
+}
+
+void ConfigManager::setPadHttpDisposeOptions(const QJsonArray &options)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject http = padHttpSection(root_);
+    http["dispose_options"] = options;
+    root_["pad_http"] = http;
 }
 
 /**

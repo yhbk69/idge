@@ -6,7 +6,7 @@ C++ 测试源码目录。含十四个测试程序与一个人工联调工具：
 
 - `test_database.cpp`：针对 `src/biz/db/` 的检测记录 DAO / 报警记录 DAO /
   DatabaseManager 做初始化、插入、批量插入、条件查询、统计、状态更新与维护
-  （vacuum/过期清理）的黑盒断言测试，输出 `[PASS]/[FAIL]` 与通过/失败计数。
+  （vacuum/过期清理）、**老库补列与 task_id 回填**的黑盒断言测试，输出 `[PASS]/[FAIL]` 与通过/失败计数。
 - `test_equipment.cpp`：设备盘点全链离线自测（无人值守板端验收），串起
   RollCallService 初始化(共库) → 盘点服务进程内模型加载(YOLO11Model) → 建任务 →
   processPhotos 检测计数 → 画框图落盘 → saveResult 落库 → getPhotos/getDetections
@@ -86,10 +86,13 @@ C++ 测试源码目录。含十四个测试程序与一个人工联调工具：
   逐位一致（守 letterbox + 射线法，同时证明多边形没被降级成 `toRect`）、
   `roleFromString` 对缺键/空串/垃圾一律回落 `forbidden`（迁移的安全失效方向）。
   只链 `Qt5::Core`、无 GUI、与 cwd 无关，任意机器可跑。
-- `test_construction_qr.cpp`：扫码登录门的**全部契约**离线自检（12 组）。施工信息的
-  解析/校验/会话状态机（`ConstructionInfo::fromJson`/`fromQrText` + `ConstructionSession`）
-  加上真解一张码图：用 `segno` 生成含中文的 PNG → `qrcode::scanQrFromImageFile()` → 喂给
-  与登录页完全同一条 `startLogin()` 路径。另钉住四条易塌的口径：失败**不动**会话（不存在半登录）、
+- `test_construction_qr.cpp`：扫码登录门的**全部契约**离线自检（13 组）。契约是
+  `plan/qr-login-edge-v1.md`，夹具就是 `plan/qr-login.json` 的副本。施工信息的解析/校验/
+  会话状态机（`ConstructionInfo::fromJson`/`fromQrText` + `ConstructionSession`）覆盖
+  §6 第 2–3 步（必填、时间可推导）与 §6.6（taskId 比对），加上真解一张新契约码图：
+  `qrcode::scanQrFromImageFile()` → 与登录页完全同一条 `startLogin()` 路径。
+  §6.4 有效期与 §6.5 验签本轮不做，所以没有对应用例。
+  另钉住四条易塌的口径：失败**不动**会话（不存在半登录）、
   `toJson()` 往返保留未知键（字段没定稿，加字段不许吃掉多余键）、图片读不到时给**原因**而不是
   返回空列表（空列表与"没有码"同形，会把路径错判成码印坏）、
   `fields()` 逐键渲染的形状（已知键按声明顺序给中文名、空值成行显示 `—`、未知键用键名排在后面
@@ -98,7 +101,7 @@ C++ 测试源码目录。含十四个测试程序与一个人工联调工具：
 - `test_pad_wire.cpp`：Pad 接口 v1 **出站 JSON 映射**的离线契约自检（16 组，含 `deviceId` 派生）。
   `AlarmRecord` → `alarm` / `alarm_update` 的唯一出口（`src/biz/pad/pad_wire.cpp`）：
   时区偏移补齐与游标反向换算的往返一致（对端按 `updatedAt` 合并与推进游标，偏移缺失=整批漏同步）、
-  `rectified` 映射成 `PENDING+readAt` 而不是 `DISPOSED`（"我看过了"不许上报成"我处理过了"）、
+  `rectified` 映射成 `PENDING+readAt`、只有 `disposed` 才映射 `DISPOSED`（"我看过了"不许上报成"我处理过了"）、
   `taskId` 只取 `construction_info.construction_id`（取错键对端按施工计划过滤一条都不显示）、
   类型表（`un_helmet→HELMET/未戴安全帽/PPE违规`、`fence_in→INTRUSION`、`fence_out→CROSS`、
   **裸 `fence` 老行按前缀归 `INTRUSION`**，报告 P2-4：老库里那两万多行不设这条就会被推成 `PERSON`）
@@ -117,12 +120,13 @@ C++ 测试源码目录。含十四个测试程序与一个人工联调工具：
   边界用 `>=`（同一秒内的更新不许被漏）、建行那一刻就写 `update_time` 才能被增量看到。
   `markRead()` 的两条语义：`read_time` 保留最早值（重复已读不推后、墙钟回拨取更早者），
   但 `update_time` **每次都往前走**。第 9 组钉计划过滤**下推进 SQL**（报告 P1-2 的活锁）：
-  库里混有别的施工计划的 40 行时，按 `constructionId` 取到的只有本计划的行，且 `limit` 是
+  库里混有别的施工计划的 40 行时，按 `taskId` 取到的只有本计划的行，且 `limit` 是
   **过滤之后**才截断——截在前面会让本计划的行永远被别的计划挤在窗口外、增量游标原地不动。
-  判据用 `instr(construction_info, '"construction_id":"…"')`，因为 Qt 自带的 SQLite 3.31.1
-  **没有 JSON1**（板端实测 0 个 `json` 符号），不能用 `json_extract`。
+  判据是 `task_id = ?` 等值（B2 于 2026-11-04 定案后 `task_id` 已是一等列 + `idx_alarms_task_id`）；
+  以前这里是 `instr(construction_info, '"construction_id":"…"')` 子串匹配，因为 Qt 自带的
+  SQLite 3.31.1 **没有 JSON1**（板端实测 0 个 `json` 符号），`json_extract` 在这条路径上不存在。
   只链 `Qt5::Core` + `Qt5::Sql` + DAO 依赖闭包。
-- `test_pad_ws_server.cpp`：Pad 接口 v1 的 **WS 服务端线上自检**（16 组，loopback 单进程）。
+- `test_pad_ws_server.cpp`：Pad 接口 v1 的 **WS 服务端线上自检**（17 组，loopback 单进程）。
   起真 `PadWsServer` 在 127.0.0.1 的临时口上，用真 `QWebSocket` 按 §3 走一遍：
   `hello→hello_ack`（`serverTime` 带偏移、`capabilities` 只有 `alarm`、`detectionBoxes` 恒 false）、
   版本不匹配 `code=1001` 且连接被关闭、`ping→pong` 信封带 `code=0/message=ok`、每个 `sync_request`
@@ -138,6 +142,32 @@ C++ 测试源码目录。含十四个测试程序与一个人工联调工具：
   第 15 组测 **Origin 白名单**：`http://` Origin 连不上、空 Origin 能连，且被拒的连接不进 `clients_`
   ——取基线前要把前序连接排空（`disconnected` → `clients_.removeAll` 等一轮事件循环，
   立刻数会把上一组的收尾时序当成这一组的行为）。链 `Qt5::Core/Network/Sql/WebSockets`，无 GUI。
+- `test_pad_http_message.cpp`：Pad 接口 v1 的 **HTTP 传输层离线自检**（19 组，只喂字节，不起 socket）。
+  `padhttp::RequestDecoder` 直接吃原始报文：简单 GET 的六项拆解、请求行不是三段就失败、
+  百分号解码（**UTF-8 转义要还原成中文**，逐字节转 `QChar` 会把一个汉字拆成三个 ISO-8859-1 字符）、
+  非法转义 `%zz` 与结尾孤立 `%` **原样保留**（畸形 ID 该在业务层判"不存在"，不该在传输层变"参数错误"）、
+  同名查询键留第一个、半截头+半截正文分两次喂、**头与正文的字节上限**（`Content-Length` 声明就超限
+  时 `receivedBodyBytes()` 必须还是 0——这是内存防线）、chunked 两段 + trailer 逐字节还原、
+  长度行非十六进制失败、keep-alive 连解两个请求且 `takeRequest` 后正文/查询不复用残留、
+  multipart 三 part（payload + 两张照片，`filename` 给的是 `../../etc/passwd` 也只当数据）、
+  缺结束定界与 part 超上限都判失败、`serializeReply` 的 `Content-Length` 与正文一致 + extra 头能顶掉
+  默认头（两个同名 `Content-Type` 客户端只认最后一个）、§2.4 每一档"状态码配业务码"的配对。
+  **纯 Qt Core**，与 cwd 无关，秒级——改报文解析先跑它。
+- `test_pad_http_api.cpp`：Pad 接口 v1 的 **HTTP `/api/` 面线上自检**（21 组，loopback 起真
+  `PadHttpServer` + 真 `QTcpSocket` + 真文件库 + 真临时媒体根）。按 §4~§7 逐条走：`/api/health` 的
+  `capabilities` 是**嵌在 data.capabilities 下**的四组（摊平到 data 顶层时 Pad 取值全落空）、
+  `/api/device/status` 全 snake_case 且不混 camelCase、`/api/streams` 缺 `taskId` → 400/2001、
+  `liveUrl` **不含** rtsp 源里的 `user:pass`（默认剥凭据）、`cameraId` 用通道口径 `CH1` 而不是注册表 id
+  （两路引用同一条流时注册表 id 会撞在 §5.1 的唯一键上）、未知 `streamId` → 404/2002、
+  `save-draft` 新建/同 `requestId` **逐字节重放且不重复建版本**/`RECT` 只给 3 点 → 422/4001/
+  有草稿再新建 → 2004/缺草稿再编辑 → 2005/删 ACTIVE → 2005/停用 DRAFT → 2006、
+  `apply` 真渲出一张 **PNG 且能从 8090 那台文件服务取到**、`dispose` 的 multipart `filename`
+  是 `../../etc/passwd` 也只在 `dispose/<alarmId>/` 下产出 `disposeN.jpg`、`read` 用**对端报的那个**
+  `readAt`（比本机时刻早）、终态再标误报/再处置 → 409/2003、一条连接连发三个请求各自收到完整响应、
+  **处置成功后模拟"关机整批回写"，状态必须还是 disposed**（第 21 组：只改库不改内存副本的写法
+  第二天早上会神秘复原）。链 Core/Gui/Network/Sql/WebSockets + sqlite3/jsoncpp，
+  ⚠ 里面有真 `QPainter` 渲染，所以必须 `QGuiApplication` + `QT_QPA_PLATFORM=offscreen`
+  ——`QCoreApplication` 下第一次 `drawText` 会在字体库里段错误（板端 gdb 实测 #0 在 libQt5Gui）。
 - `ws_sink.cpp`：**不是自检，是人工对拍的接收端**（`QWebSocketServer`）。板子出网受限，联调只能走
   loopback：`./ws_sink 8765 /tmp/sink_out` 起一个假对端，把 `websocket.server_url` 指到
   `ws://127.0.0.1:8765`。`ws_binary` 档它按 `media_id` 把二进制分块拼回文件并与报文里的 sha256 对拍；
@@ -149,17 +179,19 @@ C++ 测试源码目录。含十四个测试程序与一个人工联调工具：
 
 | 文件 | 说明 |
 |------|------|
-| `test_database.cpp` | 数据库模块测试（4 组用例：初始化/检测/报警/维护），基于 Qt Core + 宏 `TEST_ASSERT`；报警组覆盖检索层（`AlarmFilter` 计数与取行同口径、分页、scope 不重不漏、围栏角色、负责人/施工id 过滤、三类 facet 候选值、`acknowledgeAllPending`） |
+| `test_database.cpp` | 数据库模块测试（5 组用例：初始化/检测/报警/维护/**老库 task_id 升级**），基于 Qt Core + 宏 `TEST_ASSERT`；报警组覆盖检索层（`AlarmFilter` 计数与取行同口径、分页、scope 不重不漏、围栏角色、负责人/taskId 过滤、三类 facet 候选值、`acknowledgeAllPending`）。第 5 组用**文件库**跑真实升级路径：只带 `construction_info` 的老行 → `task_id` 强制打回 NULL → 二次 `initialize()` 回填 → 按 taskId 命中 → NULL 行归零 → **模拟关机 RAM 窗口整批回写**（`insertAlarms`）后仍不为 NULL、再启动仍扫到 0 行。内存库覆盖不到这条，所以它是唯一用文件的组 |
 | `test_equipment.cpp` | 设备盘点全链离线自测（模型加载→检测计数→画框→落库→回读→热更新原子性），逐项 `[ok]/[FAIL]` |
 | `test_rollcall.cpp` | 人员点名全链离线自测（exe 对照回归 + 注册/去重/注销匹配/落库回读），逐项 `[ok]/[FAIL]` |
 | `test_latest_frame_slot.cpp` | LatestFrameSlot 单槽广播契约自检（跳帧/生命周期/close 唤醒/reset），末行打印一行 PASS 说明 |
 | `test_channel_reload.cpp` | 通道热更新板端离线自测（停→releaseTasks→重建 ×4 轮，槽位集合/线程数/RSS/每槽生效阈值四项断言），须在 build 目录下跑 |
 | `test_alarm_uplink.cpp` | 报警上行离线自检（18 组：两种 transport 报文形状 / 帧序 / 地址换算与路径逃逸 / 队列·ack·退避），纯 Qt Core，任意机器可跑 |
 | `test_geofence_role.cpp` | 围栏角色判定离线自检（8 组：禁区优先 / 无岗区域守卫 / 任一岗区域内 / shapeIndex 口径 / 凹多边形回归 / role 回落），纯 Qt Core，任意机器可跑 |
-| `test_construction_qr.cpp` | 扫码登录门离线自检（12 组：施工信息解析/校验/会话状态机/逐键渲染 + 真解一张含中文的码图），Qt Core+Gui+zbar，无摄像头无 GUI |
+| `test_construction_qr.cpp` | 扫码登录门离线自检（13 组：qr-login 嵌套载荷解析 / §5 时间窗 / §9 提示 / §6.6 taskId 比对 / 会话状态机 / 逐键渲染 / 历史形状兼容 + 真解一张码图），Qt Core+Gui+zbar，无摄像头无 GUI |
 | `test_pad_wire.cpp` | Pad 接口 v1 出站 JSON 映射离线自检（16 组：时区往返 / 状态三值 / readAt 回落 / taskId / 类型表与兜底 / 必填键 / 证据 URL 与越界拒绝 / 信封无 v 无 requestId / deviceId 派生非空且稳定），纯 Qt Core |
 | `test_pad_sync.cpp` | Pad 断线补漏的库侧自检（9 组：全量与增量游标 / 老行按 alarm_time 兜底 / `>=` 边界 / 新行可见 / markRead 保留最早已读但必推 update_time / 计划过滤下推进 SQL 且 limit 在过滤之后），Qt Core+Sql，内存库 |
-| `test_pad_ws_server.cpp` | Pad WS 服务端线上自检（16 组：握手与能力位 / 1001 关闭 / pong 带 code / sync_result 恰好一条 / 未知 type 与缺必填项与空 taskId 各出 2001 / alarm_ack 不回复 / 报警广播 / 状态变更推 alarm_update / Origin 白名单 / 空 device_id 也出必填 deviceId），Qt Core+Network+Sql+WebSockets，loopback |
+| `test_pad_ws_server.cpp` | Pad WS 服务端线上自检（17 组：握手与能力位 / 1001 关闭 / pong 带 code / sync_result 恰好一条 / 未知 type 与缺必填项与空 taskId 各出 2001 / alarm_ack 不回复 / 报警广播 / 状态变更推 alarm_update / 片段落盘只推 alarm_update（带 clipUrl，无底址时缺键不给 null）/ Origin 白名单 / 空 device_id 也出必填 deviceId），Qt Core+Network+Sql+WebSockets，loopback |
+| `test_pad_http_message.cpp` | HTTP 传输层离线自检（19 组：GET 拆解 / 请求行三段 / UTF-8 转义还原与非法转义原样留 / 同名键留第一个 / 分次喂 / 头与正文上限先于解析 / chunked+trailer / keep-alive 连解两个 / multipart 三 part 与 filename 只是数据 / 缺定界与超 part 数失败 / 信封两形状 / Content-Length 一致与头去重 / 状态码配业务码），**纯 Qt Core**，不起 socket |
+| `test_pad_http_api.cpp` | HTTP `/api/` 面线上自检（21 组：health 的 capabilities 嵌套 / device/status 全 snake_case / streams 缺 taskId / liveUrl 剥凭据 / cameraId=CHn / 未知 streamId 2002 / save-draft 新建·重放·422 / 2004·2005·2006 三档冲突 / apply 渲出真 PNG 且 8090 取得到 / dispose 的 filename 穿越不参与路径 + 库里 JSON 数组 / read 用对端 readAt / 终态 409/2003 / 一条连接三个请求 / 处置后扛住关机整批回写），Qt Core+Gui+Network+Sql+WebSockets，loopback + 临时库 + 临时媒体根；需 offscreen |
 | `test_video_sources.cpp` | 视频流注册表与通道引用解析离线自检（5 组：默认种子 / 三层兜底与悬空不回退 / 内联与引用互斥 / 注册表写入规则 / 存盘往返与迁移幂等），纯 Qt Core，临时文件不碰 `data/config.json` |
 | `test_stream_params.cpp` | `video.sources` 四个静默打开参数的板端实测（6 组：loop / EOF 回卷 / timeoutMs / reconnectMs+分片停止 / 软解档出帧 / 内联旧口径兜底），须在构建目录下跑，缺 3 秒素材 SKIP 三组 |
 | `test_gb28181_source_ref.cpp` | 国标流引用 `video.sources[]` 的离线自检（9 组：三类丢弃各给一行原因 / 全丢时 load 判 false / `takeSource()` 取注册表 / 旧取流键被忽略 / 空 type 按 url 前缀补型 / mp4→file / 运行中删流得空 cfg / 引用计数含国标 / 顶层老布局同判据），Qt Core+Network，无 FFmpeg |
@@ -196,6 +228,11 @@ cd build/build_rk3588_linux && ./test_stream_params [3秒素材] [黑洞地址] 
 ./build/build_rk3588_linux/test_pad_wire            # 纯 Qt Core，与 cwd 无关
 ./build/build_rk3588_linux/test_pad_sync            # 内存库，无 config.json 依赖
 ./build/build_rk3588_linux/test_pad_ws_server       # loopback WS，无 GUI
+
+# Pad 接口 v1 的 HTTP /api/ 面两连：先传输层（不起 socket，秒级），再线上（真服务端+真库+真渲染）。
+# 改报文形状（chunked/multipart/上限）只跑第一个就够；改路由或字段才需要第二个
+./build/build_rk3588_linux/test_pad_http_message    # 纯 Qt Core，与 cwd 无关
+./build/build_rk3588_linux/test_pad_http_api        # 自己在 127.0.0.1:18899 起服务端；内部已钉 offscreen
 
 # 围栏判定自检只链 fence_checker.cpp，改判定逻辑时优先跑它（目标级构建，不整树重编）
 cmake --build build/build_rk3588_linux --target test_geofence_role -j"$(nproc)"
@@ -240,7 +277,8 @@ curl -o /tmp/x.jpg '<sink 打出的 snapshot/media_begin url>' && sha256sum /tmp
 早先写 `> 0` 是测试自己的历史 bug（在内存库上永远失败）。
 `test_database` 的源文件是**显式列在 CMakeLists 里**的（不像主目标那样 GLOB），
 `alarm_dao` 一旦引用新模块就会链接期报 undefined reference —— 它现在额外链
-`src/biz/session/construction_session.cpp`（`constructionFacets` 要用 `ConstructionInfo::kKey*`）。
+`src/biz/session/construction_session.cpp`（`taskIdForInsert()` 在 `task_id` 列为空时要回落
+`ConstructionInfo::taskIdFromJsonText()` 解老行的 `construction_info`）。
 `test_equipment` 的 db 与任务目录全部落在 `/tmp/equip_check_<pid>/`、`test_rollcall` 落在
 `/tmp/rollcall_check_<pid>/`（含 test.jpg 副本，隔离 exe 的 `_faces.json` 残留），跑完即删，不碰正式 `data/roll_call_data`。
 
@@ -272,6 +310,19 @@ curl -o /tmp/x.jpg '<sink 打出的 snapshot/media_begin url>' && sha256sum /tmp
   `construction_session.cpp` + `qr_decoder.cpp` 两个文件：解码器刻意只用 `QImage`/`QRect`
   （不拖 OpenCV/RKNN 头），这是它能脱离摄像头与 GUI 线程自测的前提
 - `ws_sink` 链 `Qt5::Core` + `Qt5::WebSockets`，`QCoreApplication` 无 GUI 依赖
+- `test_pad_http_message` **只链 `Qt5::Core`**，源 = `pad_http_message.cpp` 一个 TU：
+  这一层被切出来的全部理由就是它不 include socket，所以能喂字节自测。加一条 socket 依赖它就废了
+- `test_pad_http_api` 是 HTTP 面的**依赖闭包**：六个 `pad_http_*.cpp` + `pad_request_cache.cpp` +
+  `pad_wire.cpp`/`pad_ws_server.cpp`（`/api/health` 要读它的 `clientCount()`）+
+  `alarm_uplink_engine.cpp`（`mediaUrlFor()` 那份"越界一律不给"的判据）+
+  `pad_fence_store.cpp`/`fence_frame_renderer.cpp` +
+  `alarm_manager.cpp`/`alarm_dao.cpp`/`detection_dao.cpp`/`database_manager.cpp` +
+  `construction_session.cpp`/`ConfigManager.cpp`/`device_stats.cpp`/`model_registry.cpp`，链
+  `Qt5::Core/Gui/Network/Sql/WebSockets` + `sqlite3`/`jsoncpp`/`pthread`。
+  ⚠ 与 `test_channel_reload` 同一类问题：**源列表是手抄的**，给 HTTP 面加一个 TU 时这里要一起加，
+  否则它只在别人机器上以 undefined reference 的形式坏
+  （`pad_http_alarms.cpp` 引 `AlarmManager`、`pad_http_device.cpp` 引 `PadWsServer::clientCount()`
+  与 `ModelRegistry`，少一个就是一串链接错误，而链接错误比编译错误难归因）
 - `test_channel_reload` 链的是主流水线的依赖闭包：`ffmpeg_video_decoder` + `video_recorder` +
   `ppe_task`/`base_task` + `model_registry` + `ConfigManager`/`parse_config` +
   DMA 缓冲 + `alarm_manager`/`alarm_dao`/`detection_dao`/`database_manager` + 围栏两件 +
@@ -290,7 +341,9 @@ curl -o /tmp/x.jpg '<sink 打出的 snapshot/media_begin url>' && sha256sum /tmp
 
 - **新增测试源必须同时在 `.gitignore` 加 `!tests/xxx.cpp`**：根 `.gitignore` 里有
   `test_*.cpp` 这条"临时验证文件"规则，会把正式测试源一并挡掉，而根 CMakeLists 已经
-  引用它 —— 结果是本地能编、别人克隆后 `No such file` 编不过。十四个测试都已放行。
+  引用它 —— 结果是本地能编、别人克隆后 `No such file` 编不过。十六个测试都已放行（2026-11-05 加了
+  `test_pad_http_message.cpp`/`test_pad_http_api.cpp` 两条，漏掉这两行的表现是 CI 上
+  `No such file or directory`，而本地构建一切正常）。
   **`ws_sink.cpp` 不在 `test_*.cpp` 的射程里（文件名不以 `test_` 开头），不需要豁免**——
   当初 `test_alarm_uplink.cpp` 就是这么被静默挡住过一轮，`git status` 里根本没有它。
 - 断言基于 `src/biz/db/` 接口行为（如"批量插入10条"后 `queryByTimeRange` 期望 ≥11 条），

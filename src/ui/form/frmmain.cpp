@@ -36,6 +36,9 @@
 #include "alarm_uplink.h"
 #include "http_file_service.h"   // 报警媒体的内嵌文件服务（url 模式；装配点在此）
 #include "pad_ws_server.h"        // Pad 接口 v1 的入站 WS 服务端（本机是服务端；装配点在此）
+#include "pad_wire.h"             // defaultDeviceId()：HTTP 面的 device_id 与 WS 那条同源
+#include "pad_http_server.h"      // Pad 接口 v1 的入站 HTTP `/api/` 服务端（§4~§7；装配点在此）
+#include "pad_http_api.h"         // 按配置装配那四条章节的路由
 #include "roll_call_widget.h"
 #include "equipment_inventory_widget.h"
 #include "smart_recognition_widget.h"
@@ -388,6 +391,15 @@ void frmMain::initForm()
     // 9. 加载配置文件（内部会把老 schema 一次性迁移到按通道配置）
     ConfigManager::instance().load(RuntimePaths::configFile());
 
+    // 9.5 装入扫码登录的校验口径（qr-login-edge-v1.md §6.6）：只有"本机当前计划"这一条。
+    //     §6.4 有效期与 §6.5 验签本轮不做（2026-11-04 裁定）。装在登录页出现之前，
+    //     否则第一张码会按"不比对"放过去。
+    {
+        session::LoginPolicy policy;
+        policy.expectedTaskId = ConfigManager::instance().qrLoginExpectedTaskId();
+        session::ConstructionSession::instance().setLoginPolicy(policy);
+    }
+
     // 10. 设置各通道围栏覆盖层的通道号 + 加载围栏配置
     //     必须在开流之前：解码器建推理任务时要检查"本通道有没有模型能产出围栏类别"，
     //     晚加载会让这条告警静默跳过（围栏本身在 decodeLoop 里逐帧读，不受时序影响）。
@@ -645,45 +657,48 @@ void frmMain::initNewPages()
 
     AlarmUplink::instance().attach();
 
-    // Pad 接口 v1 的入站服务端（本机是 WS 服务端，Pad 连进来）。出厂 pad_server.enabled=false，
-    // 打开它等于在局域网里开一个明文零鉴权的收报警的口 —— 与 alarm_uplink 同一条安全口径，
-    // 所以开关只在这里判一次、随进程生命周期起一次（QWebSocketServer 可以关，但配置无 setter，
-    // 改了要重启，避免"看起来生效了其实连的是旧端口"）。
+    // Pad 接口 v1 的入站服务端（本机是 WS 服务端，Pad 连进来）。**默认开**（2026-11-04 起），
+    // 打开它等于在局域网里开一个明文零鉴权的收报警的口 —— 唯一的门是握手 Origin 白名单。
+    // 日志出口无条件连一次：服务端是单例，调试设置页随时可能把它关掉再起起来，
+    // 只在 enabled 分支里连就会让"页面上刚开的服务"一条日志都不打。
+    connect(&pad::PadWsServer::instance(), &pad::PadWsServer::logMessage,
+            this, [this](const QString &cat, const QString &msg) {
+                log(cat, msg);
+            });
+    // HTTP 面的日志走同一个出口（category 固定 "pad-http"）。这条 connect 放在 enabled
+    // 判断**之外**，理由与上面那句一样：调试页里当场打开的服务端不该一条日志都不打。
+    connect(&pad::PadHttpServer::instance(), &pad::PadHttpServer::logMessage,
+            this, [this](const QString &cat, const QString &msg) {
+                log(cat, msg);
+            });
     if (uplinkCfg.padServerEnabled()) {
-        pad::ServerConfig padCfg;
-        padCfg.port = static_cast<quint16>(uplinkCfg.padServerPort());
-        padCfg.path = uplinkCfg.padServerPath();
-        padCfg.deviceId = uplinkCfg.padServerDeviceId();
-        padCfg.syncLimit = uplinkCfg.padServerSyncLimit();
-
-        // 证据地址复用上面那台内嵌 http 文件服务：同一棵树、同一套 Range 实测行为，
-        // 不再起第二个服务器。配置里写了 pad_server.media_base_url 就一切按它来
-        // （对端经 NAT/反代访问的场景），本机服务可以不起。
-        const QString mediaOverride = uplinkCfg.padServerMediaBaseUrl();
-        HttpFileService &media = HttpFileService::instance();
-        const QString mediaRoot = QFileInfo(RuntimePaths::alarmsDir()).absoluteFilePath();
-        if (mediaOverride.isEmpty() && !media.running()) {
-            const quint16 mediaPort =
-                static_cast<quint16>(uplinkCfg.alarmUplinkMediaHttpPort());
-            if (!media.start(mediaRoot, mediaPort)) {
-                log("warning", QStringLiteral("Pad 服务端要出证据地址，但媒体文件服务 port=%1 没起来"
-                                              "——本次报警只发文字").arg(mediaPort));
-            }
-        }
-        padCfg.mediaRootDir = mediaRoot;
-        padCfg.mediaBaseUrl = media.baseUrl(mediaOverride);
-
-        connect(&pad::PadWsServer::instance(), &pad::PadWsServer::logMessage,
-                this, [this](const QString &cat, const QString &msg) {
-                    log(cat, msg);
-                });
         QString padErr;
-        if (!pad::PadWsServer::instance().start(padCfg, &padErr)) {
+        if (!startPadServerFromConfig(&padErr)) {
             log("warning", QStringLiteral("Pad 服务端没起来：%1").arg(padErr));
         } else {
             log("system", QStringLiteral("Pad 服务端已监听 ws://0.0.0.0:%1%2（明文零鉴权，"
                                          "局域网内任何设备都能连进来收报警）")
-                              .arg(padCfg.port).arg(padCfg.path));
+                              .arg(uplinkCfg.padServerPort()).arg(uplinkCfg.padServerPath()));
+        }
+    }
+
+    // Pad 接口 v1 的 HTTP `/api/` 面（§4~§7）。与上面那台 WS 是**两个口、两台服务端**：
+    // 那台只推报警，这台能被写——处置/误报/已读/围栏增删改全从这里进。
+    // 默认开着（pad_http.enabled 出厂 true），关掉是彻底不 bind。
+    if (uplinkCfg.padHttpEnabled()) {
+        QString httpErr;
+        if (!startPadHttpFromConfig(&httpErr)) {
+            log("warning", QStringLiteral("Pad HTTP 面没起来：%1").arg(httpErr));
+        } else {
+            log("system", QStringLiteral("Pad HTTP 面已监听 http://0.0.0.0:%1/api/（明文零鉴权，"
+                                         "局域网内任何设备都能改报警状态与围栏；关闭请写 "
+                                         "pad_http.enabled=false）")
+                              .arg(uplinkCfg.padHttpPort()));
+            if (!uplinkCfg.padHttpExposeStreamCredentials()) {
+                // 只在默认那档提一次：现场看不到"为什么 Pad 播不起来"的时候，这一句是唯一线索
+                log("info", QStringLiteral("§6.1 的 liveUrl 已剥掉视频源口令"
+                                          "（要保留请打开 pad_http.expose_stream_credentials）"));
+            }
         }
     }
 
@@ -691,6 +706,101 @@ void frmMain::initNewPages()
     // 这里不再从全局标签文件填 AlarmManager。
 
     updateAlarmBadge();
+}
+
+/**
+ * @brief 按当前配置起 Pad WS 服务端（连同它出证据用的 8090 文件服务）
+ * @param err 失败原因（中文），可为空
+ * @return true = 已在监听
+ *
+ * 只负责**起**：调用方要先 PadWsServer::stop() 再调它（调试页"保存并应用"就是这么做的），
+ * 因为 start() 在已监听时会直接返回 true、不会换成新端口。
+ * 证据服务是进程级一次性的（mk_env_init 起、之后不能再起），所以这里只在没跑时补起，
+ * 任何情况下都不会停它；配置写了 media_base_url 时连起都不起，直接按配置的地址发。
+ */
+bool frmMain::startPadServerFromConfig(QString *err)
+{
+    ConfigManager &cfg = ConfigManager::instance();
+    pad::ServerConfig padCfg;
+    padCfg.port = static_cast<quint16>(cfg.padServerPort());
+    padCfg.path = cfg.padServerPath();
+    padCfg.deviceId = cfg.padServerDeviceId();
+    padCfg.syncLimit = cfg.padServerSyncLimit();
+
+    const QString mediaOverride = cfg.padServerMediaBaseUrl();
+    HttpFileService &media = HttpFileService::instance();
+    const QString mediaRoot = QFileInfo(RuntimePaths::alarmsDir()).absoluteFilePath();
+    if (mediaOverride.isEmpty() && !media.running()) {
+        const quint16 mediaPort = static_cast<quint16>(cfg.alarmUplinkMediaHttpPort());
+        if (!media.start(mediaRoot, mediaPort)) {
+            log("warning", QStringLiteral("Pad 服务端要出证据地址，但媒体文件服务 port=%1 没起来"
+                                          "——本次报警只发文字").arg(mediaPort));
+        }
+    }
+    padCfg.mediaRootDir = mediaRoot;
+    padCfg.mediaBaseUrl = media.baseUrl(mediaOverride);
+
+    return pad::PadWsServer::instance().start(padCfg, err);
+}
+
+/**
+ * @brief 按当前配置起 Pad HTTP `/api/` 服务端（v1 §4 处置 / §5 围栏 / §6 视频 / §7 设备）
+ * @param err 失败原因（中文），可为空
+ * @return true = 已在监听
+ *
+ * 与 startPadServerFromConfig 的三点不同，都是"这台服务端"自己的事：
+ *   1) **路由在这里装**（registerPadHttpRoutes 先 clearRoutes 再逐条 addRoute）。
+ *      ctx 按值进各个 handler，所以改了配置必须重新调本函数才生效——这正是调试页
+ *      「保存并应用」存在的理由。
+ *   2) **依赖同一个 8090 媒体服务**：围栏画面与整改照片的 URL 都由它出字节。
+ *      这里只在它没起来时补起一次，从不停它（进程级一次性，见 http_file_service.h）。
+ *      补不起就照样监听——§4/§5/§6/§7 里除了 frameUrl/photoUrls 都不依赖媒体服务，
+ *      为了一个画面地址把整个 `/api/` 关掉是过度的。
+ *   3) **deviceId 与 WS 那条同源**（pad::defaultDeviceId()）：两个接口给对端报两个设备号
+ *      是比报错更难查的问题，所以两边都读 pad_server.device_id 这一个键。
+ *
+ * 先 stop 再起：PadHttpServer::start() 在已监听时幂等返回 true，不换口。
+ */
+bool frmMain::startPadHttpFromConfig(QString *err)
+{
+    ConfigManager &cfg = ConfigManager::instance();
+
+    pad::HttpServerConfig httpCfg;
+    httpCfg.port = static_cast<quint16>(cfg.padHttpPort());
+    // 正文上限按 MB 配、传进去是字节：26MB 那档的来由（§4.2 五张 5MB + 余量）写在
+    // ConfigManager::padHttpMaxBodyMb 与 pad_http_server.h 的默认值上，两处一致。
+    httpCfg.maxBodyBytes = static_cast<qint64>(cfg.padHttpMaxBodyMb()) * 1024LL * 1024LL;
+    httpCfg.deviceId = cfg.padServerDeviceId().isEmpty()
+        ? pad::defaultDeviceId()
+        : cfg.padServerDeviceId();
+
+    pad::HttpApiContext ctx;
+    ctx.deviceId = httpCfg.deviceId;
+    ctx.exposeStreamCredentials = cfg.padHttpExposeStreamCredentials();
+    // 通道在线判据接到 AlarmManager 那张表上：§6 的 status 与 §7.1 的 cameras[].online
+    // 必须同源，两处各读各的就会出现"视频页说在线、设备页说离线"。
+    ctx.channelOnline = [](int channel) {
+        return AlarmManager::instance().isChannelOnline(channel);
+    };
+    ctx.fenceFrameDir = cfg.padHttpFenceFrames() ? QStringLiteral("fence-frames") : QString();
+
+    const QString mediaOverride = cfg.padServerMediaBaseUrl();
+    HttpFileService &media = HttpFileService::instance();
+    const QString mediaRoot = QFileInfo(RuntimePaths::alarmsDir()).absoluteFilePath();
+    if (mediaOverride.isEmpty() && !media.running()) {
+        const quint16 mediaPort = static_cast<quint16>(cfg.alarmUplinkMediaHttpPort());
+        if (!media.start(mediaRoot, mediaPort)) {
+            log("warning", QStringLiteral("Pad HTTP 面要出围栏画面/整改照片地址，但媒体文件服务"
+                                          " port=%1 没起来——apply 会回 503/3003，处置照片不给地址")
+                               .arg(mediaPort));
+        }
+    }
+    ctx.mediaRootDir = mediaRoot;
+    ctx.mediaBaseUrl = media.baseUrl(mediaOverride);
+
+    pad::PadHttpServer &server = pad::PadHttpServer::instance();
+    pad::registerPadHttpRoutes(&server, ctx);
+    return server.start(httpCfg, err);
 }
 
 /**
@@ -1389,7 +1499,7 @@ void frmMain::updateSessionBadge()
     // 只放姓名：这一颗回答的是"现在系统记的是谁"，施工id/电话/工号点开来在详情框里
     // 全都有。带上"登录人 …·施工id"那阵子，18px 的字在 1920 宽里跟导航行抢横向空间，
     // 三字姓名加个 id 就开始截字 —— 截了字就等于没有这个提示。
-    sessionBadge_->setText(session::ConstructionInfo::display(info.workerName));
+    sessionBadge_->setText(session::ConstructionInfo::display(info.personName));
     sessionBadge_->show();
     sessionBadge_->raise();
 }
@@ -1889,6 +1999,240 @@ void frmMain::initDebugPage()
         } else {
             qWarning() << "initDebugPage: 找不到设置页滚动区，WebSocket 分组未加入";
             grpWs->deleteLater();
+        }
+    }
+
+    // ========== Pad 服务端（WS 入站 8900） ==========
+    // 与上面那个分组不是一回事：上面是**本机连出去**的旧链路（WsClient），
+    // 这里是 Pad 连进来收报警的 v1 服务端（pad_server）。改完点「保存并应用」= 写配置 +
+    // 停服再起服（QWebSocketServer 可以重开，端口换了必须重启监听器才生效；
+    // 已连的 Pad 会被断开，它自己会重连）。
+    {
+        QGroupBox *grpPad = new QGroupBox("Pad 服务端（WS 入站）");
+        grpPad->setStyleSheet(QString("QGroupBox{font-size:%1px; font-weight:bold;}"
+                                      "QLabel{font-size:%2px;}"
+                                      "QLineEdit{font-size:%2px;}"
+                                      "QSpinBox{font-size:%2px;}"
+                                      "QPushButton{font-size:%2px;}")
+                                  .arg(theme::FS_CARD)
+                                  .arg(theme::FS_BODY));
+        QGridLayout *glPad = new QGridLayout(grpPad);
+        glPad->setHorizontalSpacing(10);
+        glPad->setVerticalSpacing(6);
+
+        auto *chkEnabled = new QCheckBox("启用 Pad WS 服务端");
+        chkEnabled->setChecked(cfg.padServerEnabled());
+        glPad->addWidget(chkEnabled, 0, 0, 1, 2);
+
+        auto *labStatus = new QLabel;
+        glPad->addWidget(labStatus, 0, 2, 1, 2);
+
+        auto *spinPort = new QSpinBox;
+        spinPort->setRange(1024, 65535);
+        spinPort->setValue(cfg.padServerPort());
+        glPad->addWidget(new QLabel("端口:"), 1, 0);
+        glPad->addWidget(spinPort, 1, 1);
+        auto *labPortHint = new QLabel("8899 留给 /api/ HTTP");
+        labPortHint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
+        glPad->addWidget(labPortHint, 1, 2, 1, 2);
+
+        auto *editPath = new QLineEdit(cfg.padServerPath());
+        editPath->setPlaceholderText("/");
+        glPad->addWidget(new QLabel("WS 路径:"), 2, 0);
+        glPad->addWidget(editPath, 2, 1);
+        auto *labPathHint = new QLabel("只进日志，不用于筛连接");
+        labPathHint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
+        glPad->addWidget(labPathHint, 2, 2, 1, 2);
+
+        auto *editDevice = new QLineEdit(cfg.padServerDeviceId());
+        editDevice->setPlaceholderText("空 = 按 /etc/machine-id 派生");
+        glPad->addWidget(new QLabel("设备 ID:"), 3, 0);
+        glPad->addWidget(editDevice, 3, 1, 1, 3);
+
+        auto *editMedia = new QLineEdit(cfg.padServerMediaBaseUrl());
+        editMedia->setPlaceholderText("空 = 自动取本机 IP + 8090");
+        glPad->addWidget(new QLabel("证据地址前缀:"), 4, 0);
+        glPad->addWidget(editMedia, 4, 1, 1, 3);
+
+        auto *spinSync = new QSpinBox;
+        spinSync->setRange(1, 5000);
+        spinSync->setValue(cfg.padServerSyncLimit());
+        glPad->addWidget(new QLabel("单次同步上限:"), 5, 0);
+        glPad->addWidget(spinSync, 5, 1);
+        auto *labSyncHint = new QLabel("一次 sync_result 最多几条");
+        labSyncHint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
+        glPad->addWidget(labSyncHint, 5, 2, 1, 2);
+
+        auto *btnApply = new QPushButton("保存并应用");
+        btnApply->setMinimumWidth(120);
+        btnApply->setStyleSheet(theme::mainButton(theme::BTN_SECONDARY));
+        glPad->addWidget(btnApply, 6, 3);
+
+        auto refreshStatus = [labStatus, chkEnabled]() {
+            const bool running = pad::PadWsServer::instance().running();
+            if (!chkEnabled->isChecked()) {
+                labStatus->setText("○ 已停用");
+                labStatus->setStyleSheet("color: #dc3232;");
+            } else if (running) {
+                labStatus->setText(QString("● 监听中 0.0.0.0:%1")
+                                       .arg(ConfigManager::instance().padServerPort()));
+                labStatus->setStyleSheet("color: #32b432;");
+            } else {
+                labStatus->setText("✕ 未监听");
+                labStatus->setStyleSheet("color: #dc3232;");
+            }
+        };
+        refreshStatus();
+
+        connect(btnApply, &QPushButton::clicked, this,
+                [this, chkEnabled, spinPort, editPath, editDevice, editMedia, spinSync,
+                 refreshStatus]() {
+                    ConfigManager &c = ConfigManager::instance();
+                    c.setPadServerEnabled(chkEnabled->isChecked());
+                    c.setPadServerPort(spinPort->value());
+                    c.setPadServerPath(editPath->text());
+                    c.setPadServerDeviceId(editDevice->text());
+                    c.setPadServerMediaBaseUrl(editMedia->text());
+                    c.setPadServerSyncLimit(spinSync->value());
+                    c.save();
+                    // 先停再起：start() 在已监听时是幂等的（直接返回 true），
+                    // 不停一下换端口就等于没换。已连的 Pad 会被断开，它会自己重连。
+                    pad::PadWsServer::instance().stop();
+                    QString err;
+                    bool ok = false;
+                    if (chkEnabled->isChecked()) {
+                        ok = startPadServerFromConfig(&err);
+                    }
+                    refreshStatus();
+                    if (!chkEnabled->isChecked()) {
+                        log("system", "Pad 服务端已停用（配置已保存）");
+                    } else if (ok) {
+                        log("system", QString("Pad 服务端已按新配置监听 0.0.0.0:%1%2")
+                                          .arg(c.padServerPort()).arg(c.padServerPath()));
+                    } else {
+                        log("warning", QString("Pad 服务端没起来：%1").arg(err));
+                    }
+                });
+
+        QVBoxLayout *padContent = settingsContentLayout(ui->pageSettings);
+        if (padContent) {
+            padContent->insertWidget(padContent->count() - 1, grpPad);
+        } else {
+            qWarning() << "initDebugPage: 找不到设置页滚动区，Pad 服务端分组未加入";
+            grpPad->deleteLater();
+        }
+    }
+
+    // ========== Pad HTTP 服务端（/api/ 入站 8899，v1 §4~§7） ==========
+    // 与上面那一组是**两个口、两台服务端**：那台只往外推报警，这台能被写
+    // （处置/误报/已读 + 围栏建/改/下发/停用/删草稿）。所以这一组多出来的两个开关
+    // 都是围绕"写面"的：正文上限（处置带 0~5 张照片）与围栏画面渲染。
+    // 「保存并应用」= 写配置 + 存盘 + 停服再装路由起服（QTcpServer 与 QWebSocketServer
+    // 一样可以重开；路由里 ctx 是按值捕获的，不重装就还是旧配置）。
+    {
+        QGroupBox *grpHttp = new QGroupBox("Pad HTTP 服务端（/api/ 入站）");
+        grpHttp->setStyleSheet(QString("QGroupBox{font-size:%1px; font-weight:bold;}"
+                                       "QLabel{font-size:%2px;}"
+                                       "QCheckBox{font-size:%2px;}"
+                                       "QSpinBox{font-size:%2px;}"
+                                       "QPushButton{font-size:%2px;}")
+                                   .arg(theme::FS_CARD)
+                                   .arg(theme::FS_BODY));
+        QGridLayout *glHttp = new QGridLayout(grpHttp);
+        glHttp->setHorizontalSpacing(10);
+        glHttp->setVerticalSpacing(6);
+
+        auto *chkHttpEnabled = new QCheckBox("启用 Pad HTTP /api/ 面（明文零鉴权，可写）");
+        chkHttpEnabled->setChecked(cfg.padHttpEnabled());
+        glHttp->addWidget(chkHttpEnabled, 0, 0, 1, 2);
+
+        auto *labHttpStatus = new QLabel;
+        glHttp->addWidget(labHttpStatus, 0, 2, 1, 2);
+
+        auto *spinHttpPort = new QSpinBox;
+        spinHttpPort->setRange(1024, 65535);
+        spinHttpPort->setValue(cfg.padHttpPort());
+        glHttp->addWidget(new QLabel("端口:"), 1, 0);
+        glHttp->addWidget(spinHttpPort, 1, 1);
+        auto *labHttpPortHint = new QLabel("A4 分配：8899=/api/、8900=WS、8090=媒体文件");
+        labHttpPortHint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
+        glHttp->addWidget(labHttpPortHint, 1, 2, 1, 2);
+
+        auto *spinBody = new QSpinBox;
+        spinBody->setRange(1, 100);
+        spinBody->setValue(cfg.padHttpMaxBodyMb());
+        glHttp->addWidget(new QLabel("正文上限(MB):"), 2, 0);
+        glHttp->addWidget(spinBody, 2, 1);
+        auto *labBodyHint = new QLabel("§4.2 处置带照片：5 张 ×5MB + 余量");
+        labBodyHint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
+        glHttp->addWidget(labBodyHint, 2, 2, 1, 2);
+
+        auto *chkFenceFrame = new QCheckBox("围栏下发时渲染生效画面 PNG（§5.3 必填 frameUrl）");
+        chkFenceFrame->setChecked(cfg.padHttpFenceFrames());
+        glHttp->addWidget(chkFenceFrame, 3, 0, 1, 4);
+
+        auto *chkExposeCred = new QCheckBox("liveUrl 保留视频源口令（默认剥掉）");
+        chkExposeCred->setChecked(cfg.padHttpExposeStreamCredentials());
+        glHttp->addWidget(chkExposeCred, 4, 0, 1, 4);
+
+        auto *btnHttpApply = new QPushButton("保存并应用");
+        btnHttpApply->setMinimumWidth(120);
+        btnHttpApply->setStyleSheet(theme::mainButton(theme::BTN_SECONDARY));
+        glHttp->addWidget(btnHttpApply, 5, 3);
+
+        auto refreshHttpStatus = [labHttpStatus, chkHttpEnabled]() {
+            const bool running = pad::PadHttpServer::instance().running();
+            if (!chkHttpEnabled->isChecked()) {
+                labHttpStatus->setText("○ 已停用");
+                labHttpStatus->setStyleSheet("color: #dc3232;");
+            } else if (running) {
+                labHttpStatus->setText(QString("● 监听中 0.0.0.0:%1（%2 条路由，已连 %3）")
+                                           .arg(ConfigManager::instance().padHttpPort())
+                                           .arg(pad::PadHttpServer::instance().routeCount())
+                                           .arg(pad::PadHttpServer::instance().clientCount()));
+                labHttpStatus->setStyleSheet("color: #32b432;");
+            } else {
+                labHttpStatus->setText("✕ 未监听");
+                labHttpStatus->setStyleSheet("color: #dc3232;");
+            }
+        };
+        refreshHttpStatus();
+
+        connect(btnHttpApply, &QPushButton::clicked, this,
+                [this, chkHttpEnabled, spinHttpPort, spinBody, chkFenceFrame, chkExposeCred,
+                 refreshHttpStatus]() {
+                    ConfigManager &c = ConfigManager::instance();
+                    c.setPadHttpEnabled(chkHttpEnabled->isChecked());
+                    c.setPadHttpPort(spinHttpPort->value());
+                    c.setPadHttpMaxBodyMb(spinBody->value());
+                    c.setPadHttpFenceFrames(chkFenceFrame->isChecked());
+                    c.setPadHttpExposeStreamCredentials(chkExposeCred->isChecked());
+                    c.save();
+                    // 先停再起：start() 在已监听时幂等返回 true，不停一下换口等于没换。
+                    // 停的顺序也在装路由之前——registerPadHttpRoutes 只换表不影响监听，
+                    // 但放在 stop 之后起，读到的就是"这一套配置 + 这一张路由表"。
+                    pad::PadHttpServer::instance().stop();
+                    QString err;
+                    bool ok = false;
+                    if (chkHttpEnabled->isChecked())
+                        ok = startPadHttpFromConfig(&err);
+                    refreshHttpStatus();
+                    if (!chkHttpEnabled->isChecked()) {
+                        log("system", "Pad HTTP 面已停用（配置已保存，端口不再监听）");
+                    } else if (ok) {
+                        log("system", QString("Pad HTTP 面已按新配置监听 0.0.0.0:%1/api/（路由已重装）")
+                                          .arg(c.padHttpPort()));
+                    } else {
+                        log("warning", QString("Pad HTTP 面没起来：%1").arg(err));
+                    }
+                });
+
+        QVBoxLayout *httpContent = settingsContentLayout(ui->pageSettings);
+        if (httpContent) {
+            httpContent->insertWidget(httpContent->count() - 1, grpHttp);
+        } else {
+            qWarning() << "initDebugPage: 找不到设置页滚动区，Pad HTTP 面分组未加入";
+            grpHttp->deleteLater();
         }
     }
 

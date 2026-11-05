@@ -84,7 +84,14 @@ decodeLoop 打开流后：用 dec_ctx 的实际宽高 + 流的 avg_frame_rate(�
     → 任务带 due = 报警时刻 + kClipPostMs(2s)，到点才取窗口：
       "前 3 秒 + 后 2 秒"里的后 2 秒在报警那一刻还没发生
     → dumpAnnexB(上传用裸流) + dumpMp4(网页副本，同批包只加封装不重编)
+      ⚠ `dumpMp4` 里帧时间戳要**rescale 到输出流的 time_base**：`avformat_write_header`
+        之后 mp4 muxer 会把它改成自己的那一档（本机实测 1/15360）。2026-11-05 之前直接把
+        "帧计数"当 muxer 的 tick 写，138 帧（≈5.5 秒）的片段 `ffprobe` 只有 **0.009 秒**
+        ——Pad 一帧几十微秒放完，看起来就是"没有视频"。改动后复测口径：
+        `ffprobe -show_entries format=duration` 应落在 **5.0~5.6 秒**（fps=25、窗口 3+2 秒，
+        环里正好有这个跨度时）；明显小于 4 秒就是时间戳又没换算。
     → AlarmManager::attachVideoClip(ids, 裸流路径, mp4 路径) 回填内存 + AlarmDAO::updateVideoPath
+      回填之后 WS 侧只发一条 `alarm_update`（带 clipUrl），不再重发整条 `alarm`（2026-11-05 流程）。
       mp4 没写成时第三参传**空串**（只 qWarning，不发 videoClipSkipped）：裸流已在盘上，本地留档这条不变。
       撤承诺发生在上行那侧——url 档发的就是 mp4，`AlarmUplink::onVideoClipAttached` 拿到空路径
       会替它发一条 `media_failed{reason:"mp4 副本没写成"}`，对端不会静默等一段没有的视频

@@ -43,7 +43,8 @@ struct AlarmFilter {
     QString className;
     QString status;
     QString workerName;
-    QString constructionId;
+    QString taskId;       // 施工计划 ID（v1 的 taskId；B2 定案＝库内 construction_info 的 construction_id，
+                          // 2026-11-04 起有自己的一等列 task_id，筛选走等值而不是解 JSON）
     FenceRole fenceRole = RoleAll;
     Scope scope = All;
     int limit = 500;
@@ -84,8 +85,8 @@ public:
                                              AlarmFilter::Scope scope = AlarmFilter::All);
     QVector<QPair<QString, int>> workerFacets(long startTime, long endTime,
                                               AlarmFilter::Scope scope = AlarmFilter::All);
-    QVector<QPair<QString, int>> constructionFacets(long startTime, long endTime,
-                                                    AlarmFilter::Scope scope = AlarmFilter::All);
+    QVector<QPair<QString, int>> taskIdFacets(long startTime, long endTime,
+                                              AlarmFilter::Scope scope = AlarmFilter::All);
 
     // 按时间范围查询
     QVector<AlarmRecord> queryByTimeRange(long startTime, long endTime,
@@ -121,23 +122,25 @@ public:
      * @param sinceInternal 空串 = 全量（走没有 WHERE 的那条：Qt 把空 QString 绑成 NULL，
      *        `>= NULL` 恒不成立，绑成 "" 会一条都不回——首次全量就是这个形状）
      * @param limit 最多取几行
-     * @param constructionId 非空时**在 SQL 里**按施工计划过滤（v1 的 taskId）
+     * @param taskId 非空时**在 SQL 里**按施工计划过滤（v1 的 taskId ＝ 库内 task_id 列；
+     *        B2 于 2026-11-04 定案与 construction_id 同物）。空串＝不加这条条件
      *
      * 用 COALESCE(NULLIF(update_time,''), alarm_time)：早期版本建行时不写 update_time，
      * 老库里几万行是空串，直接按 update_time 过滤会把它们整批漏掉。
      * 时间文本仍是库内那种定宽无偏移格式（与 alarm_time 的字典序过滤同一套口径）。
      *
-     * ⚠ `constructionId` 这条过滤**必须在 SQL 里**，不能"先取 limit 行再在 C++ 里筛"：
+     * ⚠ `taskId` 这条过滤**必须在 SQL 里**，不能"先取 limit 行再在 C++ 里筛"：
      *   那是报告 §八 P1-2 的病灶——库里几万行历史时，升序取到的前 limit 行全是**别的应用**
      *   最早期的报警，筛完剩 0 条 → 游标回显 null → Pad 存 null → 下次仍是全量，
      *   该计划的报警**永远同步不到**且零报错（活锁）。下推之后 LIMIT 落在过滤之后，
      *   增量才会向前推进。
-     * 过滤表达式与 buildFilterWhere() 的「按施工id」那条逐字同一套（instr + 带引号的
-     * 整段 needle）：本机 QSQLITE 插件内嵌 SQLite 3.31.1 且没编 JSON1，json_extract 会
-     * "no such function"；LIKE 的 needle 里 %/_ 是通配符，而施工 id 与键名都带下划线，会过度匹配。
+     * 判据与 buildFilterWhere() 的「按施工计划」那条逐字同一套：都是 `task_id = :task_id` 等值。
+     * 2026-11-04 之前这里是 `instr(construction_info,'"construction_id":"X"')`（内嵌 SQLite
+     * 3.31.1 没编 JSON1，json_extract 会 "no such function"），子串匹配依赖序列化形状且用不上
+     * 索引，所以 B2 定案后把它升成了一等列 + idx_alarms_task_id。
      */
     QVector<AlarmRecord> queryUpdatedSince(const QString &sinceInternal, int limit = 500,
-                                           const QString &constructionId = QString());
+                                           const QString &taskId = QString());
 
     // ========================================================================
     // 更新操作
@@ -152,17 +155,49 @@ public:
     // 剩下两万七在库里纹丝不动，按钮按下去数字都不带变的。
     int acknowledgeAllPending();
 
-    // 处置报警
-    bool dispose(const QString &id, const QString &result,
-                 int userId, const QString &userName,
-                 const QString &remark = QString());
+    /**
+     * @brief v1 §4.2 的处置：把一条报警写成终态 `disposed` 并落处置记录
+     * @param measure       处置措施文本（对端从 §4.1 的选项 label 里选，落 dispose_result）
+     * @param personId      处置人工号原文（v1 的 personId，例 "05-0101"）。落 dispose_person_id；
+     *                      dispose_user_id 只有在它能整体解析成整数时才顺带写，否则保持原值不动
+     * @param personName    处置人姓名（落 dispose_user_name）
+     * @param remark        补充说明。**空串 = 不改这一列**（SQL 里是 COALESCE），
+     *                      要清空请走 updateRemark()
+     * @param photoPathsJson 整改照片路径的 JSON 数组文本（0~5 个），落 dispose_photo；
+     *                      空串写 `[]` 而不是 NULL，读侧就只有一种形状要认
+     * @param disposedAt    处置时间，**库内那套定宽无偏移文本**。空串 = 用本机当前时间
+     * @return false = 没改成。含三种：库没开、id 不存在、已经是终态
+     *          （WHERE 里挡掉 disposed/false_alarm，所以 §4.2 的 409/2003 不需要"先查再写"）
+     *
+     * ⚠ 调用方**必须**同时更新内存窗口里那一份同 id 记录，否则关机时的
+     *   `syncToDatabase()` 会拿内存里 status 还是 pending 的旧副本 INSERT OR REPLACE 回来，
+     *   处置就在第二天早上被静默撤销（和 task_id 回填被打回 NULL 是同一个病灶）。
+     *   所以线上路径是 AlarmManager::disposeAlarmById()，不是直接调本函数。
+     */
+    bool dispose(const QString &id, const QString &measure, const QString &personId,
+                 const QString &personName, const QString &remark,
+                 const QString &photoPathsJson, const QString &disposedAt);
 
-    // 标记为误报
-    bool markFalseAlarm(const QString &id, const QString &remark = QString());
+    /**
+     * @brief 标记误报
+     * @param personId/personName/markedAt v1 §4.3 走这条时传；空串 = 该列不动（COALESCE）。
+     *        UI 上那个「误报」按钮沿用旧口径全传空，所以它的行为与改动前逐字节相同。
+     * @return false = 库没开 / id 不存在 / 已是终态（disposed 或 false_alarm 都不再改）
+     */
+    bool markFalseAlarm(const QString &id, const QString &remark = QString(),
+                        const QString &personId = QString(),
+                        const QString &personName = QString(),
+                        const QString &markedAt = QString());
 
-    // 标记已读：read_time 保留**最早**值（重复调用不会把已读时间推后），
-    // 并且每次都写 update_time —— 对端断线补漏按 update_time 做游标，漏写等于这条已读丢。
-    bool markRead(const QString &id);
+    /**
+     * @brief 标记已读：read_time 保留**最早**值，并且每次都写 update_time
+     * @param candidateTime 候选已读时间（库内定宽文本）。空串 = 用本机当前时间，
+     *        也就是 v1 之前那条"板端看过就算已读"的老口径；
+     *        非空 = §4.4 里 Pad 报上来的 readAt（Pad 第一次打开详情的时刻）。
+     *        ⚠ 传进来了就**只信它**，不再与本机墙钟取小——Pad 的时钟由 hello_ack 校准过，
+     *        而"边缘设备保留最早 readAt"要保的是**对端报的那个最早值**。
+     */
+    bool markRead(const QString &id, const QString &candidateTime = QString());
 
     // 更新备注
     bool updateRemark(const QString &id, const QString &remark);

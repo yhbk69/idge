@@ -53,14 +53,28 @@ ClipWriter 后台线程(报警 +2s 到点) → dump 裸流/MP4 → attachVideoCl
          → emit videoClipAttached(ids, 裸流路径, mp4 副本路径)（**当前只有报警上行 url 档是消费者**）
          （UI 不发信号：详情对话框打开时读 alarms() 自然拿到最新路径）
 
-UI/Pad 改状态（acknowledgeAlarmById(id) / markAsFalsePositiveById(id) 成功之后，UI 两条按钮都走这里）
+UI/Pad/HTTP 改状态（`acknowledgeAlarmById(id)` / `markAsFalsePositiveById(id)` 成功之后，
+UI 两条按钮走这里；v1 §4 的三个 HTTP 入口 `disposeAlarmById` / `markAlarmReadById` /
+`markAsFalsePositiveById(id, personId, personName, markedAtInternal)` 也走这里）
          → recordForId(id)：先查内存环形列表，查不到回库 queryById
          → emit alarmStatusChanged(AlarmRecord)（**单条**变更；Pad 靠它立刻下发 alarm_update）
+         → ⚠ 三条写路径的顺序都是「**先库 → 再改内存环形列表那份副本 → 最后 emit**」。
+           只改库不改副本的写法，会在下次开机 `syncToDatabase()` 整批回写时被打回原状
+           （处置在第二天早上神秘复原）。这条有离线契约（`test_pad_http_api` 第 21 组）
+         → `markAlarmReadById(id, readAtInternal)` 不改状态：§4.4"读一条报警不算处置"，
+           库里已有的 `read_time` 更早时就保留已有的（墙钟回拨也不能把它往后推）
+         → `disposeAlarmById` 是唯一能写出 `status='disposed'` 的路径，SQL 里带终态守卫，
+           已 `disposed`/`false_alarm` 的行 `numRowsAffected()==0` → 路由回 409/2003
          → acknowledgeAll() **不发这条**：一次可能几千条，逐条广播会把 GUI 线程钉住，
            这批增量交给下一次 sync_request 从库里补漏（口径见 src/biz/pad/README.md 第 5 条）
          → 按下标的老接口 acknowledgeAlarm(int) / markAsFalsePositive(int) **也不发**（全工程零调用方）：
            要新增状态入口一律用 ById 版，否则 Pad 那侧永远停在旧状态
 ```
+
+`isChannelOnline(int)` 是给 HTTP §6/§7.1 用的**唯一**通道在线判据：`/api/streams` 的 `status`
+与 `/api/device/status` 的 `cameras[].online` 必须同源，两处各读各的就会出现
+"视频页说在线、设备页说离线"（实现是查那张 per-channel 的运行表，不新造状态）。
+
 两条判定路径的限流键与窗口**互相独立**：
 
 | 路径 | 键 | 窗口 |

@@ -487,13 +487,20 @@ bool VideoRecorder::dumpMp4(const QString &filePath, qint64 center_ms,
 
         // 包数据是借用的（pkt->buf = NULL），write_frame 只会 unref 不会 free，
         // 因此不能拷贝、也绝不能让 ffmpeg 去 free 这块 std::vector 内存。
-        // 输出时间戳按墙钟差折算，同一帧的多个包用 +i 保证严格递增（MP4 要求
+        // 输出时间戳按墙钟差折算，同一帧的多个包用 +1 保证严格递增（MP4 要求
         // dts 单调），比直接复用 bp.pts 更抗丢帧。
+        //
+        // ⚠ 单位换算必须做：上面算出的是**帧计数**（1/fps 为单位），而
+        // `avformat_write_header` 之后 mp4 muxer 会把 `stream->time_base` 改成它自己
+        // 那一档（本机实测 1/15360）。2026-11-05 之前直接把帧计数当 muxer 的 tick 写，
+        // 结果 138 帧（≈5.5 秒）的片段 duration 只有 **0.009 秒**（ffprobe 实测），
+        // 播放器几十微秒就放完、看起来"没有视频"。所以每个包都要 rescale 到输出流的时基。
+        const AVRational frameBase{1, qMax(1, cfg_.fps)};
         const qint64 baseWallMs = window.front().wall_ms;
         qint64 lastOutPts = -1;
         int index = 0;
         for (const BufferedPacket &bp : window) {
-            qint64 outPts = (bp.wall_ms - baseWallMs) * cfg_.fps / 1000;
+            qint64 outPts = (bp.wall_ms - baseWallMs) * frameBase.den / 1000;
             if (outPts <= lastOutPts) {
                 outPts = lastOutPts + 1;
             }
@@ -505,6 +512,7 @@ bool VideoRecorder::dumpMp4(const QString &filePath, qint64 center_ms,
             pkt->duration = 1;
             pkt->stream_index = 0;
             pkt->flags = bp.isKeyFrame ? AV_PKT_FLAG_KEY : 0;
+            av_packet_rescale_ts(pkt, frameBase, stream->time_base);
 
             ret = av_interleaved_write_frame(fmtCtx, pkt);
             av_packet_unref(pkt);

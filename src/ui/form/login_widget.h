@@ -9,7 +9,8 @@
 // 所以将来字段格式改动不会牵到界面（改的地方只有 ConstructionInfo）。
 //
 // 两个登录入口走的是**同一条** ConstructionSession::startLogin(qrText) 路径：
-//   扫码登录 → QrScanDialog::scan() 实时扫出码内原文（窗格打开即扫，无快门键）
+//   扫码登录 → QrScanDialog::scan() 实时扫出码内原文（打开即扫、无快门键；
+//              解出即返回，**不显示码内内容、没有确认键**，直接登录）
 //   测试登录 → 读 plan/construction_qr.json（伪造信息，多候选路径，见 .cpp）
 // 没有第二套解析/校验分支，测试登录通过就等于扫码登录通过。
 //

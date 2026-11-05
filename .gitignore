@@ -62,6 +62,8 @@ test_*.cpp
 #   test_video_sources            —— 视频流注册表与通道引用解析 5 组离线契约
 #   test_stream_params            —— video.sources 四个静默参数的板端实测/回归
 #   test_gb28181_source_ref       —— gb28181.streams 引用 video.sources 的九条离线契约
+#   test_pad_http_message         —— HTTP 传输层（解码/上限/multipart/信封）19 组离线契约
+#   test_pad_http_api             —— HTTP /api/ 面线上自检（loopback 真服务端+真库+真渲染 21 组）
 !tests/test_database.cpp
 !tests/test_equipment.cpp
 !tests/test_rollcall.cpp
@@ -76,6 +78,8 @@ test_*.cpp
 !tests/test_video_sources.cpp
 !tests/test_stream_params.cpp
 !tests/test_gb28181_source_ref.cpp
+!tests/test_pad_http_message.cpp
+!tests/test_pad_http_api.cpp
 
 # 测试素材（*.jpg/*.mp4 全局忽略，此处显式放行；*_faces.json 等为运行产物不放行）
 !assets/test/1.mp4

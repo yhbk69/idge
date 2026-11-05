@@ -67,6 +67,26 @@ static QString currentDateTimeStr()
 }
 
 // ============================================================================
+// 写库时这一行的施工计划身份（v1 的 taskId；扫码载荷里是 plan.taskId）
+// ============================================================================
+// 记录自带的 taskId 优先；没填就从 construction_info 解（新形状读 plan.taskId，
+// 历史行回落 construction_id）。兜底不是多余：测试与老调用方
+// 是手工拼 AlarmRecord 的，只喂 constructionJson 不填新字段，少这一步就写成 NULL，
+// 而现在所有过滤只看 task_id —— 症状是那一行对 Pad 永久不可见，而且零报错。
+// ⚠ 这条判据**不能**保证返回非 null：空 constructionJson 解出来就是空 QString，
+// 而 Qt 把空 QString 当**无值**绑进 SQL，落库是 NULL 而不是 ''。所以这一列的
+// "永不为 NULL"不变式由两条 INSERT 里的 `IFNULL(:task_id, '')` 兜住，不靠这里的返回值。
+// 为什么必须在 SQL 侧兜：AlarmManager 每次关机把 RAM 窗口（1000 条）整批回写，
+// 这 1000 行未登录老行的 taskId 是空串 → 绑成 NULL → 把启动回填收尾写好的 '' 打回 NULL，
+// 于是回填每一开机都要重新扫并重新 UPDATE 那 1000 行（实测 `0 from JSON + 1000 sealed empty`）。
+static QString taskIdForInsert(const AlarmRecord &alarm)
+{
+    return alarm.taskId.isEmpty()
+               ? session::ConstructionInfo::taskIdFromJsonText(alarm.constructionJson)
+               : alarm.taskId;
+}
+
+// ============================================================================
 // insertAlarm: 插入单条报警记录
 // ============================================================================
 // 流程：
@@ -96,12 +116,14 @@ int64_t AlarmDAO::insertAlarm(const AlarmRecord &alarm)
                            class_id, class_name, confidence, image_path, video_path,
                            status, dispose_result, dispose_user_id, dispose_user_name,
                            dispose_time, dispose_photo, remark, read_time,
-                           create_time, update_time, worker_name, construction_info)
+                           create_time, update_time, worker_name, construction_info,
+                           task_id)
         VALUES (:id, :alarm_type, :alarm_level, :alarm_time, :channel,
                 :class_id, :class_name, :confidence, :image_path, :video_path,
                 :status, :dispose_result, :dispose_user_id, :dispose_user_name,
                 :dispose_time, :dispose_photo, :remark, :read_time,
-                :create_time, :update_time, :worker_name, :construction_info)
+                :create_time, :update_time, :worker_name, :construction_info,
+                IFNULL(:task_id, ''))
     )");
 
     query.bindValue(":id", id);
@@ -129,6 +151,7 @@ int64_t AlarmDAO::insertAlarm(const AlarmRecord &alarm)
     // 施工信息：未登录时为空串，入库即 NULL 语义（显示侧统一成 "—"）
     query.bindValue(":worker_name", alarm.workerName);
     query.bindValue(":construction_info", alarm.constructionJson);
+    query.bindValue(":task_id", taskIdForInsert(alarm));
 
     if (!query.exec()) {
         qWarning() << "Insert alarm failed:" << query.lastError().text();
@@ -186,12 +209,14 @@ int64_t AlarmDAO::insertAlarms(const QVector<AlarmRecord> &alarms)
                            class_id, class_name, confidence, image_path, video_path,
                            status, dispose_result, dispose_user_id, dispose_user_name,
                            dispose_time, dispose_photo, remark, read_time,
-                           create_time, update_time, worker_name, construction_info)
+                           create_time, update_time, worker_name, construction_info,
+                           task_id)
         VALUES (:id, :alarm_type, :alarm_level, :alarm_time, :channel,
                 :class_id, :class_name, :confidence, :image_path, :video_path,
                 :status, :dispose_result, :dispose_user_id, :dispose_user_name,
                 :dispose_time, :dispose_photo, :remark, :read_time,
-                :create_time, :update_time, :worker_name, :construction_info)
+                :create_time, :update_time, :worker_name, :construction_info,
+                IFNULL(:task_id, ''))
     )");
 
     for (const AlarmRecord &alarm : alarms) {
@@ -222,6 +247,7 @@ int64_t AlarmDAO::insertAlarms(const QVector<AlarmRecord> &alarms)
         query.bindValue(":update_time", alarm.updateTime);
         query.bindValue(":worker_name", alarm.workerName);
         query.bindValue(":construction_info", alarm.constructionJson);
+        query.bindValue(":task_id", taskIdForInsert(alarm));
 
         if (query.exec()) {
             inserted++;
@@ -486,18 +512,12 @@ FilterSql buildFilterWhere(const AlarmFilter &f)
         eq("status", "status", f.status);
     }
 
-    if (!f.constructionId.isEmpty()) {
-        // 用 instr 而不是 json_extract：本机构建用的 Qt QSQLITE 插件内嵌的是
-        // SQLite 3.31.1 且**没有编入 JSON1**（插件里搜不到任何 json_* 函数名），
-        // json_extract 会直接 "no such function" 把整条查询打死。
-        // 也不用 LIKE：LIKE 的 needle 里 % 和 _ 是通配符，施工id 带下划线就会过度匹配
-        // （本项目的键名恰恰是 construction_id 这种下划线风格）。
-        // needle 是整段 "..." 带引号一起 bind 的，序列化形状由 ConstructionInfo::toJson
-        // 固定（QJsonDocument::Compact，无空格），所以这个子串匹配是精确的。
-        parts << QStringLiteral("instr(construction_info, :cid_needle) > 0");
-        out.binds.append(qMakePair(QStringLiteral("cid_needle"),
-                                   QStringLiteral("\"construction_id\":\"%1\"")
-                                       .arg(f.constructionId)));
+    if (!f.taskId.isEmpty()) {
+        // 等值判据：task_id 是 2026-11-04 随 B2 定案加的一等列（= 扫码载荷的 plan.taskId）。
+        // 以前这里写 `instr(construction_info, '"construction_id":"X"') > 0`——子串匹配依赖
+        // QJsonDocument::Compact 的序列化形状，键序一变、多一个空格、或将来改成 pretty 就
+        // 静默查不到，而且几万行的库上它永远用不上索引。
+        eq("task_id", "task_id", f.taskId);
     }
 
     // 围栏与类别两张表的分流：alarm_type 前缀，与 recordFromQuery 还原
@@ -662,27 +682,22 @@ QVector<QPair<QString, int>> AlarmDAO::workerFacets(long startTime, long endTime
     return runFacet(sql, binds, "worker");
 }
 
-// 施工id 藏在 construction_info 这段 JSON 文本里，SQLite 又没有 JSON1，
-// 所以候选值不在 SQL 里解，而是把 distinct 载荷取回来在 C++ 侧用 QJsonDocument 解。
-// distinct 的载荷数量 = 登录次数（同一时段所有报警共用同一份文本），是个个位数的量。
-QVector<QPair<QString, int>> AlarmDAO::constructionFacets(long startTime, long endTime,
-                                                          AlarmFilter::Scope scope)
+// 施工计划候选值：task_id 从 B2 定案起是一等列，所以这里直接 GROUP BY 它，不再把整段
+// JSON 取回来在 C++ 侧解（老写法既用不上索引，也让"哪个键算 taskId"这件事有两处判据）。
+// distinct 的数量＝登录过的施工计划数，通常个位数；LIMIT 60 是下拉的兜底上限。
+QVector<QPair<QString, int>> AlarmDAO::taskIdFacets(long startTime, long endTime,
+                                                    AlarmFilter::Scope scope)
 {
     QVector<QPair<QString, QVariant>> binds;
     const QString sql = QStringLiteral(
-        "SELECT construction_info, COUNT(*) FROM alarms "
-        "WHERE status <> 'false_alarm' AND construction_info <> ''%1%2 "
-        "GROUP BY construction_info ORDER BY COUNT(*) DESC LIMIT 60")
+        "SELECT task_id, COUNT(*) FROM alarms "
+        "WHERE status <> 'false_alarm' AND task_id IS NOT NULL AND task_id <> ''%1%2 "
+        "GROUP BY task_id ORDER BY COUNT(*) DESC LIMIT 60")
         .arg(andTimeRangeClause(startTime, endTime, binds), facetScopeClause(scope));
 
     QVector<QPair<QString, int>> out;
-    for (const auto &row : runFacet(sql, binds, "construction")) {
-        const QJsonDocument doc = QJsonDocument::fromJson(row.first.toUtf8());
-        if (!doc.isObject()) continue;
-        const QString id = doc.object()
-                               .value(QLatin1String(session::ConstructionInfo::kKeyConstructionId))
-                               .toString();
-        if (!id.isEmpty()) out.append(qMakePair(id, row.second));
+    for (const auto &row : runFacet(sql, binds, "taskId")) {
+        if (!row.first.isEmpty()) out.append(qMakePair(row.first, row.second));
     }
     return out;
 }
@@ -690,7 +705,7 @@ QVector<QPair<QString, int>> AlarmDAO::constructionFacets(long startTime, long e
 /**
  * @brief 按状态查询报警记录
  *
- * @param status: 报警状态（"pending"/"rectified"/"false_alarm"）
+ * @param status: 报警状态（"pending"/"rectified"/"disposed"/"false_alarm"）
  * @param limit:  最大返回数量（默认 1000）
  * @return: 该状态的报警记录列表，按时间倒序
  */
@@ -778,7 +793,7 @@ AlarmRecord AlarmDAO::queryById(const QString &id)
 }
 
 QVector<AlarmRecord> AlarmDAO::queryUpdatedSince(const QString &sinceInternal, int limit,
-                                                 const QString &constructionId)
+                                                 const QString &taskId)
 {
     QVector<AlarmRecord> results;
     QSqlDatabase db = DatabaseManager::instance().database();
@@ -794,12 +809,11 @@ QVector<AlarmRecord> AlarmDAO::queryUpdatedSince(const QString &sinceInternal, i
     if (!sinceInternal.isEmpty()) {
         parts << QStringLiteral("COALESCE(NULLIF(update_time, ''), alarm_time) >= :since");
     }
-    if (!constructionId.isEmpty()) {
-        // needle 连引号一起 bind，序列化形状由 ConstructionInfo::toJson 固定（Compact、无空格），
-        // 所以这段子串匹配是精确的；判据与 buildFilterWhere() 的「按施工id」逐字同一套
-        // （本机 QSQLITE 内嵌 SQLite 3.31.1 且没编 JSON1，json_extract 会 "no such function"；
-        //  LIKE 的 %/_ 是通配符，而键名与施工 id 都带下划线，会过度匹配）。
-        parts << QStringLiteral("instr(construction_info, :cid_needle) > 0");
+    if (!taskId.isEmpty()) {
+        // task_id 等值（B2 定案后的一等列，判据与 buildFilterWhere 逐字同一套）。
+        // 走 OR 空游标同一条教训：绑空串会让 `task_id = ''` 命中"未登录产生的那些行"，
+        // 而调用方给空 taskId 的意思本来就是"不加这条条件"。
+        parts << QStringLiteral("task_id = :task_id");
     }
 
     QSqlQuery query(db);
@@ -813,9 +827,8 @@ QVector<AlarmRecord> AlarmDAO::queryUpdatedSince(const QString &sinceInternal, i
     if (!sinceInternal.isEmpty()) {
         query.bindValue(QStringLiteral(":since"), sinceInternal);
     }
-    if (!constructionId.isEmpty()) {
-        query.bindValue(QStringLiteral(":cid_needle"),
-                        QStringLiteral("\"construction_id\":\"%1\"").arg(constructionId));
+    if (!taskId.isEmpty()) {
+        query.bindValue(QStringLiteral(":task_id"), taskId);
     }
     query.bindValue(QStringLiteral(":limit"), limit);
 
@@ -825,7 +838,7 @@ QVector<AlarmRecord> AlarmDAO::queryUpdatedSince(const QString &sinceInternal, i
         }
     } else {
         qWarning() << "Query alarms updated since" << sinceInternal
-                   << "constructionId" << constructionId
+                   << "taskId" << taskId
                    << "failed:" << query.lastError().text();
     }
 
@@ -874,6 +887,8 @@ bool AlarmDAO::updateStatus(const QString &id, const QString &status)
 // acknowledgeAllPending: 一条 UPDATE 把所有未确认置为已确认
 // ============================================================================
 // 「全部确认」这个按钮的语义就是全部，所以它必须落在库上而不是落在内存那 1000 行窗口上。
+// 例外是 `disposed`：那是"已经处置过"的终态，被一句 UPDATE 收进已确认就等于本机自己
+// 把 v1 §3.7「终态不能回退成 PENDING」打穿了，而且 PAD 那边会收到一帧状态倒退的 alarm_update。
 int AlarmDAO::acknowledgeAllPending()
 {
     QSqlDatabase db = DatabaseManager::instance().database();
@@ -882,7 +897,7 @@ int AlarmDAO::acknowledgeAllPending()
     QSqlQuery query(db);
     query.prepare(R"(
         UPDATE alarms SET status = 'rectified', update_time = :update_time
-        WHERE status <> 'rectified'
+        WHERE status NOT IN ('rectified', 'disposed')
     )");
     query.bindValue(":update_time", currentDateTimeStr());
 
@@ -894,31 +909,61 @@ int AlarmDAO::acknowledgeAllPending()
     return query.numRowsAffected();
 }
 
-bool AlarmDAO::dispose(const QString &id, const QString &result,
-                       int userId, const QString &userName,
-                       const QString &remark)
+/**
+ * @brief v1 §4.2 的处置落库：状态 + 处置记录一次写完
+ *
+ * 状态写 `disposed` 而不是 `rectified`：后者是本机「确认＝我看过了」，混用就等于把
+ * "看过"上报成"处理过"（口径确认单 N2）。
+ *
+ * 三条 SQL 层的判据，都是"少写一条就会在板端出现诡异现象"的那种：
+ *   1) `WHERE ... AND status NOT IN ('disposed','false_alarm')` —— 终态不回退（§3.7），
+ *      也让 §4.2 的 409/2003 不需要调用方"先查状态再写"（那是个读-改-写竞争窗口）。
+ *      受影响 0 行时调用方分不清"没这条"和"已终态"，用 queryById 补一次判读即可。
+ *   2) `COALESCE(:x, x)` 用在 user_id/user_name/remark 上 —— 空 QString 被 Qt 绑成 NULL
+ *      （这条实测过很多次，见 insertAlarms 上方那段注释），COALESCE 于是等价于
+ *      "这一列这次没给，就别动"。remark 因此**不能**再由处置接口清空，
+ *      那是 updateRemark() 的活：两条路各管一件事，比"一个接口既能填又能清"好排查。
+ *   3) dispose_person_id 存原文、dispose_user_id 只在 personId 整体是整数时才推。
+ *      把 "05-0101" 折成 5 会比不折更坏：那是一句看起来像真工号的假数（N5 的落地选择）。
+ */
+bool AlarmDAO::dispose(const QString &id, const QString &measure, const QString &personId,
+                       const QString &personName, const QString &remark,
+                       const QString &photoPathsJson, const QString &disposedAt)
 {
     QSqlDatabase db = DatabaseManager::instance().database();
     if (!db.isOpen()) return false;
 
+    const QString now = currentDateTimeStr();
+    // 对端报的处置时间优先（Pad 上可能先填表后提交），没报就用本机此刻。
+    // 注意这里**不是** min(两者)：disposedAt 是"人做完处置"的时刻，
+    // update_time 才是"本机改库"的时刻，两个各有其位，混成一个就没法解释重试了。
+    const QString stamp = disposedAt.isEmpty() ? now : disposedAt;
+
+    bool numericId = false;
+    const int userId = personId.toInt(&numericId);
+
     QSqlQuery query(db);
     query.prepare(R"(
         UPDATE alarms SET
-            status = 'rectified',
+            status = 'disposed',
             dispose_result = :result,
-            dispose_user_id = :user_id,
-            dispose_user_name = :user_name,
+            dispose_person_id = :person_id,
+            dispose_user_id = COALESCE(:user_id, dispose_user_id),
+            dispose_user_name = COALESCE(:user_name, dispose_user_name),
             dispose_time = :dispose_time,
-            remark = :remark,
+            dispose_photo = :photo,
+            remark = COALESCE(:remark, remark),
             update_time = :update_time
-        WHERE id = :id
+        WHERE id = :id AND status NOT IN ('disposed', 'false_alarm')
     )");
-    query.bindValue(":result", result);
-    query.bindValue(":user_id", userId);
-    query.bindValue(":user_name", userName);
-    query.bindValue(":dispose_time", currentDateTimeStr());
+    query.bindValue(":result", measure);
+    query.bindValue(":person_id", personId);
+    query.bindValue(":user_id", numericId ? QVariant(userId) : QVariant());
+    query.bindValue(":user_name", personName);
+    query.bindValue(":dispose_time", stamp);
+    query.bindValue(":photo", photoPathsJson.isEmpty() ? QStringLiteral("[]") : photoPathsJson);
     query.bindValue(":remark", remark);
-    query.bindValue(":update_time", currentDateTimeStr());
+    query.bindValue(":update_time", now);
     query.bindValue(":id", id);
 
     if (!query.exec()) {
@@ -929,7 +974,20 @@ bool AlarmDAO::dispose(const QString &id, const QString &result,
     return query.numRowsAffected() > 0;
 }
 
-bool AlarmDAO::markFalseAlarm(const QString &id, const QString &remark)
+/**
+ * @brief 标记误报（v1 §4.3 与本机「误报」按钮共用这一条）
+ *
+ * 与 dispose 同一条终态判据（`status NOT IN ('disposed','false_alarm')`），
+ * 于是本机界面上"对一条已处置的报警点误报"从**能改**变成**不改**。
+ * 这不是回归：§3.7 明写终态不回退，而"误报覆盖处置"会让 Pad 先收到 DISPOSED
+ * 再收到 FALSE_ALARM，两条都是真的、只能靠 updatedAt 猜哪个算。
+ * 后四个入参全空（UI 那条路径就是这样调的）时，写进去的只有 status 与 update_time，
+ * 与本次改动前逐字节相同——唯一差别是 remark 从"被空串清掉"变成"不动"（COALESCE），
+ * 那个差别是修 bug：误报从来不该顺手抹掉别人写的补充说明。
+ */
+bool AlarmDAO::markFalseAlarm(const QString &id, const QString &remark,
+                              const QString &personId, const QString &personName,
+                              const QString &markedAt)
 {
     QSqlDatabase db = DatabaseManager::instance().database();
     if (!db.isOpen()) return false;
@@ -938,11 +996,17 @@ bool AlarmDAO::markFalseAlarm(const QString &id, const QString &remark)
     query.prepare(R"(
         UPDATE alarms SET
             status = 'false_alarm',
-            remark = :remark,
+            remark = COALESCE(:remark, remark),
+            dispose_person_id = COALESCE(:person_id, dispose_person_id),
+            dispose_user_name = COALESCE(:user_name, dispose_user_name),
+            dispose_time = COALESCE(:marked_at, dispose_time),
             update_time = :update_time
-        WHERE id = :id
+        WHERE id = :id AND status NOT IN ('disposed', 'false_alarm')
     )");
     query.bindValue(":remark", remark);
+    query.bindValue(":person_id", personId);
+    query.bindValue(":user_name", personName);
+    query.bindValue(":marked_at", markedAt);
     query.bindValue(":update_time", currentDateTimeStr());
     query.bindValue(":id", id);
 
@@ -954,27 +1018,38 @@ bool AlarmDAO::markFalseAlarm(const QString &id, const QString &remark)
     return query.numRowsAffected() > 0;
 }
 
-bool AlarmDAO::markRead(const QString &id)
+/**
+ * @brief v1 §4.4 的已读：read_time 保留最早，update_time 每次都推
+ * @param candidateTime Pad 报上来的 readAt（库内那套定宽文本）；空 = 用本机此刻
+ *
+ * 为什么 candidateTime 传了就**只信它**、不再与本机墙钟取小：
+ *   §4.4 的语义是"只在 Pad 第一次打开详情时上报，边缘设备保留最早 readAt"。
+ *   本机墙钟可能比 Pad 的校准时钟晚几秒（NTP 跳变更晚），取小就把
+ *   "对端第一次打开"换成"本机收到请求"，而 §2.5 的幂等要求重试拿到同一个值——
+ *   所以判据定成：**库里已有的更早就保留已有的，否则用对端报的那个**。
+ * ⚠ update_time 必须每次都写：它是对端断线补漏的游标（§3.8 第 4 条），漏写等于这条已读丢了。
+ */
+bool AlarmDAO::markRead(const QString &id, const QString &candidateTime)
 {
     QSqlDatabase db = DatabaseManager::instance().database();
     if (!db.isOpen()) return false;
 
     const QString now = currentDateTimeStr();
+    const QString candidate = candidateTime.isEmpty() ? now : candidateTime;
+
     QSqlQuery query(db);
     // read_time 取最早：已经读过就不动（Pad 反复上报、板端二次点开都不能把已读时间推后），
-    // 但墙钟回拨时新值更早，仍以更早者为准。update_time 必须每次都写：
-    // 它是对端断线补漏的游标（见 plan/idge-pad-v1.md §3.8 第 4 条），漏写等于这条已读丢了。
+    // 但墙钟回拨时新值更早，仍以更早者为准。
     query.prepare(R"(
         UPDATE alarms SET
             read_time = CASE
-                WHEN read_time IS NULL OR read_time = '' OR read_time > :now_then
-                THEN :read_time
+                WHEN read_time IS NULL OR read_time = '' OR read_time > :candidate
+                THEN :candidate
                 ELSE read_time END,
             update_time = :update_time
         WHERE id = :id
     )");
-    query.bindValue(":now_then", now);
-    query.bindValue(":read_time", now);
+    query.bindValue(":candidate", candidate);
     query.bindValue(":update_time", now);
     query.bindValue(":id", id);
 
@@ -1318,6 +1393,9 @@ AlarmRecord AlarmDAO::recordFromQuery(QSqlQuery &query)
     record.disposeResult = query.value("dispose_result").toString();
     record.disposeUserId = query.value("dispose_user_id").toInt();
     record.disposeUserName = query.value("dispose_user_name").toString();
+    // 老库/补列失败时这一列不存在：QSqlQuery::value(名字) 取不到就是无效值 → 空串，
+    // 不会崩也不会把整条记录判废（其余各列同一条兜法）。
+    record.disposePersonId = query.value("dispose_person_id").toString();
     record.disposeTime = query.value("dispose_time").toString();
     record.disposePhoto = query.value("dispose_photo").toString();
     record.remark = query.value("remark").toString();
@@ -1327,6 +1405,8 @@ AlarmRecord AlarmDAO::recordFromQuery(QSqlQuery &query)
     // 施工信息：老行是 NULL → 空串，显示侧成 "—"，不回填（历史上确实没有这份信息）
     record.workerName = query.value("worker_name").toString();
     record.constructionJson = query.value("construction_info").toString();
+    // 施工计划身份（v1 的 taskId）：迁移前的老行这里是 NULL → 空串，出门口由 taskIdOf() 回落解 JSON
+    record.taskId = query.value("task_id").toString();
 
     // 兼容旧字段
     // NOTE(边界): alarm_time 不是合法 ISO 文本（NULL/被外部工具改坏）时 fromString 解不出来，

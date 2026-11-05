@@ -58,8 +58,13 @@
         "  注册表里的 timeoutMs/reconnectMs 对国标路径不生效（这路的起停由 SIP 会话 INVITE/BYE 控制）。",
         "websocket 段留空即整条链路不启动；对 WS 而言本机是【客户端】，不主动监听端口。",
         "  但报警上行开 url 档（alarm_uplink.enabled=true 且 media_transport=\"url\"）时，本机会内嵌起一台",
-        "  http 静态文件服务监听 media_http_port（默认 8090）——这是唯一被监听的口，明文零鉴权，",
+        "  http 静态文件服务监听 media_http_port（默认 8090），明文零鉴权，",
         "  能连通本机的任何人都可按路径取走 data/alarms 下的全部报警媒体，开启前先确认网段隔离（详见 src/media/server/README.md）。",
+        "三个监听口按 A4 分工（2026-11-04 对方答复）：8899 = http://<host>:8899/api/（pad_http.port，2026-11-05 已实现），",
+        "  8900 = ws://<host>:8900/（pad_server.port 出厂值），8090 = 报警媒体静态文件（alarm_uplink.media_http_port）。",
+        "  ⚠ 现场 data/config.json 里若显式写了 pad_server.port=8899，改出厂值无效，WS 会继续占住 /api/ 那个口。",
+        "  三口现在【都在监】：8090 出媒体字节、8900 往外推报警、8899 能被写（处置/误报/已读/围栏）。",
+        "  最后一个口出厂默认开，是因为 §4/§5 不做就等于 Pad 的处置闭环整条断掉；要收紧就写 pad_http.enabled=false。",
         "websocket.server_url 【只填 ws://】：本机 Qt 的 TLS 后端缺两个 OpenSSL 符号，wss:// 连不上（plan/roadmap.md §十）。",
         "alarm_uplink.enabled 出厂 false：往外发数据必须人来打开。recording.enabled 出厂 true（报警必带片段）。",
         "  alarm_uplink 段与 recording 段的迁移口径都是【只补缺失段、不覆盖已有段】，所以现场老 config.json",
@@ -233,12 +238,57 @@
         "expect_ack": false
     },
     "pad_server": {
-        "enabled": false,
-        "port": 8899,
+        "enabled": true,
+        "_readme": [
+            "enabled 出厂 true（2026-11-04 起）：本机用途就是被 Pad 连；显式写 false 才关。",
+            "这是明文零鉴权的入站口，局域网内任何设备都能连进来收报警、拿证据地址；",
+            "唯一的门是握手时的 Origin 白名单（空 Origin 与 android-app://* 放行，其余 403）。",
+            "证据（图片/视频）不在 WS 里发，只发 URL；那些 URL 指向 8090 的内嵌文件服务，",
+            "所以 Pad 关掉 8090 就只剩报警文字。media_base_url 留空 = 自动取本机非回环 IPv4。",
+            "port 默认 8900（A4：8899 留给 http://<host>:8899/api/）。"
+        ],
+        "port": 8900,
         "ws_path": "/",
         "device_id": "",
         "media_base_url": "",
         "sync_limit": 500
+    },
+    "pad_http": {
+        "enabled": true,
+        "_readme": [
+            "Pad 接口 v1 的 HTTP /api/ 入站面（§4 报警处置·§5 围栏·§6 实时视频·§7 设备/健康），契约见 plan/idge-pad-v1.md。",
+            "enabled 出厂 true：这台设备的用途就是被 Pad 连。⚠ 与 pad_server 不同的是这是【写】面——",
+            "  局域网内任何设备都能改报警状态（处置/误报/已读）与围栏（建/改/下发/停用）。规约 §2.3 认了默认不鉴权，本机照做；",
+            "  不想要就显式写 false（关掉是不 bind 8899，不是 bind 了再拒）。",
+            "port 8899 = http://<host>:8899/api/。A4 三口：8899=HTTP /api/、8900=WS、8090=媒体静态文件。",
+            "  这一只监听器是本机自建的 QTcpServer，【可以】运行期重开，所以调试设置页改端口点「保存并应用」就生效；",
+            "  8090 那台是内嵌 ZLM 的进程级一次监听，起了就不能再起，所以它的端口不在这里给。",
+            "max_body_mb 26 = §4.2 五张 5MB 照片 + JSON 余量。判据在收之前：Content-Length 声明超限直接 400，不先收满再嫌大。",
+            "expose_stream_credentials 默认 false：§6.1 的 liveUrl 会剥掉 rtsp://user:pass@ 里的口令。",
+            "  开了它 = 把每台摄像头的口令发给局域网，并且它会出现在对端的日志与缓存里。",
+            "fence_frames true 时 §5.3 的 apply 渲一张合成画面 PNG 并回 frameUrl（该文件写在 8090 那棵树里）；",
+            "  关掉后 apply 一律 503/3003 —— 规约把缺 frameUrl 定为失败，所以宁可显式报错，不返回一个没有画面却标 ACTIVE 的版本。",
+            "dispose_options 空数组 = §4.1 用代码内置那两条措辞（已现场纠正 / 已提醒作业人员）。非空即【整组替换】，",
+            "  元素形如 {\"id\":1,\"label\":\"已现场纠正\",\"sortOrder\":1,\"enabled\":1}；单项形状不合会被跳过，全部跳过才回落内置值。",
+            "四个写接口（dispose/false-alarm/read/围栏三个）都必须带 requestId：§2.5 只按它命中，不比较内容，",
+            "  重放返回首次那份响应【一字不差】（含 4xx/5xx），保留 ≥24 小时。命中记录在 idge.db 的 pad_request_cache 表。",
+            "围栏存在 idge.db 的 pad_fences/pad_fence_versions 两张表，【不驱动本机检测判定】——本机判定仍读 geofence 段，两套并存。"
+        ],
+        "port": 8899,
+        "max_body_mb": 26,
+        "expose_stream_credentials": false,
+        "fence_frames": true,
+        "dispose_options": []
+    },
+    "qr_login": {
+        "_readme": [
+            "扫码登录的校验档，契约见 plan/qr-login-edge-v1.md，示例码 plan/qr-login.json。",
+            "当前实现 §6 的 1–3 步 + §6.6：JSON 形状 / 必填字段 / 时间可推导 / taskId 比对。",
+            "§6.4 有效期与 §6.5 ECDSA 验签本轮**不做**（2026-11-04 裁定）：",
+            "  issuedAt/expiresAt/signature 仍照原样解析并随会话保存，但不据此拒绝登录。",
+            "expected_task_id 留空=不比对；非空时 plan.taskId 必须与之相等（§6.6 设备绑定某个计划）。"
+        ],
+        "expected_task_id": ""
     },
     "smartRecognition": {
         "camera": ""

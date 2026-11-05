@@ -17,6 +17,10 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDebug>
+#include <QDir>
+#include <QFile>
+#include <QSqlDatabase>
+#include <QSqlQuery>
 #include <iostream>
 
 #include "database_manager.h"
@@ -240,16 +244,17 @@ void testAlarmOperations()
     af.fenceRole = AlarmFilter::RoleAll;
     af.scope = AlarmFilter::All;
 
-    // 施工信息：负责人走独立列，施工id 走 instr(construction_info, '"construction_id":"X"')
-    // ——Qt 内建的 SQLite 没有 JSON1，json_extract 在这里根本不可用。
+    // 施工信息：负责人与施工计划各自一列（task_id 是 2026-11-04 随 B2 定案加的一等列），
+    // 两条都是等值筛选——以前施工id 走 instr(construction_info,'"construction_id":"X"')，
+    // 那是子串匹配，依赖 QJsonDocument::Compact 的序列化形状，键序/空格一变就静默查不到。
     af.workerName = "张三";
     TEST_ASSERT(dao.countByFilter(af) == 1, "按负责人筛选");
     af.workerName.clear();
-    af.constructionId = "SG-TEST-01";
-    TEST_ASSERT(dao.countByFilter(af) == 1, "按施工id筛选");
-    af.constructionId = "SG-TEST-011";   // 前缀相同但不存在：instr 是精确子串，不是 LIKE
+    af.taskId = "SG-TEST-01";
+    TEST_ASSERT(dao.countByFilter(af) == 1, "按施工计划(taskId)筛选");
+    af.taskId = "SG-TEST-011";   // 前缀相同但不存在：等值判据，比 instr 更严
     TEST_ASSERT(dao.countByFilter(af) == 0, "施工id 不做前缀匹配");
-    af.constructionId.clear();
+    af.taskId.clear();
 
     // 候选值：列表页的下拉与表头菜单都从这三条来，取值必须带计数
     auto alarmClassFacets = dao.classFacets(now - 10000, now + 1000);
@@ -257,9 +262,9 @@ void testAlarmOperations()
     auto workerFacets = dao.workerFacets(now - 10000, now + 1000);
     TEST_ASSERT(workerFacets.size() == 1 && workerFacets.at(0).first == "张三",
                 "负责人候选值只含登录人");
-    auto cidFacets = dao.constructionFacets(now - 10000, now + 1000);
+    auto cidFacets = dao.taskIdFacets(now - 10000, now + 1000);
     TEST_ASSERT(cidFacets.size() == 1 && cidFacets.at(0).first == "SG-TEST-01",
-                "施工id 候选值从 construction_info 解析出来");
+                "taskId 候选值从 task_id 列出来");
 
     // 一键确认：把剩下未确认的一次改完，返回值必须与库里剩余 pending 对得上
     const int pendingBefore = dao.unacknowledgedCount();
@@ -334,6 +339,101 @@ void testDatabaseMaintenance()
 // ============================================================================
 // main
 // ============================================================================
+// ============================================================================
+// 测试老库升级：task_id 列补齐 + 回填 + 幂等（B2 定案，2026-11-04）
+// ============================================================================
+// 为什么这份用例必须跑**文件库**而不是继续用 :memory:：要验的是 ALTER TABLE + 事务 + WAL
+// 凑在一起的行为，而 :memory: 每次 initialize 都是一份全新空库，永远走不到补列与回填那条路。
+// 实测就是这条用例暴露了缺陷：回填的 commit 因"活动语句未收尾"失败，跟着的 rollback 把刚
+// ALTER 出来的三列一起吞掉，老库升级当场废掉且只在日志里留两行。
+void testLegacyTaskIdUpgrade(const QString &dbPath)
+{
+    std::cout << "\n=== 测试老库 task_id 升级与回填 ===" << std::endl;
+
+    QFile::remove(dbPath);
+    QFile::remove(dbPath + QStringLiteral("-wal"));
+    QFile::remove(dbPath + QStringLiteral("-shm"));
+
+    TEST_ASSERT(DatabaseManager::instance().initialize(dbPath), "文件库初始化");
+
+    AlarmDAO dao;
+    const long now = QDateTime::currentMSecsSinceEpoch();
+
+    AlarmRecord withTask;
+    withTask.id = "legacy-task-a";
+    withTask.timestamp = now;
+    withTask.channel = 0;
+    withTask.clsId = 0;
+    withTask.className = "person";
+    withTask.confidence = 0.9f;
+    withTask.alarmType = "detection";
+    withTask.alarmLevel = 3;
+    withTask.status = "pending";
+    withTask.workerName = QString::fromUtf8("李四");
+    withTask.constructionJson = QString::fromUtf8(
+        "{\"construction_id\":\"TASK-A\",\"worker_name\":\"李四\"}");
+    // 故意不填 taskId：DAO 写入口必须从那段 JSON 兜底解出来，否则手工拼记录的老调用方
+    // 会写进 NULL，而这行从此对 Pad 的 sync 永久不可见且零报错。
+    TEST_ASSERT(dao.insertAlarm(withTask) > 0, "插入只带 construction_info 的老形状行");
+
+    AlarmRecord noTask = withTask;
+    noTask.id = "legacy-task-none";
+    noTask.workerName.clear();
+    noTask.constructionJson.clear();
+    TEST_ASSERT(dao.insertAlarm(noTask) > 0, "插入未登录（无施工信息）的行");
+
+    // 把两行都退回"补列之前"的形状。走自己的 QSqlQuery 而不是 DatabaseManager::executeSQL——
+    // 后者是私有接口，测试不该为了取巧去扩大它的作用域。
+    {
+        QSqlQuery nullify(DatabaseManager::instance().database());
+        TEST_ASSERT(nullify.exec("UPDATE alarms SET task_id = NULL"),
+                    "模拟老行：task_id 置 NULL");
+    }
+
+    // 二次 initialize = 补列(幂等) + 回填，正是现场老库开机走的那条路
+    TEST_ASSERT(DatabaseManager::instance().initialize(dbPath), "同一份库二次 initialize");
+
+    AlarmFilter byTask;
+    byTask.taskId = "TASK-A";
+    TEST_ASSERT(dao.countByFilter(byTask) == 1, "回填后按 taskId 等值能命中老行");
+
+    QSqlDatabase db = DatabaseManager::instance().database();
+    QSqlQuery left(db);
+    TEST_ASSERT(left.exec("SELECT COUNT(*) FROM alarms WHERE task_id IS NULL")
+                    && left.next() && left.value(0).toInt() == 0,
+                "没有施工信息的行被写成空串：下次开机不再重扫（幂等的前提）");
+
+    TEST_ASSERT(DatabaseManager::instance().initialize(dbPath), "三次 initialize 无害");
+    TEST_ASSERT(dao.countByFilter(byTask) == 1, "重复启动后仍能按 taskId 命中");
+
+    db = DatabaseManager::instance().database();
+    QSqlQuery shape(db);
+    TEST_ASSERT(shape.exec("SELECT task_id FROM alarms WHERE id = 'legacy-task-none'")
+                    && shape.next() && shape.value(0).toString().isEmpty()
+                    && !shape.value(0).isNull(),
+                "未登录行落的是空串而不是 NULL");
+
+    // 关机时 AlarmManager::syncToDatabase 走的是 **批量** 路径
+    // （`AlarmDAO::insertAlarms` → `INSERT OR REPLACE`），不是单条 insertAlarm。
+    // 未登录行的 taskId/constructionJson 都是空 QString。Qt 把空 QString 当**无值**，
+    // 绑进 SQL 就是 NULL——实测这一轮把刚收尾好的 1000 行 '' 全打回 NULL，
+    // 于是每次开机都要重新扫+重新 UPDATE 那 1000 行，启动收尾等于白做。
+    // INSERT 里的 `IFNULL(:task_id, '')` 只为这一条存在，所以这里必须重新走一次 DAO。
+    noTask.id = "legacy-task-none";   // 同 id 覆盖，形状与 RAM 回写一致
+    TEST_ASSERT(dao.insertAlarms({noTask}) > 0, "模拟关机时 RAM 窗口整批回写");
+
+    db = DatabaseManager::instance().database();
+    QSqlQuery afterWriteback(db);
+    TEST_ASSERT(afterWriteback.exec("SELECT COUNT(*) FROM alarms WHERE task_id IS NULL")
+                    && afterWriteback.next() && afterWriteback.value(0).toInt() == 0,
+                "回写没有把已收尾的行打回 NULL");
+    TEST_ASSERT(DatabaseManager::instance().initialize(dbPath), "回写后再启动一次");
+    QSqlQuery stillNull(DatabaseManager::instance().database());
+    TEST_ASSERT(stillNull.exec("SELECT COUNT(*) FROM alarms WHERE task_id IS NULL")
+                    && stillNull.next() && stillNull.value(0).toInt() == 0,
+                "回写后的那次启动仍然扫到 0 行（幂等没被回写打破）");
+}
+
 int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
@@ -347,6 +447,9 @@ int main(int argc, char *argv[])
     testDetectionOperations();
     testAlarmOperations();
     testDatabaseMaintenance();
+    // 老库升级这条路径必须落在文件上（:memory: 每次都是全新空库，走不到 ALTER+回填），
+    // 所以放在最后，用一个临时文件库单独跑一遍。
+    testLegacyTaskIdUpgrade(QDir::currentPath() + QStringLiteral("/test_legacy_taskid.db"));
 
     // 输出结果
     std::cout << "\n========================================" << std::endl;
@@ -355,6 +458,12 @@ int main(int argc, char *argv[])
 
     // 关闭数据库
     DatabaseManager::instance().close();
+
+    // 用例自带的临时库清掉：它落在构建目录里，留着会让人以为是第 N 份现场库
+    const QString legacyDb = QDir::currentPath() + QStringLiteral("/test_legacy_taskid.db");
+    QFile::remove(legacyDb);
+    QFile::remove(legacyDb + QStringLiteral("-wal"));
+    QFile::remove(legacyDb + QStringLiteral("-shm"));
 
     return testsFailed > 0 ? 1 : 0;
 }

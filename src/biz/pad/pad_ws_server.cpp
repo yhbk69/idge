@@ -372,7 +372,7 @@ void PadWsServer::handleHello(QWebSocket *socket, const QJsonObject &data)
 /**
  * @brief 处理 sync_request：按游标 + taskId 从库里补漏，回一条 sync_result
  *
- * 三条实现约束（协议语义见 pad/README.md 与 plan/idge-pad-v1.md §3.8）：
+ * 三条实现约束（协议语义见 pad/README.md 与 plan/edge-pad-v1.md §3.7）：
  *   - **这条 SQL 是本机唯一按 update_time 取数的路径**，计划过滤下推进 SQL 而不是
  *     取一批再在 C++ 里筛（原因见下面那段注释，报告 §八 P1-2）；
  *   - 游标取的是行内 `max(update_time，空则 alarm_time)`：update_time 是"补漏游标"，
@@ -462,8 +462,7 @@ void PadWsServer::handleAlarmGenerated(const AlarmRecord &alarm)
 
 void PadWsServer::handleAlarmStatusChanged(const AlarmRecord &alarm)
 {
-    // §3.7：边缘侧「查看」只发 readAt，「处置/误报」要发 status + dispose。
-    // 本机现在没有处置表单（roadmap P1-3），所以这条只带 status/readAt/updatedAt；
+    // §3.6：边缘侧「查看」只发 readAt，「处置/误报」要发 status + dispose。
     // **但必须发**——对端按 alarmId 就地合并，不发的那条在 Pad 上永远是旧状态。
     pushAlarmUpdate(alarm);
     emit logMessage(QStringLiteral("pad"),
@@ -473,16 +472,20 @@ void PadWsServer::handleAlarmStatusChanged(const AlarmRecord &alarm)
 }
 
 /**
- * @brief 片段落盘回调：逐条按 id 从库里重读，再广播一条完整 alarm
+ * @brief 片段落盘回调：逐条按 id 从库里重读，再广播一条 `alarm_update`（带 clipUrl）
  * @param alarmIds 空列表直接返回；没连着 Pad（running() 为 false）也直接返回，不做排队
  * @param videoPath / webPath 刻意不用（见下面 Q_UNUSED）：路径以库里读回来的那份为准，
  *        信号里的裸流路径只是"刚写到哪里"，与 alarms.video_path 的入库口径不保证相同
  *
- * 为什么要多一次 queryById：对端合并只看 updatedAt（§3.8），而 update_time 只被
- * AlarmDAO::updateVideoPath 在**库里**推前过；直接用内存记录会让对端看到同一个
- * updatedAt 的两条 alarm，第二次的 clipUrl 被丢弃。
+ * **流程（2026-11-05 现场指定）**：报警当刻先发 `alarm`（信息 + 抓拍图，clipUrl=null），
+ * 片段写完整之后**只发 `alarm_update` 把视频补上**，不再重发整条 `alarm`。
+ * 对端按 alarmId + updatedAt 就地合并，其余字段不动。
+ *
+ * 为什么要多一次 queryById：对端合并只看 updatedAt，而 update_time 只在**库里**被
+ * AlarmDAO::updateVideoPath 推前过；直接用内存记录会发出与上一条同 updatedAt 的更新，
+ * 对端按"较新胜出"会把这次更新丢掉。
  * 代价是每个 id 一次单行查询（N 通常 1~2 条，走主键，量级可忽略）。
- * 记录已被清理/尚未落库时 record.id 为空 → 跳过该条，不广播半截 alarm。
+ * 记录已被清理/尚未落库时 record.id 为空 → 跳过该条，不广播半截更新。
  */
 void PadWsServer::handleVideoClipAttached(const QStringList &alarmIds, const QString &videoPath,
                                           const QString &webPath)
@@ -504,7 +507,11 @@ void PadWsServer::handleVideoClipAttached(const QStringList &alarmIds, const QSt
         if (record.id.isEmpty()) {
             continue;
         }
-        pushAlarm(record);
+        pushAlarmUpdate(record);
+        // 日志不复述"带 clipUrl"：mp4 万一没写成，这条 update 就不带那个键（宁缺勿假），
+        // 写死一句话反而让现场以为视频已经上去了。
+        emit logMessage(QStringLiteral("pad"),
+                        QStringLiteral("片段落盘，已推送 alarm_update：%1").arg(record.id));
     }
 }
 
@@ -524,7 +531,8 @@ void PadWsServer::pushAlarmUpdate(const AlarmRecord &record)
     if (!running()) {
         return;
     }
-    broadcast(envelope(QStringLiteral("alarm_update"), alarmUpdateJson(record)));
+    broadcast(envelope(QStringLiteral("alarm_update"),
+                       alarmUpdateJson(record, cfg_.mediaBaseUrl, cfg_.mediaRootDir)));
 }
 
 // 单播的尽力而为：state 不是 Connected 就静默丢掉，不记日志也不返错——调用方都是

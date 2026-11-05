@@ -22,7 +22,7 @@
 //   8) 未知 type → error 2001（code/message 在信封层，data.detail 带上那个 type）
 //   9) alarm_ack **不回复**（用"紧接着的 ping 的 pong 是下一帧"来证明中间没有插话）
 //  10) AlarmManager 发 alarmGenerated → 连接上收到 type=alarm 的完整快照
-//  11) 没有媒体底址时 evidence.snapshotUrls 是 []（不臆造对端取不到的地址）
+//  11) 没有媒体底址时 alarm 顶层 evidenceSnapshotUrl 是空串（键按 §13.2.1 必填，但不臆造地址）
 //  12) 配置 device_id 留空时 hello_ack 仍带必填 deviceId（口径 A17）
 //  13) hello 缺 deviceId/token/clientVersion → error 2001 且**不关连接**，补齐后同一条连接
 //      还能握手成功（P3-2：参数错与版本不兼容必须分开判，混了就等于给对端假方向）
@@ -31,6 +31,8 @@
 //      空 Origin 与 android-app://* 放行（P2-3）
 //  16) 确认/误报 → 立刻推一帧 alarm_update，带 alarmId/status/readAt/updatedAt
 //      （P1-1：以前 pushAlarmUpdate 零调用方，Pad 那条只能等重连才拉平）
+//  17) 片段落盘 → **只推 alarm_update**（不再是重发整条 alarm）：有底址时带 clipUrl，
+//      没底址时缺键而不是 null（2026-11-05 现场流程）
 //
 // 仓库根运行：./build/build_rk3588_linux/test_pad_ws_server，rc 0=PASS 1=FAIL
 // ============================================================================
@@ -38,15 +40,19 @@
 #include "pad_ws_server.h"
 #include "pad_wire.h"      // defaultDeviceId()：契约 12 要比对派生值
 #include "alarm_manager.h"
+#include "database_manager.h"
+#include "alarm_dao.h"
 
 #include <QCoreApplication>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QFile>
 #include <QHostAddress>
-#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QStringList>
+#include <QTemporaryDir>
 #include <QTimer>
 #include <QWebSocket>
 
@@ -339,9 +345,13 @@ try {
               "pending → PENDING");
         check(pushData.value(QLatin1String("updatedAt")).toString().contains(QLatin1Char('+')),
               "updatedAt 带偏移");
-        const QJsonArray snaps = pushData.value(QLatin1String("evidence")).toObject()
-                                    .value(QLatin1String("snapshotUrls")).toArray();
-        check(snaps.isEmpty(), "没有媒体底址时不给证据地址（宁缺勿假）");
+        // §13.2.1：证据平铺在 alarm 顶层，必填键 evidenceSnapshotUrl 必须在；
+        // 没有媒体底址时给空串（省略 = 必填缺失），也绝不拼一个对端取不到的地址。
+        check(pushData.contains(QLatin1String("evidenceSnapshotUrl"))
+                  && pushData.value(QLatin1String("evidenceSnapshotUrl")).toString().isEmpty(),
+              "没有媒体底址时 evidenceSnapshotUrl 是空串（键在、地址不给）");
+        check(!pushData.contains(QLatin1String("evidence")),
+              "alarm 顶层不再有 evidence 对象（§13.2.1 末条）");
         check(pushData.contains(QLatin1String("taskId")),
               "taskId 键必须在（未登录时是空串，不是缺键）");
 
@@ -517,6 +527,107 @@ try {
 
         socket->close();
         QCoreApplication::processEvents();
+    }
+
+    // ── 17：片段落盘 → 只推 alarm_update（带 clipUrl），不再重发整条 alarm ────
+    // 2026-11-05 现场流程：报警当刻先发 alarm（信息+图片），视频写完后用 alarm_update 补视频。
+    {
+        // 这条分支要从库里重读（updatedAt 只被 updateVideoPath 推过），先起一个临时库。
+        // 必须走 AlarmManager::initDatabase()：AlarmManager 自己缓存 dbInitialized_，
+        // 只调 DatabaseManager::initialize() 的话它仍认为"没库"，attach 直接返回、不推帧。
+        // static：让库活到进程结束——storeAndNotify 是**异步入库**（AlarmDbWriter 线程），
+        // 块一结束就删目录会让后台那条写入失败（日志 "unable to open database file"）。
+        static QTemporaryDir dbDir;
+        check(dbDir.isValid(), "临时库目录建不出来");
+        check(AlarmManager::instance().initDatabase(dbDir.path() + QStringLiteral("/ws_clip.db")),
+              "临时报警库初始化失败");
+
+        QWebSocket *socket = connectTo(kPort);
+        Recorder recorder(socket);
+
+        // 负例：没配媒体底址 → clipUrl **整个键不出现**（不能是 null，null 会清掉对端已拿到的视频）
+        const AlarmRecord clipRec = makeRecord(QStringLiteral("ALARM-CLIP-1"));
+        {
+            // 报警入库是异步的（AlarmDbWriter），而片段回调会立刻按 id 去库里读；
+            // 这里同步补一行，等价于生产上"片段在报警 +2 秒后才到"的时序。
+            AlarmDAO dao;
+            check(dao.insertAlarms(QVector<AlarmRecord>{clipRec}) > 0, "前置：同步入库失败");
+        }
+        AlarmManager::instance().storeAndNotify(QVector<AlarmRecord>{clipRec});
+        {
+            AlarmDAO probe;
+            check(!probe.queryById(QStringLiteral("ALARM-CLIP-1")).id.isEmpty(),
+                  "前置：报警必须已经在库里（片段回调靠 queryById 取 updatedAt）");
+        }
+        const int markGen = recorder.mark();
+        check(recorder.waitFor(markGen + 1) >= markGen + 1, "前置：先收到那条 alarm 快照");
+        const int markClip = recorder.mark();
+        AlarmManager::instance().attachVideoClip(
+            {QStringLiteral("ALARM-CLIP-1")},
+            QStringLiteral("/tmp/idge_clip_probe/ALARM-CLIP-1.h265"),
+            QStringLiteral("/tmp/idge_clip_probe/ALARM-CLIP-1.mp4"));
+        check(recorder.waitFor(markClip + 1) >= markClip + 1, "片段落盘后必须推一帧");
+        const QJsonObject neg = recorder.at(markClip);
+        check(neg.value(QLatin1String("type")).toString() == QLatin1String("alarm_update"),
+              "补视频走 alarm_update，而不是重发整条 alarm");
+        const QJsonObject negData = neg.value(QLatin1String("data")).toObject();
+        check(negData.value(QLatin1String("alarmId")).toString() == QStringLiteral("ALARM-CLIP-1"),
+              "alarm_update 的 alarmId 对得上（对端按它就地合并）");
+        check(!negData.contains(QLatin1String("clipUrl")),
+              "没有底址时 update 里不带 clipUrl（缺键≠null）");
+        check(negData.value(QLatin1String("syncState")).toString() == QLatin1String("SUBMITTED"),
+              "update 带 syncState（本机恒 SUBMITTED）");
+        socket->close();
+        QCoreApplication::processEvents();
+
+        // 正例：配了媒体底址 + 同名 mp4 真在盘上 → clipUrl 指到它
+        QTemporaryDir mediaDir;
+        check(mediaDir.isValid(), "临时媒体根建不出来");
+        const QString rawPath = mediaDir.path() + QStringLiteral("/ALARM-CLIP-2.h265");
+        {
+            QFile mp4(mediaDir.path() + QStringLiteral("/ALARM-CLIP-2.mp4"));
+            check(mp4.open(QIODevice::WriteOnly), "mp4 测试文件写不出来");
+            mp4.write("x");
+        }
+        pad::PadWsServer::instance().stop();
+        pad::ServerConfig withMedia = cfg;
+        withMedia.mediaBaseUrl = QStringLiteral("http://127.0.0.1:18090");
+        withMedia.mediaRootDir = mediaDir.path();
+        QString mediaErr;
+        check(pad::PadWsServer::instance().start(withMedia, &mediaErr),
+              qPrintable(QStringLiteral("带媒体底址重启失败：") + mediaErr));
+
+        socket = connectTo(kPort);
+        Recorder recorder2(socket);
+        const AlarmRecord clipRec2 = makeRecord(QStringLiteral("ALARM-CLIP-2"));
+        {
+            AlarmDAO dao;
+            check(dao.insertAlarms(QVector<AlarmRecord>{clipRec2}) > 0, "正例：同步入库失败");
+        }
+        AlarmManager::instance().storeAndNotify(QVector<AlarmRecord>{clipRec2});
+        const int markGen2 = recorder2.mark();
+        check(recorder2.waitFor(markGen2 + 1) >= markGen2 + 1, "正例前置：先收到 alarm");
+        const int markClip2 = recorder2.mark();
+        AlarmManager::instance().attachVideoClip(
+            {QStringLiteral("ALARM-CLIP-2")}, rawPath,
+            mediaDir.path() + QStringLiteral("/ALARM-CLIP-2.mp4"));
+        check(recorder2.waitFor(markClip2 + 1) >= markClip2 + 1, "正例：片段落盘后要推 update");
+        const QJsonObject posFrame = recorder2.at(markClip2);
+        const QJsonObject posData = posFrame.value(QLatin1String("data")).toObject();
+        check(posFrame.value(QLatin1String("type")).toString() == QLatin1String("alarm_update"),
+              "正例也是 alarm_update");
+        check(posData.value(QLatin1String("clipUrl")).toString()
+                  == QStringLiteral("http://127.0.0.1:18090/ALARM-CLIP-2.mp4"),
+              "clipUrl = 媒体底址 + root 内相对路径");
+        check(posData.value(QLatin1String("updatedAt")).toString().contains(QLatin1Char('+')),
+              "updatedAt 带偏移（对端按它判较新）");
+        socket->close();
+        QCoreApplication::processEvents();
+
+        // 复位成原来的无底址配置，别影响后面的组
+        pad::PadWsServer::instance().stop();
+        QString resetErr;
+        check(pad::PadWsServer::instance().start(cfg, &resetErr), "复位服务端失败");
     }
 
     // ── 服务端仍能接受新连接（上一条关闭没把服务搞挂）───────────────────────

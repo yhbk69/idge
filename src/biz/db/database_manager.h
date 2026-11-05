@@ -118,6 +118,12 @@ private:
     // 调用方须持有 mutex_（与 executeSQL 同口径），table 只传代码里的字面量。
     bool ensureColumns(const QString &table, const QStringList &columnDefs);
 
+    // 把老行的 task_id 从 construction_info 里补出来（B2 定案：taskId ≡ 载荷里的 construction_id）。
+    // ensureColumns 只能让列**存在**，值不会自己长出来；而所有过滤都已改成按 task_id 等值，
+    // 不回填就等于把历史报警整批藏起来。只碰 task_id IS NULL 的行 ⇒ 幂等。
+    // 返回回填行数（0 = 无需迁移；-1 = 失败，调用方只告警不致命）。
+    int backfillAlarmTaskIds();
+
     // 执行SQL语句（调用线程自己的连接；须在持有 mutex_ 的路径上调用）
     bool executeSQL(const QString &sql);
 

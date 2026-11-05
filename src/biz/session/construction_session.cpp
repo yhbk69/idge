@@ -6,6 +6,9 @@
  * JSON 文本"进入本机的**唯一**入口：解析与校验只写在 fromJson 一处，
  * 登录页、"测试登录"、单测都走它，口径不分叉。
  *
+ * 契约：plan/qr-login-edge-v1.md（2026-11-04），载荷示例 plan/qr-login.json。
+ * 形状是 `person{}` + `plan{}` 的嵌套对象；旧扁平形状只作为历史库的**读取兼容**。
+ *
  * 本文件的两块内容刻意分开：
  *   - ConstructionInfo：纯值类型，无状态、无锁，负责"码里的文本 → 字段契约"；
  *   - ConstructionSession：进程内单例，只保存"当前会话值"这一份状态。
@@ -14,28 +17,29 @@
  * （AlarmManager::makeAlarmRecord 给每条报警打戳时调 snapshot()）。
  * snapshot() 按值返回、函数返回即释放读锁，调用方不得持锁去写数据库。
  *
- * 依赖：只用 Qt Core（QString/QJsonObject/QJsonDocument），不 include 任何 src/ui 头，
- * 因此 tests/test_construction_qr.cpp 能离线跑 11 条契约。
+ * 依赖：只用 Qt Core（QString/QJson/QDateTime）。
+ * 不 include 任何 src/ui / src/base 头，因此 tests/test_construction_qr.cpp 能离线跑。
  */
 #include "construction_session.h"
 
+#include <QDate>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonParseError>
-#include <QJsonValue>
+#include <QTime>
 #include <QReadLocker>
 #include <QWriteLocker>
 
 namespace session {
 
-const char ConstructionInfo::kKeyConstructionId[] = "construction_id";
-const char ConstructionInfo::kKeyWorkerName[]     = "worker_name";
-const char ConstructionInfo::kKeyWorkerPhone[]    = "worker_phone";
-const char ConstructionInfo::kKeyWorkerId[]       = "worker_id";
-const char ConstructionInfo::kKeyWorkContent[]    = "work_content";
-
 namespace {
 
-// 二维码里的值可能是字符串，也可能是数字（工号/id 常被写成 number）。
+// 契约固定的时区偏移（qr-login-edge-v1.md §5："时区统一为 Asia/Shanghai"）。
+// 故意不用 QTimeZone("Asia/Shanghai")：那要读系统 tzdata，板子上少一份 zoneinfo
+// 就会让登录时间悄悄错 8 小时；固定 +08:00 与规约同义且不依赖外部文件。
+constexpr int kPlanUtcOffsetSeconds = 8 * 3600;
+
+// 二维码里的值可能是字符串，也可能是数字（年份/人数常写成 number）。
 // 统一取成去掉首尾空白的文本；非字符串标量走 JSON 文本表示，对象/数组视为空。
 /**
  * @brief 任意 JSON 标量 → 显示/存储用的文本
@@ -45,9 +49,9 @@ namespace {
  * 直接用它的话码里写成 number 的工号会在详情框里凭空消失。三条特判各有一次具体取舍：
  *   - bool → "1"/"0"，与界面其它开关类显示一致，不留 "true"/"false" 这种英文串；
  *   - 整值 double 走 qint64 分支：QString::number(double) 默认 'g' 格式只保 6 位有效数字，
- *     雪花型 id（如 19 位施工 id）会被打成科学计数法且**精度丢失**，落库后就再也查不回来；
+ *     雪花型 id（如 18 位 taskId）会被打成科学计数法且**精度丢失**，落库后就再也查不回来；
  *   - 对象/数组当空：具名字段只该是标量。嵌套结构仍完整留在 raw 里，
- *     toJson() 原样落库，所以"视为空"只影响具名字段的显示，不丢数据。
+ *     toJson() 原样透传未知键，所以"视为空"只影响具名字段的显示，不丢数据。
  */
 QString valueText(const QJsonValue &v)
 {
@@ -75,96 +79,280 @@ QString valueText(const QJsonValue &v)
 
 QString textOf(const QJsonObject &obj, const char *key)
 {
-    return valueText(obj.value(QString::fromLatin1(key)));
+    return valueText(obj.value(QLatin1String(key)));
+}
+
+// 数字字段：JSON number 与"数字字符串"都收（现场签发系统两种都出现过）。
+int intOf(const QJsonObject &obj, const char *key)
+{
+    const QJsonValue v = obj.value(QLatin1String(key));
+    if (v.isDouble())
+        return static_cast<int>(v.toDouble());
+    return valueText(v).toInt();
+}
+
+// 布尔字段：只认 JSON bool。缺失/false 同义，字符串 "true" 不认（§4.3 定的是 boolean）。
+bool boolOf(const QJsonObject &obj, const char *key)
+{
+    return obj.value(QLatin1String(key)).toBool(false);
+}
+
+// days 只取第一个非空值（§5.3），其余值一概不看——多日语义未定，不自行拼窗口。
+QString firstDayOf(const QJsonObject &plan)
+{
+    const QJsonArray arr = plan.value(QStringLiteral("days")).toArray();
+    for (const QJsonValue &v : arr) {
+        const QString s = valueText(v);
+        if (!s.isEmpty())
+            return s;
+    }
+    return QString();
+}
+
+// 把码里的对象读进结构体：**不做任何校验**，缺键留空。
+// fromJson 与 fields() 共用这一份读法，所以"哪个键叫什么"不会在显示与校验之间分叉。
+// 旧扁平形状（历史库里的 construction_info）在这里被翻译成同样的字段：
+// construction_id → taskId、worker_name → personName，其余旧键只留在 raw 里供显示。
+void readObject(const QJsonObject &obj, ConstructionInfo *info)
+{
+    info->raw = obj;
+
+    const QJsonObject person = obj.value(QStringLiteral("person")).toObject();
+    const QJsonObject plan = obj.value(QStringLiteral("plan")).toObject();
+
+    info->issuedAt = textOf(obj, "issuedAt");
+    info->expiresAt = textOf(obj, "expiresAt");
+    info->signatureAlg = textOf(obj, "signatureAlg");
+    info->signature = textOf(obj, "signature");
+
+    info->personId = textOf(person, "id");
+    info->personName = textOf(person, "name");
+    info->personRole = textOf(person, "role");
+
+    info->taskId = textOf(plan, "taskId");
+    info->lineName = textOf(plan, "lineName");
+    info->stationName = textOf(plan, "stationName");
+    info->workType = textOf(plan, "workType");
+    info->year = intOf(plan, "year");
+    info->month = intOf(plan, "month");
+    info->days.clear();
+    const QString day = firstDayOf(plan);
+    if (!day.isEmpty())
+        info->days << day;
+    info->tendays = intOf(plan, "tendays");
+    info->starttime = textOf(plan, "starttime");
+    info->startmorrow = boolOf(plan, "startmorrow");
+    info->constrainttime = textOf(plan, "constrainttime");
+    info->endtime = textOf(plan, "endtime");
+    info->endmorrow = boolOf(plan, "endmorrow");
+    info->totalPersonCount = intOf(plan, "totalPersonCount");
+
+    // 历史形状：只补计划身份与负责人姓名，其它旧字段不映射（新契约里没有它们）
+    if (info->taskId.isEmpty())
+        info->taskId = textOf(obj, "construction_id");
+    if (info->personName.isEmpty())
+        info->personName = textOf(obj, "worker_name");
+}
+
+/**
+ * @brief §5 的计划窗口推导
+ * @return false = 时间字段不合法（调用方统一报"二维码施工计划时间无效"）
+ *
+ * 规则逐条对应 §5.1：基准日期 = year/month/days[0]；开始时间取 starttime，
+ * 空则 constrainttime=="4" → 23:00；结束时间必填；endmorrow 加一天；
+ * 结束不晚于开始且 endmorrow==false 时自动跨零点一天；最后必须 end > start。
+ * 推导只在登录那一刻做一次，结果存进 startsAt/endsAt——后续所有使用方（详情框、
+ * 将来的计划作用域）都读这两个值，不各自重算。
+ */
+bool deriveWindow(ConstructionInfo *info)
+{
+    const int day = info->days.isEmpty() ? 0 : info->days.first().toInt();
+    const QDate base(info->year, info->month, day);
+    if (!base.isValid())
+        return false;
+
+    QTime startClock;
+    if (!info->starttime.isEmpty())
+        startClock = QTime::fromString(info->starttime, QStringLiteral("HH:mm"));
+    else if (info->constrainttime == QLatin1String("4"))
+        startClock = QTime(23, 0);   // 运营结束后
+    if (!startClock.isValid())
+        return false;
+
+    const QTime endClock = QTime::fromString(info->endtime, QStringLiteral("HH:mm"));
+    if (!endClock.isValid())
+        return false;
+
+    const QDate startDate = info->startmorrow ? base.addDays(1) : base;
+    info->startsAt = QDateTime(startDate, startClock, Qt::OffsetFromUTC, kPlanUtcOffsetSeconds);
+
+    QDate endDate = base;
+    if (info->endmorrow)
+        endDate = endDate.addDays(1);
+    QDateTime end(endDate, endClock, Qt::OffsetFromUTC, kPlanUtcOffsetSeconds);
+    if (!info->endmorrow && end <= info->startsAt)
+        end = end.addDays(1);   // 跨零点保护，只加一天（§5.1 第 3 条）
+    info->endsAt = end;
+
+    return info->startsAt.isValid() && info->endsAt.isValid()
+           && info->endsAt > info->startsAt;
 }
 
 // 中文提示里同时给出界面用名与协议键名，现场照着改码的人不用猜
-QString missingFieldText(const QString &uiName, const char *key)
+QString missingFieldText(const QString &uiName, const QString &key)
 {
-    return QString::fromUtf8("二维码缺少字段 %1(%2)")
-        .arg(uiName, QString::fromLatin1(key));
+    return QString::fromUtf8("二维码缺少字段 %1(%2)").arg(uiName, key);
 }
 
-// 已知键的界面中文名与显示顺序。键名取自 ConstructionInfo::kKey*，
-// 所以"协议里叫什么"仍然只有一个出处，这里只额外承担"界面上叫什么、排第几"。
-// 新增字段时在这里加一行，两个详情框就各多一行，别处不用动。
+// 已知键的界面中文名与显示顺序。只描述"界面上叫什么、排第几"，
+// 键名本身仍只在 readObject 里出现一次。
 struct KeyLabel {
     const char *key;
     const char *label;   // UTF-8
 };
 
-const KeyLabel kPreferredFields[] = {
-    {ConstructionInfo::kKeyConstructionId, "施工id"},
-    {ConstructionInfo::kKeyWorkerName,     "负责人"},
-    {ConstructionInfo::kKeyWorkerPhone,    "负责人电话"},
-    {ConstructionInfo::kKeyWorkerId,       "负责人工号"},
-    {ConstructionInfo::kKeyWorkContent,    "施工内容"},
+const KeyLabel kPersonFields[] = {
+    {"id",    "人员工号"},
+    {"name",  "姓名"},
+    {"role",  "角色"},
 };
+
+const KeyLabel kPlanFields[] = {
+    {"taskId",           "施工计划(taskId)"},
+    {"lineName",         "线路"},
+    {"stationName",      "车站"},
+    {"workType",         "作业内容"},
+    {"year",             "计划年份"},
+    {"month",            "计划月份"},
+    {"days",             "计划日期"},
+    {"tendays",          "旬"},
+    {"starttime",        "开始时间"},
+    {"startmorrow",      "开始顺延次日"},
+    {"constrainttime",   "开始时间约束"},
+    {"endtime",          "结束时间"},
+    {"endmorrow",        "结束顺延次日"},
+    {"totalPersonCount", "计划人数"},
+};
+
+const KeyLabel kLegacyFields[] = {
+    {"construction_id", "施工id（旧）"},
+    {"worker_name",     "负责人（旧）"},
+    {"worker_phone",    "负责人电话（旧）"},
+    {"worker_id",       "负责人工号（旧）"},
+    {"work_content",    "施工内容（旧）"},
+};
+
+bool isKnownTopLevel(const QString &key)
+{
+    return key == QLatin1String("person") || key == QLatin1String("plan")
+        || key == QLatin1String("issuedAt") || key == QLatin1String("expiresAt")
+        || key == QLatin1String("signatureAlg") || key == QLatin1String("signature");
+}
 
 } // namespace
 
-// 空对象的判据把 raw 也算进来：码里只带了未知键（协议先发字段、结构体还没跟上）时
-// 这份信息**不是**空的——落库与详情框都要靠 raw 把它显示出来。
 bool ConstructionInfo::isEmpty() const
 {
-    return constructionId.isEmpty() && workerName.isEmpty() && workerPhone.isEmpty() &&
-           workerId.isEmpty() && workContent.isEmpty() && raw.isEmpty();
+    return personId.isEmpty() && personName.isEmpty() && personRole.isEmpty()
+        && taskId.isEmpty() && lineName.isEmpty() && stationName.isEmpty()
+        && workType.isEmpty() && raw.isEmpty();
 }
 
-/**
- * @brief 落库与上行用的规范化 JSON
- * @return raw 的副本，上面覆盖五个具名字段（键名恒定存在，值为空时是空串而不是缺键）
- *
- * 为什么先铺 raw 再覆盖：未知键必须原样透传（见 session/README.md 的"改字段只动四处"），
- * 而具名字段可能被用户/上层改写过，以结构体为准。
- *
- * 已知副作用：具名字段解出来是空串时，这里会**用空串覆盖掉 raw 里的原值**。
- * 只有两种成因——上层手工构造了 ConstructionInfo 又没填该字段，或码里把该键写成了
- * 对象/数组（valueText 视为空）。后者会丢掉那段嵌套内容，遇到就先看码而不是改这里。
- */
+// 施工计划身份的唯一取值判据：新形状读 plan.taskId，旧扁平形状回落 construction_id。
+// DAO 写 task_id 列、启动回填老行、Pad 出数三处都从这里走。
+QString ConstructionInfo::taskIdFromJsonText(const QString &jsonText)
+{
+    if (jsonText.isEmpty()) {
+        return QString();
+    }
+    const QJsonDocument doc = QJsonDocument::fromJson(jsonText.toUtf8());
+    if (!doc.isObject()) {
+        return QString();
+    }
+    ConstructionInfo info;
+    readObject(doc.object(), &info);
+    return info.taskId;
+}
+
 QJsonObject ConstructionInfo::toJson() const
 {
-    QJsonObject obj = raw;
-    obj.insert(QLatin1String(kKeyConstructionId), constructionId);
-    obj.insert(QLatin1String(kKeyWorkerName), workerName);
-    obj.insert(QLatin1String(kKeyWorkerPhone), workerPhone);
-    obj.insert(QLatin1String(kKeyWorkerId), workerId);
-    obj.insert(QLatin1String(kKeyWorkContent), workContent);
+    // 先铺未知的顶层键（协议先加字段时不丢），已知键一律用结构体里的值覆盖。
+    QJsonObject obj;
+    for (auto it = raw.begin(); it != raw.end(); ++it) {
+        if (!isKnownTopLevel(it.key()))
+            obj.insert(it.key(), it.value());
+    }
+
+    if (!issuedAt.isEmpty())     obj.insert(QStringLiteral("issuedAt"), issuedAt);
+    if (!expiresAt.isEmpty())    obj.insert(QStringLiteral("expiresAt"), expiresAt);
+    if (!signatureAlg.isEmpty()) obj.insert(QStringLiteral("signatureAlg"), signatureAlg);
+    if (!signature.isEmpty())    obj.insert(QStringLiteral("signature"), signature);
+
+    QJsonObject person = raw.value(QStringLiteral("person")).toObject();
+    person.insert(QStringLiteral("id"), personId);
+    person.insert(QStringLiteral("name"), personName);
+    person.insert(QStringLiteral("role"), personRole);
+    obj.insert(QStringLiteral("person"), person);
+
+    QJsonObject plan = raw.value(QStringLiteral("plan")).toObject();
+    plan.insert(QStringLiteral("taskId"), taskId);
+    plan.insert(QStringLiteral("lineName"), lineName);
+    plan.insert(QStringLiteral("stationName"), stationName);
+    plan.insert(QStringLiteral("workType"), workType);
+    plan.insert(QStringLiteral("year"), year);
+    plan.insert(QStringLiteral("month"), month);
+    QJsonArray dayArray;
+    for (const QString &d : days)
+        dayArray.append(d);
+    plan.insert(QStringLiteral("days"), dayArray);
+    plan.insert(QStringLiteral("tendays"), tendays);
+    plan.insert(QStringLiteral("starttime"), starttime);
+    plan.insert(QStringLiteral("startmorrow"), startmorrow);
+    plan.insert(QStringLiteral("constrainttime"), constrainttime);
+    plan.insert(QStringLiteral("endtime"), endtime);
+    plan.insert(QStringLiteral("endmorrow"), endmorrow);
+    plan.insert(QStringLiteral("totalPersonCount"), totalPersonCount);
+    obj.insert(QStringLiteral("plan"), plan);
+
     return obj;
 }
 
-/**
- * @brief 解析 + 校验：全工程**唯一**的校验规则所在
- * @param obj 码里解出的 JSON 对象；未知键不报错也不拒绝（协议先加字段时的兼容路径）
- * @param out 出参，nullptr 时直接返回 false（不抛、不崩）
- * @param err 可选出参；非空时写入中文原因， nullptr 时跳过文案构造
- * @return 两个必填键都非空才 true；false 时 out 不被写（不留半成品对象）
- *
- * 必填只有 construction_id 与 worker_name，且**一次只报第一个**缺的字段——
- * 现场照着提示补一项即可，不用一次看懂一整段错误。
- * 判"缺"的标准是 valueText 归一化之后为空：数字 0、空串、纯空白、对象都算缺。
- * 登录页 / "测试登录" / 单测都从这里过，别在调用方再加一遍校验（会分叉）。
- */
-bool ConstructionInfo::fromJson(const QJsonObject &obj, ConstructionInfo *out, QString *err)
+bool ConstructionInfo::fromJson(const QJsonObject &obj, ConstructionInfo *out, QString *err,
+                                const LoginPolicy &policy)
 {
     if (!out)
         return false;
 
     ConstructionInfo info;
-    info.raw = obj;
-    info.constructionId = textOf(obj, kKeyConstructionId);
-    info.workerName     = textOf(obj, kKeyWorkerName);
-    info.workerPhone    = textOf(obj, kKeyWorkerPhone);
-    info.workerId       = textOf(obj, kKeyWorkerId);
-    info.workContent    = textOf(obj, kKeyWorkContent);
+    readObject(obj, &info);
 
-    // 必填校验：缺哪个就点名哪个，一次只报第一个（现场按提示补一项即可）
-    if (info.constructionId.isEmpty()) {
-        if (err) *err = missingFieldText(QString::fromUtf8("施工id"), kKeyConstructionId);
+    // ---- §6 第 2 步：必填 ----
+    if (info.personId.isEmpty() || info.personName.isEmpty()) {
+        if (err) *err = QString::fromUtf8("二维码缺少人员信息");
         return false;
     }
-    if (info.workerName.isEmpty()) {
-        if (err) *err = missingFieldText(QString::fromUtf8("负责人姓名"), kKeyWorkerName);
+    if (info.taskId.isEmpty()) {
+        if (err) *err = QString::fromUtf8("二维码缺少施工计划");
+        return false;
+    }
+    if (info.totalPersonCount <= 0) {
+        if (err) *err = QString::fromUtf8("二维码计划人数无效");
+        return false;
+    }
+
+    // ---- §6 第 3 步：时间可推导 ----
+    if (!deriveWindow(&info)) {
+        if (err) *err = QString::fromUtf8("二维码施工计划时间无效");
+        return false;
+    }
+
+    // §6 第 4 步（有效期/签发时钟）与第 5 步（验签）**本轮不做**（2026-11-04 裁定）。
+    // issuedAt/expiresAt/signatureAlg/signature 仍照原样解析并保存（§8 要求会话保留它们），
+    // 只是不据此拒绝登录。要做时在这里补两段，提示文案见规约 §9。
+
+    // ---- §6 第 6 步：与本机当前计划比对 ----
+    if (!policy.expectedTaskId.isEmpty() && info.taskId != policy.expectedTaskId) {
+        if (err) *err = QString::fromUtf8("二维码施工计划与当前设备任务不一致");
         return false;
     }
 
@@ -172,17 +360,8 @@ bool ConstructionInfo::fromJson(const QJsonObject &obj, ConstructionInfo *out, Q
     return true;
 }
 
-/**
- * @brief 二维码原文 → ConstructionInfo（登录页唯一的调用入口）
- * @return false 的三种情况：原文空白 / 不是合法 JSON / 是 JSON 但不是对象（数组、标量），
- *         后两类都到不了 fromJson，因此不会报"缺字段"
- *
- * 入参先 trimmed()：扫码枪与 ZBar 常在原文两端带换行，不去掉会让 QJsonDocument
- * 直接解析失败，现场表现成"码是对的但解不开"。
- * 失败原因刻意**不带原文**（见函数体注释）——码内容可能是别的系统的载荷，
- * 进日志等于把别人的数据抄进本机日志。
- */
-bool ConstructionInfo::fromQrText(const QString &qrText, ConstructionInfo *out, QString *err)
+bool ConstructionInfo::fromQrText(const QString &qrText, ConstructionInfo *out, QString *err,
+                                  const LoginPolicy &policy)
 {
     const QString text = qrText.trimmed();
     if (text.isEmpty()) {
@@ -194,35 +373,27 @@ bool ConstructionInfo::fromQrText(const QString &qrText, ConstructionInfo *out, 
     const QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8(), &parseError);
     if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
         // 只回类型，不把原文塞进日志/界面（码里可能是别的系统的内容）
-        if (err) {
-            *err = doc.isObject()
-                ? QString::fromUtf8("二维码内容不是有效 JSON：%1")
-                      .arg(parseError.errorString())
-                : QString::fromUtf8("二维码内容不是施工信息 JSON 对象");
-        }
+        if (err) *err = QString::fromUtf8("二维码内容无法识别");
         return false;
     }
 
-    return fromJson(doc.object(), out, err);
+    return fromJson(doc.object(), out, err, policy);
 }
 
-// 空值统一显示 "—"（em dash）而不是留白：详情框与列表里空白会被读成"渲染坏了"，
-// 而历史上确实没有施工信息（老库补列后是 NULL → 读成空串）就是这种情况。
 QString ConstructionInfo::display(const QString &value)
 {
     return value.isEmpty() ? QStringLiteral("—") : value;
 }
 
-/**
- * @brief 逐键渲染成显示行（两个详情框共用这一个函数）
- * @return 空对象返回空表；否则"已知键按 kPreferredFields 的顺序 + 其余键按键名字典序"
- *
- * 两段输出的语义不同是刻意的：已知键带中文名、位置固定，未知键直接用键名当标签排后面，
- * 于是"协议加了字段"先表现为界面上多一行裸键名，再决定要不要给它中文名——
- * 不需要为了让界面不出乱码而改代码。
- * QJsonObject::keys() 本身按键字典序返回，所以后半段的顺序稳定、截图对比不会 flaky。
- * 值都过 display()：空串显示 "—"，0 与 false 这类标量已被 valueText 转成文本。
- */
+QString ConstructionInfo::planWindowText() const
+{
+    if (!startsAt.isValid() || !endsAt.isValid())
+        return QString();
+    return QStringLiteral("%1 → %2")
+        .arg(startsAt.toString(QStringLiteral("yyyy-MM-dd HH:mm")),
+             endsAt.toString(QStringLiteral("yyyy-MM-dd HH:mm")));
+}
+
 QVector<ConstructionField> ConstructionInfo::fields(const QJsonObject &obj)
 {
     QVector<ConstructionField> rows;
@@ -230,42 +401,84 @@ QVector<ConstructionField> ConstructionInfo::fields(const QJsonObject &obj)
         return rows;
     }
 
+    const bool nested = obj.contains(QStringLiteral("person"))
+                        || obj.contains(QStringLiteral("plan"));
     QStringList emitted;
-    for (const KeyLabel &f : kPreferredFields) {
-        const QString key = QString::fromLatin1(f.key);
-        if (!obj.contains(key)) {
-            continue;
-        }
+
+    auto append = [&rows, &emitted](const QString &label, const QString &key,
+                                    const QString &value) {
         ConstructionField row;
-        row.label = QString::fromUtf8(f.label);
-        row.value = display(valueText(obj.value(key)));
+        row.label = label;
+        row.value = display(value);
         rows.append(row);
         emitted << key;
+    };
+
+    if (nested) {
+        const QJsonObject person = obj.value(QStringLiteral("person")).toObject();
+        for (const KeyLabel &f : kPersonFields) {
+            const QString key = QString::fromLatin1(f.key);
+            if (!person.contains(key))
+                continue;
+            append(QString::fromUtf8(f.label), QStringLiteral("person.") + key,
+                   valueText(person.value(key)));
+        }
+
+        const QJsonObject plan = obj.value(QStringLiteral("plan")).toObject();
+        for (const KeyLabel &f : kPlanFields) {
+            const QString key = QString::fromLatin1(f.key);
+            if (!plan.contains(key))
+                continue;
+            append(QString::fromUtf8(f.label), QStringLiteral("plan.") + key,
+                   valueText(plan.value(key)));
+        }
+
+        // 推导窗口单独一行：它是 §5 算出来的，不是码里的某个键，所以放在键行之后
+        ConstructionInfo info;
+        readObject(obj, &info);
+        if (deriveWindow(&info)) {
+            ConstructionField row;
+            row.label = QString::fromUtf8("计划时间");
+            row.value = info.planWindowText();
+            rows.append(row);
+        }
+    } else {
+        // 历史扁平形状：老库里的行，仍按中文名显示
+        for (const KeyLabel &f : kLegacyFields) {
+            const QString key = QString::fromLatin1(f.key);
+            if (!obj.contains(key))
+                continue;
+            append(QString::fromUtf8(f.label), key, valueText(obj.value(key)));
+        }
     }
 
     // 码里多出来的键也照原样列出来（用键名当标签），这样协议加字段时
     // 界面先能看到值，再决定要不要给它一个中文名。QJsonObject::keys() 按键排序，显示稳定。
     const QStringList rest = obj.keys();
     for (const QString &key : rest) {
-        if (emitted.contains(key)) {
+        if (isKnownTopLevel(key))
             continue;
-        }
-        ConstructionField row;
-        row.label = key;
-        row.value = display(valueText(obj.value(key)));
-        rows.append(row);
+        if (emitted.contains(key))
+            continue;
+        append(key, key, valueText(obj.value(key)));
     }
+
+    if (nested) {
+        const QStringList groups = {QStringLiteral("person"), QStringLiteral("plan")};
+        for (const QString &group : groups) {
+            const QJsonObject sub = obj.value(group).toObject();
+            for (auto it = sub.begin(); it != sub.end(); ++it) {
+                const QString path = group + QLatin1Char('.') + it.key();
+                if (emitted.contains(path))
+                    continue;
+                append(path, path, valueText(it.value()));
+            }
+        }
+    }
+
     return rows;
 }
 
-/**
- * @brief 落库/上行里那段 JSON 文本 → fields()
- * @return 空串、解析失败、不是对象——一律返回**空表**，不报错、不写日志
- *
- * 静默是设计要求：这条路径的入参来自 `alarms.construction_info` 列，老行是 NULL→空串，
- * 手工改坏过的库也可能是半截 JSON；详情框不该因为一条历史数据显示成错误态。
- * 判据用 trimmed().isEmpty() 而不是 isEmpty()：库里存过带换行的紧凑文本时结果一致。
- */
 QVector<ConstructionField> ConstructionInfo::fieldsFromJson(const QString &json)
 {
     if (json.trimmed().isEmpty()) {
@@ -278,41 +491,32 @@ QVector<ConstructionField> ConstructionInfo::fieldsFromJson(const QString &json)
     return fields(doc.object());
 }
 
-// Meyers 单例：C++11 起静态局部变量的初始化本身线程安全，所以第一次调用来自
-// UI 线程还是解码线程都不会出问题；实例内所有状态由 lock_ 保护。
 ConstructionSession &ConstructionSession::instance()
 {
     static ConstructionSession s;
     return s;
 }
 
-/**
- * @brief 扫码登录：解析 + 校验 + 定死为当前会话内容（三步一次做完）
- * @param err 可选出参，透传给 fromQrText
- * @return false 时**会话完全不动**——不存在"半登录"状态，也不需要调用方回滚
- *
- * 两个登录入口（扫码 / "测试登录"手输 JSON）都走这一个重载，校验规则因此只有一份。
- */
+void ConstructionSession::setLoginPolicy(const LoginPolicy &policy)
+{
+    QWriteLocker locker(&lock_);
+    policy_ = policy;
+}
+
+LoginPolicy ConstructionSession::loginPolicy() const
+{
+    QReadLocker locker(&lock_);
+    return policy_;
+}
+
 bool ConstructionSession::startLogin(const QString &qrText, QString *err)
 {
     ConstructionInfo info;
-    if (!ConstructionInfo::fromQrText(qrText, &info, err))
+    if (!ConstructionInfo::fromQrText(qrText, &info, err, loginPolicy()))
         return false;
     return startLogin(info);
 }
 
-/**
- * @brief 以已解析好的对象登录（写锁保护的真正赋值处）
- * @param info 调用方应保证已通过 fromJson/fromQrText 校验；本函数**不再校验**必填字段
- * @return 恒为 true（写内存状态不会失败）
- *
- * 前置条件不在这里检查是刻意的：校验只有 fromJson 一处，"必填没填也算登录成功"这种
- * 口径分叉宁可不要。绕过 fromQrText 直接调它（单测常用）就能造出一个
- * constructionId 为空的登录态，此时标题栏角标与上行的 taskId 都会是空串。
- *
- * "登录状态下再扫码不静默改写归属"这条规则也不在这里判——门禁在调用方
- * （src/ui/form/frmmain.cpp 用 isLoggedIn() 决定放行主界面），这里再判一次就是两处口径。
- */
 bool ConstructionSession::startLogin(const ConstructionInfo &info)
 {
     QWriteLocker locker(&lock_);
@@ -321,17 +525,6 @@ bool ConstructionSession::startLogin(const ConstructionInfo &info)
     return true;
 }
 
-/**
- * @brief 清空会话（整份替换成空对象，不逐字段清）
- *
- * 调用方**必须配对**做两件事，本函数都不替它做：
- *   1. AlarmManager::resetThrottles() —— 限流窗口是本机内存 map，不清的话重登后
- *      2 秒（类别）/10 秒（围栏）窗口内的第一条报警会被静默吞掉，现象是
- *      "换了个人扫码，头一条报警没了"（见 src/biz/alarm/README.md）；
- *   2. 回到登录页并挡住主界面门禁。
- * 已产生并落库的报警不受影响：施工信息在产生时就固化进记录，退出登录不回改历史行，
- * 仍在重传队列里的那条带的仍是它产生时的负责人。
- */
 void ConstructionSession::logout()
 {
     QWriteLocker locker(&lock_);
@@ -348,38 +541,20 @@ bool ConstructionSession::isLoggedIn() const
     return loggedIn_;
 }
 
-/**
- * @brief 取当前会话的施工信息快照
- * @return 按值拷贝；未登录时是空对象（isEmpty() 为真），不是 nullptr 之类的特殊值
- *
- * 读锁只在函数体内持有，返回即释放——这是"解码线程可以给报警打戳、又不会持锁跨
- * 数据库写"的实现方式（session/README.md 的线程与锁一节）。
- * 拷贝代价是 QJsonObject 的一次深拷贝（几个短字符串），每条报警一次，实测不构成热点；
- * 想改成共享指针会牺牲"调用方拿到的一定是不再变化的快照"这条性质。
- * 写只在 UI 线程，读可来自任意线程；QReadWriteLock 默认非递归，别在持读锁时再进 snapshot()。
- */
 ConstructionInfo ConstructionSession::snapshot() const
 {
     QReadLocker locker(&lock_);
     return info_;
 }
 
-/**
- * @brief 一行摘要，供日志与详情显示
- * @return 两个必填任缺其一就返回"未登录"；否则 "施工 <id> / 负责人 <name>"
- *
- * 刻意只取两个必填字段（不含电话/工号/内容）：这行文本会进日志，
- * 摘要里带上手机号等于把个人信息抄进日志文件。
- * 内部走 snapshot() 取快照，不直接读 info_，因此不会绕过锁。
- */
 QString ConstructionSession::summary() const
 {
     const ConstructionInfo info = snapshot();
-    if (info.constructionId.isEmpty() || info.workerName.isEmpty())
+    if (info.taskId.isEmpty() || info.personName.isEmpty())
         return QString::fromUtf8("未登录");
     return QString::fromUtf8("施工 %1 / 负责人 %2")
-        .arg(ConstructionInfo::display(info.constructionId),
-             ConstructionInfo::display(info.workerName));
+        .arg(ConstructionInfo::display(info.taskId),
+             ConstructionInfo::display(info.personName));
 }
 
 } // namespace session

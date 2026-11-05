@@ -60,11 +60,12 @@ constexpr int kPageSizeMax = 50;
 
 enum TabIndex { TabClass = 0, TabFence = 1, TabDetection = 2 };
 
-// 状态码 → 界面中文。库里只有 pending/rectified/false_alarm 三种，
+// 状态码 → 界面中文。库里是 pending/rectified/disposed/false_alarm 四种，
 // 列表以前把非 rectified 一律显示"未确认"，误报于是和未确认撞成同一个词。
 QString statusLabel(const QString &status)
 {
     if (status == QLatin1String("rectified")) return QStringLiteral("已确认");
+    if (status == QLatin1String("disposed")) return QStringLiteral("已处置");
     if (status == QLatin1String("false_alarm")) return QStringLiteral("误报");
     return QStringLiteral("未确认");
 }
@@ -73,9 +74,12 @@ QString statusLabel(const QString &status)
 // （SUCCESS #4caf50 / 中性灰 #9E9E9E / WARNING #ff9800），这里必须用 QColor 而不是
 // theme:: 的字符串常量—— QTableWidgetItem::setForeground 要的是 QColor。
 // 灰是给"误报"的：它不再是待处理项，但又不该看起来像错误，所以不占红也不占橙。
+// 蓝是给"已处置"的：它和"已确认"（绿）在板端是两件事——一个是走完了处置表单，
+// 一个只是有人看过，撞成同一个颜色就等于把闭环进度读成已读进度。取值同 theme::INFO。
 QColor statusColor(const QString &status)
 {
-    if (status == QLatin1String("rectified")) return QColor(76, 175, 80);   // 绿
+    if (status == QLatin1String("rectified")) return QColor(76, 175, 80);    // 绿
+    if (status == QLatin1String("disposed")) return QColor(33, 150, 243);    // 蓝（theme::INFO）
     if (status == QLatin1String("false_alarm")) return QColor(158, 158, 158); // 灰
     return QColor(255, 152, 0);                                              // 橙
 }
@@ -493,6 +497,7 @@ void AlarmListWidget::setupFilterBar(QVBoxLayout *mainLay)
     comboStatus_ = makeCombo("全部（不含误报）");
     comboStatus_->addItem("未确认", QStringLiteral("pending"));
     comboStatus_->addItem("已确认", QStringLiteral("rectified"));
+    comboStatus_->addItem("已处置", QStringLiteral("disposed"));
     comboStatus_->addItem("误报", QStringLiteral("false_alarm"));
     comboWorker_ = makeCombo("全部负责人");
     comboConstruction_ = makeCombo("全部施工id");
@@ -571,7 +576,7 @@ AlarmFilter AlarmListWidget::currentAlarmFilter(AlarmFilter::Scope scope) const
     f.className = comboData(comboClass_).toString();
     f.status = comboData(comboStatus_).toString();
     f.workerName = comboData(comboWorker_).toString();
-    f.constructionId = comboData(comboConstruction_).toString();
+    f.taskId = comboData(comboConstruction_).toString();
     f.fenceRole = fenceRole_;
     f.scope = scope;
     f.limit = pageSize();
@@ -611,7 +616,7 @@ void AlarmListWidget::rebuildFacets()
         fillCombo(comboWorker_, QStringLiteral("全部负责人"),
                   dao.workerFacets(start, end, scope));
         fillCombo(comboConstruction_, QStringLiteral("全部施工id"),
-                  dao.constructionFacets(start, end, scope));
+                  dao.taskIdFacets(start, end, scope));
     }
 }
 

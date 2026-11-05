@@ -193,7 +193,8 @@ void LoginWidget::setStatus(const QString &text, bool error)
  *     不发 loginFailed（发了会在 frmMain 日志里留一条"登录失败：（空）"的假事故）；
  *   - error 非空 = 真的没解出来/设备打不开 → 显示错误 + 发 loginFailed(reason)。
  * 成功路径：startLogin 已经把会话写好（归属从这一刻起定死），这里只发信号，
- * 开流/亮导航都是 frmMain::onLoginSucceeded 的事。
+ * 开流/亮导航都是 frmMain::onLoginSucceeded 的事。窗格本身解出即返回（2026-11-04：
+ * 不显示码内内容、不等确认），所以"扫码 → 进主界面"中间没有第二次点击。
  * 现场口径：验扫码只认真摄像头对真码；要喂假数据请用「测试登录」（同一条 startLogin）。
  */
 void LoginWidget::onScanClicked()
@@ -237,16 +238,20 @@ bool LoginWidget::loadFakePayload(QString *jsonText, QString *err)
     // 经 run.sh 启动时 CWD 是 build/build_rk3588_linux，仓库根下的 plan/ 根本不在
     // 相对路径上；而部署机上 plan/ 既不随克隆分发、也不该分发（伪造信息不进仓）。
     // data/ 那条是部署机上真正可用的落点：data/ 是运行时就存在的数据目录。
-    const QString fileName = QStringLiteral("/construction_qr.json");
+    // 新名在前、旧名在后：2026-11-04 起生产示例是 qr-login.json（qr-login-edge-v1），
+    // construction_qr.json 是换契约前的同内容副本，现场要是只认旧名也照样能用。
+    const QStringList fileNames = {QStringLiteral("/qr-login.json"),
+                                   QStringLiteral("/construction_qr.json")};
     const QString cwd = QDir::currentPath();
-    const QStringList candidates = {
-        qEnvironmentVariable("IDGE_PLAN_DIR") + fileName,
-        cwd + QStringLiteral("/plan") + fileName,
-        cwd + QStringLiteral("/../plan") + fileName,
-        cwd + QStringLiteral("/../../plan") + fileName,
-        cwd + QStringLiteral("/../../../plan") + fileName,
-        cwd + QStringLiteral("/data") + fileName,
-    };
+    QStringList candidates;
+    for (const QString &fileName : fileNames) {
+        candidates << qEnvironmentVariable("IDGE_PLAN_DIR") + fileName
+                   << cwd + QStringLiteral("/plan") + fileName
+                   << cwd + QStringLiteral("/../plan") + fileName
+                   << cwd + QStringLiteral("/../../plan") + fileName
+                   << cwd + QStringLiteral("/../../../plan") + fileName
+                   << cwd + QStringLiteral("/data") + fileName;
+    }
 
     QStringList tried;
     for (const QString &raw : candidates) {

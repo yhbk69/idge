@@ -42,6 +42,7 @@
 #include <QList>
 #include "runtime_paths.h"
 #include <QJsonObject>
+#include <QJsonArray>
 #include <mutex>
 
 /**
@@ -415,10 +416,10 @@ public:
 
     // ========== pad_server 配置（Pad 接口 v1 的入站服务端，本机是服务端）==========
 
-    /** @brief 是否启用 Pad 服务端（默认 false：明文零鉴权的入站口，必须人来打开） */
+    /** @brief 是否启用 Pad 服务端（默认 true，2026-11-04 起；显式写 false 才关） */
     bool padServerEnabled() const;
 
-    /** @brief Pad WS 监听端口（默认 8899，范围 1024~65535） */
+    /** @brief Pad WS 监听端口（默认 8900，范围 1024~65535；8899 按 A4 留给 `/api/` HTTP） */
     int padServerPort() const;
 
     /** @brief Pad WS 路径（默认 "/"，只进日志——QWebSocketServer 不按路径筛连接） */
@@ -433,6 +434,60 @@ public:
 
     /** @brief 一次 sync_result 的条数上限（默认 500，范围 1~5000） */
     int padServerSyncLimit() const;
+
+    // ========== qr_login 配置（扫码登录的校验档，见 plan/qr-login-edge-v1.md §6）==========
+
+    // 上面六个键的 setter（2026-11-05 起有，给调试设置页用）。写内存后由调用方 save()；
+    // 端口/sync_limit 在这里就 qBound，避免界面层各自判一次范围。
+    void setPadServerEnabled(bool enabled);
+    void setPadServerPort(int port);
+    void setPadServerPath(const QString &path);
+    void setPadServerDeviceId(const QString &deviceId);
+    void setPadServerMediaBaseUrl(const QString &baseUrl);
+    void setPadServerSyncLimit(int limit);
+
+    /** @brief 本机当前施工计划 ID（默认空 = 不比对）。非空时 plan.taskId 必须与它相等，
+     *         否则按 §6.6 拒绝登录——这是"设备绑定到某个计划"的唯一入口。
+     * @note §6.4 有效期与 §6.5 验签本轮**不做**（2026-11-04 裁定），所以没有对应开关。 */
+    QString qrLoginExpectedTaskId() const;
+
+    // ========== pad_http 配置（Pad 接口 v1 的 HTTP `/api/` 面，本机是服务端）==========
+    // 与 pad_server 是**两台独立服务端、两个独立的口**：那台是 WS 报警面（8900），
+    // 这台是 HTTP `/api/`（8899，§4 处置 / §5 围栏 / §6 视频 / §7 设备）。
+    // 两段都有 enabled/port，但互不影响：调试页上各有一个「保存并应用」，各管各的重启。
+
+    /** @brief 是否启用 HTTP `/api/` 面（默认 **true**，与 pad_server 同一判断：
+     *         这台设备的用途就是被 Pad 连。⚠ 这是明文零鉴权的**写**面，
+     *         局域网内任何设备都能改报警状态与围栏；不想要就显式写 false，
+     *         关掉是彻底不 bind，不是"bind 了但拒绝"。 */
+    bool padHttpEnabled() const;
+
+    /** @brief HTTP 监听端口（默认 8899，范围 1024~65535；A4 分配：8899=`/api/`、8900=WS） */
+    int padHttpPort() const;
+
+    /** @brief 单个请求正文的字节上限，单位 MB（默认 26 = §4.2 五张 5MB + JSON 余量；1~100） */
+    int padHttpMaxBodyMb() const;
+
+    /** @brief §6.1 的 liveUrl 是否保留视频源里的 `user:pass@`（默认 **false** = 剥掉）。
+     *         打开它等于把每台摄像头的口令发给局域网里任何一台设备；
+     *         只有确认 Pad 那边必须带凭据才播得起来时才开。 */
+    bool padHttpExposeStreamCredentials() const;
+
+    /** @brief 围栏下发时是否渲染合成画面 PNG（默认 true）。
+     *         §5.3 要求 apply 必返 frameUrl；关掉它 apply 会回 503/3003，而不是给一个假地址。 */
+    bool padHttpFenceFrames() const;
+
+    /** @brief §4.1 的处置选项数组（元素 {id,label,enabled,sortOrder}）。
+     *         **空数组 = 用代码内置那两条**（规约 §4.1 示例的原文案）；写出来就整组替换，
+     *         现场改措辞不用重新编译。 */
+    QJsonArray padHttpDisposeOptions() const;
+
+    void setPadHttpEnabled(bool enabled);
+    void setPadHttpPort(int port);
+    void setPadHttpMaxBodyMb(int megabytes);
+    void setPadHttpExposeStreamCredentials(bool expose);
+    void setPadHttpFenceFrames(bool render);
+    void setPadHttpDisposeOptions(const QJsonArray &options);
 
     // ========== WebSocket 配置 ==========
 
@@ -546,6 +601,16 @@ private:
      * @return true=root_ 有改动（调用方负责 saveUnsafe 落盘）
      */
     bool migratePadServerDefaults();
+
+    /**
+     * @brief 老配置缺少 pad_http 段时补齐默认值（load 内持锁调用，勿单独使用）
+     *
+     * 与 migratePadServerDefaults 同口径，只为让"这台有没有开 HTTP 写面"在现场文件里
+     * 可见可改。默认 enabled=true，所以**补齐本身就会开始监听 8899** ——
+     * 这与 pad_server 那句"出厂默认开"是同一个决定，风险与理由一起写在 README 里。
+     * @return true=root_ 有改动（调用方负责 saveUnsafe 落盘）
+     */
+    bool migratePadHttpDefaults();
 
     /**
      * @brief 老配置没有 video.sources 时补一个空数组（load 内持锁调用）

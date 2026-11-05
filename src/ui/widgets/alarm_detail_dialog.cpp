@@ -107,12 +107,25 @@ void AlarmDetailDialog::setupUi()
                                               theme::FS_BODY, true));
     }
     addRow(3, "置信度:", QString("%1%").arg(alarm_.confidence * 100, 0, 'f', 1));
-    statusLabel_ = addRow(4, "状态:", alarm_.status == "rectified" ? "已确认" : "未确认");
-    if (alarm_.status != "rectified") {
-        statusLabel_->setStyleSheet(theme::text(theme::WARNING, theme::FS_BODY, true));
+    // 四个内部状态各给一句：以前这里只分"已确认/未确认"，于是误报和被处置的行都会被读成
+    // "未确认"。列表那边同一个 bug 已经修过（alarm_list_widget.cpp 的 statusLabel），
+    // 详情不能留第二套口径——同一报警在两个地方显示成两种进度，比错着更难解释。
+    QString statusText;
+    const char *statusColor = theme::WARNING;   // 未确认
+    if (alarm_.status == QLatin1String("rectified")) {
+        statusText = QString::fromUtf8("已确认");
+        statusColor = theme::SUCCESS;
+    } else if (alarm_.status == QLatin1String("disposed")) {
+        statusText = QString::fromUtf8("已处置");
+        statusColor = theme::INFO;
+    } else if (alarm_.status == QLatin1String("false_alarm")) {
+        statusText = QString::fromUtf8("误报");
+        statusColor = theme::TEXT_MUTED;
     } else {
-        statusLabel_->setStyleSheet(theme::text(theme::SUCCESS, theme::FS_BODY, true));
+        statusText = QString::fromUtf8("未确认");
     }
+    statusLabel_ = addRow(4, "状态:", statusText);
+    statusLabel_->setStyleSheet(theme::text(statusColor, theme::FS_BODY, true));
 
     // 报警视频片段：硬编环形缓冲区在"报警后 2 秒"才落盘，所以打开得快时可能还没有。
     // 这里只报状态/路径，不做播放——裸流浏览器放不了，网页侧播同名的 .mp4 副本。

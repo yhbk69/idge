@@ -125,12 +125,14 @@ private slots:
     /// UI 确认/误报 → 广播 alarm_update；acknowledgeAll() 不发这条（见 pad/README.md 口径 5）
     void handleAlarmStatusChanged(const AlarmRecord &alarm);
     /**
-     * @brief 片段落盘（约报警 +2s）→ 从库里重读记录并**再广播一条完整 alarm**
+     * @brief 片段落盘（约报警 +2s）→ 从库里重读记录并广播一条 `alarm_update`（带 clipUrl）
      *
-     * 为什么不用 alarm_update：v1 §13.2.3 的 alarm_update 不带 evidence，而片段路径
-     * 只在库里的 update_time 被推前过（内存记录的 videoPath 与库不同步到 updatedAt），
-     * 对端按 updatedAt 合并才会认这次更新。videoPath/webPath 两个入参这里都不用，
-     * 路径以 DAO 读回来的那份为准。
+     * 流程（2026-11-05 现场指定）：报警当刻先发 `alarm`（信息 + 抓拍图，clipUrl=null），
+     * 视频写完后**只发 `alarm_update` 把视频补上**，不再重发整条 `alarm`。
+     * 必须从 DAO 重读：`updatedAt` 只在库里被 updateVideoPath 推前过，用内存记录会与
+     * 上一条同 updatedAt，对端按"较新胜出"合并时会把这次更新丢掉。
+     * videoPath/webPath 两个入参这里都不用，路径以 DAO 读回来的那份为准。
+     * ⚠ §13.2.2 的字段表里还没有 `clipUrl`，这是现场指令先落的一项，规约待补。
      */
     void handleVideoClipAttached(const QStringList &alarmIds, const QString &videoPath,
                                  const QString &webPath);

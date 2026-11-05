@@ -83,7 +83,8 @@ $IDGE_WORKSPACE/
 | `recording` | 报警视频硬件编码录制（**默认 `enabled=true`**，报警必带关联片段是需求验收项）；`buffer_seconds` 需 ≥ 片段窗口 3+2 秒，缺键默认 8（`config_example.json` 模板当前写 5） |
 | `smartRecognition` | 智能识别四张卡片（二维码/OCR/点名/盘点）共用的取流地址；键缺省时自动探测摄像头节点（MJPEG 优先，其次 CSI/rkisp 的 NV12、YUYV），探测不到退回 `/dev/video0`。仅 getter，设置页不编辑 |
 | `websocket` | Pad↔Aibox 客户端：`server_url`（空=整条链路不启动，设置页可改）+ 心跳/重连间隔（仅 JSON）。**本机是客户端，这条连接本身不监听端口**；它是旧协议，v1 之后由下面的 `pad_server` 取代（去留待接口方确认） |
-| `pad_server` | **Pad 接口 v1 的入站服务端**（本机是 WS 服务端，Pad 连进来收报警）。`enabled` **默认 `false`**——这是一个明文零鉴权的入站口，局域网内任何设备都能连。`port` 默认 8899（v1 占位；与 `media_http_port` 8090 是两个口）；`media_base_url` 空=复用内嵌文件服务的自动地址。只能改 JSON、无 setter（改口要重启）；握手只放空 Origin 与 `android-app://*`（其余 403，判据 `originAllowed()` 一处）。落点 [src/biz/pad/](src/biz/pad/README.md)，键表见 [src/base/config/README.md](src/base/config/README.md)。**本轮只落 WS 报警面，`/api/` HTTP 面未实现** |
+| `pad_server` | **Pad 接口 v1 的入站 WS 服务端**（本机是 WS 服务端，Pad 连进来收报警）。`enabled` **默认 `true`**（2026-11-04 现场定：本机就是给 Pad 连的；显式写 `false` 才关）——这是明文零鉴权的入站口，唯一的门是握手 Origin 白名单。`port` 默认 **8900**（A4 定案：8899 归 `http://<host>:8899/api/`，WS 走 `ws://<host>:8900/`；媒体出站是第三个口 `media_http_port` 8090）；`media_base_url` 空=复用内嵌文件服务的自动地址。调试设置页有「Pad 服务端（WS 入站）」分组（开关/端口/路径/设备 ID/证据地址前缀/同步上限，「保存并应用」= 写配置 + 停服再起服）；握手只放空 Origin 与 `android-app://*`（其余 403，判据 `originAllowed()` 一处）。落点 [src/biz/pad/](src/biz/pad/README.md)，键表见 [src/base/config/README.md](src/base/config/README.md)。**这一条只推报警，写不进来**——写面是下面那台 |
+| `pad_http` | **Pad 接口 v1 的入站 HTTP `/api/` 面**（v1 §4 报警处置 · §5 围栏 · §6 实时视频 · §7 设备/健康 · §9 媒体地址口径；2026-11-05 落地）。`enabled` **默认 `true`**、`port` 默认 **8899**、`max_body_mb` 26、`expose_stream_credentials` **false**（`liveUrl` 剥掉 `rtsp://user:pass@` 的口令）、`fence_frames` true（`apply` 渲一张合成画面 PNG）、`dispose_options` 空=用内置两条措辞。**明文零鉴权而且可写**：局域网内任何设备都能改报警状态与围栏；这一台**没有** Origin 门（对端不是浏览器，判据没意义），所以"要不要开"是部署决定而不是代码决定。调试设置页有「Pad HTTP 服务端（/api/ 入站）」分组，改完点「保存并应用」= 写配置 + `stop()` + 重装路由 + `start()`（HTTP 用自建 `QTcpServer`，可以重绑；8090 那台不行）。四个写接口都按 §2.5 只认 `requestId` 做幂等，重放返回首次那份响应一字不差。落点 [src/biz/pad/](src/biz/pad/README.md) 与 [src/biz/geofence/](src/biz/geofence/README.md)，键表见 [src/base/config/README.md](src/base/config/README.md) |
 | `alarm_uplink` | 本机报警的**上行推送**（`enabled` **默认 `false`**——往外发数据必须人开）。两段式：报警当刻发 `alarm_info`（文字 + 媒体地址承诺），媒体写稳后再发 `media_begin`。`media_transport` 默认 `url`＝本机起内嵌 http 静态文件服务（**监听 `media_http_port`，默认 8090，明文零鉴权**）只在 JSON 里发地址；`ws_binary`＝字节走 WS 分块帧（已实测，代码保留、非默认）。只能改 JSON，设置页无控件；键表见 [src/base/config/README.md](src/base/config/README.md) |
 
 另有一整段 **`gb28181`** 不经 `ConfigManager`，由 `src/biz/sip/gb28181_config.cpp` 直接读文件
@@ -110,7 +111,7 @@ $IDGE_WORKSPACE/
 
 | 页面 | 入口 | 功能 |
 |------|------|------|
-| **扫码登录** | 启动后第一屏（无入口，未登录时盖住主界面） | 左品牌块 + 右侧竖排三钮：扫码登录（窗格打开即扫描，解出后点「确认登录」）/ 测试登录（读 `plan/construction_qr.json`）/ 退出程序 |
+| **扫码登录** | 启动后第一屏（无入口，未登录时盖住主界面） | 左品牌块 + 右侧竖排三钮：扫码登录（窗格打开即扫描，**解出即登录**，不显示码内内容）/ 测试登录（读 `plan/qr-login.json`，旧名 `construction_qr.json` 兼容）/ 退出程序 |
 | 视频监控 | 顶部"视频监控" | 4 路实时画面 + FPS + 围栏叠加显示 |
 | 数据看板 | 顶部"数据看板" | 报警统计 KPI、类别分布、通道在线状态（2 秒刷新，切走即停表） |
 | 报警数据 | 顶部"报警数据" | 历史报警列表（含**负责人**列）、图片查看、确认/误报操作 |
@@ -214,17 +215,20 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
 | libmk_api | `3rdparty/zlmediakit/aarch64/` | 报警上行 url 档的内嵌 http 服务（进程级单例，`src/media/server/` 唯一封装点） |
 | OpenSSL 1.1 | `3rdparty/openssl1.1.0/lib/` | `libmk_api.so` 的 NEEDED（`libssl.so.1.1`/`libcrypto.so.1.1`）；与系统 OpenSSL 3 并存，**仅供 ZLM 链接**，Qt 的 TLS 仍走系统 3（故 `wss://` 不可用，见 §八 第 11 条）。本工程链了 `--disable-new-dtags` → DT_RPATH 可传递，`run.sh` 不需要为此加 `LD_LIBRARY_PATH` |
 
-### 网络端口口径（部署/防火墙要看的就这四条）
+### 网络端口口径（部署/防火墙要看的就这五条）
 
 | 方向 | 端口 | 何时存在 | 说明 |
 |------|------|----------|------|
 | 出站 | 对端的 `websocket.server_url` | 配了地址才连（空=整条链路不启动） | 本机是 **WS 客户端**，不监听这条；**只填 `ws://`**，`wss://` 本机连不上 |
-| **入站 TCP** | `alarm_uplink.media_http_port`，默认 **8090** | 仅 `alarm_uplink.enabled=true` 且 `media_transport="url"`（后者是默认档） | 内嵌 http 静态文件服务，根 = `data/alarms` 绝对路径，**只读、明文、零鉴权**（只关了目录索引）。报警媒体地址的交付面；想限来源网段可配库内的 `http.allow_ip_range`（默认未设＝不限）。详见 `src/media/server/README.md` |
-| **入站 TCP** | `pad_server.port`，默认 **8899** | 仅 `pad_server.enabled=true`（**出厂 `false`**） | Pad 接口 v1 的 WS 服务端，`listen(QHostAddress::Any)`，**明文、零鉴权**（§2.3 规定不鉴权）。唯一的门是 Origin 白名单：空 Origin 与 `android-app://*` 放行，带 `http(s)://` Origin 的握手回 **403**——判据在 `pad_ws_server.cpp` 的 `originAllowed()` 一处，放行别的来源改那里并回来更新本行。口径见 `src/biz/pad/README.md` |
+| **入站 TCP** | `alarm_uplink.media_http_port`，默认 **8090** | `alarm_uplink` 的 `url` 档开着，**或** `pad_server.enabled`/`pad_http.enabled` 任一开着且没写 `pad_server.media_base_url`（装配处会顺手把它起起来，同一台进程级一次的 ZLM 静态服务，不会起第二台） | 内嵌 http 静态文件服务，根 = `data/alarms` 绝对路径，**只读、明文、零鉴权**（只关了目录索引）。报警媒体地址的交付面，现在还多担两件事：处置照片（`dispose/<alarmId>/`）与围栏合成画面（`fence-frames/<fenceId>/`）的字节都从这里取。想限来源网段可配库内的 `http.allow_ip_range`（默认未设＝不限）。详见 `src/media/server/README.md` |
+| **入站 TCP** | `pad_server.port`，默认 **8900** | 仅 `pad_server.enabled=true`（**出厂 `true`**，2026-11-04 起） | Pad 接口 v1 的 WS 服务端（**只读**：往外推报警，写不进来），`listen(QHostAddress::Any)`，**明文、零鉴权**（§2.3 规定不鉴权）。唯一的门是 Origin 白名单：空 Origin 与 `android-app://*` 放行，带 `http(s)://` Origin 的握手回 **403**——判据在 `pad_ws_server.cpp` 的 `originAllowed()` 一处，放行别的来源改那里并回来更新本行。口径见 `src/biz/pad/README.md` |
+| **入站 TCP** | `pad_http.port`，默认 **8899** | 仅 `pad_http.enabled=true`（**出厂 `true`**，2026-11-05 起） | Pad 接口 v1 的 HTTP `/api/` 面，`listen(QHostAddress::Any)`，**明文、零鉴权、可写**：处置/误报/已读 + 围栏建/改/下发/停用/删草稿。这是本机**唯一一个能被外部改状态的 TCP 口**——不想开就写 `pad_http.enabled=false`（关掉是不 bind，不是 bind 了再拒）。HTTP 没有 Origin 门（浏览器之外的客户端不发 Origin，这条判据对 `android-app://` 无意义），唯一的出站收敛是 `liveUrl` 默认剥掉视频源口令。**可以运行期重开**，调试设置页改端口点「保存并应用」即生效。口径与待确认清单见 `src/biz/pad/README.md` |
 | 出入站 UDP | `gb28181.platform.localSipPort`（默认 5060）本机 `bind` | 仅 `gb28181` 段能凑出 platform + streams | SIP 注册/心跳/MANSCDP 收发（本机也收平台报文，但它是 UDP、不是 TCP 监听口）；RTP 推流另按 SDP 协商走 TCP/UDP。**当前 `platform.transport` 不影响发包，固定 UDP** |
 
-`ss -ltnp | grep -E '8090|8899'` 为空 + `/proc/<pid>/task` 里没有 ZLM 线程，是"出厂态两个入站口都没开"的两个证据
-（别看日志行数）。
+**出厂态三个入站口都在听**（2026-11-05 板端实测：同一 `idge` 进程 `ss -ltnp` 出 8090/8900/8899 三条）。
+`ss -ltnp | grep -E '8090|8899|8900'` 用来核对"哪个口该在"，`/proc/<pid>/task` 里没有 ZLM 线程
+则说明 8090 那台没起（别看日志行数）。要"谁都没监听"就得显式写
+`pad_server.enabled=false` + `pad_http.enabled=false` + `alarm_uplink.enabled=false`。
 
 ---
 
@@ -241,12 +245,16 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
   人在所有岗区域之外报「离岗」，回岗待一会儿再出来才算新的一条），
   禁区命中优先于离岗判定、一人一帧一条，
   `geofence.throttleSeconds`（默认 10 秒）只作每通道每角色每类别的节流下限
-- **扫码登录（门禁）**：启动后先进登录页，用本机摄像头扫现场张贴的施工二维码（码内容即施工信息 JSON：
-  施工id / 负责人姓名·电话·工号 / 施工工作内容）。**未登录不推流、不检测、不出报警**；
-  必填只有 `construction_id` 与 `worker_name`，缺字段直接拒绝并点出缺哪个。每条报警都带上这份信息
-  （落库两列、详情框逐键显示、上行 `alarm_info.data.construction` 嵌套子对象）。
+- **扫码登录（门禁）**：启动后先进登录页，用本机摄像头扫现场张贴的施工二维码。码内容是
+  `qr-login-edge-v1.md` 定的嵌套 JSON：`person{id,name,role}` + `plan{taskId,线路/车站/作业内容/
+  计划时间窗,总人数}`，另有 `issuedAt/expiresAt/signature*`。**未登录不推流、不检测、不出报警**；
+  必填是 `person.id`、`person.name`、`plan.taskId` 且 `totalPersonCount>0`，缺字段直接拒绝并按
+  规约 §9 点出缺哪类。计划时间窗按 §5 推导（`starttime` 空 + `constrainttime="4"` → 23:00，
+  `endmorrow`/跨零点各自处理）。⚠ 本轮**不校验有效期、不验签**（2026-11-04 裁定），
+  `config.json` 的 `qr_login.expected_task_id` 留空即不比对计划。每条报警都带上这份信息
+  （落库两列 + `task_id`、详情框逐键显示、上行 `alarm_info.data.construction` 嵌套子对象）。
   导航的「退出」改成「退出登录」（回登录页，进程不死），登录页上有唯一的「退出程序」。
-  登录期间标题栏右上角常驻「登录人 + 施工id」角标，点开看全量五项（`ConstructionDetailDialog`）。
+  登录期间标题栏右上角常驻登录人姓名角标，点开看全量字段（`ConstructionDetailDialog`）。
   ⚠ 门挡的是"检测与报警产生"，**不是整个进程的网络出口**：GB28181 与 WsClient 仍按配置在启动时起来。
 - **报警管理**：限流去重、抓拍落盘、SQLite 持久化、GUI 悬浮提示与历史查询
 - **人员点名**：SCRFD 人脸检测 + 特征比对（进程内 RKNN 常驻推理），注册 / 点名 / 注销三阶段，余弦相似度 + 贪心一对一匹配
@@ -405,11 +413,11 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
 | `src/ai/recognition/` | 人脸识别：进程内 `InProcessFaceRecognizer`（点名生产链）+ 外部 exe 桥接 `FaceRecognitionWrapper`（对照/CLI） | [README](src/ai/recognition/README.md) |
 | `src/biz/service/` | 人员点名 / 设备盘点业务服务 | [README](src/biz/service/README.md) |
 | `src/biz/alarm/` | 报警管理（限流、去重、抓拍、SQLite 持久化） | [README](src/biz/alarm/README.md) |
-| `src/biz/geofence/` | 电子围栏（形状、角色、判定、绘制 overlay） | [README](src/biz/geofence/README.md) |
-| `src/biz/db/` | 数据持久层：报警库 idge.db（QtSQL DAO）+ 业务库 roll_call.db（sqlite3 原生） | [README](src/biz/db/README.md) |
+| `src/biz/geofence/` | 电子围栏两套：本机判定（形状、角色、`FenceChecker`、绘制 overlay，存 `config.json`）与 **Pad v1 的围栏版本库**（`pad_fence_store` + `fence_frame_renderer`，存 idge.db，**不驱动判定**） | [README](src/biz/geofence/README.md) |
+| `src/biz/db/` | 数据持久层：报警库 idge.db（QtSQL DAO，5 张表：alarms/detections + Pad 的 request_cache/fences/fence_versions）+ 业务库 roll_call.db（sqlite3 原生） | [README](src/biz/db/README.md) |
 | `src/biz/sip/` | GB/T 28181 设备侧：SIP 注册心跳、MANSCDP、PS 复用、RTP 推流 | [README](src/biz/sip/README.md) |
 | `src/biz/ws/` | Pad↔Aibox WebSocket 客户端（入站报警 + 心跳重连，预留 get_streams/set_fence）**与本机报警上行**：报文组装、内存队列、水位闸门、ack/退避、媒体读盘泵（`alarm_uplink*`/`media_pump`）。**旧协议**，v1 之后待整块退役（报告冲突 B1） | — |
-| `src/biz/pad/` | **Pad 接口 v1 的服务端**（本机是被连的一方）：`QWebSocketServer` 收发 `hello_ack`/`pong`/`alarm`/`alarm_update`/`sync_result`/`error`，外加 `AlarmRecord`→v1 JSON 的唯一映射层。与 `src/biz/ws/` 方向相反，两套不能并存 | [README](src/biz/pad/README.md) |
+| `src/biz/pad/` | **Pad 接口 v1 的服务端**（本机是被连的一方），两台：`QWebSocketServer` 收发 `hello_ack`/`pong`/`alarm`/`alarm_update`/`sync_result`/`error`；自建 `QTcpServer` 上的 HTTP `/api/` 面（§4 处置/误报/已读、§5 围栏六路由、§6 流与状态、§7 设备与健康），含 §2.5 的 `requestId` 幂等表；外加 `AlarmRecord`→v1 JSON 的唯一映射层。与 `src/biz/ws/` 方向相反，两套不能并存 | [README](src/biz/pad/README.md) |
 | `src/base/config/` | ConfigManager 单例 + data/config.json 解析 | [README](src/base/config/README.md) |
 | `src/base/buffer/` | DMA-BUF 分配与帧缓冲池 | [README](src/base/buffer/README.md) |
 | `src/base/queue/` | 阻塞队列 / 优先级队列 / 最新帧槽 | [README](src/base/queue/README.md) |
@@ -534,26 +542,41 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
 13. **开启报警上行的 `url` 档，本机就多监听一个明文端口**：默认 `media_http_port=8090`，
     根目录锁在 `data/alarms`、**只读且零鉴权**（只关了目录索引，知道文件名就能取）。
     这是"报警媒体交付方式"换来的代价，出厂 `alarm_uplink.enabled=false` 就是为了不默认开它；
-    启用前必须确认网络隔离范围。三条硬约束：①`data/alarms` 里的文件名等于可下载的地址，
-    该目录不得放任何非报警文件；②地址有效期无保证——按天保留 + 4GB 容量回收会删掉**当天**目录，
+    ⚠ **但 `pad_server.enabled` 出厂 `true` 会顺带把它起起来**（`pad_server.media_base_url` 留空时
+    装配处补起那台服务，2026-11-03 起如此），所以"出厂态 8090 没人监听"这个推论已经不成立——
+    要它不开，得写 `pad_server.enabled=false` + `pad_http.enabled=false` 或给
+    `pad_server.media_base_url` 填一个外部地址。启用前必须确认网络隔离范围。三条硬约束：
+    ①`data/alarms` 里的文件名等于可下载的地址，该目录不得放任何非报警文件——现在这条更吃紧，
+    因为 8899 那台 HTTP 面会把**处置照片**（`dispose/<alarmId>/`）与**围栏合成画面**
+    （`fence-frames/<fenceId>/`）也写进同一棵树；②地址有效期无保证——按天保留 + 4GB 容量回收会删掉**当天**目录，
     对端必须"收到即取回"，404 是正常终态；③端口/开关变更**必须重启进程**，
     ZLM 的 `mk_env_init` 是进程级一次、`stop` 后不能再 `start`，所以设置页没有"改了重开服务"这条路
     （`src/media/server/README.md`）
 12. **NPU 负载按"各通道模型数之和"计**：4 路 × 每路 3 个模型 = 12 个推理任务打在 3 个核上，
     配置不做硬拦截；任务数超过 6 时启动日志打软告警，核掩码按进程级轮转分配（跨通道共享一份
     模型上下文服务多路，仍是未做的优化）
-14. **打开 `pad_server.enabled` 是本机第一次"入站监听"**：前面所有链路都是本机主动连出去
-    （WS 客户端、GB28181 注册、报警上行），只有这一条是别人连进来。默认口 8899、明文 ws、
-    **零鉴权、无 Token**（v1 §2.3 当前就不要求 Token）——局域网内任何能连到本机的设备都能
-    收到实时报警、拉到历史报警快照与证据地址。所以出厂 `enabled=false`，与 `alarm_uplink`
-    同一条"必须人来打开"的口径；启用前先确认网段隔离范围。唯一的门是**来源检查**：
-    `originAllowed()` 放行空 Origin（原生 App 不发）与 `android-app://*`，带 `http(s)://` Origin
-    的握手回 403——它挡的是"网页 JS 可连"，**不挡**裸 socket，所以这不等于访问控制。
-    三条配套事实：
-    ①`QWebSocketServer` 独占一只监听器，v1 §2.1 想让 WS 与 `/api/` 同占 8899 在这套栈上做不到；
-    ②证据字节仍由 `media_http_port`（8090）那台文件服务出，开了 `pad_server` 就可能顺带把它
+14. **Pad 接口 v1 让本机从"只连出去"变成"被连进来"，而且是两台**：前面所有链路都是本机主动连出去
+    （WS 客户端、GB28181 注册、报警上行），只有这两条是别人连进来。
+    **8900 是只读面**（推报警、回补漏快照），**8899 是写面**（处置/误报/已读 + 围栏建/改/下发/停用）——
+    后者能改盘上状态，风险等级不一样。两口都 **明文、零鉴权、无 Token**（v1 §2.3 当前就不要求 Token），
+    出厂 `pad_server.enabled` 与 `pad_http.enabled` 都是 **`true`**（2026-11-04 / 2026-11-05 两次现场定：
+    这台设备的用途就是被 Pad 连；关掉就是 Pad 的处置闭环整条断掉）。所以"必须人来打开"那句已经不再是
+    本机的默认口径，取而代之的是**网段隔离是部署前提**：能路由到本机的任何设备都能写。
+    两道只在这条链上的约束：①8900 有**来源检查**——`originAllowed()` 放行空 Origin（原生 App 不发）
+    与 `android-app://*`，带 `http(s)://` Origin 的握手回 403，它挡的是"网页 JS 可连"，
+    **不挡**裸 socket，所以不等于访问控制；②8899 没有 Origin 门（`/api/` 的对端不是浏览器，
+    这条判据没有意义），改为**默认剥掉 `liveUrl` 里的视频源口令**
+    （`pad_http.expose_stream_credentials=false`），不把每台摄像头的口令跟着报警一起发出去。
+    四条配套事实：
+    ①监听口按 A4（2026-11-04 定案）分工：`http://<host>:8899/api/` 归 HTTP（**2026-11-05 已实现并在监听**），
+    `ws://<host>:8900/` 归 Pad WS——`QWebSocketServer` 独占一只监听器，同口在这套栈上做不到；
+    ②证据字节仍由 `media_http_port`（8090）那台文件服务出，开了这两台就可能顺带把它
     起起来（`pad_server.media_base_url` 写了外部地址时可不起）；
-    ③端口与开关**改了要重启**，设置页没有控件，也不做运行期重开
+    ③**8899 可以运行期重开**（自建 `QTcpServer`）：调试设置页两组都有「保存并应用」，
+    改完写配置 + `stop()` + 重装路由/重连信号 + `start()`，已连的 Pad/客户端会被断开后自行重连；
+    8090 那台仍然不行（见第 13 条）；
+    ④HTTP 写接口全部按 §2.5 只认 `requestId` 幂等，**不比较请求内容**——同一个 UUID 打到另一个
+    `alarmId` 也返回首次那份响应（板端实测过），这是规约要求而不是本机漏判。
     （落点与口径见 [src/biz/pad/README.md](src/biz/pad/README.md)）
 
 > 已闭环、不再在此罗列的历史项：解码线程与 `player_widget` 关闭（现 `closeEvent` 两阶段并行停 4 路）、

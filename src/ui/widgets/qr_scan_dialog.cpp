@@ -318,8 +318,13 @@ private:
     bool quitting_ = false;
 };
 
-// 实时扫码窗格。返回 Confirmed 时 confirmedContent 是用户点确认那颗码的原文。
-Outcome runLiveScan(QWidget *parent, const QString &confirmText,
+// 实时扫码窗格。返回 Confirmed 时 confirmedContent 是拿到的码原文。
+//
+// autoAcceptFirstHit（登录路径）＝ **解出即返回**：不冻结画面、不显示码内内容、不等用户点确认。
+// 现场口径（2026-11-04）：登录页扫码"扫出信息不用显示，直接登录"，少一次点击就少一次误操作；
+// 码本身是否合法由 ConstructionSession::startLogin 判，窗格不重复判一遍。
+// false（智能识别页）保留原来的冻结 + 确认 + 多码点选，那是给人看码内容的入口。
+Outcome runLiveScan(QWidget *parent, const QString &confirmText, bool autoAcceptFirstHit,
                     QString *confirmedContent, QString *err)
 {
     QDialog dialog(parent);
@@ -373,8 +378,11 @@ Outcome runLiveScan(QWidget *parent, const QString &confirmText,
                                  .arg(theme::TEXT)
                                  .arg(theme::FS_CARD)
                                  .arg(theme::PANEL, theme::BORDER));
-    infoLabel->setText(QString::fromUtf8("正在扫描：把现场张贴的二维码放进画面中央，"
-                                         "解出后这里会显示码内内容。"));
+    infoLabel->setText(
+        autoAcceptFirstHit
+            ? QString::fromUtf8("正在扫描：把现场张贴的二维码放进画面中央，识别成功即自动登录。")
+            : QString::fromUtf8("正在扫描：把现场张贴的二维码放进画面中央，"
+                                "解出后这里会显示码内内容。"));
     root->addWidget(infoLabel);
 
     auto *buttonRow = new QWidget(&dialog);
@@ -408,16 +416,22 @@ Outcome runLiveScan(QWidget *parent, const QString &confirmText,
         return button;
     };
 
-    auto *againBtn = makeButton(QString::fromUtf8("重新扫描"), theme::PANEL, theme::TEXT,
-                                theme::HOVER, 1);
     auto *cancelBtn = makeButton(QString::fromUtf8("取消"), theme::FIELD, theme::TEXT,
                                  theme::HOVER, 1);
-    auto *confirmBtn = makeButton(confirmText, theme::SUCCESS, "#FFFFFF",
-                                 theme::SUCCESS_HOVER, 2);
+    // 登录路径**解出即返回**：既没有"确认"，也没有"重新扫描"（扫描本身是连续的，
+    // 按住这颗按钮的窗口期根本不存在）。两颗都只在手动档建，免得底部留两个按不动的
+    // 大按钮，现场反而以为界面卡住了。
+    QPushButton *againBtn = nullptr;
+    QPushButton *confirmBtn = nullptr;
+    if (!autoAcceptFirstHit) {
+        againBtn = makeButton(QString::fromUtf8("重新扫描"), theme::PANEL, theme::TEXT,
+                              theme::HOVER, 1);
+        confirmBtn = makeButton(confirmText, theme::SUCCESS, "#FFFFFF",
+                                theme::SUCCESS_HOVER, 2);
+        confirmBtn->setEnabled(false);
+        againBtn->setEnabled(false);   // 还没解出码时"重新扫描"无意义，先按住
+    }
     root->addWidget(buttonRow);
-
-    confirmBtn->setEnabled(false);
-    againBtn->setEnabled(false);   // 还没解出码时"重新扫描"无意义，先按住
 
     // ── 扫描状态机 ─────────────────────────────────────────────
     // paused：worker 解出码时置位、GUI 线程点「重新扫描」时复位，解码线程每帧读一次
@@ -441,12 +455,17 @@ Outcome runLiveScan(QWidget *parent, const QString &confirmText,
         frozenLabel->hide();
         scanOverlay->setActive(true);
         scanOverlay->raise();
-        confirmBtn->setEnabled(false);
-        againBtn->setEnabled(false);
+        if (confirmBtn)
+            confirmBtn->setEnabled(false);
+        if (againBtn)
+            againBtn->setEnabled(false);
         selectedContent.clear();
         currentHits.clear();
-        infoLabel->setText(QString::fromUtf8("正在扫描：把现场张贴的二维码放进画面中央，"
-                                             "解出后这里会显示码内内容。"));
+        infoLabel->setText(
+            autoAcceptFirstHit
+                ? QString::fromUtf8("正在扫描：把现场张贴的二维码放进画面中央，识别成功即自动登录。")
+                : QString::fromUtf8("正在扫描：把现场张贴的二维码放进画面中央，"
+                                    "解出后这里会显示码内内容。"));
         paused.store(false, std::memory_order_release);
     };
 
@@ -454,7 +473,8 @@ Outcome runLiveScan(QWidget *parent, const QString &confirmText,
         if (index >= currentHits.size())
             return;
         selectedContent = currentHits[index].content;
-        confirmBtn->setEnabled(!selectedContent.isEmpty());
+        if (confirmBtn)
+            confirmBtn->setEnabled(!selectedContent.isEmpty());
         if (currentHits.size() > 1) {
             infoLabel->setText(QString::fromUtf8("识别到 %1 个二维码，已选第 %2 个：\n%3")
                                    .arg(static_cast<int>(currentHits.size()))
@@ -471,8 +491,23 @@ Outcome runLiveScan(QWidget *parent, const QString &confirmText,
         // 这时候再改选会把用户手挑的那颗码换成第一颗，归属就错了
         if (dialog.result() == QDialog::Accepted)
             return;
+
+        // 登录路径：解出即返回，不显示码内内容、也不冻结画面。
+        // 一帧里同时解出多颗码时取第一颗：现场正常只贴一张，而"在冻结图上挑一颗"
+        // 恰恰是本条要省掉的那一步；留一行日志，事后能看出那次登录是从几张里选了第一张。
+        if (autoAcceptFirstHit) {
+            if (hits.size() > 1) {
+                qInfo() << "QR scan: " << hits.size()
+                        << "codes in one frame, taking the first and logging in directly";
+            }
+            selectedContent = hits.front().content;
+            dialog.accept();
+            return;
+        }
+
         scanOverlay->setActive(false);
-        againBtn->setEnabled(true);
+        if (againBtn)
+            againBtn->setEnabled(true);
 
         const QSize fit = previewWidget->size();
         const QSizeF scaled = QSizeF(frame.size()).scaled(fit, Qt::KeepAspectRatio);
@@ -509,14 +544,18 @@ Outcome runLiveScan(QWidget *parent, const QString &confirmText,
         selectHit(0);
     };
 
-    QObject::connect(againBtn, &QPushButton::clicked, &dialog,
-                     [&resumeScanning]() { resumeScanning(); });
+    if (againBtn) {
+        QObject::connect(againBtn, &QPushButton::clicked, &dialog,
+                         [&resumeScanning]() { resumeScanning(); });
+    }
     QObject::connect(cancelBtn, &QPushButton::clicked, &dialog, &QDialog::reject);
-    QObject::connect(confirmBtn, &QPushButton::clicked, &dialog,
-                     [&dialog, &selectedContent]() {
-                         if (!selectedContent.isEmpty())
-                             dialog.accept();
-                     });
+    if (confirmBtn) {
+        QObject::connect(confirmBtn, &QPushButton::clicked, &dialog,
+                         [&dialog, &selectedContent]() {
+                             if (!selectedContent.isEmpty())
+                                 dialog.accept();
+                         });
+    }
 
     // 扫描线动画：40ms 一跳，一整程约 2.2s。上下文对象必须是 dialog——回调按引用捕获了
     // dialog 的栈上成员，用户在动画间隔里关掉窗格时它们已经析构。
@@ -597,7 +636,9 @@ bool QrScanDialog::scan(QWidget *parent, QString *content, QString *err)
         return false;
     }
     QString confirmed;
-    if (runLiveScan(parent, QString::fromUtf8("确认登录"), &confirmed, err) != Outcome::Confirmed)
+    // autoAcceptFirstHit=true：登录页解出即返回，窗格不显示码内内容（2026-11-04 现场口径）。
+    // confirmText 在这条路径上不参与界面（没有确认按钮），传空即可。
+    if (runLiveScan(parent, QString(), true, &confirmed, err) != Outcome::Confirmed)
         return false;
     if (content) *content = confirmed;
     return true;
@@ -613,8 +654,8 @@ void QrScanDialog::openFullScanner(QWidget *parent)
     QString content;
     QString error;
     // 窗格里已经显示过码内内容并由用户确认，这里只需要在真出错时打扰一句
-    if (runLiveScan(parent, QString::fromUtf8("确认"), &content, &error) == Outcome::Cancelled
-        && !error.isEmpty()) {
+    if (runLiveScan(parent, QString::fromUtf8("确认"), false, &content, &error)
+            == Outcome::Cancelled && !error.isEmpty()) {
         QMessageBox::warning(parent, QString::fromUtf8("错误"), error);
     }
 }

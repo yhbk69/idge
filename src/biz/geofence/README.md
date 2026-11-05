@@ -23,6 +23,8 @@
 | `fence_checker.h/.cpp` | 无状态算法：射线法命中、脚点归一化、`checkDetection` 返回 `FenceViolation`（`None`/`Intrusion`/`Absence`） |
 | `fence_manager.h/.cpp` | 单例数据管理：config.json 读写、per-channel 围栏；**老配置的像素坐标在 `loadFromConfig` 里一次性换算成归一化** |
 | `fence_overlay.h/.cpp` | 透明覆盖层 QWidget：绘制与鼠标交互（矩形/多边形/删除），按角色配色与 `setRole`；归一化↔像素的换算基准由 `setContentRect` 提供 |
+| `pad_fence_store.h/.cpp` | **Pad 接口 v1 §5 那套围栏**的存储与版本状态机：`pad_fences`/`pad_fence_versions` 两张表、`regions` 的 8 条校验、草稿/生效/停用三态流转。与上面 `FenceManager` **没有任何共享**（见下节） |
+| `fence_frame_renderer.h/.cpp` | §5.3 要的"合成生效画面"PNG：1280×720，背景网格 + 按 `ruleType` 填色的区域 + 编号圆盘，写到 `<媒体根>/fence-frames/<fenceId>/v<n>.png` |
 
 ## 核心类与数据流
 - **FenceChecker**（全静态方法）：
@@ -104,10 +106,41 @@ if (v.verdict != geofence::FenceVerdict::None) { /* v.role / v.shapeIndex 决定
 第 9 组是本轮唯一能**离线**证明"换视图尺寸不漂"的东西：它逐像素扫三种画布，
 锁 `pixelFromNorm(normFromPixel(px))==px` 与往返误差上限，配一个跨帧尺寸的判定用例。
 
+## 本目录里有**两套**围栏，别混
+
+| | 本机围栏（上面整篇） | Pad v1 围栏（`pad_fence_store`） |
+| --- | --- | --- |
+| 存哪 | `config.json` 的 `geofence.channels[].shapes` | `idge.db` 的 `pad_fences` + `pad_fence_versions` |
+| 谁画 | 界面上的 `FenceOverlay` | Pad 通过 `POST /api/fences/save-draft` 传 `regions` |
+| 坐标 | 归一化 `0..10000`（`kFenceNormBase`），两轴各除各的 | 归一化 `0..1`（v1 §13.4.3），越界**判 422/4001 而不是 clamp** |
+| 形状 | 矩形 2 对角点 / 多边形 ≥3 | `RECT` 恰好 4 点 / `POLYGON` 3–20 点，每版本 ≤8 区域 |
+| 角色 | `forbidden` / `workzone`（决定闯入还是离岗） | `INTRUSION` / `CROSS`（v1 的两个词，出站原样回显） |
+| 版本 | 无版本概念，存即生效 | DRAFT → apply → ACTIVE，旧 ACTIVE 转 DISABLED（终态） |
+| **驱动检测？** | **是**，解码线程逐帧判定 | **否**——存下来、按 v1 读回来，仅此而已 |
+
+**两套没有打通，这是本轮的定案而不是待办**：让 Pad 画的区域直接驱动本机判定，要先把
+`ruleType`→`FenceRole`、`0..1`→`0..10000`、"每版本一套形状"→"每通道一份当前形状表"三层映射定下来，
+而规约没写 `CROSS` 对应本机哪个角色（`CROSS` 字面是"越界"，本机的岗区域离岗是"在所有岗区域之外"，
+两者不等价）。猜测的代价是现场按 Pad 下发围栏后检测行为变了却没人能解释，所以宁可两套并存。
+`src/biz/pad/README.md` 的「HTTP 面还没定…第 1 条」记的就是这件事。
+
+`PadFenceStore` 全部方法都是 `const`：它不持有连接也不持有状态（每次都从
+`DatabaseManager::instance().database()` 拿本线程那个连接），所以能被路由 lambda 按值捕获。
+`activeVersion`/`draftVersion` 是**查出来的、不是存的**——存成列就有和 `status` 分叉的可能。
+
+`renderFenceFrame()` 渲的是**合成底图，不含任何实时帧**：叠一帧真实视频要 `biz → ui`
+反向拿最新帧（分层禁止），本轮没做。规约 §5.3 那句"合成生效画面"到底要不要有画面内容，
+属于待对方确认的一项，已写在 pad 的 README 里。
+
 ## 依赖关系
 - `src/ai/yolo11/common.hpp`：`object_detect_result`/`image_rect_t`。
 - `src/base/config/ConfigManager.h`：`geofence` 配置段读写。
+- `src/biz/db/database_manager.h`：`PadFenceStore` 取本线程那条 SQL 连接（同层向下，合法边）。
 - Qt Widgets：`QWidget`/`QPainter`/`QPainterPath`（overlay 绘制）。
+- Qt Gui only：`fence_frame_renderer` 用 `QImage`+`QPainter`，**不含 widget**，所以能被
+  `biz/pad` 的路由在 GUI 线程上调（也才能被 `tests/test_pad_http_api.cpp` 覆盖到）。
+  ⚠ 它要求进程里已有 `QGuiApplication` + 平台插件：`QCoreApplication` 下第一次 `drawText`
+  会在字体库里段错误（板端实测 gdb #0 在 libQt5Gui），自测因此显式钉 `QT_QPA_PLATFORM=offscreen`。
 
 ## 注意事项
 - **坐标系约定（易错点，2026-10-30 起）**：围栏顶点存的是**视频内容空间的归一化坐标**

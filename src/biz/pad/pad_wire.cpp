@@ -5,6 +5,7 @@
 #include "pad_wire.h"
 
 #include "alarm_uplink_engine.h"   // uplink::mediaUrlFor（越界即不给的安全判据）
+#include "construction_session.h"  // session::ConstructionInfo::taskIdFromJsonText（taskId 的唯一取值判据）
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -104,14 +105,18 @@ QString internalTimeFromWire(const QString &wireTimeText)
 
 QString wireStatus(const AlarmRecord &record)
 {
-    // 见文件头第 1 条：rectified 是"已确认/已读"，不是"已处置"。
+    // 见文件头第 1 条：rectified 是"已确认/已读"，只有 AlarmDAO::dispose() 写的
+    // disposed 才是 v1 的 DISPOSED——把 rectified 折成 DISPOSED 等于把"我看过了"
+    // 上报成"我处理过了"，而库里现在几万条 rectified 全是板端点过确认的历史行。
     const QString &s = record.status;
     if (s == QLatin1String("false_alarm")) {
         return QStringLiteral("FALSE_ALARM");
     }
-    if (s == QLatin1String("rectified")) {
-        return QStringLiteral("PENDING");
+    if (s == QLatin1String("disposed")) {
+        return QStringLiteral("DISPOSED");
     }
+    // pending 与 rectified 都落这里；§3.10 还规定"其他值按 PENDING 处理"，
+    // 所以认不出的内部值同样走这条，不返回空串（对端会把空值当成字段残缺）。
     return QStringLiteral("PENDING");
 }
 
@@ -131,16 +136,13 @@ QString wireReadAt(const AlarmRecord &record)
 
 QString taskIdOf(const AlarmRecord &record)
 {
-    // 唯一来源是扫码登录定死的 construction_id（B2 待与甲方确认是否等同 v1 的 taskId）。
-    if (record.constructionJson.isEmpty()) {
-        return QString();
+    // B2 于 2026-11-04 定案：v1 的 taskId 就是本机施工计划 ID（扫码载荷的 plan.taskId），
+    // 库里它已升成一等列（record.taskId），所有过滤都按它等值走。
+    // 列没值的两种情况回落去解那段 JSON：迁移前的老行、以及内存里刚造出来还没落库的行。
+    if (!record.taskId.isEmpty()) {
+        return record.taskId;
     }
-    QJsonParseError err{};
-    const QJsonDocument doc = QJsonDocument::fromJson(record.constructionJson.toUtf8(), &err);
-    if (err.error != QJsonParseError::NoError || !doc.isObject()) {
-        return QString();
-    }
-    return doc.object().value(QStringLiteral("construction_id")).toString();
+    return session::ConstructionInfo::taskIdFromJsonText(record.constructionJson);
 }
 
 QString defaultDeviceId()
@@ -217,33 +219,100 @@ TypeWire typeOf(const AlarmRecord &record)
     return fallback;
 }
 
+namespace {
+
+// 报警片段的可播地址：库里存的是 Annex-B 裸流（.h265/.h264），同名 .mp4 才是能播的那份。
+// 两者都要求存在；片段是"报警后 2 秒"才写出来，所以报警当刻通常给不出（返回空串）。
+QString clipUrlOf(const AlarmRecord &record, const QString &baseUrl, const QString &rootDir)
+{
+    if (record.videoPath.isEmpty())
+        return QString();
+    const QFileInfo clipInfo(record.videoPath);
+    const QString mp4 = clipInfo.absolutePath() + QLatin1Char('/')
+            + clipInfo.completeBaseName() + QStringLiteral(".mp4");
+    if (!QFile::exists(mp4))
+        return QString();
+    return uplink::mediaUrlFor(baseUrl, rootDir, mp4);
+}
+
+}  // namespace
+
 QJsonObject evidenceOf(const AlarmRecord &record, const QString &baseUrl, const QString &rootDir)
 {
-    QJsonObject evidence;
-    QJsonArray snapshots;
+    // §13.2.1（2026-11-05 改版）：证据两字段**直接放在 `alarm` 顶层**，不再用 `evidence`
+    // 对象包裹，也不再有 `snapshotUrls` 数组。本函数返回的就是"要并进 alarm 的那两个键"，
+    // 由 alarmJson() 逐键 insert。
+    //
+    // 这一处改过三轮，别再凭"更好判空"动它：
+    //   2026-11-04 本机改成 evidence.evidenceSnapshotUrl（被 11-05 的规约否掉）
+    //   11-05 上午按当时规约改成 evidence.snapshotUrls（真机读不到 → 图片恒空）
+    //   11-05 下午规约定为顶层 evidenceSnapshotUrl + clipUrl（即下面这版）
+    QJsonObject fields;
 
     const QString snapAbs = QFileInfo(record.imagePath).absoluteFilePath();
     const QString snapUrl = uplink::mediaUrlFor(baseUrl, rootDir, snapAbs);
-    if (!snapUrl.isEmpty()) {
-        snapshots.append(snapUrl);   // v1 §3.6：数组只放 1 个元素，Pad 只取第一个
-    }
-    evidence.insert(QStringLiteral("snapshotUrls"), snapshots);
+    // evidenceSnapshotUrl 是**必填**（string）。取不到地址时给空串而不是省略键：
+    // 省略 = 必填缺失，严格实现会整条拒收；空串 = 字段在、值无效，Pad 按 §3.5
+    // "无图/加载失败显示占位"处理。两种都行的情况下，绝不拼一个对端取不到的地址。
+    fields.insert(QStringLiteral("evidenceSnapshotUrl"), snapUrl);
 
-    // 库里存的是 Annex-B 裸流；同名 .mp4 才是能播的那个（见 alarm_manager.h 的 attachVideoClip）。
-    // 文件还没落盘就不写这个键——"预告了但取不到"比对端更坏。
-    if (!record.videoPath.isEmpty()) {
-        const QFileInfo clipInfo(record.videoPath);
-        const QString mp4 = clipInfo.absolutePath() + QLatin1Char('/')
-                + clipInfo.completeBaseName() + QStringLiteral(".mp4");
-        if (QFile::exists(mp4)) {
-            const QString clipUrl = uplink::mediaUrlFor(baseUrl, rootDir, mp4);
-            if (!clipUrl.isEmpty()) {
-                evidence.insert(QStringLiteral("clipUrl"), clipUrl);
-            }
-        }
-    }
-    return evidence;
+    // 片段"报警后约 2 秒"才落盘，所以首帧这里是 null；到位后按 §3.6 发一条
+    // **alarm_update 带 clipUrl**（用户 2026-11-05 指定的流程：先发信息+图片，视频写完再更新）。
+    const QString clipUrl = clipUrlOf(record, baseUrl, rootDir);
+    fields.insert(QStringLiteral("clipUrl"),
+                  clipUrl.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(clipUrl));
+    return fields;
 }
+
+namespace {
+
+// §13.2.3 的 `dispose` 对象。`alarm` 与 `alarm_update` **共用这一份**：
+// 两处各拼一遍的话，别的 Pad 收到的"部分更新"里就会缺照片/工号，而本机详情框里有——
+// 同一个报警在两端显示成两种内容。
+QJsonObject disposeObjectOf(const AlarmRecord &record, const QString &baseUrl,
+                            const QString &rootDir)
+{
+    QJsonObject dispose;
+    dispose.insert(QStringLiteral("measure"), record.disposeResult);
+    dispose.insert(QStringLiteral("remark"), record.remark);
+    // personId：库里是 dispose_person_id 列（字符串工号）。没给就整个键不写——
+    // 写空串会被对端读成"处置人工号是空"，那是另一种假数。
+    if (!record.disposePersonId.isEmpty())
+        dispose.insert(QStringLiteral("personId"), record.disposePersonId);
+    dispose.insert(QStringLiteral("personName"), record.disposeUserName);
+    // disposedAt 是"终态时必填"。老行可能终态但没有 dispose_time（迁移前只写了状态），
+    // 这时**宁可省略也不填现在**：wireTime("") 会回落成当前时刻，那等于伪造一个处置时间。
+    if (!record.disposeTime.isEmpty())
+        dispose.insert(QStringLiteral("disposedAt"), wireTime(record.disposeTime));
+
+    // photoUrls：库里那列现在是**JSON 数组文本**（0~5 张），但老行是单张裸路径，
+    // 所以两种形状都认：以 '[' 开头就按数组解，否则当成一个元素。
+    // 判据是"第一个字符"而不是 try-parse：一条被截断的坏 JSON 会走数组分支然后
+    // 解出空表，那等于把"有照片但读不出"报成"没照片"。
+    QJsonArray photos;
+    const QString stored = record.disposePhoto.trimmed();
+    QJsonArray storedPaths;
+    if (stored.startsWith(QLatin1Char('['))) {
+        const QJsonDocument doc = QJsonDocument::fromJson(stored.toUtf8());
+        if (doc.isArray())
+            storedPaths = doc.array();
+    } else if (!stored.isEmpty()) {
+        storedPaths.append(stored);
+    }
+    for (const QJsonValue &item : storedPaths) {
+        const QString path = item.toString();
+        if (path.isEmpty())
+            continue;
+        const QString url = uplink::mediaUrlFor(
+            baseUrl, rootDir, QFileInfo(path).absoluteFilePath());
+        if (!url.isEmpty())
+            photos.append(url);   // 越出媒体根的一律不列（mediaUrlFor 的判据）
+    }
+    dispose.insert(QStringLiteral("photoUrls"), photos);
+    return dispose;
+}
+
+}  // namespace
 
 QJsonObject alarmJson(const AlarmRecord &record, const QString &baseUrl, const QString &rootDir)
 {
@@ -265,56 +334,60 @@ QJsonObject alarmJson(const AlarmRecord &record, const QString &baseUrl, const Q
     data.insert(QStringLiteral("readAt"), readAt.isEmpty() ? QJsonValue(QJsonValue::Null)
                                                           : QJsonValue(readAt));
     data.insert(QStringLiteral("confidence"), static_cast<double>(record.confidence));
-    data.insert(QStringLiteral("evidence"), evidenceOf(record, baseUrl, rootDir));
+
+    // §13.2.1：证据字段**平铺**在 alarm 顶层（evidenceSnapshotUrl / clipUrl），
+    // 没有 evidence 对象。sync_result.alarms[] 用的是同一份快照，所以两处一起就对了。
+    const QJsonObject evidenceFields = evidenceOf(record, baseUrl, rootDir);
+    for (auto it = evidenceFields.constBegin(); it != evidenceFields.constEnd(); ++it)
+        data.insert(it.key(), it.value());
 
     // 可选键：本机现在给不出的（rule/fenceVersion/regionId/modelVersion）整个省略，
-    // 不写空串——v1 §2.6 规定"可选字段可以省略或 null，Pad 按未提供处理"。
+    // 不写空串——§2.6 规定"可选字段可以省略或 null，Pad 按未提供处理"。
     if (!record.disposeResult.isEmpty() || !record.disposeUserName.isEmpty()
             || !record.disposeTime.isEmpty()) {
-        QJsonObject dispose;
-        dispose.insert(QStringLiteral("measure"), record.disposeResult);
-        dispose.insert(QStringLiteral("remark"), record.remark);
-        dispose.insert(QStringLiteral("personName"), record.disposeUserName);
-        dispose.insert(QStringLiteral("disposedAt"), wireTime(record.disposeTime));
-        QJsonArray photos;
-        if (!record.disposePhoto.isEmpty()) {
-            const QString url = uplink::mediaUrlFor(
-                baseUrl, rootDir, QFileInfo(record.disposePhoto).absoluteFilePath());
-            if (!url.isEmpty()) {
-                photos.append(url);
-            }
-        }
-        dispose.insert(QStringLiteral("photoUrls"), photos);
-        data.insert(QStringLiteral("dispose"), dispose);
+        data.insert(QStringLiteral("dispose"), disposeObjectOf(record, baseUrl, rootDir));
     }
     return data;
 }
 
-QJsonObject alarmUpdateJson(const AlarmRecord &record)
+QJsonObject alarmUpdateJson(const AlarmRecord &record, const QString &baseUrl,
+                            const QString &rootDir)
 {
     QJsonObject data;
     data.insert(QStringLiteral("alarmId"), record.id);
     const QString taskId = taskIdOf(record);
     if (!taskId.isEmpty()) {
-        data.insert(QStringLiteral("taskId"), taskId);   // §13.2.3 可选
+        data.insert(QStringLiteral("taskId"), taskId);   // §13.2.2 可选
     }
+    // status / readAt / dispose 至少给一个（§13.2.2）。本机三条状态入口各自带齐了自己那部分：
+    // 已读只改 read_time，处置/误报同时改 status 与 dispose 各列。
     data.insert(QStringLiteral("status"), wireStatus(record));
 
     const QString readAt = wireReadAt(record);
     if (!readAt.isEmpty()) {
         data.insert(QStringLiteral("readAt"), readAt);
     }
-    if (!record.disposeResult.isEmpty()) {
-        QJsonObject dispose;
-        dispose.insert(QStringLiteral("measure"), record.disposeResult);
-        dispose.insert(QStringLiteral("remark"), record.remark);
-        dispose.insert(QStringLiteral("personName"), record.disposeUserName);
-        dispose.insert(QStringLiteral("disposedAt"), wireTime(record.disposeTime));
-        data.insert(QStringLiteral("dispose"), dispose);
+    if (!record.disposeResult.isEmpty() || !record.disposeUserName.isEmpty()
+            || !record.disposeTime.isEmpty()) {
+        // 与 alarm 共用同一个 builder：照片/工号在"部分更新"里也不能丢，
+        // 否则别的 Pad 只收到状态变化，处置现场照片永远补不上（§13.2.3 的 photoUrls）。
+        data.insert(QStringLiteral("dispose"), disposeObjectOf(record, baseUrl, rootDir));
     }
-    // §3.7：updatedAt 必填且必须反映本次变更，否则对端按旧值合并会把这条更新吞掉。
+    // 视频落盘后**只发这一条 update**（2026-11-05 指定流程：报警当刻先发信息+图片，
+    // 片段写完再用 alarm_update 更新视频显示）。
+    // clipUrl 只在能给出地址时才插入，**绝不给 null**：§13.2.2"未出现的字段表示未提供，
+    // 不能当作空值清空本地"——发一个 null 会把对端已经拿到的视频清掉。
+    // ⚠ 这个字段 §13.2.2 的表格里还没有，是对端要补进规约的一项（本机按现场指令先落）。
+    const QString clipUrl = clipUrlOf(record, baseUrl, rootDir);
+    if (!clipUrl.isEmpty()) {
+        data.insert(QStringLiteral("clipUrl"), clipUrl);
+    }
+    // §13.2.2 updatedAt 必填且必须反映本次变更，否则对端按旧值合并会把这条更新吞掉。
     data.insert(QStringLiteral("updatedAt"),
                 wireTime(record.updateTime.isEmpty() ? record.alarmTime : record.updateTime));
+    // syncState：本机没有"再往中心服务器上传"这一步（§8/§11 未装），所以恒 SUBMITTED
+    // （= 已接收待上传）。**不报 UPLOADED**——那是假数；等真正接到上传任务再改这一处。
+    data.insert(QStringLiteral("syncState"), QStringLiteral("SUBMITTED"));
     return data;
 }
 

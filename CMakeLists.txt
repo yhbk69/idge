@@ -677,12 +677,14 @@ add_executable(test_pad_wire
     tests/test_pad_wire.cpp
     src/biz/pad/pad_wire.cpp
     src/biz/ws/alarm_uplink_engine.cpp
+    src/biz/session/construction_session.cpp   # pad_wire 的 taskId 取值判据复用这一处实现
 )
 
 target_include_directories(test_pad_wire PRIVATE
     ${CMAKE_SOURCE_DIR}/src/biz/pad
     ${CMAKE_SOURCE_DIR}/src/biz/ws
     ${CMAKE_SOURCE_DIR}/src/biz/alarm
+    ${CMAKE_SOURCE_DIR}/src/biz/session
 )
 
 target_link_libraries(test_pad_wire
@@ -753,6 +755,88 @@ target_include_directories(test_pad_ws_server PRIVATE
 
 target_link_libraries(test_pad_ws_server
     Qt5::Core
+    Qt5::Network
+    Qt5::Sql
+    Qt5::WebSockets
+    sqlite3
+    ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/lib/libjsoncpp.a
+    pthread
+)
+
+# ============================================================================
+# Pad 接口 v1 HTTP 面的报文解析离线自检（不起 socket、不碰库）
+# 只编 pad_http_message.cpp：那一层的全部判据（chunked / multipart / 上限 / 百分号 /
+# §2.4 信封）都能靠喂字节验，见 tests/test_pad_http_message.cpp 文件头的十九条。
+# 仓库根运行：./build/build_rk3588_linux/test_pad_http_message，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_pad_http_message
+    tests/test_pad_http_message.cpp
+    src/biz/pad/pad_http_message.cpp
+)
+
+target_include_directories(test_pad_http_message PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/biz/pad
+)
+
+target_link_libraries(test_pad_http_message
+    Qt5::Core
+)
+
+# ============================================================================
+# Pad 接口 v1 HTTP 面的线上自检（loopback 起真服务端 + 真 QTcpSocket 客户端）
+# 源列表 = 四条章节路由的依赖闭包（PadHttpServer 走 AlarmManager/AlarmDAO/围栏库/设备采样，
+# 所以连 db、session、geofence、sysinfo、ai/model_repo 一起编）。
+# 不链 GUI 之外的东西：Qt5::Gui 是**必须**的——fence_frame_renderer 用 QImage/QPainter
+# 画 §5.3 要求的那张合成画面，它在 offscreen 之外不需要任何显示设备。
+# 契约清单见 tests/test_pad_http_api.cpp 文件头。
+# 仓库根运行：./build/build_rk3588_linux/test_pad_http_api，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_pad_http_api
+    tests/test_pad_http_api.cpp
+    src/biz/pad/pad_http_message.cpp
+    src/biz/pad/pad_http_server.cpp
+    src/biz/pad/pad_http_api.cpp
+    src/biz/pad/pad_http_alarms.cpp
+    src/biz/pad/pad_http_fences.cpp
+    src/biz/pad/pad_http_streams.cpp
+    src/biz/pad/pad_http_device.cpp
+    src/biz/pad/pad_request_cache.cpp
+    src/biz/pad/pad_wire.cpp
+    src/biz/pad/pad_ws_server.cpp
+    src/biz/ws/alarm_uplink_engine.cpp
+    src/biz/geofence/pad_fence_store.cpp
+    src/biz/geofence/fence_frame_renderer.cpp
+    src/biz/alarm/alarm_manager.cpp
+    src/biz/db/database_manager.cpp
+    src/biz/db/alarm_dao.cpp
+    src/biz/db/detection_dao.cpp
+    src/biz/session/construction_session.cpp
+    src/base/config/ConfigManager.cpp
+    src/base/sysinfo/device_stats.cpp
+    src/ai/model_repo/model_registry.cpp
+)
+
+target_include_directories(test_pad_http_api PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/biz/pad
+    ${CMAKE_SOURCE_DIR}/src/biz/ws
+    ${CMAKE_SOURCE_DIR}/src/biz/alarm
+    ${CMAKE_SOURCE_DIR}/src/biz/db
+    ${CMAKE_SOURCE_DIR}/src/biz/geofence
+    ${CMAKE_SOURCE_DIR}/src/biz/session
+    ${CMAKE_SOURCE_DIR}/src/base
+    ${CMAKE_SOURCE_DIR}/src/base/config
+    ${CMAKE_SOURCE_DIR}/src/base/sysinfo
+    ${CMAKE_SOURCE_DIR}/src/ai/model_repo
+    ${CMAKE_SOURCE_DIR}/src/ai/yolo11
+    ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/include
+    ${CMAKE_SOURCE_DIR}/3rdparty/sqlite
+)
+
+target_link_libraries(test_pad_http_api
+    Qt5::Core
+    Qt5::Gui
     Qt5::Network
     Qt5::Sql
     Qt5::WebSockets
