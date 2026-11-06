@@ -7,6 +7,7 @@
 
 #include <QDateTime>
 #include <QDebug>
+#include <QSet>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -80,28 +81,39 @@ QVector<PadFenceVersion> NativeFenceStore::loadVersions(const QString &fenceId) 
 }
 
 // ============================================================================
-// 取某 task 下所有本机围栏
+// 取某 task 下的围栏（含 task_id='' 的全局历史桶）
 // ============================================================================
+// 迁移进来的老围栏没有 taskId，统一放在空串桶里；登录前/登录后都必须能读到，
+// 否则"迁移成功"反而等于把围栏从判定里摘掉。同一 camera 两个桶都有时，当前
+// task 的那条优先（它才是登录后新画的）。
 QList<PadFence> NativeFenceStore::fencesForTask(const QString &taskId) const
 {
     QList<PadFence> out;
     QSqlDatabase db = storeDb("fencesForTask");
     if (!db.isOpen())
         return out;
+    // null 串绑成 SQL NULL 会让 `task_id = :task_id` 永不命中，统一按空串（全局桶）查
+    const QString scopeTaskId = taskId.isNull() ? QStringLiteral("") : taskId;
     QSqlQuery query(db);
     query.prepare(QStringLiteral(
         "SELECT fence_id, task_id, camera_id, stream_id FROM native_fences "
-        "WHERE task_id = :task_id ORDER BY fence_id"));
-    query.bindValue(QStringLiteral(":task_id"), taskId);
+        "WHERE task_id = :task_id OR task_id = '' "
+        "ORDER BY CASE WHEN task_id = :task_id AND task_id <> '' THEN 0 ELSE 1 END, fence_id"));
+    query.bindValue(QStringLiteral(":task_id"), scopeTaskId);
     if (!query.exec()) {
         qWarning() << "native_fence_store fencesForTask failed:" << query.lastError().text();
         return out;
     }
+    QSet<QString> seenCameras;
     while (query.next()) {
+        const QString cameraId = query.value(2).toString();
+        if (seenCameras.contains(cameraId))
+            continue;
+        seenCameras.insert(cameraId);
         PadFence fence;
         fence.fenceId = query.value(0).toString();
         fence.taskId = query.value(1).toString();
-        fence.cameraId = query.value(2).toString();
+        fence.cameraId = cameraId;
         fence.streamId = query.value(3).toString();
         fence.versions = loadVersions(fence.fenceId);
         out.append(fence);
@@ -180,11 +192,17 @@ QString NativeFenceStore::saveActiveVersion(const QString &taskId, const QString
     if (!db.isOpen())
         return QString();
 
+    // QString() 是 null 串，绑进 SQL 就是 NULL。task_id / stream_id 两列都是
+    // NOT NULL：显式 NULL 不触发 DEFAULT ''，INSERT 会整条失败。迁移路径正是用
+    // QString() 表示"全局空桶"，所以这里统一规范化成空串再读写。
+    const QString scopeTaskId = taskId.isNull() ? QStringLiteral("") : taskId;
+    const QString scopeStreamId = streamId.isNull() ? QStringLiteral("") : streamId;
+
     const QString now = internalNow();
     const QString regionsJson = regionsToJsonText(regions);
 
     PadFence existing;
-    const bool hasExisting = loadFenceByTaskCamera(taskId, cameraId, &existing);
+    const bool hasExisting = loadFenceByTaskCamera(scopeTaskId, cameraId, &existing);
 
     // 1) 已有围栏：把旧 ACTIVE 置为 DISABLED
     if (hasExisting) {
@@ -221,9 +239,9 @@ QString NativeFenceStore::saveActiveVersion(const QString &taskId, const QString
             "                          created_at, updated_at) "
             "VALUES (:fence_id, :task_id, :camera_id, :stream_id, :now, :now)"));
         ins.bindValue(QStringLiteral(":fence_id"), fenceId);
-        ins.bindValue(QStringLiteral(":task_id"), taskId);
+        ins.bindValue(QStringLiteral(":task_id"), scopeTaskId);
         ins.bindValue(QStringLiteral(":camera_id"), cameraId);
-        ins.bindValue(QStringLiteral(":stream_id"), streamId);
+        ins.bindValue(QStringLiteral(":stream_id"), scopeStreamId);
         ins.bindValue(QStringLiteral(":now"), now);
         if (!ins.exec()) {
             qWarning() << "native_fence_store insert fence failed:" << ins.lastError().text();

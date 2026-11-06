@@ -309,6 +309,11 @@ void FenceManager::reloadForTask(const QString &taskId)
         cf.shapes = regionsToShapes(active.regions);
         fences_[ch] = cf;
     }
+    // 与 loadFromConfig 同一口径：内存里有形状就允许判定。启动时 config 的
+    // geofence.enabled 可能是 false（模板默认），登录后才从库里读到围栏的情况
+    // 若不在这里抬开关，检测链路会一直跳过这个通道。
+    if (!fences_.empty())
+        enabled_ = true;
     qDebug() << "[Fence] reloadForTask:" << taskId << "channels=" << fences_.size();
 }
 

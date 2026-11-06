@@ -21,6 +21,7 @@
 #include <QMessageBox>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QPixmap>
 #include <QScreen>
 #include <QGuiApplication>
@@ -71,45 +72,44 @@ void AlarmDetailDialog::setupUi()
     imageLabel_->setText("无截图");
     mainLay->addWidget(imageLabel_);
 
-    // 信息网格
-    QGridLayout *infoLay = new QGridLayout();
-    infoLay->setHorizontalSpacing(12);
-    infoLay->setVerticalSpacing(8);
-
-    auto addRow = [&](int row, const QString &label, const QString &value) {
-        QLabel *lbl = new QLabel(label);
-        lbl->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
+    // ── 信息区：基础项带标签，施工信息保留常用项 ─────────────────────────────
+    // 全量摊开（construction_info 最多近 20 行）会把截图挤没；只留三项又不够判误报。
+    // 这里取中间档：基础六项带标签，施工信息保留人/计划/地点/内容/时段，
+    // 纯技术键（年月日、旬、顺延、约束）不进详情，仍可在「施工详情」框查看。
+    auto addField = [](QGridLayout *grid, int row, int col,
+                       const QString &label, const QString &value,
+                       const char *color, bool bold) {
+        QLabel *lbl = new QLabel(label + QStringLiteral("："));
+        lbl->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
         QLabel *val = new QLabel(value);
-        val->setStyleSheet(theme::text(theme::TEXT, theme::FS_BODY, true));
-        infoLay->addWidget(lbl, row, 0);
-        infoLay->addWidget(val, row, 1);
+        val->setStyleSheet(theme::text(color, theme::FS_BODY, bold));
+        val->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        grid->addWidget(lbl, row, col * 2);
+        grid->addWidget(val, row, col * 2 + 1);
         return val;
     };
 
-    // 时间行按要求撤了：这一页是围着施工项目看的，时刻在列表那一行上，重复一遍只占位。
-    addRow(0, "通道:", QString("通道 %1").arg(alarm_.channel + 1));
-    addRow(1, "类别:", alarm_.className);
-    // 报警级别：目前只有两个真实取值 —— 模型检测=3（一般）、电子围栏=2（重要），
-    // 分别来自 alarm_manager.cpp 里那两处 makeAlarmRecord 的入参；1/4 还没有生产者。
-    // 颜色跟着级别走：岗位上一眼要分得清"这条要不要现在处理"。
+    // 报警视频片段：硬编环形缓冲区在"报警后 2 秒"才落盘，打开得快时可能还没有。
+    QString clipText;
+    if (alarm_.videoPath.isEmpty()) {
+        clipText = QStringLiteral("未生成");
+    } else if (!QFileInfo::exists(alarm_.videoPath)) {
+        clipText = QStringLiteral("已清理");
+    } else {
+        const QFileInfo clip(alarm_.videoPath);
+        clipText = QStringLiteral("%1（%2 KB）").arg(clip.fileName()).arg(clip.size() / 1024);
+    }
+
     QString levelText;
+    const char *levelColor = theme::TEXT;
     switch (alarm_.alarmLevel) {
-    case 1: levelText = QString::fromUtf8("紧急"); break;
-    case 2: levelText = QString::fromUtf8("重要"); break;
+    case 1: levelText = QString::fromUtf8("紧急"); levelColor = theme::DANGER; break;
+    case 2: levelText = QString::fromUtf8("重要"); levelColor = theme::WARNING; break;
     case 3: levelText = QString::fromUtf8("一般"); break;
     case 4: levelText = QString::fromUtf8("提示"); break;
     default: levelText = QString::fromUtf8("未知（%1）").arg(alarm_.alarmLevel); break;
     }
-    QLabel *levelLabel = addRow(2, "报警级别:", levelText);
-    if (alarm_.alarmLevel <= 2) {
-        levelLabel->setStyleSheet(theme::text(alarm_.alarmLevel == 1 ? theme::DANGER
-                                                                     : theme::WARNING,
-                                              theme::FS_BODY, true));
-    }
-    addRow(3, "置信度:", QString("%1%").arg(alarm_.confidence * 100, 0, 'f', 1));
-    // 四个内部状态各给一句：以前这里只分"已确认/未确认"，于是误报和被处置的行都会被读成
-    // "未确认"。列表那边同一个 bug 已经修过（alarm_list_widget.cpp 的 statusLabel），
-    // 详情不能留第二套口径——同一报警在两个地方显示成两种进度，比错着更难解释。
+
     QString statusText;
     const char *statusColor = theme::WARNING;   // 未确认
     if (alarm_.status == QLatin1String("rectified")) {
@@ -124,47 +124,68 @@ void AlarmDetailDialog::setupUi()
     } else {
         statusText = QString::fromUtf8("未确认");
     }
-    statusLabel_ = addRow(4, "状态:", statusText);
-    statusLabel_->setStyleSheet(theme::text(statusColor, theme::FS_BODY, true));
 
-    // 报警视频片段：硬编环形缓冲区在"报警后 2 秒"才落盘，所以打开得快时可能还没有。
-    // 这里只报状态/路径，不做播放——裸流浏览器放不了，网页侧播同名的 .mp4 副本。
-    QString clipText;
-    if (alarm_.videoPath.isEmpty()) {
-        clipText = "未生成";
-    } else {
-        const QFileInfo clip(alarm_.videoPath);
-        if (!clip.exists()) {
-            clipText = "已清理";
-        } else {
-            const QFileInfo webCopy(clip.absolutePath() + QStringLiteral("/")
-                                    + clip.completeBaseName() + QStringLiteral(".mp4"));
-            clipText = QString("%1（%2 KB）%3")
-                .arg(clip.fileName())
-                .arg(clip.size() / 1024)
-                .arg(webCopy.exists() ? QStringLiteral(" · 网页副本 .mp4") : QString());
-        }
-    }
-    addRow(5, "视频:", clipText);
+    QGridLayout *infoLay = new QGridLayout();
+    infoLay->setHorizontalSpacing(12);
+    infoLay->setVerticalSpacing(8);
+    addField(infoLay, 0, 0, "通道", QStringLiteral("通道 %1").arg(alarm_.channel + 1),
+             theme::TEXT, false);
+    addField(infoLay, 0, 1, "类别", alarm_.className, theme::TEXT, false);
+    addField(infoLay, 1, 0, "报警级别", levelText, levelColor, true);
+    addField(infoLay, 1, 1, "置信度",
+             QStringLiteral("%1%").arg(alarm_.confidence * 100, 0, 'f', 1),
+             theme::TEXT, false);
+    statusLabel_ = addField(infoLay, 2, 0, "状态", statusText, statusColor, true);
+    addField(infoLay, 2, 1, "视频", clipText, theme::TEXT, false);
+    mainLay->addLayout(infoLay);
 
-    // 施工信息：按 JSON 里有什么就列什么，键→中文名与顺序由 ConstructionInfo::fields()
-    // 给（与「施工详情」框同一个口径，见 src/biz/session/construction_session.h）。
-    // 未登录时产生的报警（以及本轮之前的全部历史行）这里是空的 —— 不回填，
-    // 历史上确实没有这份信息，显示成一行说明比留白或假数据诚实。
+    // 施工信息：按白名单取常用项，顺序固定；缺失的键直接不显示
     const QVector<session::ConstructionField> construction =
         session::ConstructionInfo::fieldsFromJson(alarm_.constructionJson);
-    int nextRow = 6;
-    if (construction.isEmpty()) {
-        QLabel *val = addRow(nextRow++, QString::fromUtf8("施工信息:"),
-                             QString::fromUtf8("— （该报警产生时未登录，无施工信息）"));
-        val->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
-    } else {
-        for (const session::ConstructionField &row : construction) {
-            addRow(nextRow++, row.label + QStringLiteral("："), row.value);
+    static const QStringList kKeepFields = {
+        QStringLiteral("姓名"), QStringLiteral("负责人（旧）"),
+        QStringLiteral("人员工号"), QStringLiteral("负责人工号（旧）"),
+        QStringLiteral("负责人电话（旧）"), QStringLiteral("角色"),
+        QStringLiteral("施工计划(taskId)"), QStringLiteral("施工id（旧）"),
+        QStringLiteral("线路"), QStringLiteral("车站"),
+        QStringLiteral("作业内容"), QStringLiteral("施工内容（旧）"),
+        QStringLiteral("计划人数"), QStringLiteral("计划时间")};
+    QHash<QString, QString> byLabel;
+    for (const session::ConstructionField &field : construction)
+        byLabel.insert(field.label, field.value);
+    QVector<session::ConstructionField> kept;
+    for (const QString &label : kKeepFields) {
+        if (byLabel.contains(label)) {
+            session::ConstructionField field;
+            field.label = label;
+            field.value = byLabel.value(label);
+            kept.append(field);
         }
     }
-
-    mainLay->addLayout(infoLay);
+    if (kept.isEmpty()) {
+        QLabel *none = new QLabel(QStringLiteral("施工信息：该报警产生时未登录"));
+        none->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
+        mainLay->addWidget(none);
+    } else {
+        QLabel *section = new QLabel(QStringLiteral("施工信息"));
+        section->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
+        mainLay->addWidget(section);
+        QGridLayout *infoGrid = new QGridLayout();
+        infoGrid->setHorizontalSpacing(10);
+        infoGrid->setVerticalSpacing(6);
+        int row = 0;
+        for (const session::ConstructionField &field : kept) {
+            QLabel *lbl = new QLabel(field.label + QStringLiteral("："));
+            lbl->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
+            QLabel *val = new QLabel(field.value);
+            val->setStyleSheet(theme::text(theme::TEXT, theme::FS_BODY));
+            val->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            infoGrid->addWidget(lbl, row, 0);
+            infoGrid->addWidget(val, row, 1);
+            ++row;
+        }
+        mainLay->addLayout(infoGrid);
+    }
 
     mainLay->addStretch();
     // 预览区与底部弹簧按 3:1 分剩余高度：图拿到绝大部分，信息网格仍按自身尺寸贴住中间。

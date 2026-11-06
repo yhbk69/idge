@@ -93,6 +93,7 @@
 #include <QElapsedTimer>
 #include <QDateTime>
 #include <QFile>
+#include <QPoint>
 #include <cerrno>
 #include <queue>
 #include <deque>
@@ -111,6 +112,7 @@
 #include "dma_alloc.h"        // dma_sync_device_to_cpu / dma_sync_cpu_to_device
 #include <libswscale/swscale.h>   // 软件帧（摄像头裸流/纯软解）→ RGBA 兜底转换
 #include "image_utils.h"
+#include "image_drawing.h"   // 围栏报警截图：把围栏边线补画进 RGB 像素
 #include "alarm_manager.h"
 #include "fence_manager.h"
 #include "fence_checker.h"
@@ -140,6 +142,70 @@
 // ============================================================
 namespace {
 
+// 围栏截图要补画的区域：帧像素坐标的闭合多边形 + ARGB 颜色。
+// 先按 fillAlpha 铺半透明底色，再描边线。
+struct FenceOutline {
+    QVector<QPoint> points;
+    unsigned int color = COLOR_RED;   // image_drawing 的 ARGB 口径（边线与填充同色）
+    int fillAlpha = 50;               // 区域填充不透明度 0..255，与界面 roleFillColor 同档
+};
+
+// 在 RGB888 像素上按奇偶规则填充多边形（alpha 混合）。
+// 只给围栏截图用：文件里没有带 alpha 的绘制器，而证据图要"看得见区域、又压不住画面"。
+// 坐标允许越界（围栏可以画进黑边），逐像素裁剪。
+static void fillPolygonRgb(unsigned char *pixels, int w, int h,
+                           const QVector<QPoint> &points, unsigned int argb, int alpha)
+{
+    if (!pixels || w <= 0 || h <= 0 || points.size() < 3)
+        return;
+    alpha = std::clamp(alpha, 0, 255);
+    if (alpha == 0)
+        return;
+    const int cr = (argb >> 16) & 0xFF;
+    const int cg = (argb >> 8) & 0xFF;
+    const int cb = argb & 0xFF;
+
+    int minY = points[0].y(), maxY = points[0].y();
+    for (const QPoint &p : points) {
+        minY = std::min(minY, p.y());
+        maxY = std::max(maxY, p.y());
+    }
+    const int yBegin = std::max(0, minY);
+    const int yEnd = std::min(h - 1, maxY);
+    QVector<float> crossings;
+    crossings.reserve(points.size());
+
+    for (int y = yBegin; y <= yEnd; ++y) {
+        const float scanY = y + 0.5f;
+        crossings.clear();
+        for (int i = 0; i < points.size(); ++i) {
+            const QPoint &a = points.at(i);
+            const QPoint &b = points.at((i + 1) % points.size());
+            if (a.y() == b.y())
+                continue;
+            const float y0 = a.y();
+            const float y1 = b.y();
+            if ((scanY >= y0 && scanY < y1) || (scanY >= y1 && scanY < y0)) {
+                crossings.append(a.x() + (scanY - y0) * (b.x() - a.x()) / (y1 - y0));
+            }
+        }
+        if (crossings.size() < 2)
+            continue;
+        std::sort(crossings.begin(), crossings.end());
+        unsigned char *row = pixels + static_cast<size_t>(y) * w * 3;
+        for (int k = 0; k + 1 < crossings.size(); k += 2) {
+            const int x0 = std::max(0, static_cast<int>(std::ceil(crossings[k] - 0.5f)));
+            const int x1 = std::min(w - 1, static_cast<int>(std::floor(crossings[k + 1] - 0.5f)));
+            for (int x = x0; x <= x1; ++x) {
+                unsigned char *p = row + x * 3;
+                p[0] = static_cast<unsigned char>((p[0] * (255 - alpha) + cr * alpha) / 255);
+                p[1] = static_cast<unsigned char>((p[1] * (255 - alpha) + cg * alpha) / 255);
+                p[2] = static_cast<unsigned char>((p[2] * (255 - alpha) + cb * alpha) / 255);
+            }
+        }
+    }
+}
+
 // 一张待写盘的任务：存一份 RGB 像素（去掉 alpha，体积比 RGBA 小 25%）+ 路径
 //
 // 像素有两种来源，pixels() 统一取出：
@@ -158,6 +224,7 @@ struct SnapJob {
             rgb = std::move(o.rgb);
             dmaVa = o.dmaVa; dmaSize = o.dmaSize; dmaFd = o.dmaFd;
             w = o.w; h = o.h; path = std::move(o.path);
+            fences = std::move(o.fences);
             o.dmaVa = nullptr; o.dmaSize = 0; o.dmaFd = -1;
         }
         return *this;
@@ -173,6 +240,7 @@ struct SnapJob {
     int w = 0;
     int h = 0;
     QString path;                      // 保存路径(.jpg)
+    QVector<FenceOutline> fences;      // 围栏报警才非空：写盘前补画到 RGB 上
 
 private:
     void release()
@@ -200,12 +268,14 @@ public:
     // 一种访存——板端实测一次 submit 中位 28.3ms、p90 62.4ms、最大 104.4ms
     // （4 路 1280×720、n=321），而一帧预算只有 33.3ms：一次抓拍吃掉大半个预算。
     // 改走 RGA 后同口径中位 2.5ms、最大 9.7ms（n=62），且逐字节等于 CPU 的结果。
-    void submit(int w, int h, const unsigned char *rgba, int srcFd, const QString &path)
+    void submit(int w, int h, const unsigned char *rgba, int srcFd, const QString &path,
+                QVector<FenceOutline> fences = {})
     {
         SnapJob job;
         job.w = w;
         job.h = h;
         job.path = path;
+        job.fences = std::move(fences);
 
         if (!convertByRga(job, srcFd)) convertByCpu(job, rgba);   // 回退：RGA 拒收该 fd 也得有图
 
@@ -318,6 +388,22 @@ private:
         img.width = job.w;
         img.height = job.h;
         img.width_stride = job.w;
+        // 围栏报警：先铺一层半透明区域，再描边线。检测框是解码线程烧在显示缓冲里的，
+        // 围栏叠加层只存在于 UI，不会进截图——所以在这里补一次。
+        // draw_line 的颜色是 ARGB（0xAARRGGBB），内部按目标格式转序。
+        for (const FenceOutline &fence : job.fences) {
+            fillPolygonRgb(img.virt_addr, job.w, job.h, fence.points,
+                           fence.color, fence.fillAlpha);
+        }
+        for (const FenceOutline &fence : job.fences) {
+            if (fence.points.size() < 2)
+                continue;
+            for (int i = 0; i < fence.points.size(); ++i) {
+                const QPoint &a = fence.points.at(i);
+                const QPoint &b = fence.points.at((i + 1) % fence.points.size());
+                draw_line(&img, a.x(), a.y(), b.x(), b.y(), fence.color, 3);
+            }
+        }
         write_image(job.path.toUtf8().constData(), &img);
         writeThumb(job);
     }
@@ -536,9 +622,47 @@ static void submitAlarmClip(const std::shared_ptr<VideoRecorder> &recorder,
     ClipWriter::get().submit(std::move(job));
 }
 
+// 围栏形状（归一化 0..10000）→ 帧像素边线；矩形展开成四个角。
+// 颜色走 image_drawing 的 ARGB 常量，红=禁区、绿=岗区域（与界面配色一致）。
+static QVector<FenceOutline> fenceOutlinesForSnapshot(const geofence::ChannelFence &fence,
+                                                      int w, int h)
+{
+    QVector<FenceOutline> out;
+    for (const geofence::FenceShape &shape : fence.shapes) {
+        FenceOutline outline;
+        const bool workzone = shape.role == geofence::FenceRole::Workzone;
+        outline.color = workzone ? COLOR_GREEN : COLOR_RED;
+        // 与界面 FenceOverlay::roleFillColor 同一档：绿 45、红 50（255 制），
+        // 低到不挡画面，又能一眼看出区域范围。
+        outline.fillAlpha = workzone ? 45 : 50;
+        if (shape.type == geofence::ShapeType::Rectangle && shape.points.size() >= 2) {
+            const geofence::Rectangle rect = shape.toRect();
+            outline.points = {
+                QPoint(geofence::pixelFromNorm(rect.left, 0, w),
+                       geofence::pixelFromNorm(rect.top, 0, h)),
+                QPoint(geofence::pixelFromNorm(rect.right, 0, w),
+                       geofence::pixelFromNorm(rect.top, 0, h)),
+                QPoint(geofence::pixelFromNorm(rect.right, 0, w),
+                       geofence::pixelFromNorm(rect.bottom, 0, h)),
+                QPoint(geofence::pixelFromNorm(rect.left, 0, w),
+                       geofence::pixelFromNorm(rect.bottom, 0, h))};
+        } else {
+            outline.points.reserve(shape.points.size());
+            for (const geofence::Point &p : shape.points) {
+                outline.points.append(QPoint(geofence::pixelFromNorm(p.x, 0, w),
+                                             geofence::pixelFromNorm(p.y, 0, h)));
+            }
+        }
+        if (outline.points.size() >= 2)
+            out.append(outline);
+    }
+    return out;
+}
+
 // 生成截图路径并提交给后台线程，返回保存路径
 static QString submitAlarmSnapshot(int channel, const QString &className,
-                                   int w, int h, const unsigned char *rgba, int srcFd)
+                                   int w, int h, const unsigned char *rgba, int srcFd,
+                                   const geofence::ChannelFence *fence = nullptr)
 {
     // 整段都在解码线程上跑（建目录 + 拼文件名 + 拷一份像素副本），报警密集时
     // 这些微秒直接从这一路的帧预算里扣。[PROBE] snap 每次报警出一行，
@@ -566,7 +690,10 @@ static QString submitAlarmSnapshot(int channel, const QString &className,
         .arg(QDateTime::currentDateTime().toString("HHmmss_zzz"));
 
     // 提交给后台线程写盘（像素转换交给 RGA，产物随 job 移交），解码线程立即返回不等待
-    SnapWriter::get().submit(w, h, rgba, srcFd, path);
+    QVector<FenceOutline> outlines;
+    if (fence)
+        outlines = fenceOutlinesForSnapshot(*fence, w, h);
+    SnapWriter::get().submit(w, h, rgba, srcFd, path, std::move(outlines));
     if (perfProbe())
         qWarning() << "[PROBE] snap us" << snapClock.nsecsElapsed() / 1000;
     return path;
@@ -586,7 +713,8 @@ static QString submitAlarmSnapshot(int channel, const QString &className,
 // ============================================================================
 static void deliverAlarms(int channel, QVector<AlarmRecord> &alarms,
                           const image_buffer_t &frame,
-                          const std::shared_ptr<VideoRecorder> &recorder)
+                          const std::shared_ptr<VideoRecorder> &recorder,
+                          const geofence::ChannelFence *fence = nullptr)
 {
     if (alarms.isEmpty())
         return;
@@ -594,7 +722,7 @@ static void deliverAlarms(int channel, QVector<AlarmRecord> &alarms,
     if (AlarmManager::instance().screenshotsEnabled()) {
         const QString snap = submitAlarmSnapshot(
             channel, alarms.front().className, frame.width, frame.height,
-            (const unsigned char *)frame.virt_addr, frame.fd);
+            (const unsigned char *)frame.virt_addr, frame.fd, fence);
         // 只在截图成功时设置路径
         for (auto &a : alarms) a.imagePath = snap;
     }
@@ -2399,7 +2527,7 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
                                             .arg(a.confidence * 100, 0, 'f', 1));
                                 }
                             }
-                            deliverAlarms(channel_, fenceAlarms, dislayImage, videoRecorder_);
+                            deliverAlarms(channel_, fenceAlarms, dislayImage, videoRecorder_, &cf);
                         }
                     }
 

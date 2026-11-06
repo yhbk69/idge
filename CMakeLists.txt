@@ -1157,3 +1157,33 @@ target_link_libraries(test_net_route
     Qt5::Core
     Qt5::Network
 )
+
+# ============================================================================
+# 电子围栏图文说明的离屏出图工具（tools/geofence_shots）
+# 底图用板端真实报警快照，围栏由真 FenceOverlay + 合成鼠标事件提交，判定由真
+# FenceChecker 出，落库写到临时 idge.db —— 不碰现场的库和 config.json。
+# 仓库根运行：./build/build_rk3588_linux/geofence_shots <出图目录> <底图jpg>
+# ============================================================================
+add_executable(geofence_shots
+    tools/geofence_shots/main.cpp
+    src/biz/geofence/fence_overlay.cpp
+    src/biz/geofence/fence_manager.cpp
+    src/biz/geofence/fence_checker.cpp
+    src/biz/geofence/fence_frame_renderer.cpp
+    src/biz/geofence/pad_fence_store.cpp
+    src/biz/geofence/native_fence_store.cpp
+    src/biz/db/database_manager.cpp
+    src/biz/session/construction_session.cpp
+    src/base/config/ConfigManager.cpp
+)
+
+target_link_libraries(geofence_shots
+    Qt5::Core
+    Qt5::Gui
+    Qt5::Widgets
+    Qt5::Sql
+    sqlite3
+    pthread
+)
+
+target_compile_definitions(geofence_shots PRIVATE ZERO_COPY)
