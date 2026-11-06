@@ -121,16 +121,22 @@ void FenceOverlay::loadFences()
 }
 
 // ============================================================================
-// saveFences - 保存围栏数据到 FenceManager
+// saveFences - 保存围栏数据到 FenceManager（落 DB）
 // ============================================================================
-// 不再记录 overlay 尺寸：围栏顶点是归一化坐标，判定端不需要画布几何，
-// 换视图 / 全屏 / 拖窗口都不会让既有围栏改语义（旧实现记 overlay_w/h 正是失配之源）。
-// 顺序：setChannelFence（触发 fenceChanged 刷新）→ saveToConfig 落盘。
+// 形状由 FenceManager::setChannelFence 落库（native_fences 新 ACTIVE 版本）。
+// 未登录时 setChannelFence 直接拒绝，这里顺手把本地刚画的形状回滚（从 manager 重读），
+// 避免"画上去了但没存"的假象。
 // ============================================================================
 void FenceOverlay::saveFences()
 {
     FenceManager::instance().setChannelFence(channel_, channelFence_);
-    FenceManager::instance().saveToConfig();
+    if (!FenceManager::isLoggedIn()) {
+        // 未登录：setChannelFence 已拒绝落库，回滚本地临时形状
+        loadFences();
+        FenceManager::instance().postLog("fence",
+            QStringLiteral("未登录，围栏操作已取消，请先扫码登录"));
+        return;
+    }
     emit fenceUpdated();
 }
 

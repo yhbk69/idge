@@ -38,6 +38,8 @@
 #include <utility>
 #include <string>
 
+#include <QString>
+
 namespace geofence {
 
 // ============================================================================
@@ -157,11 +159,17 @@ inline FenceRole roleFromString(const std::string &text) {
 // toRect():  将任意形状的顶点列表归一化为外接矩形（min/max 扫描，O(n)）。
 //            矩形命中判断前先经 toRect() 归一化，从而与顶点的存储顺序无关，
 //            即用户从任意方向拖出的对角点都能得到正确的 [left,top,right,bottom]。
+//
+// regionId: 形状级稳定身份（本机生成，格式 RG-<fenceId>-<seq> 或哈希）。
+//   画完第一个形状时分配，此后该形状的增/删/改**不影响其它形状的 regionId**——
+//   删中间一个，后面的 id 保持不变；这是与"按 vector 下标命中"的关键区别。
+//   空串表示尚未分配（新画的形状在落库前由 FenceManager 分配）。
 // ============================================================================
 struct FenceShape {
     ShapeType type = ShapeType::Rectangle;
     FenceRole role = FenceRole::Forbidden;
     std::vector<Point> points;
+    QString regionId;   ///< 形状级稳定 id；空串 = 未分配
 
     bool empty() const { return points.empty(); }
     void clear() { points.clear(); }

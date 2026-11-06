@@ -30,6 +30,7 @@
 #include "alarm_uplink_engine.h"      // uplink::mediaUrlFor（"越界即不给"那份判据）
 #include "fence_frame_renderer.h"
 #include "pad_fence_store.h"
+#include "native_fence_store.h"
 #include "pad_http_server.h"
 #include "pad_request_cache.h"
 #include "pad_wire.h"
@@ -204,12 +205,22 @@ void registerFenceRoutes(PadHttpServer *server, const HttpApiContext &ctx)
                                  QStringLiteral("GET /api/fences?taskId=<施工计划 ID>"));
                          }
                          QJsonArray fences;
+                         // 1) Pad 下发的围栏（pad_fences）
                          const QList<geofence::PadFence> list = store.fencesForTask(taskId);
-                         for (const geofence::PadFence &fence : list)
+                         QSet<QString> padCameraIds;
+                         for (const geofence::PadFence &fence : list) {
                              fences.append(fenceJson(fence, ctx));
+                             padCameraIds.insert(fence.cameraId);
+                         }
+                         // 2) 本机画的围栏（native_fences）：同 cameraId 被 Pad 占用则跳过（Pad 优先）
+                         geofence::NativeFenceStore nativeStore;
+                         const QList<geofence::PadFence> nativeList = nativeStore.fencesForTask(taskId);
+                         for (const geofence::PadFence &fence : nativeList) {
+                             if (padCameraIds.contains(fence.cameraId))
+                                 continue;
+                             fences.append(fenceJson(fence, ctx));
+                         }
                          QJsonObject data;
-                         // data.taskId 必须与请求一致（§5.2 明写）：原样回显请求里那个，
-                         // 不回库里读出来的——两者不等时回显请求值才能让对端按它落缓存。
                          data.insert(QStringLiteral("taskId"), taskId);
                          data.insert(QStringLiteral("fences"), fences);
                          return padhttp::replyOk(data);

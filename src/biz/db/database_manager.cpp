@@ -409,6 +409,44 @@ bool DatabaseManager::createTables()
     // GET /fences?taskId= 先按 task 捞围栏再逐条取版本；这条按围栏取 ACTIVE/DRAFT 是热路径
     executeSQL("CREATE INDEX IF NOT EXISTS idx_pad_fence_versions_fence ON pad_fence_versions(fence_id, status);");
 
+    // ── 本机围栏（驱动检测的那套）：按 taskId + cameraId(=CHn) 组织，多版本留历史 ──
+    // 与 pad_fences 同构但更简单：没有 DRAFT，每次编辑建一条新 ACTIVE、旧 ACTIVE→DISABLED，
+    // regionId 由本机分配并稳定跟踪到形状级。详见 src/biz/geofence/native_fence_store.h。
+    QString createNativeFences = R"(
+        CREATE TABLE IF NOT EXISTS native_fences (
+            fence_id    TEXT PRIMARY KEY,                      -- NFENCE-<自增号>，永不复用
+            task_id     TEXT NOT NULL,                         -- 登录态=当前施工 taskId；未登录时空串（但未登录不允许画，故实际只有登录态数据）
+            camera_id   TEXT NOT NULL,                         -- CH0 / CH1 / CH2 / CH3（=通道号）
+            stream_id   TEXT NOT NULL DEFAULT '',              -- 通道对应流 id（可空）
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+    )";
+    if (!executeSQL(createNativeFences)) {
+        return false;
+    }
+    executeSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_native_fences_task_camera ON native_fences(task_id, camera_id);");
+    executeSQL("CREATE INDEX IF NOT EXISTS idx_native_fences_task ON native_fences(task_id);");
+
+    QString createNativeFenceVersions = R"(
+        CREATE TABLE IF NOT EXISTS native_fence_versions (
+            fence_id      TEXT NOT NULL,                       -- → native_fences.fence_id
+            version       INTEGER NOT NULL,                    -- 从 1 起，每次编辑 max+1
+            status        TEXT NOT NULL,                       -- ACTIVE / DISABLED（本机无 DRAFT，画完即生效）
+            name          TEXT NOT NULL,                       -- "通道N围栏"
+            regions_json  TEXT NOT NULL,                       -- §5 regions 数组 JSON（regionId 本机生成、形状级稳定）
+            frame_path    TEXT,
+            applied_at    TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL,
+            PRIMARY KEY (fence_id, version)
+        );
+    )";
+    if (!executeSQL(createNativeFenceVersions)) {
+        return false;
+    }
+    executeSQL("CREATE INDEX IF NOT EXISTS idx_native_fence_versions_fence ON native_fence_versions(fence_id, status);");
+
     qInfo() << "Database tables created successfully";
     return true;
 }

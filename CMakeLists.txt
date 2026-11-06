@@ -806,6 +806,7 @@ add_executable(test_pad_http_api
     src/biz/pad/pad_ws_server.cpp
     src/biz/ws/alarm_uplink_engine.cpp
     src/biz/geofence/pad_fence_store.cpp
+    src/biz/geofence/native_fence_store.cpp
     src/biz/geofence/fence_frame_renderer.cpp
     src/biz/alarm/alarm_manager.cpp
     src/biz/db/database_manager.cpp
@@ -990,6 +991,8 @@ add_executable(test_channel_reload
     src/biz/db/detection_dao.cpp
     src/biz/db/database_manager.cpp
     src/biz/geofence/fence_manager.cpp
+    src/biz/geofence/native_fence_store.cpp
+    src/biz/geofence/pad_fence_store.cpp
     src/biz/geofence/fence_checker.cpp
     src/base/imaging/image_utils.cpp
     src/base/imaging/image_drawing.cpp
@@ -1073,6 +1076,8 @@ add_executable(test_stream_params
     src/biz/db/detection_dao.cpp
     src/biz/db/database_manager.cpp
     src/biz/geofence/fence_manager.cpp
+    src/biz/geofence/native_fence_store.cpp
+    src/biz/geofence/pad_fence_store.cpp
     src/biz/geofence/fence_checker.cpp
     src/base/imaging/image_utils.cpp
     src/base/imaging/image_drawing.cpp

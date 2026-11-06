@@ -1565,6 +1565,10 @@ void frmMain::onLoginSucceeded()
     ui->btnMain->click();
 
     startAllStreams();
+    // 登录后切到该施工计划的围栏（DB 里按 taskId 存的那批）；
+    // 未登录时内存里没有围栏，登录后才加载并驱动检测。
+    geofence::FenceManager::instance().reloadForTask(
+        session::ConstructionSession::instance().snapshot().taskId);
     log("system", QString("扫码登录成功：%1")
                       .arg(session::ConstructionSession::instance().summary()));
 }
@@ -1576,7 +1580,8 @@ void frmMain::onLoginSucceeded()
  * 清什么：四路解码、AlarmManager 的限流内存 map、会话、上一班的 toast 与角标显示。
  * 不清什么（都是有意保留，别"顺手加clean"）：
  *   - DB 历史与 data/alarms 文件——归属在 makeAlarmRecord() 就写死了，属于上一班；
- *   - FenceManager 的围栏——配置态不是会话态；
+ *   - 围栏 DB 数据（native_fences）——仍按 taskId 留在库里，下次同任务登录可恢复；
+ *     但**内存围栏要清空**（reloadForTask("")），未登录不再驱动检测；
  *   - WsClient 连接与**待发上行队列**——施工信息在报警产生时就定死了，发送时不再
  *     回查会话，所以重传的那条仍带着它产生时的归属，清空反而会丢上报。
  * resetThrottles() 不是可选的：不清的话重登后 2s（类别）/围栏窗口期内的第一条
@@ -1609,6 +1614,8 @@ void frmMain::onLogoutRequested()
     // 2 秒（检测）/围栏窗口期内的第一条报警会被静默吞掉，界面一条都不出。
     AlarmManager::instance().resetThrottles();
     session::ConstructionSession::instance().logout();
+    // 登出后清空内存围栏：未登录不驱动检测，但 DB 里的历史仍在、同 task 再登可恢复。
+    geofence::FenceManager::instance().reloadForTask(QString());
 
     // 悬浮提示收掉：它是 this 的子件、盖在整窗之上，不藏会在登录页右上角继续挂着上一班的报警
     if (toastTimer_) {
