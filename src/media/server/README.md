@@ -19,6 +19,9 @@
 | --- | --- |
 | `http_file_service.h` | 进程级单例 `HttpFileService`：`start/stop/port/running/baseUrl/firstUsableIpv4`，文件头写死三条库约束 |
 | `http_file_service.cpp` | **全工程唯一** include `mk_*.h` 的编译单元；公开接口一律 Qt 类型，`mk_` 的指纹不外泄 |
+| `rtsp_live_service.h/.cpp` | §6.1 的**带检测框** RTSP 直播：把 `VideoRecorder` 已编好的 Annex-B 包喂给 ZLM 的 media source，本层不编码；地址口径 `rtsp://<本机 IP>:<pad_rtsp.port>/live/CHn`，`baseUrl()` 复用 `HttpFileService::firstUsableIpv4()` |
+| `zlm_env.h/.cpp` | `mk_env_init1` 的进程级一次性门（上面两台服务共享，IO 线程数与日志级别在这里定） |
+| `net_route.h/.cpp` | 「本机对外是哪张网卡」的判据：解析 `/proc/net/route` 的默认路由、按 metric 升序回网卡名。纯文本进、列表出，不碰 `mk_*` 也不碰 socket，所以能离线喂表验（`tests/test_net_route.cpp`） |
 
 ## 核心类与数据流
 - **HttpFileService**（函数内 static 单例，无 Qt 线程亲和：内部只有 C API 调用与 `QNetworkInterface` 查询）。
@@ -67,11 +70,48 @@ main() 事件循环结束之后
 | --- | --- | --- | --- |
 | `media_transport` | string | `"url"` | `"url"` = 本文件的服务 + JSON 发地址；`"ws_binary"` = 字节走 WS 分块帧，**此时本服务整个不起** |
 | `media_http_port` | int | 8090 | `qBound(1024, _, 65535)`。板端 `net.ipv4.ip_unprivileged_port_start=1024` 且 uid 1000，**80/443 bind 不上** |
-| `media_base_url` | string | 空（自动） | 非空则原样采用（去尾斜杠），用于对端只能经 NAT/DNS 名访问、或本机多网卡要指定对外那张；空 = `http://<第一个非回环 IPv4>:<实际绑定端口>` |
+| `media_base_url` | string | 空（自动） | 非空则原样采用（去尾斜杠），用于对端只能经 NAT/DNS 名访问、或本机多网卡要指定对外那张；空 = `http://<对外那张口的 IPv4>:<实际绑定端口>`，选口判据见下面「自动地址挑哪张口」 |
 
 **这三个键在已有现场设备上永远不会自动出现**：`migrateAlarmUplinkDefaults()` 只补缺失段、
 不覆盖已有段，老 `config.json` 里的 `alarm_uplink` 段会被原样保留，新键全靠 getter 兜默认值。
 要改只能手改 JSON。设置页无控件（`recording`/`alarm_uplink`/本服务都还没做 UI）。
+
+### 自动地址挑哪张口（`firstUsableIpv4()`，2026-11-06 改版）
+
+判据是**内核路由表**：`netroute::defaultRouteIfacesFromProc()` 读 `/proc/net/route`，
+把默认路由（`Destination` 与 `Mask` 都是 `00000000`）的网卡按 `metric` 升序排出来，
+这个顺序优先、其余口按 `QNetworkInterface::allInterfaces()` 原顺序补在后面，
+每张候选口再各自过那四道判据（`IsUp && IsRunning && !IsLoopBack`、名字不撞
+`kSkipIfaceNames`、IPv4 且非回环、不在 `169.254/16`）。读不到路由表就退化成纯枚举顺序。
+
+为什么必须换（现场故障，不是假想）：本机实测 `ip -o addr` 出两个全局 IPv4——
+
+```
+3: usb0   192.168.200.23/24   ← 板载 4G 模块（MDM9207，3-1:1.0 走 rndis_host），
+                                 地址是模块内置 DHCP 发的，网关 192.168.200.1 就是模块本身
+4: wlan0  192.168.124.43/24   ← 连着现场 WiFi，Pad 和摄像头（192.168.124.36）都在这张网
+默认路由：wlan0 metric=600  <  usb0 metric=20100
+```
+
+`usb0` 的 ifindex 比 `wlan0` 小，所以旧的「枚举里第一个命中项」在**模块拿到地址的那段时间里**
+必然选中那个点对点口，Pad 收到的 `evidenceSnapshotUrl` / `clipUrl` / `dispose.photoUrls` / `liveUrl`
+全是 `192.168.200.23`，局域网里没人路由得到 → 图片、片段、直播一起挂。
+为什么必须看路由表而不是把 `usb0` 拉黑名单：这张口**时有时无**——11-06 14:28 复测时模块还在
+（`/sys/bus/usb/devices/3-1` 与 `usb0` 都在），但它的内置 DHCP 租约过期了，`usb0` 只剩链路没有
+全局 IPv4，路由表里也只有 `wlan0` 一条默认路由。这就是现场"时好时坏"的全部来由，而按名字拉黑
+既解释不了这个现象、也会在真拿 USB 网卡做上行的部署里把自己挡掉。
+新判据两种状态都实测回 `192.168.124.43`（前者靠 metric，后者靠逐口判据自己落下一张）。
+
+三条必须知道的边界：
+- **它答的是「本机自己上网走哪张口」，不是「对端从哪张网过来」**。对端要是恰好从
+  第三条网（例如它也挂在 `usb0` 那侧）连进来，仍然会挑错——这种时候只能手填前缀。
+- **`liveUrl` 不认手填前缀**：`RtspLiveService::baseUrl()` 无条件走本函数（没有 override 入参），
+  所以 `media_base_url` 修不好直播，只修得好图片和片段。
+- **手填前缀会抑制本地这台服务**：装配处那两处的条件是
+  `mediaOverride.isEmpty() && !media.running()`（`src/ui/form/frmmain.cpp` 起 Pad WS 与
+  Pad HTTP 的两段），`media_base_url` 非空时**连 8090 都不起**，
+  填了个没人听的地址也没有任何提示。想「既手填地址、字节又由本机 8090 出」目前做不到，
+  得让 `alarm_uplink.enabled` 且 `media_transport="url"`（那是另一条起服务的路）。
 
 ### 实测语义（curl 逐条核对，ZLM 版本换了要重跑）
 

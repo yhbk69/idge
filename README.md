@@ -220,7 +220,11 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
 | 方向 | 端口 | 何时存在 | 说明 |
 |------|------|----------|------|
 | 出站 | 对端的 `websocket.server_url` | 配了地址才连（空=整条链路不启动） | 本机是 **WS 客户端**，不监听这条；**只填 `ws://`**，`wss://` 本机连不上 |
-| **入站 TCP** | `alarm_uplink.media_http_port`，默认 **8090** | `alarm_uplink` 的 `url` 档开着，**或** `pad_server.enabled`/`pad_http.enabled` 任一开着且没写 `pad_server.media_base_url`（装配处会顺手把它起起来，同一台进程级一次的 ZLM 静态服务，不会起第二台） | 内嵌 http 静态文件服务，根 = `data/alarms` 绝对路径，**只读、明文、零鉴权**（只关了目录索引）。报警媒体地址的交付面，现在还多担两件事：处置照片（`dispose/<alarmId>/`）与围栏合成画面（`fence-frames/<fenceId>/`）的字节都从这里取。想限来源网段可配库内的 `http.allow_ip_range`（默认未设＝不限）。详见 `src/media/server/README.md` |
+| **入站 TCP** | `alarm_uplink.media_http_port`，默认 **8090** | `alarm_uplink` 的 `url` 档开着，**或** `pad_server.enabled`/`pad_http.enabled` 任一开着且没写 `pad_server.media_base_url`（装配处会顺手把它起起来，同一台进程级一次的 ZLM 静态服务，不会起第二台） | 内嵌 http 静态文件服务，根 = `data/alarms` 绝对路径，**只读、明文、零鉴权**（只关了目录索引）。报警媒体地址的交付面，现在还多担两件事：处置照片（`dispose/<alarmId>/`）与围栏合成画面（`fence-frames/<fenceId>/`）的字节都从这里取。想限来源网段可配库内的 `http.allow_ip_range`（默认未设＝不限）。**地址里的主机部分**由
+`HttpFileService::firstUsableIpv4()` 决定，判据是"内核默认路由 metric 最小的口"（2026-11-06 改版；
+之前是枚举第一个命中项，会选中板载 4G 模块那张 `usb0` 的点对点地址，Pad 侧图片+直播一起挂）。
+§6.1 的 `liveUrl` 共用同一判据但**不认** `pad_server.media_base_url`。判据与复测数字见
+`src/media/server/README.md`「自动地址挑哪张口」 |
 | **入站 TCP** | `pad_server.port`，默认 **8900** | 仅 `pad_server.enabled=true`（**出厂 `true`**，2026-11-04 起） | Pad 接口 v1 的 WS 服务端（**只读**：往外推报警，写不进来），`listen(QHostAddress::Any)`，**明文、零鉴权**（§2.3 规定不鉴权）。唯一的门是 Origin 白名单：空 Origin 与 `android-app://*` 放行，带 `http(s)://` Origin 的握手回 **403**——判据在 `pad_ws_server.cpp` 的 `originAllowed()` 一处，放行别的来源改那里并回来更新本行。口径见 `src/biz/pad/README.md` |
 | **入站 TCP** | `pad_http.port`，默认 **8899** | 仅 `pad_http.enabled=true`（**出厂 `true`**，2026-11-05 起） | Pad 接口 v1 的 HTTP `/api/` 面，`listen(QHostAddress::Any)`，**明文、零鉴权、可写**：处置/误报/已读 + 围栏建/改/下发/停用/删草稿。这是本机**唯一一个能被外部改状态的 TCP 口**——不想开就写 `pad_http.enabled=false`（关掉是不 bind，不是 bind 了再拒）。HTTP 没有 Origin 门（浏览器之外的客户端不发 Origin，这条判据对 `android-app://` 无意义），唯一的出站收敛是 `liveUrl` 默认剥掉视频源口令。**可以运行期重开**，调试设置页改端口点「保存并应用」即生效。口径与待确认清单见 `src/biz/pad/README.md` |
 | 出入站 UDP | `gb28181.platform.localSipPort`（默认 5060）本机 `bind` | 仅 `gb28181` 段能凑出 platform + streams | SIP 注册/心跳/MANSCDP 收发（本机也收平台报文，但它是 UDP、不是 TCP 监听口）；RTP 推流另按 SDP 协商走 TCP/UDP。**当前 `platform.transport` 不影响发包，固定 UDP** |

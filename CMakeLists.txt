@@ -821,6 +821,7 @@ add_executable(test_pad_http_api
     src/media/server/rtsp_live_service.cpp
     src/media/server/zlm_env.cpp
     src/media/server/http_file_service.cpp
+    src/media/server/net_route.cpp
 )
 
 target_include_directories(test_pad_http_api PRIVATE
@@ -1004,6 +1005,7 @@ add_executable(test_channel_reload
     src/media/server/rtsp_live_service.cpp
     src/media/server/zlm_env.cpp
     src/media/server/http_file_service.cpp
+    src/media/server/net_route.cpp
 )
 
 # 主目标的库搜索路径是 target_link_directories(${PROJECT_NAME})，不会传给本目标，
@@ -1088,6 +1090,7 @@ add_executable(test_stream_params
     src/media/server/rtsp_live_service.cpp
     src/media/server/zlm_env.cpp
     src/media/server/http_file_service.cpp
+    src/media/server/net_route.cpp
 )
 
 target_link_directories(test_stream_params PRIVATE
@@ -1131,3 +1134,26 @@ target_link_libraries(test_stream_params
 target_compile_definitions(test_stream_params PRIVATE ZERO_COPY)
 
 target_link_options(test_stream_params PRIVATE "LINKER:--allow-shlib-undefined" "LINKER:--disable-new-dtags")
+
+# ============================================================================
+# 本机对外网卡的判据离线自检（/proc/net/route 文本进、网卡名顺序出）
+# 为什么单独一个 suite：这段判据决定了媒体地址（evidenceSnapshotUrl / clipUrl /
+# liveUrl）自动口径挑哪张口，挑错 = Pad 收到的地址全是 4G 模块那个点对点口，
+# 图片和直播一起挂（2026-11-05 现场）。它不碰 mk_*、也不碰 socket，
+# 所以只编 net_route.cpp 一个文件就能把十一条合成用例 + 一条真表自洽跑完。
+# 仓库根运行：./build/build_rk3588_linux/test_net_route，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_net_route
+    tests/test_net_route.cpp
+    src/media/server/net_route.cpp
+)
+
+target_include_directories(test_net_route PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/media/server
+)
+
+target_link_libraries(test_net_route
+    Qt5::Core
+    Qt5::Network
+)

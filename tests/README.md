@@ -57,6 +57,12 @@ C++ 测试源码目录。含十四个测试程序与一个人工联调工具：
   ⚠ **cwd 必须是构建目录**（`assets/` 相对路径与 `librockchip_mpp` 的 rpath 都按那儿算）；
   缺 3 秒素材会 SKIP 1/2/5 三组并打印生成命令。2026-11-03 实测值记在
   `plan/代码审查_2026-11-02_协议对齐idge-pad-v1.md` §十-1。
+- `test_net_route.cpp`：**媒体地址选网卡判据**的离线自检（12 条，喂 `/proc/net/route` 文本）。
+  钉的是"这台机器对外是哪张口"——2026-11-05 现场那次"Pad 收到的图片和直播地址全是
+  192.168.200.23"就是它管的：板载 4G 模块在 host 侧是一张 `usb0`（rndis_host），ifindex
+  比 `wlan0` 小，旧判据「枚举里第一个命中项」恒定选中那个点对点口。判据换成内核默认路由
+  按 metric 升序，所以契约 1 直接抄本机那张真表（wlan0=600 必须在 usb0=20100 前面）。
+  最后一条把**列序**钉在当前内核上：列一变，十一条合成用例还全绿，只有它会红。
 - `test_gb28181_source_ref.cpp`：国标流**引用**视频流注册表的离线自检（9 组，无 FFmpeg）。
   `gb28181.streams[]` 现在只写国标身份 + `source_id`，取流字段全在 `video.sources[]`，于是新增三类
   "只在运行时才暴露"的错，三种表现必须不同：**忘写** `source_id`、**指向不存在的 id**、
@@ -192,6 +198,7 @@ C++ 测试源码目录。含十四个测试程序与一个人工联调工具：
 | `test_pad_ws_server.cpp` | Pad WS 服务端线上自检（17 组：握手与能力位 / 1001 关闭 / pong 带 code / sync_result 恰好一条 / 未知 type 与缺必填项与空 taskId 各出 2001 / alarm_ack 不回复 / 报警广播 / 状态变更推 alarm_update / 片段落盘只推 alarm_update（带 clipUrl，无底址时缺键不给 null）/ Origin 白名单 / 空 device_id 也出必填 deviceId），Qt Core+Network+Sql+WebSockets，loopback |
 | `test_pad_http_message.cpp` | HTTP 传输层离线自检（19 组：GET 拆解 / 请求行三段 / UTF-8 转义还原与非法转义原样留 / 同名键留第一个 / 分次喂 / 头与正文上限先于解析 / chunked+trailer / keep-alive 连解两个 / multipart 三 part 与 filename 只是数据 / 缺定界与超 part 数失败 / 信封两形状 / Content-Length 一致与头去重 / 状态码配业务码），**纯 Qt Core**，不起 socket |
 | `test_pad_http_api.cpp` | HTTP `/api/` 面线上自检（21 组：health 的 capabilities 嵌套 / device/status 全 snake_case / streams 缺 taskId / liveUrl 剥凭据 / cameraId=CHn / 未知 streamId 2002 / save-draft 新建·重放·422 / 2004·2005·2006 三档冲突 / apply 渲出真 PNG 且 8090 取得到 / dispose 的 filename 穿越不参与路径 + 库里 JSON 数组 / read 用对端 readAt / 终态 409/2003 / 一条连接三个请求 / 处置后扛住关机整批回写），Qt Core+Gui+Network+Sql+WebSockets，loopback + 临时库 + 临时媒体根；需 offscreen |
+| `test_net_route.cpp` | 「本机对外是哪张网卡」判据的离线自检（12 条：本机实测那张表里 wlan0 必须排在 4G 模块的 `usb0` 前面 / metric 对调第一名跟着换 / 只有网段路由时回空 / Destination 零但 Mask 非零不算默认 / 同口两条去重 / 同 metric 稳定原顺序 / 真实表形状（tab + 行尾长空格 + 空白行）/ 垃圾行只跳自己 / 表头行不作数 / 空文本 / CRLF 不吃进口名 / 真 `/proc/net/route` 解出的口名必须都在 `allInterfaces()` 里且不重复），Qt Core+Network，不碰 `mk_*`、不起 socket |
 | `test_video_sources.cpp` | 视频流注册表与通道引用解析离线自检（5 组：默认种子 / 三层兜底与悬空不回退 / 内联与引用互斥 / 注册表写入规则 / 存盘往返与迁移幂等），纯 Qt Core，临时文件不碰 `data/config.json` |
 | `test_stream_params.cpp` | `video.sources` 四个静默打开参数的板端实测（6 组：loop / EOF 回卷 / timeoutMs / reconnectMs+分片停止 / 软解档出帧 / 内联旧口径兜底），须在构建目录下跑，缺 3 秒素材 SKIP 三组 |
 | `test_gb28181_source_ref.cpp` | 国标流引用 `video.sources[]` 的离线自检（9 组：三类丢弃各给一行原因 / 全丢时 load 判 false / `takeSource()` 取注册表 / 旧取流键被忽略 / 空 type 按 url 前缀补型 / mp4→file / 运行中删流得空 cfg / 引用计数含国标 / 顶层老布局同判据），Qt Core+Network，无 FFmpeg |
@@ -233,6 +240,9 @@ cd build/build_rk3588_linux && ./test_stream_params [3秒素材] [黑洞地址] 
 # 改报文形状（chunked/multipart/上限）只跑第一个就够；改路由或字段才需要第二个
 ./build/build_rk3588_linux/test_pad_http_message    # 纯 Qt Core，与 cwd 无关
 ./build/build_rk3588_linux/test_pad_http_api        # 自己在 127.0.0.1:18899 起服务端；内部已钉 offscreen
+
+# 媒体地址"选哪张网卡"的判据（改 net_route.cpp，或现场怀疑图片/直播地址挑错口时先跑它）
+./build/build_rk3588_linux/test_net_route           # 纯文本解析，与 cwd 无关；最后一条会读真 /proc/net/route
 
 # 围栏判定自检只链 fence_checker.cpp，改判定逻辑时优先跑它（目标级构建，不整树重编）
 cmake --build build/build_rk3588_linux --target test_geofence_role -j"$(nproc)"
@@ -312,6 +322,12 @@ curl -o /tmp/x.jpg '<sink 打出的 snapshot/media_begin url>' && sha256sum /tmp
 - `ws_sink` 链 `Qt5::Core` + `Qt5::WebSockets`，`QCoreApplication` 无 GUI 依赖
 - `test_pad_http_message` **只链 `Qt5::Core`**，源 = `pad_http_message.cpp` 一个 TU：
   这一层被切出来的全部理由就是它不 include socket，所以能喂字节自测。加一条 socket 依赖它就废了
+- `test_net_route` 链 `Qt5::Core` + `Qt5::Network`，源 = `net_route.cpp` 一个 TU：
+  判据本体是"文本进、网卡名列表出"的纯函数，`QNetworkInterface` 只被最后一条真表自洽用例用到。
+  **这就是它为什么单独一个文件**：`firstUsableIpv4()` 在 `http_file_service.cpp` 里，而那个 TU
+  是全工程唯一 allowlist `mk_*.h` 的编译单元——判据要留在里面，自检就得拖上 ZLM/OpenSSL。
+  ⚠ 反向约束：任何 target 编 `http_file_service.cpp` 都必须一起编 `net_route.cpp`
+  （`test_pad_http_api`/`test_channel_reload`/`test_stream_params` 三处的源列表已跟着加）
 - `test_pad_http_api` 是 HTTP 面的**依赖闭包**：六个 `pad_http_*.cpp` + `pad_request_cache.cpp` +
   `pad_wire.cpp`/`pad_ws_server.cpp`（`/api/health` 要读它的 `clientCount()`）+
   `alarm_uplink_engine.cpp`（`mediaUrlFor()` 那份"越界一律不给"的判据）+
@@ -341,11 +357,18 @@ curl -o /tmp/x.jpg '<sink 打出的 snapshot/media_begin url>' && sha256sum /tmp
 
 - **新增测试源必须同时在 `.gitignore` 加 `!tests/xxx.cpp`**：根 `.gitignore` 里有
   `test_*.cpp` 这条"临时验证文件"规则，会把正式测试源一并挡掉，而根 CMakeLists 已经
-  引用它 —— 结果是本地能编、别人克隆后 `No such file` 编不过。十六个测试都已放行（2026-11-05 加了
-  `test_pad_http_message.cpp`/`test_pad_http_api.cpp` 两条，漏掉这两行的表现是 CI 上
+  引用它 —— 结果是本地能编、别人克隆后 `No such file` 编不过。十七个测试都已放行（2026-11-05 加了
+  `test_pad_http_message.cpp`/`test_pad_http_api.cpp`/`test_net_route.cpp` 三条，漏掉这几行的表现是 CI 上
   `No such file or directory`，而本地构建一切正常）。
   **`ws_sink.cpp` 不在 `test_*.cpp` 的射程里（文件名不以 `test_` 开头），不需要豁免**——
   当初 `test_alarm_uplink.cpp` 就是这么被静默挡住过一轮，`git status` 里根本没有它。
+- **链了 `mk_api` 的 suite 直接跑会报 `libssl.so.1.1: cannot open shared object file`**（2026-11-05 实测）：
+  `--disable-new-dtags` 目前只加在 `idge`、`test_channel_reload`、`test_stream_params` 三个 target 上，
+  其余 suite 写出来是 **DT_RUNPATH**（`objdump -x` 一眼可辨），而 RUNPATH **不传递**——
+  `libmk_api.so` 自己 NEEDED 的 `libssl.so.1.1` 就找不到了（根 `README.md` 依赖表那条
+  "`run.sh` 不需要为此加 `LD_LIBRARY_PATH`"只对 RPATH 的那几个成立，说的是主程序）。临时口径：
+  `LD_LIBRARY_PATH=$PWD/3rdparty/openssl1.1.0/lib:$PWD/3rdparty/zlmediakit/aarch64 ./build/.../test_pad_http_api`。
+  治本是给剩下那些 target 也补上 `"LINKER:--disable-new-dtags"`，本轮没动（改动面 = 十几个 target 的链接行）。
 - 断言基于 `src/biz/db/` 接口行为（如"批量插入10条"后 `queryByTimeRange` 期望 ≥11 条），
   改动 DAO 语义时需同步核对用例假设。
 - 测试进程为单线程顺序执行，`testsPassed/testsFailed` 为全局计数，多线程化时需加锁。

@@ -9,9 +9,11 @@
 #include <QHostAddress>
 #include <QNetworkInterface>
 #include <QRegularExpression>
+#include <QSet>
 #include <QVector>
 #include <QDebug>
 
+#include "net_route.h"   // 默认路由判据：多网卡时"对外是哪张口"由内核的路由表说了算
 #include "zlm_env.h"   // mk_env_init1 的进程级一次性门（与 RtspLiveService 共享）
 
 // 只取用到的那部分 C API：配置项/http 服务器。
@@ -38,6 +40,73 @@ bool ifaceNameSkipped(const QString &name)
         }
     }
     return false;
+}
+
+/**
+ * @brief 这张口上"能给对端用"的第一个 IPv4，不合格返回空串
+ * @note 判据四道：IsUp && IsRunning && !IsLoopBack、网卡名不撞 kSkipIfaceNames、
+ *       是 IPv4 且非回环、不在 169.254/16（没拿到 DHCP 时自己编的地址，对端够不着）。
+ * @note 与 ui 域的 QtHelper::getLocalIPs 同一判据，但不 include ui 头（分层方向）。
+ */
+QString usableIpv4On(const QNetworkInterface &iface)
+{
+    const QNetworkInterface::InterfaceFlags flags = iface.flags();
+    if (!(flags & QNetworkInterface::IsUp) || !(flags & QNetworkInterface::IsRunning)
+            || (flags & QNetworkInterface::IsLoopBack)) {
+        return QString();
+    }
+    if (ifaceNameSkipped(iface.name())) {
+        return QString();
+    }
+    for (const QNetworkAddressEntry &entry : iface.addressEntries()) {
+        const QHostAddress ip = entry.ip();
+        if (ip.protocol() != QAbstractSocket::IPv4Protocol || ip.isLoopback()) {
+            continue;
+        }
+        const QString text = ip.toString();
+        // 169.254/16 是没拿到 DHCP 时自己编的地址，对端不可能够得着
+        if (text.startsWith(QStringLiteral("169.254."))) {
+            continue;
+        }
+        return text;
+    }
+    return QString();
+}
+
+/**
+ * @brief 候选口的顺序：内核默认路由经过的口排最前，其余按 allInterfaces() 原顺序补在后面
+ * @note 为什么要排（2026-11-05 实测）：板载 4G 模块的 rndis 口 `usb0` ifindex=3、
+ *       `wlan0` ifindex=4，枚举顺序恒定把 usb0 排在前面，于是媒体地址长期发成
+ *       模块内置 DHCP 给的 192.168.200.23——那是个点对点口，局域网里的 Pad 路由不到。
+ *       内核路由表里默认路由是 wlan0 metric=600、usb0 metric=20100，所以拿它当前排依据。
+ * @note 路由表读不到（非 Linux/proc 没挂）就是原枚举顺序，行为退化而不是报错。
+ * @note 只排顺序、不改判据：能不能用仍然由 usableIpv4On() 说了算，所以默认路由那张口
+ *       如果没地址（比如 WiFi 断了），会正常落到下一张口。
+ */
+QVector<QNetworkInterface> ifacesByRoutePriority()
+{
+    // Qt 5.12 的 allInterfaces() 回 QList，6.x 才改成 QVector —— 升 Qt 时连测试一起改
+    const QList<QNetworkInterface> all = QNetworkInterface::allInterfaces();
+    QVector<QNetworkInterface> ordered;
+    QSet<QString> taken;
+    for (const QString &name : netroute::defaultRouteIfacesFromProc()) {
+        if (taken.contains(name)) {
+            continue;
+        }
+        for (const QNetworkInterface &iface : all) {
+            if (iface.name() == name) {
+                ordered.push_back(iface);
+                taken.insert(name);
+                break;
+            }
+        }
+    }
+    for (const QNetworkInterface &iface : all) {
+        if (!taken.contains(iface.name())) {
+            ordered.push_back(iface);
+        }
+    }
+    return ordered;
 }
 
 /// 去掉末尾的 '/'（拼接地址时统一按"前缀不带斜杠 + 路径带前导斜杠"处理）
@@ -148,38 +217,21 @@ void HttpFileService::stop()
 }
 
 /**
- * @brief 取第一个可用的非回环 IPv4
+ * @brief 挑一个能给对端用的本机 IPv4
  * @return 地址字符串；一个都没有返回**空串**（调用方据此不申报媒体地址）
- * @note 判据四道：IsUp && IsRunning && !IsLoopBack、网卡名不撞 kSkipIfaceNames、
- *       是 IPv4 且非回环、不在 169.254/16（没拿到 DHCP 时自己编的地址，对端够不着）。
- * @note ⚠ **best-effort，不是"正确的那张网卡"**：多网卡时返回的是
- *       QNetworkInterface::allInterfaces() 枚举顺序里的第一个命中项，
- *       顺序不保证等于"对外口"。所以配置里留了 media_base_url 这个逃生口——
- *       现场一旦报"图片下载不到"，先手填前缀而不是来改这里的判据。
- * @note 与 ui 域的 QtHelper::getLocalIPs 同一判据，但不 include ui 头（分层方向）。
+ * @note 顺序 = 内核默认路由经过的口优先，其余按枚举顺序（见 ifacesByRoutePriority），
+ *       每张口再各自过 usableIpv4On() 那四道判据。
+ * @note ⚠ 仍然是 **best-effort，不是"对端一定够得着"**：它对的是"本机自己上网走哪张口"，
+ *       不是"对端从哪张网过来"。两条默认路由都合法、或对端在第三条网上（例如它走
+ *       USB 共享上网那条点对点口连进来）就会挑错，所以配置里留了 media_base_url 这个
+ *       逃生口——现场一旦报"图片下载不到"，先手填前缀而不是来改这里的判据。
  */
 QString HttpFileService::firstUsableIpv4()
 {
-    for (const QNetworkInterface &iface : QNetworkInterface::allInterfaces()) {
-        const QNetworkInterface::InterfaceFlags flags = iface.flags();
-        if (!(flags & QNetworkInterface::IsUp) || !(flags & QNetworkInterface::IsRunning)
-                || (flags & QNetworkInterface::IsLoopBack)) {
-            continue;
-        }
-        if (ifaceNameSkipped(iface.name())) {
-            continue;
-        }
-        for (const QNetworkAddressEntry &entry : iface.addressEntries()) {
-            const QHostAddress ip = entry.ip();
-            if (ip.protocol() != QAbstractSocket::IPv4Protocol || ip.isLoopback()) {
-                continue;
-            }
-            const QString text = ip.toString();
-            // 169.254/16 是没拿到 DHCP 时自己编的地址，对端不可能够得着
-            if (text.startsWith(QStringLiteral("169.254."))) {
-                continue;
-            }
-            return text;
+    for (const QNetworkInterface &iface : ifacesByRoutePriority()) {
+        const QString ip = usableIpv4On(iface);
+        if (!ip.isEmpty()) {
+            return ip;
         }
     }
     return QString();

@@ -70,12 +70,16 @@ public:
     // ============================================================================
     // overrideUrl 非空 → 原样采用（去掉末尾斜杠），用于对端只能通过 NAT/DNS 名访问的场景，
     //   也用于"本机多网卡、想指定对外那张"。
-    // overrideUrl 为空 → 自动：http://<第一个非回环 IPv4>:<实际绑定端口>。
+    //   ⚠ 装配处（frmMain 起 Pad 两面的那两处）在 override 非空时**不会起本地 8090**，
+    //   所以手填前缀只对"这台服务已经在跑"或"字节真在别处"两种情形成立；填了个没人听的
+    //   地址不会报错，症状是对端拿到地址后一律取不到图。
+    // overrideUrl 为空 → 自动：http://<可用 IPv4>:<实际绑定端口>，口的选择见 firstUsableIpv4。
     // 服务没起来、或一个可用 IPv4 都拿不到 → 返回空串（调用方据此不申报媒体）。
     QString baseUrl(const QString &overrideUrl) const;
 
-    /// 第一个可用的非回环 IPv4（过滤 down/loopback，与 QtHelper::getLocalIPs 同一判据，
-    /// 但不依赖 ui 域）。空串 = 没有。
+    /// 挑一个能给对端用的非回环 IPv4：**内核默认路由 metric 最小的口优先**，其余按
+    /// allInterfaces() 枚举顺序补，每张口各自过那四道判据（见 .cpp 的 usableIpv4On）。
+    /// 空串 = 一个都没有。仍然是 best-effort，猜错由 media_base_url 手填兜。
     static QString firstUsableIpv4();
 
 private:

@@ -199,6 +199,16 @@ POST /api/fences/{id}/delete-draft  → 只删 DRAFT；删 ACTIVE → 409/2005
 装配点在 `frmMain`：
 `pad_server.enabled` 或 `pad_http.enabled` 且没写 `pad_server.media_base_url` 时，顺手把那台文件服务起起来
 （与 `alarm_uplink` 的 url 档共用同一台，不起第二个服务器）。
+**地址里的主机部分怎么来的**：`HttpFileService::firstUsableIpv4()`，判据是**内核默认路由按 metric 升序**
+（2026-11-06 改版，之前是"枚举里第一个命中项"）。改版的直接原因是现场那次"Pad 图片/直播全打不开"：
+板载 4G 模块在 host 侧是一张 `usb0`（rndis_host），ifindex 比 `wlan0` 小，旧判据在模块拿到租约的那段
+时间里必然把它内置 DHCP 给的那个点对点地址（本机实测 `192.168.200.23`）报给 Pad，
+而 Pad 和摄像头都在 `192.168.124.0/24`；租约过期后这张口没地址，旧判据又"自己好了"——所以现象是时好时坏。
+判据细节、边界与复测数字记在 `src/media/server/README.md`「自动地址挑哪张口」；
+排障时记住三条：① 这个地址是 §3.5 的图片/片段、§4.2 的 `photoUrls`、§5.3 的 `frameUrl`、§6.1 的 `liveUrl`
+**共用**的一处口径，一次挑错四个面一起挂；② `liveUrl` 不认 `media_base_url`（`RtspLiveService::baseUrl()`
+没有 override 入参）；③ 手填 `media_base_url` 时装配处不再起本地 8090，所以"填地址"这件事要么在
+服务已经起来的进程里改，要么让 `alarm_uplink` 的 url 档开着。
 **底址为空就一条地址都不发**——那台服务是零鉴权的，宁可让 Pad 显示"无证据"，
 也不能发一个对端取不到、或指向 root 之外的地址。路径换算复用 `uplink::mediaUrlFor()`
 （"越界一律不给"的判据有离线契约覆盖）；旧上行整块退役时要把这个函数挪进本目录，别复制。

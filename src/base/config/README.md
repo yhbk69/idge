@@ -115,7 +115,7 @@
 | `send_clip` | bool | `true` | 第二段是否申报片段；`recording.enabled=false` 时自动降级为不发，并打一条 warning |
 | `media_transport` | string | `url` | `url`=本机内嵌 http 文件服务、JSON 只发地址（**默认**）；`ws_binary`=媒体字节走 WS 二进制分块帧。getter 只归一化成这两个值；`ws_binary` 档下 `mk_*` 一次都不调、不监听端口 |
 | `media_http_port` | int | `8090` | `url` 档的服务口，`qBound(1024, _, 65535)`。取 8090 而非 80：板端 uid 1000 + `net.ipv4.ip_unprivileged_port_start=1024`，80/443 bind 不上。**改口必须重启进程**（ZLM 运行时进程级一次） |
-| `media_base_url` | string | 空 | 地址前缀，空 = 自动（第一个非回环 IPv4 + 实际绑定端口）；多网卡猜错、对端经 NAT/域名访问时在这里写死 |
+| `media_base_url` | string | 空 | 地址前缀，空 = 自动（内核默认路由 metric 最小那张口的 IPv4 + 实际绑定端口，见 `src/media/server/README.md`「自动地址挑哪张口」）；多网卡猜错、对端经 NAT/域名访问时在这里写死 |
 | `chunk_size` | int | `262144` | 仅 `ws_binary` 档有效：单个二进制帧大小，对端 `maxFrameSize` 更小时调这里 |
 | `ack_timeout_ms` | int | `15000` | 仅 `expect_ack=true` 有意义：等 `uplink_ack` 的超时 |
 | `max_attempts` | int | `3` | 同一项最多重投几次，超过判失败并 warning |
@@ -160,7 +160,7 @@ MJPEG**，只认 MJPEG 会把这颗物理摄像头整个漏掉）。只出 10-bi
 | `port` | int | `8900`（1024~65535） | Pad WS 监听口。A4 于 2026-11-04 定案：`http://<host>:8899/api/` 归 HTTP、`ws://<host>:8900/` 归 WS（规约 §2.1 原本两个都写 8899，`QWebSocketServer` 独占监听器做不到同口）。与 `alarm_uplink.media_http_port`（8090，媒体字节出站）是第三个口。⚠ 现场 config.json 显式写了本键时，改默认值无效 |
 | `ws_path` | string | `/` | **只进日志**。`QWebSocketServer` 不按路径筛连接，Pad 连哪条路径都收；写 `/ws` 不会把别的路径挡掉 |
 | `device_id` | string | 空 | `hello_ack.data.deviceId`（例 `EDGE-05-007`）；**空 = 按本机派生**（`/etc/machine-id` 前 12 位，本机实测 `EDGE-1030A3F99414`），该键 §13.1.3 规定必填、不会省略；现场要固定值就填这里，填了赢 |
-| `media_base_url` | string | 空 | 证据 URL 前缀。空 = 复用内嵌文件服务的自动地址（并在需要时把它起起来）；写了就一切按它来，本机服务可以不起——对端经 NAT/反代访问的场景就靠它 |
+| `media_base_url` | string | 空 | 证据 URL 前缀。空 = 复用内嵌文件服务的自动地址（并在需要时把它起起来）；写了就一切按它来，本机服务可以不起——对端经 NAT/反代访问的场景就靠它。⚠ 两个边界：① 非空时装配处**不会再起本地 8090**，填个没人听的地址不报错、症状只是对端取不到图；② 它**管不到 §6 的 `liveUrl`**（`RtspLiveService::baseUrl()` 没有 override 入参，只走自动口径） |
 | `sync_limit` | int | `500`（1~5000） | 一次 `sync_result` 最多带几条。v1 没给分页规则，先设上限；游标取本次返回里的最大 `update_time`，所以截断不会漏下一批 |
 
 六个 getter + 六个 setter（`padServerEnabled/Port/Path/DeviceId/MediaBaseUrl/SyncLimit`），

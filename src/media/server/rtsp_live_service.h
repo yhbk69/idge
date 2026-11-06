@@ -44,7 +44,9 @@ public:
     quint16 port() const { return port_; }
     bool running() const { return port_ != 0; }
 
-    /// rtsp://<第一个非回环 IPv4>:<实际绑定端口>；取不到 IP 返回空串
+    /// rtsp://<对外那张口的 IPv4>:<实际绑定端口>；取不到 IP 返回空串。
+    /// ⚠ 这里**没有** override 入参：`pad_server.media_base_url` 手填也影响不到 liveUrl，
+    /// 选口判据（内核默认路由优先）见 http_file_service.cpp 的 firstUsableIpv4()。
     QString baseUrl() const;
 
     /// 为某路流创建 media source（已存在则先释放再重建，用于换流）

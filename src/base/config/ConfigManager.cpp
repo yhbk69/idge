@@ -678,7 +678,8 @@ static QJsonObject makeAlarmUplinkDefaults()
                                      //   但会占 GUI 线程写缓冲，且要求对端能收大帧，故不作默认）
         {"media_http_port", 8090},   // media_transport="url" 时内嵌 http 服务的监听口。
                                      //   取 8090 而非 80：板端 uid 1000 + ip_unprivileged_port_start=1024
-        {"media_base_url", ""},      // 地址前缀，空 = 自动（本机第一个非回环 IPv4 + 实际绑定端口）。
+        {"media_base_url", ""},      // 地址前缀，空 = 自动（内核默认路由 metric 最小那张口的 IPv4
+                                     //   + 实际绑定端口；判据见 src/media/server/net_route.h）。
                                      //   多网卡猜错、或对端只能经 NAT/域名访问时在这里写死
         {"chunk_size", 262144},      // 二进制帧分块大小 256KB：Qt 出站按"一次调用=一个整帧"设计，
                                      //   对端 maxFrameSize 更小时调这里，不用改代码

@@ -10,7 +10,7 @@
 //   · sync_result 省略 alarms 键（而不是给 []）会让 Pad 保留旧缓存、看起来"补漏成功"；
 //   · Origin 不判 = 局域网里任何网页的 JS 都能连进来收报警、按 taskId 拉历史。
 //
-// 覆盖十六条契约：
+// 覆盖十七条契约：
 //   1) 端口占用/重复 start 的幂等（第二次 start 直接 true，不把已连的 Pad 踢掉）
 //   2) hello → hello_ack：serverTime 带偏移、protocolVersion=1、capabilities 只有 alarm、
 //      detectionBoxes 恒 false（v1 硬要求）

@@ -697,7 +697,7 @@ void frmMain::initNewPages()
                               .arg(uplinkCfg.padHttpPort()));
             if (!uplinkCfg.padHttpExposeStreamCredentials()) {
                 // 只在默认那档提一次：现场看不到"为什么 Pad 播不起来"的时候，这一句是唯一线索
-                log("info", QStringLiteral("§6.1 的 liveUrl 已剥掉视频源口令"
+                log("info", QStringLiteral("发给 Pad 的 liveUrl 已剥掉视频源口令"
                                           "（要保留请打开 pad_http.expose_stream_credentials）"));
             }
         }
@@ -710,7 +710,7 @@ void frmMain::initNewPages()
         const quint16 rtspPort = static_cast<quint16>(uplinkCfg.padRtspPort());
         if (!RtspLiveService::instance().start(rtspPort)) {
             log("warning", QStringLiteral("Pad RTSP 直播没起来 port=%1，"
-                                          "§6.1 的 liveUrl 将回落到原始视频源地址").arg(rtspPort));
+                                          "发给 Pad 的 liveUrl 将回落到原始视频源地址").arg(rtspPort));
         } else {
             log("system", QStringLiteral("Pad RTSP 直播已监听 rtsp://0.0.0.0:%1/live/<CHx>"
                                          "（带检测框画面；关闭请写 pad_rtsp.enabled=false）")
@@ -1909,9 +1909,9 @@ void frmMain::initDebugPage()
     if (ui->btnSaveAlarmClasses) ui->btnSaveAlarmClasses->setVisible(false);
     if (ui->labAlarmHint) ui->labAlarmHint->setVisible(false);
 
-    // ========== WebSocket 配置 ==========
+    // ========== 报警上报 WebSocket（本机连出去） ==========
     {
-        QGroupBox *grpWs = new QGroupBox("WebSocket 配置");
+        QGroupBox *grpWs = new QGroupBox("报警上报 WebSocket（本机连出去）");
         grpWs->setStyleSheet(QString("QGroupBox{font-size:%1px; font-weight:bold;}"
                                      "QLabel{font-size:%2px;}"
                                      "QLineEdit{font-size:%2px;}"
@@ -2031,7 +2031,7 @@ void frmMain::initDebugPage()
     // 停服再起服（QWebSocketServer 可以重开，端口换了必须重启监听器才生效；
     // 已连的 Pad 会被断开，它自己会重连）。
     {
-        QGroupBox *grpPad = new QGroupBox("Pad 服务端（WS 入站）");
+        QGroupBox *grpPad = new QGroupBox("Pad 服务端（WS 入站，本机推报警给 Pad）");
         grpPad->setStyleSheet(QString("QGroupBox{font-size:%1px; font-weight:bold;}"
                                       "QLabel{font-size:%2px;}"
                                       "QLineEdit{font-size:%2px;}"
@@ -2055,7 +2055,7 @@ void frmMain::initDebugPage()
         spinPort->setValue(cfg.padServerPort());
         glPad->addWidget(new QLabel("端口:"), 1, 0);
         glPad->addWidget(spinPort, 1, 1);
-        auto *labPortHint = new QLabel("8899 留给 /api/ HTTP");
+        auto *labPortHint = new QLabel("本口：Pad 连进来收报警推送（ws://本机IP:端口）");
         labPortHint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
         glPad->addWidget(labPortHint, 1, 2, 1, 2);
 
@@ -2073,9 +2073,12 @@ void frmMain::initDebugPage()
         glPad->addWidget(editDevice, 3, 1, 1, 3);
 
         auto *editMedia = new QLineEdit(cfg.padServerMediaBaseUrl());
-        editMedia->setPlaceholderText("空 = 自动取本机 IP + 8090");
-        glPad->addWidget(new QLabel("证据地址前缀:"), 4, 0);
-        glPad->addWidget(editMedia, 4, 1, 1, 3);
+        editMedia->setPlaceholderText("空 = 自动：本机对外 IP + 媒体端口（默认 8090）");
+        glPad->addWidget(new QLabel("媒体地址前缀:"), 4, 0);
+        glPad->addWidget(editMedia, 4, 1);
+        auto *labMediaHint = new QLabel("图片、片段、处置照片的下载地址都由它拼");
+        labMediaHint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
+        glPad->addWidget(labMediaHint, 4, 2, 1, 2);
 
         auto *spinSync = new QSpinBox;
         spinSync->setRange(1, 5000);
@@ -2153,7 +2156,7 @@ void frmMain::initDebugPage()
     // 「保存并应用」= 写配置 + 存盘 + 停服再装路由起服（QTcpServer 与 QWebSocketServer
     // 一样可以重开；路由里 ctx 是按值捕获的，不重装就还是旧配置）。
     {
-        QGroupBox *grpHttp = new QGroupBox("Pad HTTP 服务端（/api/ 入站）");
+        QGroupBox *grpHttp = new QGroupBox("Pad HTTP 服务端（/api/ 入站，Pad 写入处置与围栏）");
         grpHttp->setStyleSheet(QString("QGroupBox{font-size:%1px; font-weight:bold;}"
                                        "QLabel{font-size:%2px;}"
                                        "QCheckBox{font-size:%2px;}"
@@ -2177,7 +2180,7 @@ void frmMain::initDebugPage()
         spinHttpPort->setValue(cfg.padHttpPort());
         glHttp->addWidget(new QLabel("端口:"), 1, 0);
         glHttp->addWidget(spinHttpPort, 1, 1);
-        auto *labHttpPortHint = new QLabel("A4 分配：8899=/api/、8900=WS、8090=媒体文件");
+        auto *labHttpPortHint = new QLabel("本口：Pad 写入接口（http://本机IP:端口/api/）");
         labHttpPortHint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
         glHttp->addWidget(labHttpPortHint, 1, 2, 1, 2);
 
@@ -2186,11 +2189,11 @@ void frmMain::initDebugPage()
         spinBody->setValue(cfg.padHttpMaxBodyMb());
         glHttp->addWidget(new QLabel("正文上限(MB):"), 2, 0);
         glHttp->addWidget(spinBody, 2, 1);
-        auto *labBodyHint = new QLabel("§4.2 处置带照片：5 张 ×5MB + 余量");
+        auto *labBodyHint = new QLabel("处置提交最多带 5 张照片，每张 5MB，再加余量");
         labBodyHint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
         glHttp->addWidget(labBodyHint, 2, 2, 1, 2);
 
-        auto *chkFenceFrame = new QCheckBox("围栏下发时渲染生效画面 PNG（§5.3 必填 frameUrl）");
+        auto *chkFenceFrame = new QCheckBox("围栏下发时渲染一张生效画面 PNG，给 Pad 一个可点开的地址");
         chkFenceFrame->setChecked(cfg.padHttpFenceFrames());
         glHttp->addWidget(chkFenceFrame, 3, 0, 1, 4);
 
