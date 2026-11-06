@@ -142,7 +142,24 @@ void FenceManager::persistChannelLocked(int channel)
     }
 
     NativeFenceStore store;
-    store.saveActiveVersion(taskId, cameraId, QString(), name, regions);
+    const QString savedId = store.saveActiveVersion(taskId, cameraId, QString(), name, regions);
+    if (savedId.isEmpty()) {
+        // 落库失败就**不动**内存里的 fenceId/version：留旧值的含义是"检测与报警都用
+        // 上一次真正存进库的那一版"，两边一致。反过来若在这里回读，读到的确实是那一版，
+        // 但内存里的形状已经是用户刚画的、库里没有的 —— 那才是会把不存在的版本号
+        // 打进报警的情形。与迁移那条路径同一口径：失败就保留原状，下次重试。
+        qWarning() << "[Fence] 通道" << channel
+                   << "围栏落库失败，本次编辑未生效（重启/重登会回到上一版）";
+        return;
+    }
+    // 把刚落库的身份读回这份内存快照：报警打的 fenceId/fenceVersion 就是它。
+    // 多这一次查询只发生在"用户改完围栏"那一下（GUI 线程、每个编辑动作一次），
+    // 而解码线程每次都只读内存快照，不碰库。
+    PadFence saved;
+    if (it != fences_.end() && store.loadActiveFence(taskId, cameraId, &saved)) {
+        it.value().fenceId = saved.fenceId;
+        it.value().version = saved.activeVersion();
+    }
 }
 
 // ============================================================================
@@ -259,6 +276,9 @@ void FenceManager::loadFromConfig()
             continue;
         ChannelFence cf;
         cf.enabled = true;
+        // 版本戳随快照一起进内存：解码线程打 fenceVersion 时不能再查库
+        cf.fenceId = f.fenceId;
+        cf.version = active.version;
         cf.shapes = regionsToShapes(active.regions);
         fences_[ch] = cf;
     }
@@ -306,6 +326,9 @@ void FenceManager::reloadForTask(const QString &taskId)
             continue;
         ChannelFence cf;
         cf.enabled = true;
+        // 版本戳随快照一起进内存：解码线程打 fenceVersion 时不能再查库
+        cf.fenceId = f.fenceId;
+        cf.version = active.version;
         cf.shapes = regionsToShapes(active.regions);
         fences_[ch] = cf;
     }

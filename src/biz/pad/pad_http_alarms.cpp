@@ -31,6 +31,7 @@
 #include "ConfigManager.h"
 #include "alarm_dao.h"
 #include "alarm_manager.h"
+#include "alarm_labels.h"   // §4.1 内置处置选项的唯一一份表（本机详情框共用）
 #include "alarm_uplink_engine.h"   // 只借 uplink::mediaUrlFor 那份"越界即不给"的实现
 #include "pad_http_server.h"
 #include "pad_request_cache.h"
@@ -58,13 +59,6 @@ constexpr qint64 kMaxPhotoBytes = 5LL * 1024 * 1024;
 /// 整改照片张数上限（§4.2 明写 0~5 张）
 constexpr int kMaxPhotoCount = 5;
 
-/// §4.1 内置的两条措辞——**直接取规约 §4.1 示例里那两句原文**，不自己编第三条：
-/// 处置选项的文案是给人看的，规约给了示例就按示例来，现场要换走 dispose_options 配置。
-const struct { int id; const char *label; } kBuiltInOptions[] = {
-    {1, "已现场纠正"},
-    {2, "已提醒作业人员"},
-};
-
 QJsonObject optionJson(qint64 id, const QString &label, int enabled, int sortOrder)
 {
     QJsonObject obj;
@@ -73,6 +67,16 @@ QJsonObject optionJson(qint64 id, const QString &label, int enabled, int sortOrd
     obj.insert(QStringLiteral("enabled"), enabled);
     obj.insert(QStringLiteral("sortOrder"), sortOrder);
     return obj;
+}
+
+/// §4.1 的内置选项：**直接取 alarm_labels::disposeOptions() 那一张表**（2026-11-06 起）。
+/// 以前这里自己写两条、本机详情框再写一套，两端就分叉了；处置单选组现在共用一份，
+/// 改措辞只改 src/biz/alarm/alarm_labels.cpp 那一处。
+/// 现场要换文案走 pad_http/dispose_options 配置（下面 disposeOptions() 的整组覆盖）。
+void appendBuiltInOptions(QJsonArray *out)
+{
+    for (const alarm_labels::DisposeOption &one : alarm_labels::disposeOptions())
+        out->append(optionJson(one.id, one.label, 1, one.id));
 }
 
 /// alarmId 的允许字符集：库里那列是 32 位十六进制 UUID，但历史/联调数据可能有别的写法，
@@ -115,8 +119,7 @@ QJsonArray disposeOptions(const QString &alarmType)
     const QJsonArray configured = ConfigManager::instance().padHttpDisposeOptions();
     QJsonArray out;
     if (configured.isEmpty()) {
-        for (const auto &one : kBuiltInOptions)
-            out.append(optionJson(one.id, QString::fromUtf8(one.label), 1, one.id));
+        appendBuiltInOptions(&out);
         return out;
     }
     int order = 1;
@@ -134,9 +137,8 @@ QJsonArray disposeOptions(const QString &alarmType)
             obj.value(QStringLiteral("sortOrder")).toInt(order)));
         ++order;
     }
-    if (out.isEmpty()) {   // 配置写了但全被跳过 → 还是给内置那两条，不给空数组
-        for (const auto &one : kBuiltInOptions)
-            out.append(optionJson(one.id, QString::fromUtf8(one.label), 1, one.id));
+    if (out.isEmpty()) {   // 配置写了但全被跳过 → 还是给内置那几条，不给空数组
+        appendBuiltInOptions(&out);
     }
     // 按 sortOrder 升序（§4.1"按 sortOrder 排序"）。sortOrder 缺省已在上面按数组顺序补过，
     // 所以这里稳定排序就够。
@@ -155,6 +157,25 @@ QJsonArray disposeOptions(const QString &alarmType)
     for (const QJsonObject &one : sorted)
         ordered.append(one);
     return ordered;
+}
+
+/// measure 文本 → §4.1 选项 id 的反查。§4.2 的 multipart 里只有 measure 这段人看的文本，
+/// 规约没给选项 id 字段，所以对端提交能对上哪条 label 就按那条的 id 记进
+/// dispose_option_id；对不上（Pad 写了自由文本）返回 0 = 这一列不动。
+/// 有这一列的理由：措辞以后要改，改了不至于让"已现场纠正"的历史统计对不到今天。
+int optionIdForLabel(const QString &measure)
+{
+    const QString want = measure.trimmed();
+    for (const QJsonValue &item : disposeOptions(QString())) {
+        const QJsonObject obj = item.toObject();
+        // enabled=0 的项不参与反查：配置里关掉一条，意思是"这条以后不该再被选中"，
+        // 而历史文本恰好还是那句措辞时不该把它的 id 记成一次新的处置。
+        if (obj.value(QStringLiteral("enabled")).toInt(1) == 0)
+            continue;
+        if (obj.value(QStringLiteral("label")).toString().trimmed() == want)
+            return static_cast<int>(obj.value(QStringLiteral("id")).toDouble());
+    }
+    return 0;
 }
 
 /// 从 body 里取一个必填字符串字段。空串与"没这个键"都算缺失（§2.6：可选字段才允许 null）。
@@ -388,7 +409,7 @@ void registerAlarmRoutes(PadHttpServer *server, const HttpApiContext &ctx)
                                          alarmId, measure, remark, personId, personName,
                                          QString::fromUtf8(QJsonDocument(paths).toJson(
                                              QJsonDocument::Compact)),
-                                         disposedAt, &disposeError)) {
+                                         disposedAt, optionIdForLabel(measure), &disposeError)) {
                                      return padhttp::replyInternal(
                                          QString::fromUtf8("处置没写进库"), disposeError);
                                  }

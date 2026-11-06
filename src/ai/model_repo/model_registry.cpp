@@ -33,6 +33,7 @@
 #include <QDebug>
 
 #include <algorithm>
+#include <cstdio>   // ::rename()：覆盖已存在目标的原子替换（QFile::rename 不肯覆盖）
 
 // 库内固定文件名
 static const char *kModelFile = "model.rknn";
@@ -416,6 +417,226 @@ bool ModelRegistry::deleteModel(const QString &id, QString &errorMsg)
         std::lock_guard<std::mutex> lock(mutex_);
         entries_.remove(id);
     }
+    return true;
+}
+
+// ============================================================================
+// 版本留存与回滚（2026-11-06 加）
+// ============================================================================
+// 归档根 = data/model_versions/<id>/<版本号>/，每个归档目录里是那一版的
+// model.rknn + labels.txt + meta.json 三份。为什么不在 model/ 下面：那是 CMake
+// 软链进 git 工作树的目录，写进去等于把仓库搞脏，而且换构建目录就找不到归档。
+// 版本号取 meta.json 的 version（入库日期）；同一天二次入库时归档目录名加 -2/-3，
+// 因为"版本号"是给人看的，唯一性由目录名保证。
+// ----------------------------------------------------------------------------
+namespace {
+
+/// 版本号 → 目录名。只留 [字母数字._-]，其余换 '_'：version 是 meta.json 里
+/// 可以手填的串，带斜杠或 ".." 的话就直接拼出越界路径了。
+QString versionDirName(const QString &version)
+{
+    QString out;
+    out.reserve(version.size());
+    for (const QChar c : version) {
+        out.append((c.isLetterOrNumber() || c == QLatin1Char('.') || c == QLatin1Char('_')
+                    || c == QLatin1Char('-')) ? c : QLatin1Char('_'));
+    }
+    if (out.isEmpty())
+        out = QStringLiteral("unknown");
+    // 开头的点也要换掉：以 '.' 开头的目录在 Unix 上是隐藏项，而 archivedVersions()
+    // 的 entryList 没带 QDir::Hidden —— 症状是"这份归档写进去了，但回滚列表里永远看不到"。
+    while (out.startsWith(QLatin1Char('.')))
+        out[0] = QLatin1Char('_');
+    return out;
+}
+
+/// 把 model/library/<id>/ 现役那份复制进归档，返回归档目录名；失败返回空串并填 err。
+QString archiveCurrentEntry(const QString &id, const QString &version, QString *err)
+{
+    const QString srcDir = QStringLiteral("model/library/") + id;
+    if (!QFileInfo::exists(srcDir + "/" + kModelFile)) {
+        if (err) *err = QStringLiteral("库里没有该模型的权重文件，无法归档");
+        return QString();
+    }
+    QDir parent(ModelRegistry::versionsRoot() + "/" + id);
+    if (!parent.mkpath(QStringLiteral("."))) {
+        if (err) *err = QStringLiteral("归档目录建不出来: %1").arg(parent.absolutePath());
+        return QString();
+    }
+    const QString base = versionDirName(version.isEmpty()
+                                            ? QDate::currentDate().toString("yyyy-MM-dd")
+                                            : version);
+    QString name = base;
+    for (int dup = 2; QFileInfo::exists(parent.absoluteFilePath(name)); ++dup)
+        name = base + QStringLiteral("-%1").arg(dup);
+    const QString dst = parent.absoluteFilePath(name);
+    if (!QDir().mkpath(dst)) {
+        if (err) *err = QStringLiteral("归档目录建不出来: %1").arg(dst);
+        return QString();
+    }
+    if (!QFile::copy(srcDir + "/" + kModelFile, dst + "/" + kModelFile)) {
+        if (err) *err = QStringLiteral("归档权重失败: %1").arg(dst);
+        return QString();
+    }
+    // labels.txt / meta.json 可能不存在（空标签的库外模型），存在才拷
+    for (const char *extra : {kLabelFile, kMetaFile}) {
+        if (QFileInfo::exists(srcDir + "/" + extra))
+            QFile::copy(srcDir + "/" + extra, dst + "/" + extra);
+    }
+    return name;
+}
+
+/// 把一个文件"原子地"放进 model/library/<id>/<name>：先写同目录的 .new，再 rename 覆盖。
+/// 为什么不是 remove + copy：那中间库里那份权重是**不存在**的，而 copy 失败（磁盘满、
+/// 源被别的进程占着读到一半）就留下一个被通道引用、却加载不了的模型 —— 现场只能重装。
+/// 同目录 rename 在同一文件系统上是原子的，读侧最坏拿到旧版或新版，不会拿到半个。
+bool placeFileAtomically(const QString &srcPath, const QString &dstPath, QString *err)
+{
+    const QString tmp = dstPath + QStringLiteral(".new");
+    QFile::remove(tmp);                       // 上一次的残留（失败路径留下的）
+    if (!QFile::copy(srcPath, tmp)) {
+        if (err) *err = QStringLiteral("写入临时文件失败: %1").arg(tmp);
+        return false;
+    }
+    // ⚠ 这里不能用 QFile::rename：Qt 的语义是"目标已存在就失败"（它自己先查了一遍），
+    // 而覆盖现役那份正是本函数的目的。用 POSIX ::rename()：同目录内是原子替换，
+    // 读侧要么拿到旧版要么拿到新版，永远不会拿到"没有"或半个。
+    if (::rename(QFile::encodeName(tmp).constData(),
+                 QFile::encodeName(dstPath).constData()) != 0) {
+        QFile::remove(tmp);
+        if (err) *err = QStringLiteral("替换文件失败: %1").arg(dstPath);
+        return false;
+    }
+    return true;
+}
+
+/// 用归档目录里那份覆盖 model/library/<id>/。
+bool replaceEntryFrom(const QString &id, const QString &fromDir, QString *err)
+{
+    const QString dstDir = QStringLiteral("model/library/") + id;
+    if (!placeFileAtomically(fromDir + "/" + kModelFile, dstDir + "/" + kModelFile, err))
+        return false;
+    if (QFileInfo::exists(fromDir + "/" + kLabelFile)
+            && !placeFileAtomically(fromDir + "/" + kLabelFile, dstDir + "/" + kLabelFile, err))
+        return false;
+    return true;
+}
+
+/// 改 meta.json 的 version/sha256 两个字段（其余字段原样留着，人工写进 notes 的东西不能丢）
+void stampMetaVersion(const QString &id, const QString &version)
+{
+    const QString metaPath = QStringLiteral("model/library/") + id + "/" + kMetaFile;
+    QJsonObject o;
+    QFile f(metaPath);
+    if (f.open(QIODevice::ReadOnly)) {
+        const QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+        if (doc.isObject()) o = doc.object();
+        f.close();
+    }
+    o["id"] = id;
+    o["version"] = version;
+    o["sha256"] = fileSha256(QStringLiteral("model/library/") + id + "/" + kModelFile);
+    QFile out(metaPath);
+    if (out.open(QIODevice::WriteOnly)) {
+        out.write(QJsonDocument(o).toJson(QJsonDocument::Indented));
+        out.close();
+    }
+}
+
+}  // namespace
+
+QString ModelRegistry::versionsRoot()
+{
+    return QStringLiteral("data/model_versions");
+}
+
+QStringList ModelRegistry::archivedVersions(const QString &id) const
+{
+    QDir dir(versionsRoot() + "/" + id);
+    if (!dir.exists())
+        return QStringList();
+    // QDir::Time：新→旧。设置页那个下拉就按这个顺序列，第一条就是"上一次"。
+    return dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
+}
+
+bool ModelRegistry::updateModel(const QString &id, const QString &srcRknnPath,
+                                const QString &srcLabelPath, QString &errorMsg)
+{
+    ensureScanned();
+    const ModelMeta m = meta(id);
+    if (m.id.isEmpty()) {
+        errorMsg = QStringLiteral("库里没有 id %1，请走「导入模型」").arg(id);
+        return false;
+    }
+    const QFileInfo srcInfo(srcRknnPath);
+    if (!srcInfo.exists() || !srcInfo.isFile()) {
+        errorMsg = QStringLiteral("模型文件不存在: %1").arg(srcRknnPath);
+        return false;
+    }
+    const QString sha = fileSha256(srcRknnPath);
+    if (sha.isEmpty()) {
+        errorMsg = QStringLiteral("无法读取模型文件: %1").arg(srcRknnPath);
+        return false;
+    }
+    if (sha == m.sha256) {
+        // 内容一模一样：不归档也不写盘，省得每点一次"更新"就凭空多一条归档版本，
+        // 现场看到的版本列表就成了噪声。
+        errorMsg = QStringLiteral("与现役那份是同一个文件，未改动");
+        return true;
+    }
+
+    const QString archived = archiveCurrentEntry(id, m.version, &errorMsg);
+    if (archived.isEmpty())
+        return false;
+
+    const QString dstDir = QStringLiteral("model/library/") + id;
+    if (!placeFileAtomically(srcRknnPath, dstDir + "/" + kModelFile, &errorMsg)) {
+        errorMsg = QStringLiteral("写入新权重失败（旧版已归档为 %1，库内那份未动）: %2")
+                       .arg(archived, errorMsg);
+        return false;
+    }
+    if (!srcLabelPath.isEmpty()
+            && !placeFileAtomically(srcLabelPath, dstDir + "/" + kLabelFile, &errorMsg)) {
+        errorMsg = QStringLiteral("标签写入失败（权重已换，旧版归档为 %1）: %2")
+                       .arg(archived, errorMsg);
+        return false;
+    }
+
+    const QString newVersion = QDate::currentDate().toString("yyyy-MM-dd");
+    stampMetaVersion(id, newVersion);
+    rescan();
+    qInfo().noquote() << "[ModelRegistry] 已更新模型" << id << "新版本" << newVersion
+                      << "旧版本归档为" << archived;
+    return true;
+}
+
+bool ModelRegistry::rollbackModel(const QString &id, const QString &version, QString &errorMsg)
+{
+    ensureScanned();
+    const ModelMeta m = meta(id);
+    if (m.id.isEmpty()) {
+        errorMsg = QStringLiteral("库里没有 id %1").arg(id);
+        return false;
+    }
+    const QString srcDir = versionsRoot() + "/" + id + "/" + versionDirName(version);
+    if (!QFileInfo::exists(srcDir + "/" + kModelFile)) {
+        errorMsg = QStringLiteral("归档里没有 %1 的 %2 版本").arg(id, version);
+        return false;
+    }
+    // 现役那份也归档：回滚因此是可逆的，滚错了还能从版本列表里选回来
+    const QString archived = archiveCurrentEntry(id, m.version, &errorMsg);
+    if (archived.isEmpty())
+        return false;
+
+    if (!replaceEntryFrom(id, srcDir, &errorMsg))
+        return false;
+
+    // 版本号沿用归档目录名（带 -2/-3 的那种也照原样），这样"meta 里的 version"
+    // 与"归档目录名"永远能对上，回滚列表里看到的和库里的不会是两份东西。
+    stampMetaVersion(id, versionDirName(version));
+    rescan();
+    qInfo().noquote() << "[ModelRegistry] 已回滚模型" << id << "到" << versionDirName(version)
+                      << "，回滚前的那份归档为" << archived;
     return true;
 }
 

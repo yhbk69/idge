@@ -794,7 +794,7 @@ int main(int argc, char *argv[])
         const bool disposed = AlarmManager::instance().disposeAlarmById(
             ramId, QStringLiteral("已现场纠正"), QStringLiteral("补充"),
             QStringLiteral("05-0101"), QStringLiteral("张伟"), QStringLiteral("[]"),
-            QString(), &disposeError);
+            QString(), 0, &disposeError);
         check(disposed, qPrintable(QStringLiteral("契约21：disposeAlarmById 要成功（%1）")
                                        .arg(disposeError)));
         AlarmManager::instance().syncToDatabase();   // 模拟关机整批回写
@@ -803,6 +803,59 @@ int main(int argc, char *argv[])
         check(after.status == QStringLiteral("disposed")
                   && after.disposeResult == QStringLiteral("已现场纠正"),
               "契约21：关机回写之后处置还在（内存副本没被漏改就是这条）");
+        // ⚠ 这一条是本轮审查抓出来的真窟窿：dispose_person_id 只在 UPDATE 里出现过，
+        // 两个 INSERT 的列表都没它，而 syncToDatabase() 用的是 INSERT OR REPLACE
+        // （语义=删旧行再插新行）——于是处置完的第二天早上工号被静默清成 NULL，
+        // 库里只剩姓名，v1 §13.2.3 的 dispose.personId 对不上人。症状是"过一夜就丢"，
+        // 白天怎么点都正常，所以必须钉在**回写之后**而不是回写之前。
+        check(after.disposePersonId == QStringLiteral("05-0101"),
+              qPrintable(QStringLiteral("契约21b：关机回写之后处置人**工号**还在（实为「%1」）")
+                             .arg(after.disposePersonId)));
+    }
+
+    // ========== 契约22：溯源六列要能整圈活过"落库→回读→回写→再回读" ==========
+    // 这六列是 2026-11-06 按 §13.2.1 加的。它们和 dispose_* 一样会经过
+    // syncToDatabase() 的 INSERT OR REPLACE，所以少写一个绑定就是"过一夜被抹平"，
+    // 而且是**没有任何报错**的那种。这里把四个键的往返一次验完。
+    {
+        AlarmRecord stamped;
+        stamped.id = QStringLiteral("STAMP-ROUNDTRIP");
+        stamped.alarmType = QStringLiteral("fence_in");
+        stamped.alarmLevel = 2;
+        stamped.alarmTime = QStringLiteral("2026-11-06T10:00:00");
+        stamped.channel = 1;
+        stamped.className = QStringLiteral("person");
+        stamped.confidence = 0.9f;
+        stamped.status = QStringLiteral("pending");
+        stamped.createTime = stamped.alarmTime;
+        stamped.updateTime = stamped.alarmTime;
+        stamped.rule = QStringLiteral("禁区闯入检测");
+        stamped.modelVersion = QStringLiteral("yolo11n-ppe@2026-10-21");
+        stamped.fenceId = QStringLiteral("NFENCE-001");
+        stamped.fenceVersion = 3;
+        stamped.regionId = QStringLiteral("RG-7F3A21C9");
+        stamped.disposeOptionId = 0;
+
+        AlarmDAO dao;
+        check(dao.insertAlarm(stamped) == 1, "契约22：带溯源的报警没插进去");
+        const AlarmRecord first = dao.queryById(QStringLiteral("STAMP-ROUNDTRIP"));
+        check(first.rule == stamped.rule && first.modelVersion == stamped.modelVersion
+                  && first.fenceId == stamped.fenceId
+                  && first.fenceVersion == stamped.fenceVersion
+                  && first.regionId == stamped.regionId,
+              "契约22：溯源六列回读不一致");
+        // 关键一步：拿**回读**的那份再走一次批量 REPLACE（就是关机时发生的事）
+        QVector<AlarmRecord> batch;
+        batch << first;
+        AlarmManager::instance().syncToDatabase();
+        check(dao.insertAlarms(batch) == 1, "契约22：整批回写没执行成功");
+        const AlarmRecord again = dao.queryById(QStringLiteral("STAMP-ROUNDTRIP"));
+        check(again.rule == stamped.rule && again.modelVersion == stamped.modelVersion
+                  && again.fenceId == stamped.fenceId
+                  && again.fenceVersion == stamped.fenceVersion
+                  && again.regionId == stamped.regionId,
+              qPrintable(QStringLiteral("契约22：整批回写之后溯源列被抹平了（rule=「%1」 fenceVersion=%2）")
+                             .arg(again.rule).arg(again.fenceVersion)));
     }
 
     pad::PadHttpServer::instance().stop();

@@ -948,6 +948,15 @@ void FFmpegVideoDecoder::buildCascadeTasks()
         taskConfig.numClasses = meta.numClasses > 0
                                     ? meta.numClasses
                                     : (int)readLabelNames(lp).size();
+        // 该槽模型的版本串 `<库id>@<meta.version>`，报警落地时打戳用（v1 §13.2.1 的
+        // modelVersion）。单项拼法与 §7.1 的 activeModelVersion() 同口径；库里查不到
+        // （id 拼错/模型已移除）就是空串，详情框显示"未知"而不是编一个版本号。
+        QString slotVersion;
+        if (!meta.id.isEmpty()) {
+            slotVersion = meta.id;
+            if (!meta.version.isEmpty())
+                slotVersion += QLatin1Char('@') + meta.version;
+        }
 
         PpeTask *task = new PpeTask(taskConfig);
         tasks_.push_back(task);
@@ -965,6 +974,8 @@ void FFmpegVideoDecoder::buildCascadeTasks()
 
         // 类名表：画框用 std 版，报警侧用 QString 版（同一数据源，同下标）
         slotClassNames_.push_back(readLabelNames(lp));
+        // 与 slotClassNames_ 同下标：建任务这刻写定，之后只读（见头文件注释）
+        slotModelVersions_.push_back(slotVersion);
 
         // 报警类别与生效阈值都是"模型的参数"（video.models[<id>]），存在本解码器里
         // 而非 AlarmManager 单例：按通道配置后，通道 0 的槽位 1 与通道 2 的槽位 1
@@ -1056,6 +1067,7 @@ void FFmpegVideoDecoder::releaseTasks()
     tasks_.clear();
     slotQueues_.clear();
     slotClassNames_.clear();
+    slotModelVersions_.clear();
     {
         std::lock_guard<std::mutex> lk(slotParamMtx_);
         slotParams_.clear();
@@ -2199,6 +2211,8 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
                     for (size_t k = 0; k < slotQueues_.size(); ++k) {
                         slotCtxs[k].alarmClass =
                             (k < slotParamSnap.size()) ? slotParamSnap[k].alarmClass : QString();
+                        slotCtxs[k].modelVersion =
+                            (k < slotModelVersions_.size()) ? slotModelVersions_[k] : QString();
                         slotCtxs[k].classNames.reserve((int)slotClassNames_[k].size());
                         for (const auto &n : slotClassNames_[k])
                             slotCtxs[k].classNames << QString::fromStdString(n);
@@ -2484,8 +2498,19 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
 
                                 // 匹配不上 = 进入沿：报一次警，并建立事件（带上角色，供下次分流）
                                 entryCount++;
+                                // 围栏溯源（v1 §13.2.1 的 fenceVersion/regionId）：全部取自
+                                // 上面那份通道快照 cf，**不查库**（NativeFenceStore 只允许 GUI
+                                // 线程用，这里是解码线程）。regionId 只在命中具体形状时有值——
+                                // 离岗是"在所有岗区域之外"，没有单一责任形状，留空不是漏写。
+                                FenceContext fenceCtx;
+                                fenceCtx.fenceId = cf.fenceId;
+                                fenceCtx.version = cf.version;
+                                if (v.shapeIndex >= 0
+                                        && v.shapeIndex < (int)cf.shapes.size())
+                                    fenceCtx.regionId = cf.shapes[v.shapeIndex].regionId;
                                 fenceAlarms += AlarmManager::instance().ingestFenceAlarm(
-                                        channel_, c.det, slotCtxs[c.slot], c.timeNs, v.role);
+                                        channel_, c.det, slotCtxs[c.slot], c.timeNs, v.role,
+                                        fenceCtx);
                                 FenceInsideTrack tr;
                                 tr.x = nx; tr.y = ny; tr.w = nw; tr.h = nh;
                                 tr.lastHitNs = steadyNow;

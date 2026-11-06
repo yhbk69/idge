@@ -131,6 +131,38 @@ public:
      */
     bool deleteModel(const QString &id, QString &errorMsg);
 
+    // ========================================================================
+    // 版本留存与回滚（2026-11-06 加）
+    // ========================================================================
+    // 归档根是 **data/model_versions/<id>/<version>/**，不是 model/ 下面：
+    // `model/` 是 CMake 建进 git 工作树的软链，往那儿写等于把仓库搞脏（而且换
+    // 构建目录就找不到归档了），data/ 才是运行期数据该待的地方。
+    // 版本号取 meta.json 的 version（入库日期），同一天二次入库时目录名加 -2/-3。
+
+    /// 归档根目录（相对当前工作区）
+    static QString versionsRoot();
+
+    /// 该 id 已归档的版本目录名，**新→旧**；没归档过返回空表
+    QStringList archivedVersions(const QString &id) const;
+
+    /**
+     * @brief 覆盖式导入：id 已存在且内容不同 → 先归档现役那份，再写入新的
+     * @return true = 已写入，或内容与现役一致（sha 相同，等于没改动，也返回 true）
+     *
+     * 与 importModel 的区别就一条：importModel 撞 id 直接拒绝（那是"新增"的语义），
+     * 本函数是"换权重"：现场迭代模型时不改 id，改的是那一份 .rknn。
+     */
+    bool updateModel(const QString &id, const QString &srcRknnPath,
+                     const QString &srcLabelPath, QString &errorMsg);
+
+    /**
+     * @brief 回滚到某个归档版本
+     *
+     * 现役那份同样先归档（所以回滚是可逆的：滚错了再滚回来，两个版本都在库里留着）。
+     * 归档文件是**复制**回 model/library/<id>/，归档目录本身不动 —— 留着才能反复回滚。
+     */
+    bool rollbackModel(const QString &id, const QString &version, QString &errorMsg);
+
     /**
      * @brief 解析某一通道的级联槽位（decoder/UI 的单一事实源）
      *

@@ -48,6 +48,12 @@ CREATE TABLE IF NOT EXISTS alarms (
     worker_name     TEXT,                              -- 施工负责人姓名，扫码登录会话定死后在**产生这一刻**盖上（不等到显示/上行再回查）。报警列表那一列与"按负责人"筛选用它——为这个才单独成列，省掉每行解析 JSON
     construction_info TEXT,                            -- 整份施工信息 JSON（compact 原样；2026-11-04 起是 qr-login 的 person/plan 嵌套形状，历史行仍是扁平 construction_id/worker_name 形状，两代都读得回）。详情框逐键渲染与上行 data["construction"] 都从它出，**加字段不用改表**
     task_id           TEXT                             -- 施工计划 ID ＝ v1 的 taskId（B2 于 2026-11-04 定案：就是扫码载荷里的施工计划 ID（qr-login 起是 plan.taskId，历史行是 construction_id），对外统一叫 taskId）。写库时从会话快照直接落这一列；Pad 的 sync 过滤、列表「按施工计划」筛选、facets 候选值全部走这条**等值**判据。以前是 `instr(construction_info,'"construction_id":"X"')` 的子串匹配，依赖 QJsonDocument::Compact 的序列化形状（键序变了、多了空格、将来换成 pretty 就静默查不到），所以把它升成一等列。老行由启动时一次性回填（database_manager 的 backfillAlarmTaskIds）。⚠ **这一列的不变式是「永不为 NULL」**：没有计划身份的行落空串 `''`。写入侧靠 INSERT 里的 `IFNULL(:task_id, '')` 兜住——Qt 把空 QString 当无值，直接绑就落 NULL，而关机时 RAM 窗口整批回写会把已回填好的行打回 NULL，于是回填每开机重跑一次（实测每次 1000 行）
+    rule            TEXT,                              -- 触发规则中文名（v1 §13.2.1 的 rule），取值与 Pad 出门口同源：src/biz/alarm/alarm_labels.cpp
+    model_version   TEXT,                              -- 产出该报警的模型版本 `库id@meta.json版本`，例 yolo11n-ppe@2026-10-21
+    fence_id        TEXT,                              -- 围栏报警：当时生效的围栏主行 id（NFENCE-*/FENCE-*）；检测报警为空
+    fence_version   INTEGER,                           -- 围栏报警：当时生效的围栏版本号（出门口补 "V" 前缀成 v1 的 fenceVersion）
+    region_id       TEXT,                              -- 围栏报警：命中区域 regionId（RG-<8hex>）；离岗无单一责任形状，恒空
+    dispose_option_id INTEGER                          -- 处置选项 id（1..4），与 dispose_result 的 label 同源；统计认 id 不认措辞
 );
 
 -- 索引

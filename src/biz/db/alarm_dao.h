@@ -166,6 +166,8 @@ public:
      * @param photoPathsJson 整改照片路径的 JSON 数组文本（0~5 个），落 dispose_photo；
      *                      空串写 `[]` 而不是 NULL，读侧就只有一种形状要认
      * @param disposedAt    处置时间，**库内那套定宽无偏移文本**。空串 = 用本机当前时间
+     * @param optionId      §4.1 选项的 id（1..4），落 dispose_option_id；0 = 没选/对端只给了
+     *                      自由文本，这一列保持原值不动（措辞改了也不影响历史统计口径）
      * @return false = 没改成。含三种：库没开、id 不存在、已经是终态
      *          （WHERE 里挡掉 disposed/false_alarm，所以 §4.2 的 409/2003 不需要"先查再写"）
      *
@@ -176,7 +178,8 @@ public:
      */
     bool dispose(const QString &id, const QString &measure, const QString &personId,
                  const QString &personName, const QString &remark,
-                 const QString &photoPathsJson, const QString &disposedAt);
+                 const QString &photoPathsJson, const QString &disposedAt,
+                 int optionId = 0);
 
     /**
      * @brief 标记误报

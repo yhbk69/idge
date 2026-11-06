@@ -23,11 +23,72 @@
 #include <QImage>
 #include <QString>
 #include <QProcess>
+#include <QFile>
 #include <QFileInfo>
 #include <QDir>
 #include <QDebug>
 #include <algorithm>
 #include <opencv2/opencv.hpp>
+#include <turbojpeg.h>
+
+/**
+ * @brief JPEG 解码的唯一可用路径：turbojpeg 的 tj*，一次拿到 RGB888
+ * @return 成功返回非空 QImage（已 copy，调用方可随意持有）；失败返回空 QImage
+ *
+ * 【为什么不能用 cv::imread，也不能用 QImage::load】板端进程里 Qt 的 JPEG 插件会把
+ * 系统 libjpeg 62 带进来，OpenCV 静态库里的 jpeg_* 引用于是解析到那个 62 上，
+ * 实测：cv::imread 对一张 63KB 的现场抓拍**返回空**，而 QImage::load 直接 core dump
+ * （stderr 停在 "Wrong JPEG library version: library is 62, caller expects 80"）。
+ * 独立小程序（不建 QApplication）里 cv::imread 是好的 —— 所以这个坑只在 GUI 进程里出现，
+ * 恰好是所有显示抓拍图的地方。
+ * 【为什么 tj* 没问题】写侧 image_utils.cpp 的 write_image_jpeg() 用的就是 tj*，
+ * 抓拍图一直是它落的盘；tj* 是另一套符号名，不与 libjpeg 的 jpeg_* 互相顶替。
+ * 【为什么不用 tjLoadImage】libjpeg-turbo 2.x 那个函数只读 BMP/PPM，不读 JPEG
+ * （头文件参数说明第一行就写着），抓拍图喂进去必然 NULL。
+ */
+inline QImage decodeJpegViaTurboJpeg(const QString &path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return QImage();
+    const QByteArray bytes = f.readAll();
+    f.close();
+    if (bytes.size() < 4)
+        return QImage();
+
+    tjhandle handle = tjInitDecompress();
+    if (!handle)
+        return QImage();
+    int w = 0, h = 0, subsamp = 0, colorspace = 0;
+    // 字节指针要活到 tjDecompress2 结束：jpegBuf 是零拷贝引用，不复制。
+    const unsigned char *jpeg = reinterpret_cast<const unsigned char *>(bytes.constData());
+    QImage out;
+    if (tjDecompressHeader3(handle, jpeg, static_cast<unsigned long>(bytes.size()),
+                            &w, &h, &subsamp, &colorspace) == 0 && w > 0 && h > 0) {
+        const int pitch = w * 3;
+        uchar *pixels = new uchar[pitch * h];
+        if (tjDecompress2(handle, jpeg, static_cast<unsigned long>(bytes.size()),
+                          pixels, w, pitch, h, TJPF_RGB, TJFLAG_FASTDCT) == 0) {
+            // Qt 5.12 没有 QImage(w,h,bytesPerLine,Format) 这个构造，只能喂指针；
+            // 所有权交给 cleanup lambda（img 析构时 delete[]），随后 copy() 出来的
+            // out 与 pixels 再无关系，函数返回后不存在悬垂引用。
+            QImage img(pixels, w, h, pitch, QImage::Format_RGB888,
+                       [](void *p) { delete[] static_cast<uchar *>(p); }, pixels);
+            out = img.copy();
+        } else {
+            delete[] pixels;
+        }
+    }
+    tjDestroy(handle);
+    return out;
+}
+
+/// 是不是抓拍那套 JPEG（大小写都认）。只有 JPEG 需要走 tj*；PNG/BMP 交给 OpenCV 没这个问题。
+inline bool isJpegPath(const QString &path)
+{
+    return path.endsWith(QStringLiteral(".jpg"), Qt::CaseInsensitive)
+        || path.endsWith(QStringLiteral(".jpeg"), Qt::CaseInsensitive);
+}
 
 /**
  * @brief 整幅安全解码一张图片 → QPixmap
@@ -45,6 +106,13 @@
 inline QPixmap loadPixmapSafe(const QString& path) {
     qInfo() << "[image] loadPixmapSafe path=" << path
             << "exists=" << QFileInfo(path).exists() << "size=" << QFileInfo(path).size();
+    // 抓拍图全是 JPEG，先走 tj*（判据见 decodeJpegViaTurboJpeg 的注释块）：
+    // 以前这里第一句就是 cv::imread，在 GUI 进程里恒空，于是每个显示抓拍的界面
+    // 都退到 ImageMagick convert —— 板子上没装 convert，结果就是"永远加载失败"。
+    if (isJpegPath(path)) {
+        const QImage jpeg = decodeJpegViaTurboJpeg(path);
+        if (!jpeg.isNull()) return QPixmap::fromImage(jpeg);
+    }
     cv::Mat bgr = cv::imread(path.toStdString(), cv::IMREAD_COLOR);
     qInfo() << "[image] cv::imread empty=" << bgr.empty();
     if (bgr.empty()) {
@@ -113,6 +181,23 @@ inline QPixmap loadThumbnailScaled(const QString& path, int w, int h) {
     // 面板 20 条老报警就是 20 行噪声）。
     cv::Mat bgr;
     const QString sidecar = thumbnailSidecarPath(path);
+    // JPEG 先走 tj*（理由见 decodeJpegViaTurboJpeg 的注释块）：面板这 20 张缩略图
+    // 以前全是 cv::imread，在 GUI 进程里全部返回空，症状是"报警面板缩略图位置一直空着"。
+    // sidecar 也是 JPEG，两条都先试 tj*，都不成才落到下面的 OpenCV（PNG/BMP 走那条）。
+    if (isJpegPath(path)) {
+        QImage jpeg = QFileInfo::exists(sidecar) ? decodeJpegViaTurboJpeg(sidecar) : QImage();
+        if (jpeg.isNull())
+            jpeg = decodeJpegViaTurboJpeg(path);
+        if (!jpeg.isNull()) {
+            // Qt 侧等比缩放：SmoothTransformation 与下面 cv::INTER_AREA 在"缩小"这个
+            // 方向上观感一致，而这里源已经是解好的 QImage，再套一层 cv::Mat 视图
+            // 只是多一次拷贝。
+            const QPixmap scaled = QPixmap::fromImage(jpeg).scaled(
+                w, h, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            QPixmapCache::insert(key, scaled);
+            return scaled;
+        }
+    }
     if (QFileInfo::exists(sidecar))
         bgr = cv::imread(sidecar.toStdString(), cv::IMREAD_COLOR);
     if (bgr.empty()) {

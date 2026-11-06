@@ -92,7 +92,8 @@ static QString taskIdForInsert(const AlarmRecord &alarm)
 // 流程：
 //   1. 获取数据库连接（通过 DatabaseManager 单例）
 //   2. 如果 alarm.id 为空，自动生成 UUID 作为主键
-//   3. 准备 SQL INSERT 语句，绑定 20 个字段参数
+//   3. 准备 SQL INSERT 语句，绑定全部列参数（列数以 alarms 表为准，改表要同步
+//      insertAlarms 的那条批量 INSERT —— 两条的列表与绑定必须逐列相同）
 //   4. 执行插入，返回 1 表示成功，-1 表示失败
 //
 // 注意：
@@ -117,13 +118,15 @@ int64_t AlarmDAO::insertAlarm(const AlarmRecord &alarm)
                            status, dispose_result, dispose_user_id, dispose_user_name,
                            dispose_time, dispose_photo, remark, read_time,
                            create_time, update_time, worker_name, construction_info,
-                           task_id)
+                           task_id, rule, model_version, fence_id, fence_version,
+                           region_id, dispose_option_id, dispose_person_id)
         VALUES (:id, :alarm_type, :alarm_level, :alarm_time, :channel,
                 :class_id, :class_name, :confidence, :image_path, :video_path,
                 :status, :dispose_result, :dispose_user_id, :dispose_user_name,
                 :dispose_time, :dispose_photo, :remark, :read_time,
                 :create_time, :update_time, :worker_name, :construction_info,
-                IFNULL(:task_id, ''))
+                IFNULL(:task_id, ''), :rule, :model_version, :fence_id,
+                :fence_version, :region_id, :dispose_option_id, :dispose_person_id)
     )");
 
     query.bindValue(":id", id);
@@ -152,6 +155,16 @@ int64_t AlarmDAO::insertAlarm(const AlarmRecord &alarm)
     query.bindValue(":worker_name", alarm.workerName);
     query.bindValue(":construction_info", alarm.constructionJson);
     query.bindValue(":task_id", taskIdForInsert(alarm));
+    query.bindValue(":rule", alarm.rule);
+    query.bindValue(":model_version", alarm.modelVersion);
+    query.bindValue(":fence_id", alarm.fenceId);
+    query.bindValue(":fence_version", alarm.fenceVersion);
+    query.bindValue(":region_id", alarm.regionId);
+    query.bindValue(":dispose_option_id", alarm.disposeOptionId);
+    // 处置人/误报人的工号**原文**。这一列以前只出现在 UPDATE 里、两个 INSERT 都没写，
+    // 而 REPLACE 的语义是"删旧行再插新行"，于是关机整批回写会把 dispose() 刚写进去的
+    // 工号静默清成 NULL —— 处置记录里从此只剩姓名，§13.2.3 的 personId 对不上人。
+    query.bindValue(":dispose_person_id", alarm.disposePersonId);
 
     if (!query.exec()) {
         qWarning() << "Insert alarm failed:" << query.lastError().text();
@@ -210,13 +223,15 @@ int64_t AlarmDAO::insertAlarms(const QVector<AlarmRecord> &alarms)
                            status, dispose_result, dispose_user_id, dispose_user_name,
                            dispose_time, dispose_photo, remark, read_time,
                            create_time, update_time, worker_name, construction_info,
-                           task_id)
+                           task_id, rule, model_version, fence_id, fence_version,
+                           region_id, dispose_option_id, dispose_person_id)
         VALUES (:id, :alarm_type, :alarm_level, :alarm_time, :channel,
                 :class_id, :class_name, :confidence, :image_path, :video_path,
                 :status, :dispose_result, :dispose_user_id, :dispose_user_name,
                 :dispose_time, :dispose_photo, :remark, :read_time,
                 :create_time, :update_time, :worker_name, :construction_info,
-                IFNULL(:task_id, ''))
+                IFNULL(:task_id, ''), :rule, :model_version, :fence_id,
+                :fence_version, :region_id, :dispose_option_id, :dispose_person_id)
     )");
 
     for (const AlarmRecord &alarm : alarms) {
@@ -248,6 +263,16 @@ int64_t AlarmDAO::insertAlarms(const QVector<AlarmRecord> &alarms)
         query.bindValue(":worker_name", alarm.workerName);
         query.bindValue(":construction_info", alarm.constructionJson);
         query.bindValue(":task_id", taskIdForInsert(alarm));
+        query.bindValue(":rule", alarm.rule);
+        query.bindValue(":model_version", alarm.modelVersion);
+        query.bindValue(":fence_id", alarm.fenceId);
+        query.bindValue(":fence_version", alarm.fenceVersion);
+        query.bindValue(":region_id", alarm.regionId);
+        query.bindValue(":dispose_option_id", alarm.disposeOptionId);
+        // 工号**原文**那一列以前只出现在 UPDATE 里、两个 INSERT 都没写，而 REPLACE 的语义
+        // 是"删旧行再插新行"，于是关机整批回写会把 dispose() 刚写进去的工号静默清成 NULL
+        // ——处置记录里从此只剩姓名，§13.2.3 的 personId 对不上人。（判据同上面单条 INSERT）
+        query.bindValue(":dispose_person_id", alarm.disposePersonId);
 
         if (query.exec()) {
             inserted++;
@@ -928,7 +953,7 @@ int AlarmDAO::acknowledgeAllPending()
  */
 bool AlarmDAO::dispose(const QString &id, const QString &measure, const QString &personId,
                        const QString &personName, const QString &remark,
-                       const QString &photoPathsJson, const QString &disposedAt)
+                       const QString &photoPathsJson, const QString &disposedAt, int optionId)
 {
     QSqlDatabase db = DatabaseManager::instance().database();
     if (!db.isOpen()) return false;
@@ -947,6 +972,7 @@ bool AlarmDAO::dispose(const QString &id, const QString &measure, const QString 
         UPDATE alarms SET
             status = 'disposed',
             dispose_result = :result,
+            dispose_option_id = COALESCE(:option_id, dispose_option_id),
             dispose_person_id = :person_id,
             dispose_user_id = COALESCE(:user_id, dispose_user_id),
             dispose_user_name = COALESCE(:user_name, dispose_user_name),
@@ -957,6 +983,9 @@ bool AlarmDAO::dispose(const QString &id, const QString &measure, const QString 
         WHERE id = :id AND status NOT IN ('disposed', 'false_alarm')
     )");
     query.bindValue(":result", measure);
+    // 0 = 对端只给了自由文本、没给选项 id：绑 NULL 让 COALESCE 保住原值，
+    // 而不是把"上次选过哪一项"冲成 0（那等于把历史统计改写成"没选过"）。
+    query.bindValue(":option_id", optionId > 0 ? QVariant(optionId) : QVariant());
     query.bindValue(":person_id", personId);
     query.bindValue(":user_id", numericId ? QVariant(userId) : QVariant());
     query.bindValue(":user_name", personName);
@@ -1407,6 +1436,14 @@ AlarmRecord AlarmDAO::recordFromQuery(QSqlQuery &query)
     record.constructionJson = query.value("construction_info").toString();
     // 施工计划身份（v1 的 taskId）：迁移前的老行这里是 NULL → 空串，出门口由 taskIdOf() 回落解 JSON
     record.taskId = query.value("task_id").toString();
+    // 溯源字段（v1 §13.2.1）：2026-11-06 才补的列，迁移前的老行是 NULL → 空串/0，
+    // 出门口按"未知"处理，不回填（当时确实用的是哪版模型/围栏已经无从考证）
+    record.rule = query.value("rule").toString();
+    record.modelVersion = query.value("model_version").toString();
+    record.fenceId = query.value("fence_id").toString();
+    record.fenceVersion = query.value("fence_version").toInt();
+    record.regionId = query.value("region_id").toString();
+    record.disposeOptionId = query.value("dispose_option_id").toInt();
 
     // 兼容旧字段
     // NOTE(边界): alarm_time 不是合法 ISO 文本（NULL/被外部工具改坏）时 fromString 解不出来，

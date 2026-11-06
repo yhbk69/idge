@@ -370,6 +370,12 @@ private:
     void importModelViaDialog();     ///< 三步导入：选 rknn → 选 labels → 起 id
     void importModelZip();           ///< zip 模型包一键导入（解压→逐目录 importModel）
     void deleteSelectedModel();      ///< 删除表格选中模型（有引用则拒绝；目录移入 model/.trash/，非物理删除）
+    /// 「更新选中模型」：换同一 id 的权重文件。旧的那份先归档进 data/model_versions，
+    /// 成功后按该 id 的引用通道逐个 applyChannelConfigNow()（权重换了必须重建 NPU 上下文，
+    /// applyModelParamsNow 那种"只换运行期参数"的路走不通）。
+    void updateSelectedModel();
+    /// 「版本/回滚」：列出该 id 的归档版本，选一个复制回库（回滚前的那份同样归档，可反复滚）。
+    void rollbackSelectedModel();
     /// 用 assets/test/test.jpg 对选中模型单帧推理。
     /// ⚠ 同步跑在 **GUI 线程**：NPU 加载数秒 + 一次推理，期间整窗无响应（只有 WaitCursor）。
     /// 作为验证工具可接受，但别把它接到任何自动流程里。

@@ -676,6 +676,7 @@ target_link_libraries(test_alarm_uplink
 add_executable(test_pad_wire
     tests/test_pad_wire.cpp
     src/biz/pad/pad_wire.cpp
+    src/biz/alarm/alarm_labels.cpp
     src/biz/ws/alarm_uplink_engine.cpp
     src/biz/session/construction_session.cpp   # pad_wire 的 taskId 取值判据复用这一处实现
 )
@@ -730,6 +731,7 @@ add_executable(test_pad_ws_server
     tests/test_pad_ws_server.cpp
     src/biz/pad/pad_ws_server.cpp
     src/biz/pad/pad_wire.cpp
+    src/biz/alarm/alarm_labels.cpp
     src/biz/ws/alarm_uplink_engine.cpp
     src/biz/alarm/alarm_manager.cpp
     src/biz/db/database_manager.cpp
@@ -803,6 +805,7 @@ add_executable(test_pad_http_api
     src/biz/pad/pad_http_device.cpp
     src/biz/pad/pad_request_cache.cpp
     src/biz/pad/pad_wire.cpp
+    src/biz/alarm/alarm_labels.cpp
     src/biz/pad/pad_ws_server.cpp
     src/biz/ws/alarm_uplink_engine.cpp
     src/biz/geofence/pad_fence_store.cpp
@@ -984,6 +987,7 @@ add_executable(test_channel_reload
     src/base/buffer/dma_alloc.cpp
     src/base/buffer/DmaFrameBuffer.cpp
     src/biz/alarm/alarm_manager.cpp
+    src/biz/alarm/alarm_labels.cpp
     # alarm_manager.cpp 的 makeAlarmRecord() 现在给每条报警盖施工信息戳，
     # 于是本目标的依赖闭包里多了一个会话实现。漏了它就是三个 undefined reference
     # （instance / snapshot / toJson），而链接错误比编译错误更难归因到这里。
@@ -1073,6 +1077,7 @@ add_executable(test_stream_params
     src/base/buffer/dma_alloc.cpp
     src/base/buffer/DmaFrameBuffer.cpp
     src/biz/alarm/alarm_manager.cpp
+    src/biz/alarm/alarm_labels.cpp
     src/biz/session/construction_session.cpp
     src/biz/db/alarm_dao.cpp
     src/biz/db/detection_dao.cpp

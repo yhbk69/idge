@@ -829,7 +829,7 @@ bool frmMain::startPadHttpFromConfig(QString *err)
  *     而那个模型的 alarm_class 明明为空（只画框不报警）；
  *   - 围栏内部再分闯入禁区 / 离岗（alarmType == "fence_out"）：都写成"围栏侵入"
  *     就会把人往反方向找；
- *   - 负责人只在不为空时才拼（未登录期间根本不会有报警，空的多半是历史回读）。
+ *   - 负责人不上 toast：它是会话级常量，同一批报警每条都一样，占位不信息。
  * 副作用与限制：toast 是 this 的子件、盖在整窗之上，adjustSize + move 每次重算，
  * 位置按**当前窗口尺寸**取右下角（全屏切换后下一条报警自然会重定位，不用额外处理）；
  * 连发多条只显示最后一条（3s 单发定时器被反复重置）；alarmTime 解析失败时
@@ -852,15 +852,12 @@ void frmMain::showAlarmToast(const AlarmRecord &alarm)
     } else {
         head = QString("⚠ 通道%1 检测到 %2").arg(alarm.channel + 1).arg(alarm.className);
     }
-    // 负责人挂在时间后面；为空就不拼（toast 是右下角那一块，多一段空格比少一段更难看，
-    // 而未登录期间根本不会有报警，这条只在旧历史回读之类的场景才空）
-    const QString worker = alarm.workerName.isEmpty()
-        ? QString()
-        : QString("  负责人 %1").arg(alarm.workerName);
-    alarmToast_->setText(QString("%1 (%2%%)  %3%4")
+    // 负责人不再出现在 toast 上：它是会话级常量（同一批报警全都一样），
+    // 而这一页的口径是"列表与提示只看事件本身，人/计划进详情看"。
+    alarmToast_->setText(QString("%1 (%2%%)  %3")
         .arg(head)
         .arg(alarm.confidence * 100, 0, 'f', 1)
-        .arg(dt.toString("HH:mm:ss"), worker));
+        .arg(dt.toString("HH:mm:ss")));
     alarmToast_->adjustSize();
     // 右下角悬浮显示
     int x = this->width() - alarmToast_->width() - 20;
@@ -3169,26 +3166,32 @@ void frmMain::initModelLibraryUi()
     QPushButton *btnImport = new QPushButton("导入模型...");
     QPushButton *btnZip = new QPushButton("导入zip包...");
     QPushButton *btnTest = new QPushButton("测试选中");
+    QPushButton *btnUpdate = new QPushButton("更新选中模型...");
+    QPushButton *btnRollback = new QPushButton("版本/回滚...");
     QPushButton *btnDelete = new QPushButton("删除选中");
     btnRefresh->setStyleSheet(theme::mainButton(theme::BTN_SECONDARY));
     btnImport->setStyleSheet(theme::mainButton(theme::BTN_SECONDARY));
     btnZip->setStyleSheet(theme::mainButton(theme::BTN_SECONDARY));
     btnTest->setStyleSheet(theme::mainButton(theme::SUCCESS));
+    btnUpdate->setStyleSheet(theme::mainButton(theme::BTN_SECONDARY));
+    btnRollback->setStyleSheet(theme::mainButton(theme::BTN_SECONDARY));
     btnDelete->setStyleSheet(theme::mainButton(theme::DANGER));
-    QLabel *hint = new QLabel("库目录 model/library；改选路径后重启程序生效");
+    QLabel *hint = new QLabel("库目录 model/library；历史版本在 data/model_versions；改选路径后重启程序生效");
     hint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
     bar->addWidget(btnRefresh);
     bar->addWidget(btnImport);
     bar->addWidget(btnZip);
     bar->addWidget(btnTest);
+    bar->addWidget(btnUpdate);
+    bar->addWidget(btnRollback);
     bar->addWidget(btnDelete);
     bar->addStretch();
     bar->addWidget(hint);
     v->addLayout(bar);
 
-    modelLibTable_ = new QTableWidget(0, 6);
+    modelLibTable_ = new QTableWidget(0, 7);
     modelLibTable_->setHorizontalHeaderLabels(
-        {"id", "名称", "任务", "类别数", "输入", "被引用"});
+        {"id", "名称", "任务", "类别数", "输入", "被引用", "版本/历史"});
     modelLibTable_->verticalHeader()->setVisible(false);
     modelLibTable_->verticalHeader()->setDefaultSectionSize(theme::TOUCH_TABLE_ROW);
     modelLibTable_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -3218,6 +3221,8 @@ void frmMain::initModelLibraryUi()
     connect(btnImport, &QPushButton::clicked, this, &frmMain::importModelViaDialog);
     connect(btnZip, &QPushButton::clicked, this, &frmMain::importModelZip);
     connect(btnTest, &QPushButton::clicked, this, &frmMain::testSelectedModel);
+    connect(btnUpdate, &QPushButton::clicked, this, &frmMain::updateSelectedModel);
+    connect(btnRollback, &QPushButton::clicked, this, &frmMain::rollbackSelectedModel);
     connect(btnDelete, &QPushButton::clicked, this, &frmMain::deleteSelectedModel);
 
     contentLayout->insertWidget(insertAt, group);
@@ -3245,6 +3250,11 @@ void frmMain::refreshModelLibraryTable()
             QString::number(m.numClasses),
             QString("%1x%2").arg(m.inputWidth).arg(m.inputHeight),
             QString::number(reg.referenceCount(id)),
+            // 版本号 + 已归档的历史条数。括号里是 0 表示这份权重是"第一代"，
+            // 还没被更新过；不是 0 就能点「版本/回滚」挑回去。
+            QStringLiteral("%1（历史 %2）").arg(m.version.isEmpty() ? QStringLiteral("—")
+                                                                       : m.version)
+                                           .arg(reg.archivedVersions(id).size()),
         };
         for (int c = 0; c < cols.size(); ++c)
             modelLibTable_->setItem(row, c, new QTableWidgetItem(cols[c]));
@@ -3401,6 +3411,136 @@ void frmMain::deleteSelectedModel()
     } else {
         QMessageBox::warning(this, "删除被拒", err);
     }
+}
+
+// ============================================================
+// updateSelectedModel: 换同一 id 的权重（旧的那份归档，不丢）
+// ============================================================
+// 现场迭代模型时 id 不变（通道的模型列表、参数表都按 id 引用），改的是那一份 .rknn。
+// 以前只能"删除 → 重新导入"，而删除被引用守卫挡着，等于要先把四个通道的引用拆掉；
+// 归档在 data/model_versions/<id>/<版本号>/，所以删错了/换坏了还能滚回来。
+void frmMain::updateSelectedModel()
+{
+    if (!modelLibTable_) return;
+    const int row = modelLibTable_->currentRow();
+    if (row < 0 || !modelLibTable_->item(row, 0)) {
+        QMessageBox::information(this, "更新模型", "请先在列表中选中一行模型");
+        return;
+    }
+    const QString id = modelLibTable_->item(row, 0)->text();
+    ModelRegistry &reg = ModelRegistry::instance();
+    const ModelMeta m = reg.meta(id);
+    if (m.id.isEmpty()) {
+        QMessageBox::warning(this, "更新模型", "模型不在库中: " + id);
+        return;
+    }
+
+    QString rknn = QFileDialog::getOpenFileName(
+        this, QStringLiteral("更新模型 [%1]: 选择新的 .rknn 文件").arg(id),
+        "model", "RKNN 模型 (*.rknn)");
+    if (rknn.isEmpty()) return;
+
+    const QString labels = QFileDialog::getOpenFileName(
+        this, QStringLiteral("更新模型 [%1]: 选择标签文件（可取消=沿用原标签）").arg(id),
+        "model", "文本文件 (*.txt);;所有文件 (*)");
+
+    const int users = reg.referenceCount(id);
+    if (QtHelper::askConfirm(
+            this, QStringLiteral("更新模型"),
+            QStringLiteral("确认用新权重替换 [%1]？\n"
+                           "现役那份（版本 %2）会归档到 data/model_versions/%1/，可回滚。\n"
+                           "本模型被 %3 个通道引用，替换后这些通道会重新拉流。")
+                .arg(id)
+                .arg(m.version.isEmpty() ? QStringLiteral("—") : m.version)
+                .arg(users))
+        != QMessageBox::Ok) {
+        return;
+    }
+
+    QString err;
+    if (!reg.updateModel(id, rknn, labels, err)) {
+        QMessageBox::warning(this, "更新失败", err);
+        log("model", QStringLiteral("模型库更新失败: %1 %2").arg(id, err));
+        return;
+    }
+    // 权重换了必须重建 NPU 上下文：applyModelParamsNow 只换报警类别与阈值，
+    // 用它的话"版本列显示新版、画面还是旧模型的输出"，是最难归因的一种不一致。
+    const QList<int> channels = ConfigManager::instance().modelParamUsers(id);
+    for (int ch : channels)
+        applyChannelConfigNow(ch);
+    refreshModelLibraryTable();
+    refreshModelParamsTable();
+    reloadEquipmentService();
+    QMessageBox::information(this, "更新模型",
+                             err.isEmpty()
+                                 ? QStringLiteral("已更新 [%1]，引用通道 %2 路已重开").arg(id)
+                                       .arg(channels.size())
+                                 : err);
+    log("model", QStringLiteral("模型库更新: %1 %2").arg(id, err));
+}
+
+// ============================================================
+// rollbackSelectedModel: 从归档版本里挑一份放回库里
+// ============================================================
+void frmMain::rollbackSelectedModel()
+{
+    if (!modelLibTable_) return;
+    const int row = modelLibTable_->currentRow();
+    if (row < 0 || !modelLibTable_->item(row, 0)) {
+        QMessageBox::information(this, "版本回滚", "请先在列表中选中一行模型");
+        return;
+    }
+    const QString id = modelLibTable_->item(row, 0)->text();
+    ModelRegistry &reg = ModelRegistry::instance();
+    const QStringList versions = reg.archivedVersions(id);
+    if (versions.isEmpty()) {
+        QMessageBox::information(
+            this, "版本回滚",
+            QStringLiteral("[%1] 还没有历史版本。\n换过一次权重之后，这里就能选回到上一版。").arg(id));
+        return;
+    }
+    const QString current = reg.meta(id).version;
+
+    bool ok = false;
+    // 列表第一项是"当前版本"占位说明，选它等于什么都不做（QInputDialog 没有
+    // "只列历史"的选项，把当前版列在最前面反而最容易看明白自己在哪一版）
+    QStringList items;
+    items << QStringLiteral("（当前版本：%1，不改动）").arg(current.isEmpty() ? QStringLiteral("—") : current);
+    items << versions;
+    const QString picked = QInputDialog::getItem(
+        this, QStringLiteral("版本回滚 [%1]").arg(id),
+        QStringLiteral("归档在 data/model_versions/%1/ 的历史版本（新→旧）:").arg(id),
+        items, 1, false, &ok);
+    if (!ok || picked.isEmpty() || picked == items.first())
+        return;
+    const QString version = picked;
+
+    if (QtHelper::askConfirm(
+            this, QStringLiteral("版本回滚"),
+            QStringLiteral("确认把 [%1] 回滚到版本 %2？\n"
+                           "现役那份（版本 %3）也会先归档，滚错了还能再滚回来。")
+                .arg(id, version, current.isEmpty() ? QStringLiteral("—") : current))
+        != QMessageBox::Ok) {
+        return;
+    }
+
+    QString err;
+    if (!reg.rollbackModel(id, version, err)) {
+        QMessageBox::warning(this, "回滚失败", err);
+        log("model", QStringLiteral("模型回滚失败: %1 %2 %3").arg(id, version, err));
+        return;
+    }
+    const QList<int> channels = ConfigManager::instance().modelParamUsers(id);
+    for (int ch : channels)
+        applyChannelConfigNow(ch);
+    refreshModelLibraryTable();
+    refreshModelParamsTable();
+    reloadEquipmentService();
+    QMessageBox::information(this, "版本回滚",
+                             QStringLiteral("已把 [%1] 回滚到 %2，引用通道 %3 路已重开")
+                                 .arg(id, version)
+                                 .arg(channels.size()));
+    log("model", QStringLiteral("模型回滚: %1 -> %2").arg(id, version));
 }
 
 // ============================================================

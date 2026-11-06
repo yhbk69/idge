@@ -40,6 +40,7 @@
 // ============================================================================
 
 #include "alarm_manager.h"
+#include "alarm_labels.h"   // ruleNameOf()：规则名与 Pad 出门口共用同一张表
 #include "perf_probe.h"
 #include "ConfigManager.h"
 #include "construction_session.h"
@@ -222,6 +223,9 @@ AlarmRecord makeAlarmRecord(int channel, const object_detect_result &det,
 
     alarm.status = "pending";
 
+    // 触发规则名与 §13.2.1 的 `rule` 对齐，取值只认 alarm_labels.cpp 那一张表。
+    alarm.rule = alarm_labels::ruleNameOf(alarmType, className);
+
     // 施工信息在**产生这一刻**固化（不等到显示/上行时再回查会话）：
     // 退出登录后重传的那条报警，仍带着它产生时的施工信息。
     // 未登录时 snapshot 是空对象，两列都留空 ⇒ 门挡住的正是这里。
@@ -335,6 +339,7 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
             AlarmRecord alarm = makeAlarmRecord(channel, det, className, results.time,
                                                 QStringLiteral("detection"),
                                                 ConfigManager::instance().alarmLevel(QStringLiteral("detection")));
+            alarm.modelVersion = ctx.modelVersion;
 
             // 调试输出
             qDebug() << "AlarmManager: Creating alarm - id:" << alarm.id
@@ -373,7 +378,8 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
 // ============================================================================
 QVector<AlarmRecord> AlarmManager::ingestFenceAlarm(int channel, const object_detect_result &det,
                                                    const SlotContext &ctx, long timeNs,
-                                                   geofence::FenceRole role)
+                                                   geofence::FenceRole role,
+                                                   const FenceContext &fence)
 {
     QVector<AlarmRecord> newAlarms;
     const QString className = slotClassName(ctx, det.cls_id);
@@ -394,6 +400,11 @@ QVector<AlarmRecord> AlarmManager::ingestFenceAlarm(int channel, const object_de
                                             fenceType,
                                             ConfigManager::instance().alarmLevel(fenceType));
         alarm.isFenceAlarm = true;
+        // 溯源：哪条围栏、哪个版本、命中哪个区域（离岗没有单一责任形状，regionId 留空）
+        alarm.fenceId = fence.fenceId;
+        alarm.fenceVersion = fence.version;
+        alarm.regionId = fence.regionId;
+        alarm.modelVersion = ctx.modelVersion;
 
         qDebug() << "AlarmManager: Creating fence alarm - id:" << alarm.id
                  << "channel:" << alarm.channel
@@ -794,7 +805,7 @@ bool AlarmManager::markAsFalsePositiveById(const QString &id, const QString &per
 bool AlarmManager::disposeAlarmById(const QString &id, const QString &measure,
                                     const QString &remark, const QString &personId,
                                     const QString &personName, const QString &photoPathsJson,
-                                    const QString &disposedAtInternal, QString *err)
+                                    const QString &disposedAtInternal, int optionId, QString *err)
 {
     if (id.isEmpty()) {
         if (err) *err = QString::fromUtf8("alarmId 是空的");
@@ -810,7 +821,7 @@ bool AlarmManager::disposeAlarmById(const QString &id, const QString &measure,
         // WHERE 里带了"非终态"那条守卫（见 AlarmDAO::dispose），所以库里已是 disposed /
         // false_alarm 的行返回 0 行 → 这里就是 false，处置不会被写进去。
         dbOk = dao.dispose(id, measure, personId, personName, remark, photoPathsJson,
-                           disposedAtInternal);
+                           disposedAtInternal, optionId);
     }
     if (!dbOk) {
         // 库里没改成，就**不动内存、也不发信号**。
@@ -831,6 +842,10 @@ bool AlarmManager::disposeAlarmById(const QString &id, const QString &measure,
                 continue;
             a.status = QStringLiteral("disposed");
             a.disposeResult = measure;
+            // 0 是"这次没选内置项"，不是"改成没选过"：留原值，否则下面 syncToDatabase
+            // 的 INSERT OR REPLACE 会把上一次处置的选项 id 冲没。
+            if (optionId > 0)
+                a.disposeOptionId = optionId;
             a.disposePersonId = personId;
             a.disposeUserName = personName;
             a.disposePhoto = photoPathsJson;

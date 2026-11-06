@@ -194,10 +194,18 @@ struct FenceShape {
 // ============================================================================
 // enabled: 该通道是否启用围栏检测（通道级，混用两种角色时无法只关其中一种）
 // shapes:  该通道的所有围栏形状，可混合禁区与岗区域
+// fenceId/version: 这批形状**来自库里哪条围栏的哪一版**。报警要打围栏版本戳
+//   （v1 §13.2.1 的 fenceVersion），而解码线程不能去查库（NativeFenceStore 只允许
+//   GUI 线程用），所以只能在这份按值拷贝的快照里带出来。
+//   version 是 saveActiveVersion 每次编辑 +1 的那个整数（出门口才补 "V" 前缀）；
+//   0/空 = 这批形状还没落过库（迁移失败或内存里刚画完），报警里就不写版本，
+//   而不是写一个看起来像真数的 V0。
 // ============================================================================
 struct ChannelFence {
     bool enabled = false;
     std::vector<FenceShape> shapes;
+    QString fenceId;
+    int version = 0;
 };
 
 } // namespace geofence

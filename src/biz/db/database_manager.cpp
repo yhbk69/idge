@@ -300,9 +300,9 @@ bool DatabaseManager::createTables()
             image_path      TEXT,                              -- 抓拍图**相对路径** data/alarms/yyyyMMdd/ch{N+1}_{类别}_{HHmmss_zzz}.jpg。入库前就填好（解码线程 deliverAlarms 先写 imagePath 再 storeAndNotify），所以报警一落地就有图可对外。⚠ 老行可能是迁移前的 "alarms/..." 前缀，读取时过 RuntimePaths::resolveStoredPath 重写
             video_path      TEXT,                              -- insert 时**必为空**：片段要"报警后约 2 秒"才由 ClipWriter 写出来，事后 updateVideoPath 回填。存的是 Annex-B 裸流（.h265/.h264）；网页/Pad 要播的同名 .mp4 副本不入库（入库会让本地详情框找不到那段视频）
             status          TEXT NOT NULL DEFAULT 'pending',   -- pending / rectified / disposed / false_alarm。⚠ `rectified` 是本机"已确认"的语义 = **我看过了**，不是"已处置"；`disposed` 只由 AlarmDAO::dispose() 写，是 v1 §3.10 里 DISPOSED 的唯一来源。出站映射：disposed→DISPOSED、false_alarm→FALSE_ALARM、其余（含 rectified）→PENDING
-            dispose_result  TEXT,                              -- 处置措施文本（v1 的 dispose.measure）。**全仓零写入方**：AlarmDAO::dispose() 有实现无调用，等 /api/alarms/{id}/dispose
-            dispose_user_id INTEGER,                           -- 处置人 ID。⚠ 类型已与 v1 冲突：对端的 personId 是字符串工号（"05-0101"/"P-001"），处置闭环落地时要改成 TEXT，别在 INTEGER 上硬塞
-            dispose_user_name TEXT,                            -- 处置人/误报人姓名（同 dispose_result，无写入方）
+            dispose_result  TEXT,                              -- 处置措施文本（v1 的 dispose.measure）。写入方：`POST /api/alarms/{id}/dispose`（Pad）→ AlarmManager::disposeAlarmById → AlarmDAO::dispose；本机详情框的处置表单走同一条路
+            dispose_user_id INTEGER,                           -- 处置人 ID。⚠ 类型已与 v1 冲突：对端的 personId 是字符串工号（"05-0101"/"P-001"），所以原文落在下面的 dispose_person_id，这一列只在工号整体是整数时才顺带写
+            dispose_user_name TEXT,                            -- 处置人/误报人姓名（写入方同 dispose_result）
             dispose_person_id TEXT,                            -- 处置人/误报人的**工号原文**（v1 的 dispose.personId，形如 "05-0101"/"P-001"）。为什么另开一列而不是塞进 dispose_user_id：那是 INTEGER，装不下带横线/字母的工号，硬转数字就会静默变成 0（口径确认单 N5 的落地选择：保原文、旧列照旧写数字档）。老库由 ensureColumns 补这一列
             dispose_time    TEXT,                              -- 处置时间（同 alarm_time 口径；v1 的 disposedAt，终态时必填）
             dispose_photo   TEXT,                              -- 处置整改照片路径的 **JSON 数组文本**（0~5 个相对路径，v1 的 dispose.photoUrls）。⚠ 老行可能是**单张裸路径**（这一列原本的口径就是单张），所以读侧两种形状都要认：以 '[' 开头按数组解，否则当单元素（pad_wire.cpp 的 photoUrls 就是这么出的）。写入方是 POST /api/alarms/{id}/dispose
@@ -313,6 +313,12 @@ bool DatabaseManager::createTables()
             worker_name     TEXT,                              -- 施工负责人姓名，扫码登录会话定死后在**产生这一刻**盖上（不等到显示/上行再回查）。报警列表那一列与"按负责人"筛选用它——为这个才单独成列，省掉每行解析 JSON
             construction_info TEXT,                            -- 整份施工信息 JSON（compact 原样；2026-11-04 起是 qr-login 的 person/plan 嵌套形状，历史行仍是扁平 construction_id/worker_name 形状，两代都读得回）。详情框逐键渲染与上行 data["construction"] 都从它出，**加字段不用改表**
             task_id           TEXT                             -- 施工计划 ID ＝ v1 的 taskId（B2 于 2026-11-04 定案：就是扫码载荷里的施工计划 ID（qr-login 起是 plan.taskId，历史行是 construction_id），对外统一叫 taskId）。写库时从会话快照直接落这一列；Pad 的 sync 过滤、列表「按施工计划」筛选、facets 候选值全部走这条**等值**判据。以前是 `instr(construction_info,'"construction_id":"X"')` 的子串匹配，依赖 QJsonDocument::Compact 的序列化形状（键序变了、多了空格、将来换成 pretty 就静默查不到），所以把它升成一等列。老行由启动时一次性回填（backfillAlarmTaskIds）。⚠ **这一列的不变式是「永不为 NULL」**：没有计划身份的行落空串 `''`。写入侧靠 INSERT 里的 `IFNULL(:task_id, '')` 兜住——Qt 把空 QString 当无值，直接绑就落 NULL，而关机时 RAM 窗口整批回写会把已回填好的行打回 NULL，于是回填每开机重跑一次（实测每次 1000 行）
+            rule            TEXT,                              -- 触发规则中文名（v1 §13.2.1 的 `rule`）。取值只认 src/biz/alarm/alarm_labels.cpp 那一张表，与 Pad 出门口同源；历史行为空、不回填
+            model_version   TEXT,                              -- 产出这条报警的模型版本，形如 `yolo11n-ppe@2026-10-21`（库 id + meta.json 的 version，与 §7.1 的 model_version 同口径）。检测报警取该槽位模型，围栏报警取检出该目标的那个槽位
+            fence_id        TEXT,                              -- 围栏报警：当时生效的围栏主行 id（本机手绘 NFENCE-*，Pad 下发 FENCE-*）；检测报警为空
+            fence_version   INTEGER,                           -- 围栏报警：当时生效的围栏版本号（每次编辑 +1）。v1 的 `fenceVersion` 是字符串 "V2"，那层 "V" 前缀在出门口补，库里只存数字
+            region_id       TEXT,                              -- 围栏报警：命中区域的 regionId（RG-<8hex>，形状级、跨版本稳定）。⚠ 离岗（fence_out）没有单一责任形状，这一列**恒空**，不是漏写
+            dispose_option_id INTEGER                         -- 处置选项 id（1..4，见 pad_http_alarms.cpp 的选项表）。与 dispose_result 的 label 同源：措辞以后还会改，统计与对账要认 id 而不是认中文
         );
     )";
 
@@ -328,7 +334,13 @@ bool DatabaseManager::createTables()
                        {QStringLiteral("worker_name TEXT"),
                         QStringLiteral("construction_info TEXT"),
                         QStringLiteral("task_id TEXT"),
-                        QStringLiteral("dispose_person_id TEXT")})) {
+                        QStringLiteral("dispose_person_id TEXT"),
+                        QStringLiteral("rule TEXT"),
+                        QStringLiteral("model_version TEXT"),
+                        QStringLiteral("fence_id TEXT"),
+                        QStringLiteral("fence_version INTEGER"),
+                        QStringLiteral("region_id TEXT"),
+                        QStringLiteral("dispose_option_id INTEGER")})) {
         qWarning() << "Alarms construction columns not fully ensured";
     }
     // 老行的 task_id 回填必须在建 idx_alarms_task_id 之前跑完：几万行逐条 UPDATE 之后

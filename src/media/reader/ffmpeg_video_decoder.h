@@ -247,20 +247,25 @@ private:
     std::shared_ptr<DmaBufferPool> dmaBufferPool_;
 
     // ===== 级联多模型：每个非空模型一个推理任务 + 一个结果队列 =====
-    // PreviewOnly 模式下这三个容器保持为空，见下方 inferenceEnabled_。
+    // PreviewOnly 模式下这些容器保持为空，见下方 inferenceEnabled_。
     std::vector<PpeTask*> tasks_;                  // 推理任务(每个一个线程)
     std::vector<std::shared_ptr<PriorityQueue<object_detect_result_list>>> slotQueues_; // 各任务的结果
     // 每槽位独立的类别名表：slotClassNames_[k] 对应 tasks_[k] 模型的标签文件。
     // 级联各模型类别不同（coco80 / helmet 2类 / vest 2类…），共用一张表会把
     // helmet 的 cls_id 套用 coco 类名导致报警类别错标（2026-09-24 修复）。
     std::vector<std::vector<std::string>> slotClassNames_;
+    // 每槽位模型的版本串 `<库id>@<meta.version>`，与 slotClassNames_ 同下标，建任务时一次写定。
+    // 报警要打"这条是哪版模型检出的"（v1 §13.2.1 的 modelVersion），而库可以在运行期被
+    // 重新导入/换文件——所以这里存的是**加载那刻**解析出的版本，报警落地后就再也不动，
+    // 否则历史报警显示的会是"今天这一版"。取不到库 id 或 meta 时是空串（详情框显示"未知"）。
+    std::vector<QString> slotModelVersions_;
     // 每槽位模型的运行期参数（报警类别 + 生效阈值），与 slotClassNames_ 同下标。
     // 报警类别随结果一起传进 AlarmManager::ingest 的 SlotContext，阈值随 TaskData
     // 传进 PpeTask——两者都走"每帧一份快照"这一条路，所以共用一个容器而不是两个：
     // 分开就是两条锁、两种漂移可能。按通道配置后也不再写任何全局单例的槽表。
     // **唯一允许运行期改写的槽位容器**：写方是 GUI 线程的 updateSlotParams()，
     // 读方是解码线程每帧一次的快照拷贝，故由 slotParamMtx_ 保护（只锁这一次拷贝，
-    // 与模型加载/NPU 调用完全不重叠）。其余三个向量运行期只读。
+    // 与模型加载/NPU 调用完全不重叠）。其余向量运行期只读。
     std::vector<SlotRuntimeParam> slotParams_;
     std::mutex slotParamMtx_;              ///< 只保护 slotParams_ 的读写
 

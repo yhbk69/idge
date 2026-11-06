@@ -97,6 +97,18 @@ struct AlarmRecord {
     QString constructionJson;
     QString taskId;
 
+    // 溯源字段（v1 §13.2.1 的 rule / modelVersion / fenceVersion / regionId，
+    // 2026-11-06 起在报警产生那一刻一起落库；历史行为空，不回填）
+    QString rule;             // 触发规则中文名，见 alarm_labels.cpp（唯一事实源）
+    QString modelVersion;     // "库id@meta.json版本"，例如 yolo11n-ppe@2026-10-21
+    QString fenceId;          // 围栏报警：NFENCE-001；检测报警为空
+    int fenceVersion = 0;     // 围栏报警：当时生效的围栏版本号（出门口写成 "V<n>"）
+    QString regionId;         // 围栏报警：命中区域的 regionId；离岗没有单一责任形状，留空
+
+    // 处置（§13.2.3）：dispose_result 存选项 label，这一列存选项 id（1..4），
+    // 措辞改了不至于让历史统计对不上
+    int disposeOptionId = 0;
+
     // 兼容旧字段
     long timestamp = 0;       // 时间戳(毫秒)
     bool isFenceAlarm = false;
@@ -104,6 +116,22 @@ struct AlarmRecord {
 
 // 注册自定义类型（用于 Qt 信号/槽跨线程传递）
 Q_DECLARE_METATYPE(AlarmRecord)
+
+// ============================================================================
+// FenceContext: 围栏报警的溯源上下文（v1 §13.2.1 的 fenceVersion/regionId）
+// ============================================================================
+// 由解码线程在通道级围栏判定里现攒：fenceId/version 来自 FenceManager 缓存的
+// 那份通道快照（不查库——NativeFenceStore 只允许 GUI 线程用），regionId 来自
+// 命中的那个形状。**离岗（Workzone）没有单一责任形状**，regionId 留空。
+// 放命名空间作用域而不是 AlarmManager 内部：类内定义 + 类内 `= FenceContext()`
+// 默认实参要踩 GCC 的"default member initializer required before the end of its
+// enclosing class"（version 的 `= 0` 就是那个成员初始化器），提出来就没这约束。
+struct FenceContext
+{
+    QString fenceId;       ///< NFENCE-*/FENCE-*，空 = 这条不是围栏报警
+    int     version = 0;   ///< 当时生效的围栏版本号，0 = 未知
+    QString regionId;      ///< 命中区域 id（RG-xxxxxxxx），离岗为空
+};
 
 // ============================================================================
 // AlarmManager - 报警管理器（单例）
@@ -144,6 +172,7 @@ public:
     {
         QString     alarmClass;   ///< 该槽位模型的报警类别；空 = 只画框不报警
         QStringList classNames;   ///< 该槽位模型的类别名（labels.txt 行序 = cls_id）
+        QString     modelVersion; ///< 该槽位模型的 "库id@meta.json版本"，空 = 取不到
     };
 
     // ============================================================================
@@ -189,7 +218,8 @@ public:
     // ============================================================================
     QVector<AlarmRecord> ingestFenceAlarm(int channel, const object_detect_result &det,
                                           const SlotContext &ctx, long timeNs,
-                                          geofence::FenceRole role);
+                                          geofence::FenceRole role,
+                                          const FenceContext &fence = FenceContext());
 
     // ============================================================================
     // storeAndNotify: 存储新报警并发出信号
@@ -265,6 +295,9 @@ public:
      * @brief v1 §4.2 的处置入口（Pad 提交处置表单，含 0~5 张整改照片）
      * @param photoPathsJson 已落盘的整改照片**相对路径**的 JSON 数组文本；空串按 `[]` 存
      * @param disposedAtInternal 对端报的处置时间（库内定宽文本），空 = 本机此刻
+     * @param optionId §4.1 处置选项的 id（1..4）。0 = 只给了自由文本、没选内置项，
+     *                 这一列保持原值不动；>0 时落 dispose_option_id，
+     *                 于是"已现场纠正"改措辞不会让历史统计接不上。
      * @param err 可选出参，false 时的中文原因（"库里没有这条报警" / "已经是终态"）
      * @return true = 库里的行真的被改成 disposed 了
      *
@@ -278,7 +311,7 @@ public:
     bool disposeAlarmById(const QString &id, const QString &measure, const QString &remark,
                           const QString &personId, const QString &personName,
                           const QString &photoPathsJson, const QString &disposedAtInternal,
-                          QString *err = nullptr);
+                          int optionId = 0, QString *err = nullptr);
 
     /**
      * @brief v1 §4.4 的已读入口：**不改状态**，只推 read_time（保留最早）与 update_time

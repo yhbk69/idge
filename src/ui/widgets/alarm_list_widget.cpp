@@ -90,6 +90,26 @@ QColor statusColor(const QString &status)
 // ⚠ 弹出来的那一层**不在这条 QSS 的管辖范围内**：`QComboBox QAbstractItemView::item
 //    { min-height }` 无论写在 combo 上还是写在 view() 上都不生效（2026-10-31 独立探针实测：
 //    两种写法弹层行高都停在字体算出的尺寸），行高只能由 item delegate 给 —— 见 makeCombo。
+// 报警级别 → 界面中文与配色。取值口径同详情框（1 紧急 / 2 重要 / 3 一般 / 4 提示），
+// 生产上目前只有 3（模型检测）与围栏那两档（按 config 的 alarm.levels）。
+QString levelLabel(int level)
+{
+    switch (level) {
+    case 1: return QStringLiteral("紧急");
+    case 2: return QStringLiteral("重要");
+    case 3: return QStringLiteral("一般");
+    case 4: return QStringLiteral("提示");
+    default: return QStringLiteral("未知（%1）").arg(level);
+    }
+}
+
+QColor levelColor(int level)
+{
+    if (level == 1) return QColor(244, 67, 54);     // 红（theme::DANGER）
+    if (level == 2) return QColor(255, 152, 0);     // 橙（theme::WARNING）
+    return QColor(156, 163, 175);                   // 次要灰（theme::TEXT_MUTED）
+}
+
 QString comboQss()
 {
     return QStringLiteral(
@@ -374,15 +394,16 @@ void AlarmListWidget::setupUi()
     ====================================================
     */
     table_ = new QTableWidget();
-    // 1920 宽下再加就必截字，所以列表**只这一列**负责人，其余施工信息进详情框。
-    // uuid 那一列已撤：界面上除了它没有第二处能读到报警 id（详情框里也不显示了），
-    // 而它是排查时唯一能被抄进聊天框的一串字符 —— 真要定位某一条，用时间+通道+类别。
+    // 列序按"先判性质、再看时间"排：类别与置信度在最前两列，级别/状态紧随其后。
+    // 负责人列已撤（筛选也一并撤了）：现场按人检索的需求由 Pad 侧承担。
+    // uuid 列同样不出现 —— 真要定位某一条，用时间+通道+类别。
     table_->setColumnCount(7);
-    table_->setHorizontalHeaderLabels({"时间", "通道", "类别", "置信度", "负责人", "状态", "操作"});
-    // 撤掉最后一列后「操作」变成了最后一列：stretchLastSection 会无视它的 resize mode
-    // 把详情钮拉成一条几百像素的白条（围栏表同一个坑，见下面 fenceTable_ 的写法）。
+    table_->setHorizontalHeaderLabels({"类别", "置信度", "报警级别", "状态", "时间", "通道", "操作"});
+    // stretchLastSection 会无视「操作」列的 resize mode 把详情钮拉成几百像素白条，
+    // 所以关掉，剩余宽度给类别与时间两列。
     table_->horizontalHeader()->setStretchLastSection(false);
     table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    table_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
     table_->horizontalHeader()->setSectionResizeMode(6, QHeaderView::Fixed);
     table_->setColumnWidth(6, 100);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -406,16 +427,15 @@ void AlarmListWidget::setupUi()
     ====================================================
     */
     fenceTable_ = new QTableWidget();
-    fenceTable_->setColumnCount(7);
-    fenceTable_->setHorizontalHeaderLabels({"时间", "通道", "类别", "置信度", "负责人", "围栏类型", "操作"});
-    // 原来靠 setStretchLastSection(true) 把「围栏类型」撑满；加了「操作」列后它就是最后一列，
-    // 而 stretchLastSection 会**无视**该列的 resize mode，把按钮拉成 300px 宽的白条。
-    // 所以改成显式指定：时间/围栏类型两列分剩余宽度（与改动前等价），操作列定宽。
+    fenceTable_->setColumnCount(8);
+    fenceTable_->setHorizontalHeaderLabels({"类别", "置信度", "报警级别", "状态", "时间", "通道", "围栏类型", "操作"});
+    // 与类别报警表同一列序；剩余宽度给类别与时间，操作列定宽（stretchLastSection
+    // 会无视按钮列的 resize mode 把它拉成白条）。
     fenceTable_->horizontalHeader()->setStretchLastSection(false);
     fenceTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-    fenceTable_->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Stretch);
-    fenceTable_->horizontalHeader()->setSectionResizeMode(6, QHeaderView::Fixed);
-    fenceTable_->setColumnWidth(6, 100);
+    fenceTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
+    fenceTable_->horizontalHeader()->setSectionResizeMode(7, QHeaderView::Fixed);
+    fenceTable_->setColumnWidth(7, 100);
     fenceTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     fenceTable_->setAlternatingRowColors(true);
     fenceTable_->setStyleSheet(tableQss);
@@ -499,8 +519,6 @@ void AlarmListWidget::setupFilterBar(QVBoxLayout *mainLay)
     comboStatus_->addItem("已确认", QStringLiteral("rectified"));
     comboStatus_->addItem("已处置", QStringLiteral("disposed"));
     comboStatus_->addItem("误报", QStringLiteral("false_alarm"));
-    comboWorker_ = makeCombo("全部负责人");
-    comboConstruction_ = makeCombo("全部施工id");
 
     comboLay->addStretch();
 
@@ -547,10 +565,9 @@ void AlarmListWidget::setupFilterBar(QVBoxLayout *mainLay)
             .arg(theme::TEXT, theme::BTN_SECONDARY, theme::BORDER)
             .arg(theme::TOUCH_MAIN_MIN_H));
     connect(btnClearFilter_, &QPushButton::clicked, this, [this]() {
-        // 清除 = 五个下拉 + 围栏角色一起回到"全部"再回第一页。
+        // 清除 = 三个下拉 + 围栏角色一起回到"全部"再回第一页。
         // 复位必须一次做完：按下之后按钮一个没动而数字变了，就是又造出一个看不见的条件。
-        for (QComboBox *c : {comboChannel_, comboClass_, comboStatus_,
-                             comboWorker_, comboConstruction_}) {
+        for (QComboBox *c : {comboChannel_, comboClass_, comboStatus_}) {
             if (c) { c->blockSignals(true); c->setCurrentIndex(0); c->blockSignals(false); }
         }
         fenceRole_ = AlarmFilter::RoleAll;
@@ -575,8 +592,7 @@ AlarmFilter AlarmListWidget::currentAlarmFilter(AlarmFilter::Scope scope) const
     f.channel = comboChannel_ ? comboChannel_->currentData().toInt() : -1;
     f.className = comboData(comboClass_).toString();
     f.status = comboData(comboStatus_).toString();
-    f.workerName = comboData(comboWorker_).toString();
-    f.taskId = comboData(comboConstruction_).toString();
+    // 负责人 / 施工id 两项不再从界面取（筛选已撤），DAO 侧留空即"不限"
     f.fenceRole = fenceRole_;
     f.scope = scope;
     f.limit = pageSize();
@@ -611,13 +627,6 @@ void AlarmListWidget::rebuildFacets()
         fenceTab ? AlarmFilter::FenceOnly : AlarmFilter::ClassOnly;
 
     fillCombo(comboClass_, QStringLiteral("全部类别"), dao.classFacets(start, end, scope));
-
-    if (fenceTab || (tabWidget_ && tabWidget_->currentIndex() == TabClass)) {
-        fillCombo(comboWorker_, QStringLiteral("全部负责人"),
-                  dao.workerFacets(start, end, scope));
-        fillCombo(comboConstruction_, QStringLiteral("全部施工id"),
-                  dao.taskIdFacets(start, end, scope));
-    }
 }
 
 /*
@@ -733,33 +742,33 @@ void AlarmListWidget::refreshTable()
     for (int i = 0; i < shown; ++i) {
         const AlarmRecord &a = pageAlarms_.at(i);
 
-        // 时间列
-        QDateTime dt = QDateTime::fromString(a.alarmTime, Qt::ISODate);
-        QTableWidgetItem *timeItem = new QTableWidgetItem(dt.toString("yyyy-MM-dd HH:mm:ss"));
-        timeItem->setData(Qt::UserRole, a.imagePath);  // 存储截图路径
-        timeItem->setData(Qt::UserRole + 2, a.id);     // 存储报警ID（用于精确定位）
-        table_->setItem(i, 0, timeItem);
-
-        // 通道列
-        table_->setItem(i, 1, new QTableWidgetItem(QString("通道 %1").arg(a.channel + 1)));
-
         // 类别列
-        table_->setItem(i, 2, new QTableWidgetItem(a.className));
+        table_->setItem(i, 0, new QTableWidgetItem(a.className));
 
         // 置信度列
         QTableWidgetItem *confItem = new QTableWidgetItem(QString("%1%").arg(a.confidence * 100, 0, 'f', 1));
         confItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);  // 右对齐
-        table_->setItem(i, 3, confItem);
+        table_->setItem(i, 1, confItem);
 
-        // 负责人列：施工信息里唯一进列表的一项（1920 宽再加就截字）。
-        // 未登录/历史行为空 → 统一显示 "—"，与详情框、卡片、toast 同一个口径。
-        table_->setItem(i, 4, new QTableWidgetItem(
-            session::ConstructionInfo::display(a.workerName)));
+        // 报警级别列：颜色跟着级别走，与详情框同一口径
+        QTableWidgetItem *levelItem = new QTableWidgetItem(levelLabel(a.alarmLevel));
+        levelItem->setForeground(levelColor(a.alarmLevel));
+        table_->setItem(i, 2, levelItem);
 
         // 状态列
         QTableWidgetItem *statusItem = new QTableWidgetItem(statusLabel(a.status));
         statusItem->setForeground(statusColor(a.status));
-        table_->setItem(i, 5, statusItem);
+        table_->setItem(i, 3, statusItem);
+
+        // 时间列（截图路径与 id 仍挂在这一列的 data 上，口径与改动前一致）
+        QDateTime dt = QDateTime::fromString(a.alarmTime, Qt::ISODate);
+        QTableWidgetItem *timeItem = new QTableWidgetItem(dt.toString("yyyy-MM-dd HH:mm:ss"));
+        timeItem->setData(Qt::UserRole, a.imagePath);
+        timeItem->setData(Qt::UserRole + 2, a.id);
+        table_->setItem(i, 4, timeItem);
+
+        // 通道列
+        table_->setItem(i, 5, new QTableWidgetItem(QString("通道 %1").arg(a.channel + 1)));
 
         // 操作列（详情按钮）：触屏档 T3。这条是报警详情的**唯一可靠入口** ——
         // 表格双击在触屏上不可靠，但那是手势问题，本轮不动。
@@ -800,26 +809,32 @@ void AlarmListWidget::refreshFenceTable()
     for (int i = 0; i < shown; ++i) {
         const AlarmRecord &a = pageFenceAlarms_.at(i);
 
+        // 前六列与类别报警表同序同口径
+        fenceTable_->setItem(i, 0, new QTableWidgetItem(a.className));
+
+        QTableWidgetItem *confItem = new QTableWidgetItem(QString("%1%").arg(a.confidence * 100, 0, 'f', 1));
+        confItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        fenceTable_->setItem(i, 1, confItem);
+
+        QTableWidgetItem *levelItem = new QTableWidgetItem(levelLabel(a.alarmLevel));
+        levelItem->setForeground(levelColor(a.alarmLevel));
+        fenceTable_->setItem(i, 2, levelItem);
+
+        QTableWidgetItem *statusItem = new QTableWidgetItem(statusLabel(a.status));
+        statusItem->setForeground(statusColor(a.status));
+        fenceTable_->setItem(i, 3, statusItem);
+
         QDateTime dt = QDateTime::fromString(a.alarmTime, Qt::ISODate);
         QTableWidgetItem *timeItem = new QTableWidgetItem(dt.toString("yyyy-MM-dd HH:mm:ss"));
         timeItem->setData(Qt::UserRole, a.imagePath);
         timeItem->setData(Qt::UserRole + 2, a.id);
-        fenceTable_->setItem(i, 0, timeItem);
+        fenceTable_->setItem(i, 4, timeItem);
 
-        fenceTable_->setItem(i, 1, new QTableWidgetItem(QString("通道 %1").arg(a.channel + 1)));
-        fenceTable_->setItem(i, 2, new QTableWidgetItem(a.className));
+        fenceTable_->setItem(i, 5, new QTableWidgetItem(QString("通道 %1").arg(a.channel + 1)));
 
-        QTableWidgetItem *confItem = new QTableWidgetItem(QString("%1%").arg(a.confidence * 100, 0, 'f', 1));
-        confItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        fenceTable_->setItem(i, 3, confItem);
-
-        // 负责人列（与类别报警表同一列位、同一 "—" 口径）
-        fenceTable_->setItem(i, 4, new QTableWidgetItem(
-            session::ConstructionInfo::display(a.workerName)));
-
-        // 第 5 列出角色：一条通道可以同时有禁区和岗区域，都写"围栏"就看不出
+        // 第 6 列出角色：一条通道可以同时有禁区和岗区域，都写"围栏"就看不出
         // 报的是"闯进来了"还是"人跑出去了"。老库里的 "fence" 归到闯入。
-        fenceTable_->setItem(i, 5, new QTableWidgetItem(
+        fenceTable_->setItem(i, 6, new QTableWidgetItem(
                 a.alarmType == QLatin1String("fence_out")
                     ? QStringLiteral("离岗")
                     : QStringLiteral("闯入禁区")));
@@ -831,7 +846,7 @@ void AlarmListWidget::refreshFenceTable()
         connect(btnDetail, &QPushButton::clicked, this, [this, i]() {
             if (i < pageFenceAlarms_.size()) showAlarmDetail(pageFenceAlarms_.at(i));
         });
-        fenceTable_->setCellWidget(i, 6, btnDetail);
+        fenceTable_->setCellWidget(i, 7, btnDetail);
     }
 }
 
@@ -978,6 +993,11 @@ void AlarmListWidget::showAlarmDetail(const AlarmRecord &alarm)
         AlarmManager::instance().acknowledgeAlarmById(id);
         reloadCurrentTab();
     });
+    // 处置已经由本框自己写进库了（见 alarm_detail_dialog.h 的 commitAlarmDisposal），
+    // 这里只负责刷新列表：状态列要从"未确认"变成"已处置"。
+    connect(&dlg, &AlarmDetailDialog::alarmDisposed, this, [this](const QString &) {
+        reloadCurrentTab();
+    });
     dlg.exec();
 }
 
@@ -991,10 +1011,10 @@ void AlarmListWidget::showAlarmDetail(const AlarmRecord &alarm)
 /**
  * @brief 表格标题行点击槽函数（弹出筛选菜单）
  *
- * 支持的筛选列（类别报警表）：
- *   - 列 1（通道）、列 2（类别）、列 4（负责人）、列 5（状态）
- * 支持的筛选列（电子围栏表）：
- *   - 列 1、列 2、列 4，外加列 5（围栏类型：闯入禁区 / 离岗）
+ * 支持的筛选列（类别报警表，列序 类别|置信度|报警级别|状态|时间|通道|操作）：
+ *   - 列 0（类别）、列 3（状态）、列 5（通道）
+ * 支持的筛选列（电子围栏表，同上再加围栏类型）：
+ *   - 列 0、列 3、列 5，外加列 6（围栏类型：闯入禁区 / 离岗）
  *
  * 菜单只改下拉，不另存一份条件：条件只有检索条那一套，表头是它的第二个入口。
  */
@@ -1004,15 +1024,14 @@ void AlarmListWidget::onHeaderSectionClicked(int logicalIndex)
 
     QComboBox *target = nullptr;
     switch (logicalIndex) {
-    case 1: target = comboChannel_; break;
-    case 2: target = comboClass_; break;
-    case 4: target = comboWorker_; break;
-    case 5: target = fenceTab ? nullptr : comboStatus_; break;
-    default: return;   // 时间/置信度/操作 这几列没有可筛的取值
+    case 0: target = comboClass_; break;
+    case 3: target = comboStatus_; break;
+    case 5: target = comboChannel_; break;
+    default: return;   // 置信度/报警级别/时间/操作 没有可筛的取值，围栏类型走下面单独分支
     }
 
-    // 围栏表的第 5 列是"围栏类型"，检索条上没有对应下拉，单独走角色菜单
-    if (fenceTab && logicalIndex == 5) {
+    // 围栏表的第 6 列是"围栏类型"，检索条上没有对应下拉，单独走角色菜单
+    if (fenceTab && logicalIndex == 6) {
         QMenu menu(this);
         menu.setStyleSheet(
             QString("QMenu { background: %1; color: %2; border: 1px solid %3; }"
@@ -1153,7 +1172,7 @@ void AlarmListWidget::openPageJumpMenu()
 /*
 ====================================================
 作用：Tab 切换
-说明：检测明细表没有状态/负责人/施工id 这些列，切过去时把这三个下拉**置灰**，
+说明：检测明细表没有状态这一列，切过去时把状态下拉**置灰**，
       而不是留着让用户选了然后静默无效 —— 静默无效正是这一页以前的毛病。
 ====================================================
 */
@@ -1162,7 +1181,7 @@ void AlarmListWidget::onTabChanged()
     const bool detectionTab =
         (tabWidget_ && tabWidget_->currentIndex() == TabDetection);
 
-    for (QComboBox *c : {comboStatus_, comboWorker_, comboConstruction_}) {
+    for (QComboBox *c : {comboStatus_}) {
         if (!c) continue;
         c->setEnabled(!detectionTab);
         c->setToolTip(detectionTab
@@ -1170,13 +1189,11 @@ void AlarmListWidget::onTabChanged()
                           : QString());
     }
     if (detectionTab) {
-        // 这三个条件在检测明细里问不到，切过去就替用户清掉，避免"看不见的条件"限制着结果
-        for (QComboBox *c : {comboStatus_, comboWorker_, comboConstruction_}) {
-            if (c && c->currentIndex() != 0) {
-                c->blockSignals(true);
-                c->setCurrentIndex(0);
-                c->blockSignals(false);
-            }
+        // 这个条件在检测明细里问不到，切过去就替用户清掉，避免"看不见的条件"限制着结果
+        if (comboStatus_ && comboStatus_->currentIndex() != 0) {
+            comboStatus_->blockSignals(true);
+            comboStatus_->setCurrentIndex(0);
+            comboStatus_->blockSignals(false);
         }
         DetectionDAO dao;
         const long start = 0, end = 0;   // 0/0 = 不限时间
