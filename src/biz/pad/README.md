@@ -111,9 +111,14 @@ Pad 接口 v1（`plan/edge-pad-v1.md`）里**本机作为服务端**的那一面
    实现里是从同一个 `QJsonArray` 拷出来的，物理上不可能分叉，别改成两份各自拼一遍。
 
 ## HTTP 面还没定、也没在代码里偷偷定的事
-- **Pad 围栏与本机检测是两套，没有打通**。`pad_fences`/`pad_fence_versions` 只是把 Pad 画的
-  区域存下来并按 v1 管版本；本机判定用的是 `geofence` 段那套归一化形状（`src/biz/geofence/`）。
-  下发围栏后**检测行为不变**。要不要让前者驱动判定，规约没写，本机也不猜。
+- **Pad 围栏已接进本机检测（2026-11-07 起），但"覆盖本机手绘"这个优先级是本机定的**。
+  `FenceManager::refreshFromStores()` 每次都并两库（`native_fences` + `pad_fences`），同一通道
+  上 Pad 的 ACTIVE 版本赢；`apply`/`disable` 两条路由立刻刷一次，所以 `200/ACTIVE` 与
+  "本机开始按它判"是同一时刻。规约只写"边缘设备保存并生效"，没写两套件冲突时谁赢，
+  这里与 GET /fences 的合并口径保持一致。**待确认**：如果对方的预期是"Pad 画的与本机画的
+  同时生效"，就得改成并集而不是覆盖。
+  ⚠ 两库的 `cameraId` **编号口径不同**（本机 0-based、Pad 按 §7.1 是 1-based），解析必须分开走，
+  合错了整条围栏会下移一路、判到别的画面上；换算与判据见 `tests/test_fence_merge.cpp`。
 - **`frameUrl` 底下没有真实视频帧**。§5.3 要"合成生效画面 PNG"，本机渲的是
   背景网格 + 区域填色 + 编号（`biz/geofence/fence_frame_renderer.cpp`），没有叠任何一路实时帧——
   那需要 `biz → ui` 反向拿最新帧，本轮没做。

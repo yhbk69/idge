@@ -46,6 +46,7 @@
 #include "alarm_dao.h"
 #include "alarm_manager.h"
 #include "database_manager.h"
+#include "native_fence_store.h"
 #include "pad_http_server.h"
 #include "pad_request_cache.h"
 
@@ -62,6 +63,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QList>
+#include <QPointF>
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QThread>
@@ -328,6 +330,10 @@ int main(int argc, char *argv[])
         dao.insertAlarm(makeAlarm(QStringLiteral("aa000000000000000000000000000001"), taskId));
         dao.insertAlarm(makeAlarm(QStringLiteral("bb000000000000000000000000000002"), taskId));
         dao.insertAlarm(makeAlarm(QStringLiteral("cc000000000000000000000000000003"), taskId));
+        // 契约13b 用：处置 measure 文本 → 选项 id 的反查，需要两条没被处置过的报警
+        // （dd…4 已经被契约21 占了，这里换两个没人用的号）
+        dao.insertAlarm(makeAlarm(QStringLiteral("ff000000000000000000000000000006"), taskId));
+        dao.insertAlarm(makeAlarm(QStringLiteral("f7000000000000000000000000000007"), taskId));
     }
 
     pad::HttpApiContext ctx;
@@ -641,6 +647,71 @@ int main(int argc, char *argv[])
               "契约17：DISABLED 是终态，再下发 → 409/2005");
     }
 
+    // ── 17b) 两库并给对端：cameraId 身份换算 + Pad 占用同一物理通道 ────────
+    // 为什么单独钉：native_fences 存的是 "CH"+**0-based**（persistChannelLocked 自己拼的），
+    // 而 §6/§7.1 对外的身份是 "CH"+**1-based**（channelIdentity）。直接回库里的字符串，
+    // 对端拿到的是它没法寻址的 "CH0"，而 "CH1" 在它那边指第 0 路——它会照着错的通道
+    // 再画一条，于是同一路上挂两条围栏、且它以为自己在改本机那条。
+    {
+        const QString mergeTask = QStringLiteral("SMOKE-MERGE");
+        const auto nativeRect = []() {
+            geofence::PadRegion r;
+            r.regionId = QStringLiteral("RG-NATIVE-1");
+            r.shapeType = QStringLiteral("RECT");
+            r.ruleType = QStringLiteral("INTRUSION");
+            r.points = {QPointF(0.10f, 0.10f), QPointF(0.30f, 0.10f),
+                        QPointF(0.30f, 0.30f), QPointF(0.10f, 0.30f)};
+            return r;
+        };
+        geofence::NativeFenceStore nativeStore;
+        // 内部第 0 路（对外应是 CH1）、内部第 2 路（对外应是 CH3）
+        const QString nfCh0 = nativeStore.saveActiveVersion(
+            mergeTask, QStringLiteral("CH0"), QStringLiteral("CH0"),
+            QString::fromUtf8("本机围栏"), {nativeRect()});
+        const QString nfCh2 = nativeStore.saveActiveVersion(
+            mergeTask, QStringLiteral("CH2"), QStringLiteral("CH2"),
+            QString::fromUtf8("本机围栏"), {nativeRect()});
+        check(!nfCh0.isEmpty() && !nfCh2.isEmpty(), "契约17b 前置：本机手绘围栏没落进库");
+
+        // 对端在**内部第 2 路**上画了一条：它按 §7.1 用的是 CH3
+        QJsonObject body = draftBody(QStringLiteral("req-merge-1"), QString());
+        body.insert(QStringLiteral("taskId"), mergeTask);
+        body.insert(QStringLiteral("cameraId"), QStringLiteral("CH3"));
+        body.insert(QStringLiteral("streamId"), QStringLiteral("CH3"));
+        body.insert(QStringLiteral("name"), QStringLiteral("对端画的"));
+        body.insert(QStringLiteral("regions"), QJsonArray{regionRect(QStringLiteral("RG-PAD-1"))});
+        body.insert(QStringLiteral("plan"),
+                    QJsonObject{{QStringLiteral("taskId"), mergeTask}});
+        HttpResponse drafted;
+        check(ask(port, jsonPost(QStringLiteral("/api/fences/save-draft"), body), &drafted)
+                  && drafted.status == 200,
+              "契约17b 前置：对端在 CH3 上建草稿失败");
+        const QString padFenceId = drafted.json.value(QStringLiteral("data")).toObject()
+                                       .value(QStringLiteral("fenceId")).toString();
+
+        HttpResponse merged;
+        check(ask(port, get(QStringLiteral("/api/fences?taskId=%1").arg(mergeTask)), &merged)
+                  && merged.status == 200,
+              "契约17b：合并列表要 200");
+        const QJsonArray fences = merged.json.value(QStringLiteral("data")).toObject()
+                                      .value(QStringLiteral("fences")).toArray();
+        QJsonObject byCamera;
+        for (const QJsonValue &v : fences)
+            byCamera.insert(v.toObject().value(QStringLiteral("cameraId")).toString(), v);
+        check(fences.size() == 2, "契约17b：CH3 上本机那条被对端占了，列表该剩 2 条");
+        check(!byCamera.contains(QStringLiteral("CH0")) && !byCamera.contains(QStringLiteral("CH2")),
+              "契约17b：不能把内部的 0-based 身份直接回给对端");
+        check(byCamera.contains(QStringLiteral("CH1")) && byCamera.contains(QStringLiteral("CH3")),
+              "契约17b：本机手绘要按 §7.1 的 1-based 身份露出");
+        check(byCamera.value(QStringLiteral("CH3")).toObject().value(QStringLiteral("fenceId"))
+                      .toString() == padFenceId,
+              "契约17b：同一物理通道上 Pad 优先（检测那边只认 ACTIVE，见 test_fence_merge 契约4）");
+        // §13.4.1 的 streamId 是必填，而本机手绘表的 streamId 列一直写的是空串
+        check(byCamera.value(QStringLiteral("CH1")).toObject()
+                      .value(QStringLiteral("streamId")).toString() == QStringLiteral("CH1"),
+              "契约17b：本机手绘那台的 streamId 要按 channelIdentity 的口径补上，不能回空必填字段");
+    }
+
     // ── 13/18/19/20) 报警那四条 + keep-alive ──────────────────────────
     {
         const QString readId = QStringLiteral("aa000000000000000000000000000001");
@@ -702,6 +773,49 @@ int main(int argc, char *argv[])
             check(after.disposePhoto.startsWith(QLatin1Char('[')),
                   "契约13：dispose_photo 是 JSON 数组文本");
             check(after.status == QStringLiteral("disposed"), "契约13：状态落成 disposed");
+            check(after.disposeOptionId == 1,
+                  "契约13：measure 与出厂 label 同字时反查成 id=1（库里存的是 id 不是中文）");
+        }
+
+        // ── 13b) measure 文本 → dispose_option_id：别名与"认不出就不猜" ────────
+        // §4.2 的处置只有 measure 这段**人看的文本**（规约没给选项 id 字段），本机按 label
+        // 反查。两处必须都有离线判据，因为失败模式都是静默的：
+        //   · §4.1 的示例把 id=2 写成"已提醒作业人员"，本机出厂是"已通知作业人员"——
+        //     不认别名，这一列就永远留 0，事后统计时才发现少一块；
+        //   · 反过来，对端写自由文本时**不能**就近套一个内置 id：那是把一次处置记到
+        //     别的处置口径上，比留 0 更坏，而且无从查起。
+        {
+            AlarmDAO dao;
+            QJsonObject payload;
+            payload.insert(QStringLiteral("requestId"), QStringLiteral("req-dispose-alias"));
+            payload.insert(QStringLiteral("taskId"), QStringLiteral("SMOKE-T1"));
+            payload.insert(QStringLiteral("measure"), QStringLiteral("已提醒作业人员"));
+            payload.insert(QStringLiteral("disposedAt"), QStringLiteral("2026-11-05T09:40:00+08:00"));
+            HttpResponse viaAlias;
+            check(ask(port, multipartPost(QStringLiteral("/api/alarms/%1/dispose")
+                                              .arg(QStringLiteral("ff000000000000000000000000000006")),
+                                          payload, QList<QPair<QString, QByteArray>>()),
+                                      &viaAlias)
+                      && viaAlias.status == 200,
+                  "契约13b 前置：别名那次处置要 200");
+            check(dao.queryById(QStringLiteral("ff000000000000000000000000000006")).disposeOptionId == 2,
+                  "契约13b：规约 §4.1 的示例措辞要认成 id=2（别名表）");
+
+            QJsonObject freeText;
+            freeText.insert(QStringLiteral("requestId"), QStringLiteral("req-dispose-free"));
+            freeText.insert(QStringLiteral("taskId"), QStringLiteral("SMOKE-T1"));
+            freeText.insert(QStringLiteral("measure"), QStringLiteral("已电话上报班组长"));
+            freeText.insert(QStringLiteral("disposedAt"), QStringLiteral("2026-11-05T09:41:00+08:00"));
+            HttpResponse viaFree;
+            check(ask(port, multipartPost(QStringLiteral("/api/alarms/%1/dispose")
+                                              .arg(QStringLiteral("f7000000000000000000000000000007")),
+                                          freeText, QList<QPair<QString, QByteArray>>()),
+                                      &viaFree)
+                      && viaFree.status == 200,
+                  "契约13b 前置：自由文本那次处置也要 200（measure 必填但不限定取值）");
+            const AlarmRecord free = dao.queryById(QStringLiteral("f7000000000000000000000000000007"));
+            check(free.status == QStringLiteral("disposed") && free.disposeOptionId == 0,
+                  "契约13b：认不出的措辞留 0，不就近套一个内置 id");
         }
         HttpResponse againDispose;
         check(ask(port, jsonPost(QStringLiteral("/api/alarms/%1/dispose").arg(disposeId),

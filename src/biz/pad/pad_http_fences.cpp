@@ -22,13 +22,19 @@
 //   StoreError         → 500 / 3001
 //   画面渲染不出来      → 503 / 3003  存储/证据不可用（§5.3 要求 apply 必返 frameUrl）
 //
-// ⚠ 两套围栏没有接起来：这里的下发**不会**让本机开始按它判定。
-//   缺口与后果写在 pad_fence_store.h 文件头，README 的待确认清单里也有一条。
+// apply/disable 之后会调 FenceManager::refreshFromStores() 把这一版并进检测用的内存
+// 快照（Pad 优先覆盖同通道的本机手绘版），所以对端收到 200/ACTIVE 时本机是真在判它。
+// ⚠ 两张表的 cameraId **编号口径不同**：pad_fences 存的是对端原样发来的身份
+//   （§7.1 的 channelIdentity() = "CH"+1-based），native_fences 存的是本机自己拼的
+//   "CH"+0-based。所以列 native 围栏给对端前必须换成对外身份（nativeCameraIdForPad），
+//   否则对端拿到的是它没法寻址的 "CH0"，而 "CH1" 在两边指两个通道。
 // ============================================================================
 #include "pad_http_api.h"
 
 #include "alarm_uplink_engine.h"      // uplink::mediaUrlFor（"越界即不给"那份判据）
+#include "ConfigManager.h"            // channelCount()：身份换算的越界判据
 #include "fence_frame_renderer.h"
+#include "fence_manager.h"   // apply/disable 之后要把 Pad 围栏并进检测用的内存快照
 #include "pad_fence_store.h"
 #include "native_fence_store.h"
 #include "pad_http_server.h"
@@ -103,9 +109,30 @@ QJsonObject versionJson(const geofence::PadFenceVersion &version, const HttpApiC
     return obj;
 }
 
-/// §13.4.1 的围栏对象
-QJsonObject fenceJson(const geofence::PadFence &fence, const HttpApiContext &ctx)
+/**
+ * @brief native_fences 的 cameraId → 对端能寻址的身份（§7.1 口径）
+ *
+ * 本机手绘那张表存的是 "CH"+**0-based** 通道号（persistChannelLocked 自己拼的），
+ * 而 §6/§7.1 对外报的身份是 "CH"+**1-based**。直接把库里的字符串回给对端有两个后果：
+ *   - 第 0 路的手绘围栏回出去是 "CH0"，而对端从来没见过、也没法用这个 id 寻址；
+ *   - 第 1 路的回出去是 "CH1"，在对端那边指的是**第 0 路**——它照着这个通道再画一条，
+ *     于是同一路上挂着两条围栏，而且它以为自己在改本机那条。
+ * 认不出来（不是 CHn、或换算后越界）就原样回，宁可不换也不编一个假身份。
+ */
+QString nativeCameraIdForPad(const QString &nativeCameraId)
 {
+    static const QRegularExpression kNativeCameraId(QStringLiteral("^CH([0-9][0-9]?)$"));
+    const QRegularExpressionMatch m = kNativeCameraId.match(nativeCameraId.trimmed());
+    if (!m.hasMatch())
+        return nativeCameraId;
+    const int zeroBased = m.captured(1).toInt();
+    if (zeroBased < 0 || zeroBased >= ConfigManager::instance().channelCount())
+        return nativeCameraId;
+    return QStringLiteral("CH%1").arg(zeroBased + 1);
+}
+
+/// §13.4.1 的围栏对象
+QJsonObject fenceJson(const geofence::PadFence &fence, const HttpApiContext &ctx){
     QJsonObject obj;
     obj.insert(QStringLiteral("fenceId"), fence.fenceId);
     obj.insert(QStringLiteral("taskId"), fence.taskId);
@@ -212,13 +239,22 @@ void registerFenceRoutes(PadHttpServer *server, const HttpApiContext &ctx)
                              fences.append(fenceJson(fence, ctx));
                              padCameraIds.insert(fence.cameraId);
                          }
-                         // 2) 本机画的围栏（native_fences）：同 cameraId 被 Pad 占用则跳过（Pad 优先）
+                         // 2) 本机画的围栏（native_fences）：同一**物理通道**被 Pad 占用则跳过（Pad 优先）
+                         //    比的是换算成对外身份之后的 cameraId——直接比字符串会漏掉全部撞车，
+                         //    因为本机那套是 0-based、Pad 那套是 1-based（见 nativeCameraIdForPad）。
                          geofence::NativeFenceStore nativeStore;
                          const QList<geofence::PadFence> nativeList = nativeStore.fencesForTask(taskId);
                          for (const geofence::PadFence &fence : nativeList) {
-                             if (padCameraIds.contains(fence.cameraId))
+                             geofence::PadFence view = fence;   // 只改这份拷贝，库里不动
+                             view.cameraId = nativeCameraIdForPad(fence.cameraId);
+                             // §13.4.1 里 streamId 是必填，而 channelIdentity() 给对端的
+                             // streamId 与 cameraId 同值；本机手绘那张表的 streamId 是**空串**
+                             // （persistChannelLocked 传的就是 QString()），照原样出等于回一个
+                             // 空必填字段，所以这里跟着身份一起补上。
+                             view.streamId = view.cameraId;
+                             if (padCameraIds.contains(view.cameraId))
                                  continue;
-                             fences.append(fenceJson(fence, ctx));
+                             fences.append(fenceJson(view, ctx));
                          }
                          QJsonObject data;
                          data.insert(QStringLiteral("taskId"), taskId);
@@ -446,6 +482,11 @@ void registerFenceRoutes(PadHttpServer *server, const HttpApiContext &ctx)
                                  data.insert(QStringLiteral("fenceId"), fenceId);
                                  data.insert(QStringLiteral("version"), version);
                                  data.insert(QStringLiteral("status"), QStringLiteral("ACTIVE"));
+                                 // 让这一版**立刻参与检测**：检测读的是 FenceManager 的内存
+                                 // 快照，以前 apply 只写 pad_fences、没人刷新那份快照，
+                                 // 于是对端收到 200/ACTIVE 而本机一帧都不判，要到下次
+                                 // 登录/登出或重启才偶然生效。
+                                 geofence::FenceManager::instance().refreshFromStores();
                                  data.insert(QStringLiteral("appliedAt"), pad::wireTime(appliedAt));
                                  const QJsonValue frameUrl =
                                      frameUrlJsonValue(relativePath, ctx);
@@ -496,6 +537,10 @@ void registerFenceRoutes(PadHttpServer *server, const HttpApiContext &ctx)
                                  data.insert(QStringLiteral("fenceId"), fenceId);
                                  data.insert(QStringLiteral("version"), version);
                                  data.insert(QStringLiteral("status"), QStringLiteral("DISABLED"));
+                                 // 停用同样要刷新：不刷新的话这一路还在按刚被停掉的那版报警。
+                                 // 该通道若还有本机手绘的围栏，refresh 会把它并回来
+                                 // （Pad 优先的规则只在 Pad 有 ACTIVE 版本时成立）。
+                                 geofence::FenceManager::instance().refreshFromStores();
                                  data.insert(QStringLiteral("disabledAt"), pad::wireTime(disabledAt));
                                  return padhttp::replyOk(data);
                              });

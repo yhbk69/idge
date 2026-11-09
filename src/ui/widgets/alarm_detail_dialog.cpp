@@ -343,6 +343,9 @@ void AlarmDetailDialog::setupUi()
 // 报警图片是按天/按容量清理的，"图没了"是常态而不是错误。
 // snapshot_ 存的是原图，缩放交给 rescaleScreenshot（多次 resize 不重复读盘、不逐级劣化）。
 //
+// 【整幅没了先回退 sidecar】容量闸门只端大文件、保住 64x48 的 *_thumb.jpg
+// （见 AlarmManager 的 pruneAlarmMedia），而报警行留 30 天 —— 中间这段窗口里
+// "点开是空白"是假的：那天确实拍过。宁可先摆一张糊的一眼，也别让用户以为没取证。
 // ⚠ 解码必须走 loadPixmapSafe，**不能**用 snapshot_.load(path) / QPixmap(path)：
 //   板端 Qt 的 JPEG 插件与链进来的 libjpeg ABI 冲突，整幅解一张现场抓拍是**进程崩溃**
 //   而不是返回失败（本轮实测：拿真 jpg 打开详情框，打完 "Wrong JPEG library version:
@@ -351,16 +354,32 @@ void AlarmDetailDialog::setupUi()
 //   之前一直没崩只是因为媒体按容量清理后大多走到"无截图"那条分支。
 void AlarmDetailDialog::loadScreenshot()
 {
-    if (alarm_.imagePath.isEmpty() || !QFile::exists(alarm_.imagePath)) {
+    if (alarm_.imagePath.isEmpty()) {
         imageLabel_->setText("无截图");
         return;
     }
 
-    snapshot_ = loadPixmapSafe(alarm_.imagePath);
+    QString source = alarm_.imagePath;
+    bool thumbnailOnly = false;
+    if (!QFile::exists(source)) {
+        const QString sidecar = thumbnailSidecarPath(source);
+        if (!QFile::exists(sidecar)) {
+            imageLabel_->setText("截图已清理");
+            return;
+        }
+        source = sidecar;
+        thumbnailOnly = true;
+    }
+
+    snapshot_ = loadPixmapSafe(source);
     if (snapshot_.isNull()) {
         imageLabel_->setText("截图加载失败");
         return;
     }
+    // 文案挂在 imageLabel_ 上是错的（它是"没图"时的占位文本，有图时不显示），
+    // 所以缩略图兜底只在窗口标题里说清，避免"这是原图"的误会。
+    setWindowTitle(thumbnailOnly ? QString::fromUtf8("报警详情（截图已被容量清理，显示缩略图）")
+                                 : QString::fromUtf8("报警详情"));
     rescaleScreenshot();
 }
 

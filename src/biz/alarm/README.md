@@ -154,11 +154,17 @@ AlarmManager::instance().cleanOldData(30);
   存的也是 steady 纳秒。早期实现用 `results.time`（墙钟纳秒）相减，NTP 回拨会让差值变负、
   报警可被抑制数天；注释里"time 为毫秒"是文档误差，量纲本就一致。展示用的
   `timestamp/alarmTime` 仍由 `results.time/1e6` 换算成毫秒，并对非法值兜底为当前墙钟。
-- **清理是双闸门**：`cleanOldData(days)` 先 `pruneAlarmMedia()` 再清库。媒体侧只认识
-  `alarmsDir()/yyyyMMdd` 这种可解析为日期的目录（其它文件一律不碰），先按天数删，删完仍
-  超过 `4 GB` 才从最旧目录继续删。4 GB 目前是常量而非配置项。
+- **清理是双闸门**：`cleanOldData(days)` 先 `pruneAlarmMedia()` 再清库。判据本体在
+  `alarm_media_prune.cpp`（root / 天数 / 上限 / "今天"全是入参，所以离线用例能直接造出
+  "过期 + 超上限"，不必为验证写 4GB 文件）。媒体侧只认 `alarmsDir()/yyyyMMdd` 这种可解析为
+  日期的目录（其它子目录一律不碰，`dispose/`、`fence-frames/` 也在其列）：
+  ① 过期的整天**整目录删**（那时 DB 行同一天也没了）；② 删完仍超过 `4 GB` 就从最旧一天开始
+  **只端大文件、保住 `*_thumb.jpg`**（sidecar 是 64x48、一千多字节，与整幅抓拍差两个数量级，
+  留着才不会出现"列表里那条报警还在、点开无截图"）；③ 只有连缩略图都超上限，才回头整目录删。
+  4 GB 目前是常量而非配置项。
 - **DB 与文件不保证同步消失**：`cleanOldAlarms` 与 `pruneAlarmMedia` 各自独立执行，中途失败
-  会留下"有记录无文件"的报警；详情对话框对这种片段显示"已清理"。
+  会留下"有记录无文件"的报警；详情对话框按"整幅 → sidecar 缩略图 → 截图已清理"三级回退，
+  用缩略图兜底时窗口标题会写明"显示缩略图"。
 - 报警列表是内存 FIFO：超 1000 条 `removeFirst` 淘汰最旧，`removeFirst` 为 O(n) 搬移。
   若某条报警已被挤出内存后才生成片段，内存侧改不到，但 DB 的 `video_path` 仍会更新。
 - 线程安全：内部用 `QMutex` 保护；截图开关用 `std::atomic<bool>`。`attachVideoClip` 先解锁

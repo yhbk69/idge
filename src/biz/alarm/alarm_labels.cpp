@@ -92,4 +92,23 @@ QVector<DisposeOption> disposeOptions()
     return out;
 }
 
+QString disposeOptionLabel(int id)
+{
+    for (const DisposeOption &one : disposeOptions()) {
+        if (one.id == id)
+            return one.label;
+    }
+    return QString();
+}
+
+QVector<QString> disposeOptionAliases(int id)
+{
+    // 只登记有出处的措辞：plan/edge-pad-v1.md §4.1 的示例把 id=2 写成"已提醒作业人员"，
+    // 而本机出厂 label 是"已通知作业人员"（2026-11-06 现场定的四条之一）。
+    // 对端照文档示例发过来的文本就是这个，认不出来等于这一列白存。
+    if (id == 2)
+        return {QStringLiteral("已提醒作业人员")};
+    return {};
+}
+
 }  // namespace alarm_labels

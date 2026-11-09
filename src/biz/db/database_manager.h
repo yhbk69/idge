@@ -118,6 +118,12 @@ private:
     // 调用方须持有 mutex_（与 executeSQL 同口径），table 只传代码里的字面量。
     bool ensureColumns(const QString &table, const QStringList &columnDefs);
 
+    // ensureColumns 的事后回读：返回 columnNames 里**表里没有**的那些（小写）。
+    // PRAGMA 读不到时按"全都缺"返回——判据朝报错那一侧倒，别指望它"读不到就放行"。
+    // 为什么需要：AlarmDAO 的两条 INSERT 硬编码了新增列名，补列没成功却继续跑，
+    // 后果是每一条报警都静默写不进库，而不是"少带一个字段"。
+    QStringList missingColumns(const QString &table, const QStringList &columnNames);
+
     // 把老行的 task_id 从 construction_info 里补出来（B2 定案：taskId ≡ 载荷里的 construction_id）。
     // ensureColumns 只能让列**存在**，值不会自己长出来；而所有过滤都已改成按 task_id 等值，
     // 不回填就等于把历史报警整批藏起来。只碰 task_id IS NULL 的行 ⇒ 幂等。

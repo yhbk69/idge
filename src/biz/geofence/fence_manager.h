@@ -49,6 +49,17 @@ public:
     // taskId 为空 = 未登录，内存形状清空（检测不再用围栏，但 DB 里历史保留）。
     void reloadForTask(const QString &taskId);
 
+    /**
+     * @brief 重新把两个围栏库（native_fences + pad_fences）拉进内存快照
+     *
+     * Pad 下发（apply）/停用（disable）围栏之后**必须**调它：以前 pad_fences 里的
+     * 围栏只参与 §5 的增删改查与 GET 回显，检测链路读的只有 native_fences，
+     * 于是对端收到 200/ACTIVE、在本机一帧都不判——现在 Pad 优先覆盖同通道那版。
+     *
+     * 只能在 GUI 线程调（两个 store 都是 GUI 线程专用），且要已登录：
+     * 未登录时 currentTaskId_ 是空串，读的是"全局那一桶"。
+     */
+    void refreshFromStores();
     // ========================================================================
     // 围栏总开关 / 报警类别（全局参数，仍走 config.json）
     // ========================================================================
@@ -95,6 +106,15 @@ private:
     // 把内存里某通道的形状写成新 ACTIVE 版本落库（调用方已持锁）。
     // 形状没有 regionId 的会就地分配一个。
     void persistChannelLocked(int channel);
+
+    // 从 native_fences 读当前 taskId 的围栏进 fences_（调用方已持锁）。
+    void loadNativeFencesLocked();
+    // 从 pad_fences 读当前 taskId 的 ACTIVE 围栏，覆盖同通道那版（调用方已持锁）。
+    void mergePadFencesLocked();
+    // refreshFromStores 的免锁版：mutex_ 已由调用方持有时必须用它——QMutex 不可重入，
+    // 持锁再调 refreshFromStores() 就是自己把自己锁死（loadFromConfig/reloadForTask
+    // 在启动和登录路径上各踩一次，界面直接挂在第一帧之前）。
+    void refreshFromStoresLocked();
 
     // 为新形状分配一个稳定的 regionId（随机 hex，格式 RG-<8hex>）。
     static QString generateRegionId();

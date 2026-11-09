@@ -17,6 +17,7 @@
 
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QRegularExpression>
 #include <QTimer>
 #include <QDebug>
 #include <QRandomGenerator>
@@ -256,35 +257,8 @@ void FenceManager::loadFromConfig()
         }
     }
 
-    // 从 DB 加载当前 taskId 的围栏到内存
-    const QList<PadFence> dbFences = store.fencesForTask(currentTaskId_);
-    for (const PadFence &f : dbFences) {
-        bool ok = false;
-        const int ch = f.cameraId.mid(2).toInt(&ok);  // "CH0" → 0
-        if (!ok)
-            continue;
-        PadFenceVersion active;
-        bool hasActive = false;
-        for (const PadFenceVersion &v : f.versions) {
-            if (v.status == PadVersionStatus::Active) {
-                active = v;
-                hasActive = true;
-                break;
-            }
-        }
-        if (!hasActive)
-            continue;
-        ChannelFence cf;
-        cf.enabled = true;
-        // 版本戳随快照一起进内存：解码线程打 fenceVersion 时不能再查库
-        cf.fenceId = f.fenceId;
-        cf.version = active.version;
-        cf.shapes = regionsToShapes(active.regions);
-        fences_[ch] = cf;
-    }
-
-    if (!fences_.empty())
-        enabled_ = true;
+    // 从两个围栏库把内存快照拉一遍（native + Pad 下发的，Pad 优先）
+    refreshFromStoresLocked();
 
     qDebug() << "[Fence] loadFromConfig: enabled=" << enabled_
              << "taskId=" << currentTaskId_
@@ -301,28 +275,94 @@ void FenceManager::reloadForTask(const QString &taskId)
     fences_.clear();
 
     if (taskId.isEmpty()) {
-        // 未登录：内存清空，检测不再用围栏（DB 历史保留）
+        // 未登录：内存清空，检测不再用围栏（DB 历史保留）。
+        // ⚠ 这里与启动时的 loadFromConfig 不同：没登录时启动读的是"全局那一桶"
+        // （task_id=''，迁移进来的历史围栏），而**登出**是明确要停用的动作。
         qDebug() << "[Fence] reloadForTask: 未登录，清空内存围栏";
         return;
     }
 
+    // 抬开关（config 的 geofence.enabled 可能是模板默认的 false）由
+    // refreshFromStoresLocked 统一做，这里不再重复判一次。
+    refreshFromStoresLocked();
+    qDebug() << "[Fence] reloadForTask:" << taskId << "channels=" << fences_.size();
+}
+
+// ============================================================================
+// 内存快照的两个来源：native_fences（本机手绘）+ pad_fences（Pad 下发，优先）
+// ============================================================================
+// 【为什么两张表要合起来喂检测】§5.3 的 apply 语义是"这一版在边缘设备上生效"
+//   （ACTIVE 就叫"生效版本"），而改动前本机判定只读 native_fences：对端收到 200/ACTIVE、
+//   本机一帧都不判，这种静默不一致比"没这个功能"更坏。规约没写两套件冲突时谁赢，
+//   **Pad 优先覆盖同通道是本机定的**，已挂进 src/biz/pad/README.md 的待确认清单。
+// 【两套 cameraId 编号，解析必须分开走】
+//   native_fences：本机自己拼的 "CH"+**0-based** 通道号（CH0..CH3）。
+//   pad_fences：Pad 原样存进来的 cameraId，而 §7.1 的 channelIdentity() 发给对端的是
+//              "CH"+**1-based**（CH1..CH4）。同一个 "CH2" 在两张表里是两个通道，
+//              所以这里按各自口径解析，绝不能共用一句 mid(2).toInt()。
+// 【与 GET /fences 的差一处】那边只要该 cameraId 上有 Pad 围栏就藏掉本机那条
+//   （草稿也算占位），这边只认 ACTIVE：草稿还没生效，拿它去判帧就是替对端改了主意。
+// 【未登录（taskId 空）不并 Pad 的】pad_fences 每条都挂在具体 taskId 上，
+//   空 taskId 查出来本来就是空表，不特判也不会错。
+// ============================================================================
+namespace {
+
+/// pad_fences 的 cameraId → 本机通道号（0-based）。不匹配协议口径就返回 false。
+bool channelFromPadCameraId(const QString &cameraId, int *out)
+{
+    static const QRegularExpression kPadCameraId(QStringLiteral("^CH([1-9][0-9]?)$"));
+    const QRegularExpressionMatch m = kPadCameraId.match(cameraId.trimmed());
+    if (!m.hasMatch())
+        return false;
+    const int oneBased = m.captured(1).toInt();
+    if (oneBased < 1 || oneBased > ConfigManager::instance().channelCount())
+        return false;
+    *out = oneBased - 1;
+    return true;
+}
+
+/// 一条围栏里当前生效的那一版；没有 ACTIVE 返回 false
+bool activeVersionOf(const PadFence &fence, PadFenceVersion *out)
+{
+    for (const PadFenceVersion &v : fence.versions) {
+        if (v.status == PadVersionStatus::Active) {
+            *out = v;
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+void FenceManager::refreshFromStores()
+{
+    QMutexLocker locker(&mutex_);
+    refreshFromStoresLocked();
+}
+
+void FenceManager::refreshFromStoresLocked()
+{
+    fences_.clear();
+    loadNativeFencesLocked();
+    mergePadFencesLocked();
+    // 内存里有形状就允许判定（与 loadFromConfig/reloadForTask 同一口径）：
+    // config 的 geofence.enabled 可能是模板默认的 false，而围栏是刚生效的。
+    if (!fences_.empty())
+        enabled_ = true;
+}
+
+void FenceManager::loadNativeFencesLocked()
+{
     NativeFenceStore store;
-    const QList<PadFence> dbFences = store.fencesForTask(taskId);
+    const QList<PadFence> dbFences = store.fencesForTask(currentTaskId_);
     for (const PadFence &f : dbFences) {
         bool ok = false;
-        const int ch = f.cameraId.mid(2).toInt(&ok);
-        if (!ok)
+        const int ch = f.cameraId.mid(2).toInt(&ok);  // 本机口径："CH0" → 0
+        if (!ok || ch < 0 || ch >= ConfigManager::instance().channelCount())
             continue;
         PadFenceVersion active;
-        bool hasActive = false;
-        for (const PadFenceVersion &v : f.versions) {
-            if (v.status == PadVersionStatus::Active) {
-                active = v;
-                hasActive = true;
-                break;
-            }
-        }
-        if (!hasActive)
+        if (!activeVersionOf(f, &active))
             continue;
         ChannelFence cf;
         cf.enabled = true;
@@ -332,12 +372,34 @@ void FenceManager::reloadForTask(const QString &taskId)
         cf.shapes = regionsToShapes(active.regions);
         fences_[ch] = cf;
     }
-    // 与 loadFromConfig 同一口径：内存里有形状就允许判定。启动时 config 的
-    // geofence.enabled 可能是 false（模板默认），登录后才从库里读到围栏的情况
-    // 若不在这里抬开关，检测链路会一直跳过这个通道。
-    if (!fences_.empty())
-        enabled_ = true;
-    qDebug() << "[Fence] reloadForTask:" << taskId << "channels=" << fences_.size();
+}
+
+void FenceManager::mergePadFencesLocked()
+{
+    PadFenceStore store;
+    const QList<PadFence> padFences = store.fencesForTask(currentTaskId_);
+    for (const PadFence &f : padFences) {
+        int ch = -1;
+        if (!channelFromPadCameraId(f.cameraId, &ch)) {
+            // 对端可以自由写 cameraId（规约只说它由 Pad 生成、本机原样保存）。
+            // 对不上通道就不并——**并错通道比不并更坏**：那会在另一台画面上报警。
+            qWarning() << "[Fence] Pad 围栏" << f.fenceId << "的 cameraId"
+                       << f.cameraId << "对不上本机任何一路通道，这条不驱动检测";
+            continue;
+        }
+        PadFenceVersion active;
+        if (!activeVersionOf(f, &active))
+            continue;   // 只有草稿/已停用的版本：不覆盖，继续用本机手绘那版
+        ChannelFence cf;
+        cf.enabled = true;
+        cf.fenceId = f.fenceId;
+        cf.version = active.version;
+        cf.shapes = regionsToShapes(active.regions);
+        // Pad 优先：与 GET /api/fences 一样，同一 cameraId 上 Pad 那台占位时本机那条
+        // 不露出。差一处判据说明在这儿：那边连草稿也算占位，这边**只认 ACTIVE**——
+        // 草稿还没生效，拿它去判帧等于替对端改了主意，报警也发不出去。
+        fences_[ch] = cf;
+    }
 }
 
 // ============================================================================

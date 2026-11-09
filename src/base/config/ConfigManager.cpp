@@ -742,7 +742,7 @@ static QJsonObject makePadHttpDefaults()
         {"max_body_mb", 26},               // §4.2 五张 5MB 照片 + JSON 余量
         {"expose_stream_credentials", false},  // §6.1 的 liveUrl 默认剥掉视频源口令
         {"fence_frames", true},             // §5.3 apply 要渲染合成画面 PNG
-        {"dispose_options", QJsonArray()},  // 空 = §4.1 用代码内置那两条措辞
+        {"dispose_options", QJsonArray()},  // 空 = §4.1 用代码内置那四条措辞（alarm_labels::disposeOptions）
     };
 }
 

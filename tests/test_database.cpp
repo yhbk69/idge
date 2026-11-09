@@ -20,7 +20,9 @@
 #include <QDir>
 #include <QFile>
 #include <QSqlDatabase>
+#include <QSqlError>
 #include <QSqlQuery>
+#include <QSet>
 #include <iostream>
 
 #include "database_manager.h"
@@ -434,8 +436,135 @@ void testLegacyTaskIdUpgrade(const QString &dbPath)
                 "回写后的那次启动仍然扫到 0 行（幂等没被回写打破）");
 }
 
-int main(int argc, char *argv[])
+// ============================================================================
+// 老库补列与"缺列就停"的判据（§13.2 那六列 + dispose_person_id，2026-11-07）
+// ============================================================================
+// 钉两条方向相反的失效：
+//   A. **误杀**：新加的"缺列 ⇒ 初始化失败"判据要是写错，板子开机直接没库，
+//      比原来的静默丢报警严重得多，所以老库（真·上一代形状）必须一路走通。
+//   B. **漏判**：AlarmDAO 的两条 INSERT 硬编码了新列名，补列没成功还继续跑
+//      就是每一条报警都写不进库。少了判据 B，症状是"白天看着正常、关机全没"。
+// A 用一份手工建的**老形状** alarms 表来走真实 ALTER 路径（:memory: 每次都是新库，
+// 永远走不到补列，与 testLegacyTaskIdUpgrade 同一理由）。
+void testLegacyProvenanceColumns(const QString &dbPath)
 {
+    std::cout << "\n=== 测试老库补列（§13.2 溯源列）与缺列判据 ===" << std::endl;
+
+    QFile::remove(dbPath);
+    QFile::remove(dbPath + QStringLiteral("-wal"));
+    QFile::remove(dbPath + QStringLiteral("-shm"));
+
+    // 先裸建一个连接，把 2026-11-06 之前那份表形状造出来：
+    // 没有 worker_name/construction_info/task_id/dispose_person_id/rule/
+    // model_version/fence_id/fence_version/region_id/dispose_option_id 这十列。
+    {
+        QSqlDatabase raw = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"),
+                                                    QStringLiteral("legacy_provenance_raw"));
+        raw.setDatabaseName(dbPath);
+        TEST_ASSERT(raw.open(), "老库：裸连接要能打开新建的库文件");
+        QSqlQuery create(raw);
+        TEST_ASSERT(create.exec(R"(
+            CREATE TABLE alarms (
+                id TEXT PRIMARY KEY,
+                alarm_type TEXT NOT NULL,
+                alarm_level INTEGER NOT NULL DEFAULT 3,
+                alarm_time TEXT NOT NULL,
+                channel INTEGER NOT NULL,
+                class_id INTEGER NOT NULL,
+                class_name TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                image_path TEXT,
+                video_path TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                dispose_result TEXT,
+                dispose_user_id INTEGER,
+                dispose_user_name TEXT,
+                dispose_time TEXT,
+                dispose_photo TEXT,
+                remark TEXT,
+                read_time TEXT,
+                create_time TEXT NOT NULL,
+                update_time TEXT
+            ))"),
+                    "老库：按上一代形状建表");
+        QSqlQuery seed(raw);
+        seed.prepare(QStringLiteral(
+            "INSERT INTO alarms (id, alarm_type, alarm_level, alarm_time, channel, class_id,"
+            " class_name, confidence, status, create_time)"
+            " VALUES ('legacy-row-1','detection',3,'2026-11-06T09:00:00',0,0,'person',0.5,"
+            " 'pending','2026-11-06T09:00:01')"));
+        TEST_ASSERT(seed.exec(), "老库：塞一行历史报警");
+        raw.close();
+        QSqlDatabase::removeDatabase(QStringLiteral("legacy_provenance_raw"));
+    }
+
+    TEST_ASSERT(DatabaseManager::instance().initialize(dbPath),
+                "A) 老库初始化必须成功：新判据不能把补列成功的库误杀成失败");
+
+    {
+        QSqlDatabase db = DatabaseManager::instance().database();
+        QSqlQuery pragma(db);
+        TEST_ASSERT(pragma.exec(QStringLiteral("PRAGMA table_info(alarms)")), "老库：读列清单");
+        QSet<QString> columns;
+        while (pragma.next())
+            columns.insert(pragma.value(1).toString().toLower());
+        const char *needed[] = {"worker_name", "construction_info", "task_id",
+                                "dispose_person_id", "rule", "model_version", "fence_id",
+                                "fence_version", "region_id", "dispose_option_id"};
+        bool allPresent = true;
+        for (const char *name : needed) {
+            if (!columns.contains(QString::fromLatin1(name))) {
+                std::cout << "[INFO] 缺列: " << name << std::endl;
+                allPresent = false;
+            }
+        }
+        TEST_ASSERT(allPresent, "A) 十列都 ALTER 出来了");
+
+        QSqlQuery survived(db);
+        TEST_ASSERT(survived.exec(QStringLiteral("SELECT COUNT(*) FROM alarms"))
+                        && survived.next() && survived.value(0).toInt() == 1,
+                    "A) 历史行还在（补列没把老数据弄丢）");
+    }
+
+    // 真正的判据：DAO 的 INSERT 硬编码了这些列名，列没加上就是**每一条报警都插不进去**。
+    AlarmDAO dao;
+    AlarmRecord record;
+    record.id = QStringLiteral("provenance-1");
+    record.timestamp = QDateTime::currentMSecsSinceEpoch();
+    record.channel = 0;
+    record.clsId = 0;
+    record.className = QStringLiteral("person");
+    record.confidence = 0.7f;
+    record.alarmType = QStringLiteral("fence_in");
+    record.alarmLevel = 2;
+    record.status = QStringLiteral("pending");
+    record.rule = QStringLiteral("禁区闯入检测");
+    record.modelVersion = QStringLiteral("yolo11n-ppe@2026-10-21");
+    record.fenceId = QStringLiteral("NFENCE-1");
+    record.fenceVersion = 3;
+    record.regionId = QStringLiteral("RG-00000001");
+    record.disposePersonId = QStringLiteral("05-0101");
+    TEST_ASSERT(dao.insertAlarm(record) > 0, "B) 补列之后的 DAO 单条 INSERT 要成功");
+    const AlarmRecord back = dao.queryById(QStringLiteral("provenance-1"));
+    TEST_ASSERT(back.rule == record.rule && back.modelVersion == record.modelVersion
+                    && back.fenceId == record.fenceId && back.fenceVersion == record.fenceVersion
+                    && back.regionId == record.regionId
+                    && back.disposePersonId == record.disposePersonId,
+                "B) 六列写进去也读得回来（不是只建了个空壳列）");
+
+    // 补列成功过的库再开机两次：新判据每次都读一次 PRAGMA，误杀就在这一步把板子
+    // 变成"开机没有库"。这条是判据 A 的日常形态（现场每天开的那两次机），
+    // 比一次性升级路径更值得钉。（DROP COLUMN 想造"缺列"造不出来：QSQLITE 插件
+    // 内嵌的是 SQLite 3.31.1，DROP COLUMN 要 3.35+，实测 near "DROP": syntax error。）
+    TEST_ASSERT(DatabaseManager::instance().initialize(dbPath), "A) 二次 initialize 仍成功");
+    TEST_ASSERT(DatabaseManager::instance().initialize(dbPath), "A) 三次 initialize 仍成功（幂等）");
+    TEST_ASSERT(dao.queryById(QStringLiteral("provenance-1")).id == QStringLiteral("provenance-1"),
+                "A) 重复启动没把刚插进去的溯源行弄丢");
+
+    DatabaseManager::instance().close();
+}
+
+int main(int argc, char *argv[]){
     QCoreApplication app(argc, argv);
 
     std::cout << "========================================" << std::endl;
@@ -450,6 +579,8 @@ int main(int argc, char *argv[])
     // 老库升级这条路径必须落在文件上（:memory: 每次都是全新空库，走不到 ALTER+回填），
     // 所以放在最后，用一个临时文件库单独跑一遍。
     testLegacyTaskIdUpgrade(QDir::currentPath() + QStringLiteral("/test_legacy_taskid.db"));
+    // 老库补列与"缺列就停"的判据，同样必须落在文件库上（见函数头那段）
+    testLegacyProvenanceColumns(QDir::currentPath() + QStringLiteral("/test_legacy_provenance.db"));
 
     // 输出结果
     std::cout << "\n========================================" << std::endl;

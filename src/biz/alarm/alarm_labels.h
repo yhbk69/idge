@@ -61,4 +61,21 @@ struct DisposeOption {
  */
 QVector<DisposeOption> disposeOptions();
 
+/// 内置表里某个 id 的措辞；没有这个 id 返回空串。（用来判断配置里这一项有没有被改写）
+QString disposeOptionLabel(int id);
+
+/**
+ * @brief 某个内置选项的**别名**：别处出现过、指的还是同一件事的措辞
+ *
+ * 存在的唯一理由：对端提交的是 §4.2 multipart 里的 `measure` **人看的文本**（规约没给
+ * 选项 id 字段），而示例措辞与本机出厂 label 可能不同字——§4.1 的示例写
+ * "已提醒作业人员"，2026-11-06 现场定的是"已通知作业人员"。反查认不出来不是报错，
+ * 而是 `dispose_option_id` 记 0、状态照样落成已处置：**这一列的统计从此静默缺一块**，
+ * 板端肉眼看不出来。
+ *
+ * ⚠ 只登记**有出处**的措辞（规约原文、历史配置），不要顺手编同义词：
+ * 别名指错 id 比记 0 更坏——那是把一次处置记到别的处置口径上，事后无从查起。
+ */
+QVector<QString> disposeOptionAliases(int id);
+
 }  // namespace alarm_labels

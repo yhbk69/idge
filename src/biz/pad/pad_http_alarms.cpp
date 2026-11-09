@@ -172,8 +172,19 @@ int optionIdForLabel(const QString &measure)
         // 而历史文本恰好还是那句措辞时不该把它的 id 记成一次新的处置。
         if (obj.value(QStringLiteral("enabled")).toInt(1) == 0)
             continue;
-        if (obj.value(QStringLiteral("label")).toString().trimmed() == want)
-            return static_cast<int>(obj.value(QStringLiteral("id")).toDouble());
+        const int id = static_cast<int>(obj.value(QStringLiteral("id")).toDouble());
+        const QString label = obj.value(QStringLiteral("label")).toString().trimmed();
+        if (label == want)
+            return id;
+        // 别名（见 alarm_labels::disposeOptionAliases 那段：§4.1 的示例措辞与出厂 label
+        // 不同字）。只在**这一项没被配置改写过**时才认：配置里重写了 id=2 的 label，
+        // 那条的含义就不再是我们那四条里的"通知作业人员"，按别名套就是记错处置。
+        if (label != alarm_labels::disposeOptionLabel(id).trimmed())
+            continue;
+        for (const QString &alias : alarm_labels::disposeOptionAliases(id)) {
+            if (alias.trimmed() == want)
+                return id;
+        }
     }
     return 0;
 }

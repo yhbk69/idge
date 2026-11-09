@@ -552,7 +552,8 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
     `pad_server.media_base_url` 填一个外部地址。启用前必须确认网络隔离范围。三条硬约束：
     ①`data/alarms` 里的文件名等于可下载的地址，该目录不得放任何非报警文件——现在这条更吃紧，
     因为 8899 那台 HTTP 面会把**处置照片**（`dispose/<alarmId>/`）与**围栏合成画面**
-    （`fence-frames/<fenceId>/`）也写进同一棵树；②地址有效期无保证——按天保留 + 4GB 容量回收会删掉**当天**目录，
+    （`fence-frames/<fenceId>/`）也写进同一棵树；②地址有效期无保证——按天保留会删掉**当天**目录，
+    4GB 容量回收那一档只端大文件、保住 `*_thumb.jpg`（所以整幅抓拍图的地址照样 404，别指望事后取原图），
     对端必须"收到即取回"，404 是正常终态；③端口/开关变更**必须重启进程**，
     ZLM 的 `mk_env_init` 是进程级一次、`stop` 后不能再 `start`，所以设置页没有"改了重开服务"这条路
     （`src/media/server/README.md`）

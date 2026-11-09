@@ -677,6 +677,7 @@ add_executable(test_pad_wire
     tests/test_pad_wire.cpp
     src/biz/pad/pad_wire.cpp
     src/biz/alarm/alarm_labels.cpp
+    src/biz/alarm/alarm_media_prune.cpp
     src/biz/ws/alarm_uplink_engine.cpp
     src/biz/session/construction_session.cpp   # pad_wire 的 taskId 取值判据复用这一处实现
 )
@@ -732,6 +733,7 @@ add_executable(test_pad_ws_server
     src/biz/pad/pad_ws_server.cpp
     src/biz/pad/pad_wire.cpp
     src/biz/alarm/alarm_labels.cpp
+    src/biz/alarm/alarm_media_prune.cpp
     src/biz/ws/alarm_uplink_engine.cpp
     src/biz/alarm/alarm_manager.cpp
     src/biz/db/database_manager.cpp
@@ -806,11 +808,16 @@ add_executable(test_pad_http_api
     src/biz/pad/pad_request_cache.cpp
     src/biz/pad/pad_wire.cpp
     src/biz/alarm/alarm_labels.cpp
+    src/biz/alarm/alarm_media_prune.cpp
     src/biz/pad/pad_ws_server.cpp
     src/biz/ws/alarm_uplink_engine.cpp
     src/biz/geofence/pad_fence_store.cpp
     src/biz/geofence/native_fence_store.cpp
     src/biz/geofence/fence_frame_renderer.cpp
+    # §5.3 的 apply/disable 现在会把 Pad 围栏并进检测快照（FenceManager::refreshFromStores），
+    # 所以判定那两文件也进了本目标的依赖闭包。
+    src/biz/geofence/fence_manager.cpp
+    src/biz/geofence/fence_checker.cpp
     src/biz/alarm/alarm_manager.cpp
     src/biz/db/database_manager.cpp
     src/biz/db/alarm_dao.cpp
@@ -886,6 +893,58 @@ target_link_libraries(test_geofence_role
 )
 
 target_compile_definitions(test_geofence_role PRIVATE ZERO_COPY)
+
+# ============================================================================
+# 报警媒体按天目录裁剪的离线自检（过期整目录 / 超上限只端大文件保缩略图）
+# 为什么值得单独钉：这道闸门的后果只有两种，而且都是**事后**才看得见——删多了是
+# "三周前的报警点开没截图"，删少了是分区被 4GB 闸门之外的老库写满、落库直接失败。
+# 板子上既没法造 4GB 来验第一遍，也不方便等到过期才看得见第二遍，所以判据拆成
+# (root, days, cap, today) 四个入参在这里跑。契约清单见 tests/test_media_prune.cpp 头。
+# 仓库根运行：./build/build_rk3588_linux/test_media_prune，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_media_prune
+    tests/test_media_prune.cpp
+    src/biz/alarm/alarm_media_prune.cpp
+)
+
+target_include_directories(test_media_prune PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/biz/alarm
+)
+
+target_link_libraries(test_media_prune
+    Qt5::Core
+)
+
+target_compile_definitions(test_media_prune PRIVATE ZERO_COPY)
+
+# ============================================================================
+# 电子围栏"两个来源合并进检测快照"离线自检（native_fences + pad_fences）
+# 为什么值得单独钉：Pad 的 cameraId 是 §7.1 的 **1-based**，本机手绘表是 **0-based**，
+# 两套编号合并错了就是"在另一路画面上报警"；而合并入口 refreshFromStores 既被登录
+# 路径（整段持锁）又被 HTTP 路由（不持锁）调，QMutex 不可重入，写错一边就是启动自死锁。
+# 这三条板端肉眼都看不出来，只能在离线钉死。契约清单见 tests/test_fence_merge.cpp 头。
+# 仓库根运行：./build/build_rk3588_linux/test_fence_merge，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_fence_merge
+    tests/test_fence_merge.cpp
+    src/biz/geofence/fence_manager.cpp
+    src/biz/geofence/fence_checker.cpp
+    src/biz/geofence/pad_fence_store.cpp
+    src/biz/geofence/native_fence_store.cpp
+    src/biz/db/database_manager.cpp
+    src/biz/session/construction_session.cpp
+    src/base/config/ConfigManager.cpp
+)
+
+target_link_libraries(test_fence_merge
+    Qt5::Core
+    Qt5::Gui
+    Qt5::Sql
+    sqlite3
+    pthread
+)
+
+target_compile_definitions(test_fence_merge PRIVATE ZERO_COPY)
 
 # ============================================================================
 # 施工信息 + 二维码离线自检（解析/校验/会话状态机 + 真解一张码图）
@@ -988,6 +1047,7 @@ add_executable(test_channel_reload
     src/base/buffer/DmaFrameBuffer.cpp
     src/biz/alarm/alarm_manager.cpp
     src/biz/alarm/alarm_labels.cpp
+    src/biz/alarm/alarm_media_prune.cpp
     # alarm_manager.cpp 的 makeAlarmRecord() 现在给每条报警盖施工信息戳，
     # 于是本目标的依赖闭包里多了一个会话实现。漏了它就是三个 undefined reference
     # （instance / snapshot / toJson），而链接错误比编译错误更难归因到这里。
@@ -1078,6 +1138,7 @@ add_executable(test_stream_params
     src/base/buffer/DmaFrameBuffer.cpp
     src/biz/alarm/alarm_manager.cpp
     src/biz/alarm/alarm_labels.cpp
+    src/biz/alarm/alarm_media_prune.cpp
     src/biz/session/construction_session.cpp
     src/biz/db/alarm_dao.cpp
     src/biz/db/detection_dao.cpp

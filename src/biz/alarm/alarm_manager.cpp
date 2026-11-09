@@ -40,6 +40,7 @@
 // ============================================================================
 
 #include "alarm_manager.h"
+#include "alarm_media_prune.h"
 #include "alarm_labels.h"   // ruleNameOf()：规则名与 Pad 出门口共用同一张表
 #include "perf_probe.h"
 #include "ConfigManager.h"
@@ -1042,72 +1043,26 @@ void AlarmManager::syncToDatabase()
 }
 
 // ============================================================================
-// pruneAlarmMedia: 按天目录裁剪报警媒体（抓拍图 + 视频片段）
+// pruneAlarmMedia: 取路径 + 调判据 + 打日志
 // ============================================================================
-// 两道闸门，缺一不可：
-//   1) 天数：与 DB 的 cleanOldAlarms 同口径，过期归档整目录回收；
-//   2) 容量：4 路常驻硬编在报警密集的现场一天就能写出几十 GB（板端实测
-//      单段 1.2MB / 40 秒 12 段），分区写满会直接拖垮检测与落库主流程，
-//      所以超过上限时从最旧的一天开始删，直到落回上限内。
-// 只动"目录名能按 yyyyMMdd 解析"的目录，现场手工放的其它子目录一律不碰。
+// 两道闸门（过期整目录、超上限只端大文件保缩略图）的判据本体在
+// alarm_media_prune.cpp —— 那边 root / 上限 / "今天"全是入参，所以"过期两天 + 超上限"
+// 这种组合能在离线用例里直接造出来，不必为了验证先写 4GB 文件。这里只保留出厂口径：
+// 上限 4GB —— 4 路常驻硬编在报警密集的现场一天就能写出几十 GB（板端实测单段 1.2MB /
+// 40 秒 12 段），分区写满会直接拖垮检测与落库主流程。
 // ============================================================================
 static const qint64 kAlarmMediaMaxBytes = 4LL * 1024 * 1024 * 1024;   // 4 GB
 
-static qint64 dirBytes(const QString &path)
-{
-    qint64 total = 0;
-    QDir dir(path);
-    const QFileInfoList files = dir.entryInfoList(QDir::Files);
-    for (const QFileInfo &fi : files) {
-        total += fi.size();
-    }
-    return total;
-}
-
 static void pruneAlarmMedia(int daysToKeep)
 {
-    QDir root(RuntimePaths::alarmsDir());
-    if (!root.exists()) {
-        return;
-    }
+    const alarm_media::PruneResult pruned = alarm_media::pruneDayDirs(
+        RuntimePaths::alarmsDir(), daysToKeep, kAlarmMediaMaxBytes);
 
-    QStringList dayDirs;                      // 目录名（yyyyMMdd），从旧到新
-    const QFileInfoList entries = root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
-    for (const QFileInfo &fi : entries) {
-        if (QDate::fromString(fi.fileName(), "yyyyMMdd").isValid()) {
-            dayDirs << fi.fileName();
-        }
-    }
-    dayDirs.sort();                           // yyyyMMdd 字典序即时间序
-
-    // 闸门 1：过期归档
-    const QDate cutoff = QDate::currentDate().addDays(-qMax(1, daysToKeep));
-    while (!dayDirs.isEmpty() && QDate::fromString(dayDirs.first(), "yyyyMMdd") < cutoff) {
-        const QString path = root.absoluteFilePath(dayDirs.takeFirst());
-        if (!QDir(path).removeRecursively()) {
-            qWarning() << "AlarmManager: prune alarm media failed" << path;
-        }
-    }
-
-    // 闸门 2：容量上限（天数留着也可能超，例如当天就爆）
-    QList<qint64> sizes;
-    sizes.reserve(dayDirs.size());
-    qint64 total = 0;
-    for (const QString &name : dayDirs) {
-        const qint64 sz = dirBytes(root.absoluteFilePath(name));
-        sizes << sz;
-        total += sz;
-    }
-    for (int i = 0; i < dayDirs.size() && total > kAlarmMediaMaxBytes; ++i) {
-        const QString path = root.absoluteFilePath(dayDirs[i]);
-        if (QDir(path).removeRecursively()) {
-            total -= sizes[i];
-            qInfo() << "AlarmManager: alarm media over cap, dropped" << dayDirs[i];
-        } else {
-            qWarning() << "AlarmManager: prune alarm media failed" << path;
-            break;   // 删不动就别原地打转
-        }
-    }
+    if (pruned.dayDirsRemoved > 0)
+        qInfo() << "AlarmManager: alarm media day dirs dropped" << pruned.dayDirsRemoved;
+    if (pruned.bigFilesRemoved > 0)
+        qInfo() << "AlarmManager: alarm media over cap, dropped" << pruned.bigFilesRemoved
+                << "big files, kept" << pruned.thumbnailsKept << "thumbnails";
 }
 
 // ============================================================================

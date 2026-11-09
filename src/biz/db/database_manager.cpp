@@ -329,19 +329,36 @@ bool DatabaseManager::createTables()
     // 补列必须夹在建表与建索引之间：CREATE TABLE IF NOT EXISTS 对已部署的老库是
     // 空操作，新加的施工信息两列只有靠这里 ALTER 才存在；而下面两条按新列建的索引
     // 早于 ALTER 就会失败（老库上实测 "no such column: worker_name"）。
-    // 失败不致命（只影响报警带施工信息，不影响其余功能），所以只告警不返回 false。
-    if (!ensureColumns(QStringLiteral("alarms"),
-                       {QStringLiteral("worker_name TEXT"),
-                        QStringLiteral("construction_info TEXT"),
-                        QStringLiteral("task_id TEXT"),
-                        QStringLiteral("dispose_person_id TEXT"),
-                        QStringLiteral("rule TEXT"),
-                        QStringLiteral("model_version TEXT"),
-                        QStringLiteral("fence_id TEXT"),
-                        QStringLiteral("fence_version INTEGER"),
-                        QStringLiteral("region_id TEXT"),
-                        QStringLiteral("dispose_option_id INTEGER")})) {
+    // ⚠ 但"失败只告警"这个尺度 2026-11-06 之后已经不成立了：AlarmDAO 的两条 INSERT
+    //   （insertAlarm / insertAlarms）**硬编码**了下面这些列名，少一列的后果不是"这条
+    //   报警少带施工信息"，而是**每一条报警都插不进去**——RAM 窗口里看着一切正常，
+    //   关机就整批没了。所以这里补完必须回读一次，缺列就按初始化失败处理（见下）。
+    const QStringList alarmExtraColumnDefs = {
+        QStringLiteral("worker_name TEXT"),
+        QStringLiteral("construction_info TEXT"),
+        QStringLiteral("task_id TEXT"),
+        QStringLiteral("dispose_person_id TEXT"),
+        QStringLiteral("rule TEXT"),
+        QStringLiteral("model_version TEXT"),
+        QStringLiteral("fence_id TEXT"),
+        QStringLiteral("fence_version INTEGER"),
+        QStringLiteral("region_id TEXT"),
+        QStringLiteral("dispose_option_id INTEGER")};
+    if (!ensureColumns(QStringLiteral("alarms"), alarmExtraColumnDefs)) {
         qWarning() << "Alarms construction columns not fully ensured";
+    }
+
+    QStringList alarmExtraColumnNames;
+    for (const QString &def : alarmExtraColumnDefs)
+        alarmExtraColumnNames << def.section(QLatin1Char(' '), 0, 0);
+    const QStringList alarmsAbsent = missingColumns(QStringLiteral("alarms"), alarmExtraColumnNames);
+    if (!alarmsAbsent.isEmpty()) {
+        qCritical().noquote()
+            << "alarms 表缺列：" << alarmsAbsent.join(", ")
+            << "。AlarmDAO 的 INSERT 硬编码了这些列名，继续跑等于**每一条报警都写不进库**，"
+               "所以数据库初始化按失败处理——请查上面几行 Add column failed 的原因"
+               "（磁盘满/库被别的进程占着/库文件坏了都会走这条）。";
+        return false;
     }
     // 老行的 task_id 回填必须在建 idx_alarms_task_id 之前跑完：几万行逐条 UPDATE 之后
     // 再建索引，比"先建索引再逐条 UPDATE（每条都要维护索引）"省一整个来回。
@@ -509,6 +526,43 @@ bool DatabaseManager::ensureColumns(const QString &table, const QStringList &col
         qInfo() << "Migrated:" << sql;
     }
     return ok;
+}
+
+// ============================================================================
+// missingColumns: 表里**没有**的那几列（ensureColumns 的事后回读）
+// ============================================================================
+// 为什么单独有这一个函数：ensureColumns 的返回值只说"有没有全加上"，而 createTables
+// 要知道的是"最终缺哪些列"——ALTER 失败的原因可能是磁盘满、库被别的进程写占着、库文件
+// 坏了，那些都不会自己好转，而硬编码了列名的 INSERT 会**一直**失败。
+// 判据朝报错那一侧倒：PRAGMA 读不到（或库没开）时按"全都缺"返回。宁可在启动日志里
+// 多一句"初始化失败"，也不要放行一个"每条报警都静默写不进去"的运行期。
+// 调用方须持有 mutex_（与 ensureColumns 同口径），table/columnNames 只传代码里的字面量。
+// ============================================================================
+QStringList DatabaseManager::missingColumns(const QString &table, const QStringList &columnNames)
+{
+    QStringList absent = columnNames;   // 默认全缺：读不到就一个都不算存在
+    QSqlDatabase db = currentConnection();
+    if (!db.isOpen()) {
+        return absent;
+    }
+
+    QSqlQuery pragma(db);
+    if (!pragma.exec(QStringLiteral("PRAGMA table_info(%1)").arg(table))) {
+        qWarning() << "PRAGMA table_info failed for" << table << ":"
+                   << pragma.lastError().text();
+        return absent;
+    }
+    QSet<QString> existing;
+    while (pragma.next())
+        existing.insert(pragma.value(1).toString().toLower());
+
+    absent.clear();
+    for (const QString &name : columnNames) {
+        const QString key = name.trimmed().toLower();
+        if (!key.isEmpty() && !existing.contains(key))
+            absent << key;
+    }
+    return absent;
 }
 
 // ============================================================================

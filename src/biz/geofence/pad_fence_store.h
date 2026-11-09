@@ -5,15 +5,20 @@
 // pad_fence_store.h — v1 §5 围栏：版本行存储、状态机与围栏对象 JSON
 // ============================================================================
 //
-// 与同目录那三个文件的关系先说清，因为它们**不是同一套围栏**：
-//   fence_shape.h / fence_manager.h = 本机自己的围栏：按**通道号**组织、存在 config.json 的
-//       geofence 段、画在四宫格上、判定由 FenceChecker 用。
+// 与同目录那三个文件的关系先说清：
+//   fence_shape.h / fence_manager.h = 本机自己的围栏：按**通道号**组织、画在四宫格上、
+//       形状存在 idge.db 的 native_fences / native_fence_versions（config.json 只剩全局参数）、
+//       判定由 FenceChecker 用。
 //   本文件 = Pad 接口 v1 的围栏：按 **taskId + cameraId** 组织、存在 idge.db 的两张表里、
 //       有多版本（ACTIVE/DRAFT/DISABLED）、画面由 Pad 自己显示。
-// ⚠ 两套**没有接起来**：Pad 下发一条围栏不会让本机开始按它判定，本机界面画的围栏也不会出现在
-//   GET /fences 里。这不是遗漏而是本轮的范围决定（§5 通篇讲的是"围栏的增删改查契约"，
-//   没有任何一条要求它驱动检测），但**它是个真实的功能缺口**，
-//   已在 src/biz/pad/README.md 的"待对方确认"里挂着，别读到一半以为已经打通了。
+// 两套**已经接起来**（2026-11-07 起）：FenceManager::refreshFromStores() 把两库都拉进
+//   检测用的内存快照，同一通道上 Pad 的 ACTIVE 版本优先覆盖本机手绘版；apply/disable
+//   两条路由都会立刻刷一次，所以"对端收到 200/ACTIVE"与"本机开始按它判"是同一时刻。
+// ⚠ 接起来的前提是**两套 cameraId 各按各的口径解析**：本机的 "CHn" 是 0-based，
+//   Pad 发来的 "CHn" 是 §7.1 channelIdentity() 的 1-based。共用一次 mid(2).toInt()
+//   会让 Pad 的围栏整体下移一路（判到别的画面上去）。换算与判据集中在
+//   fence_manager.cpp 的合并那段和 pad_http_fences.cpp 的 nativeCameraIdForPad，
+//   离线契约见 tests/test_fence_merge.cpp。
 //
 // 为什么存库不存 config.json：§5.2 的模型是"一个围栏多条版本行 + 每行 1~8 个区域 +
 // 每行一份 plan/owner 快照"，那是关系形状；塞进 config.json 会变成一个手改极易写坏的深嵌套，

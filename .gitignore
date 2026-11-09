@@ -82,7 +82,11 @@ test_*.cpp
 !tests/test_pad_http_message.cpp
 !tests/test_pad_http_api.cpp
 !tests/test_net_route.cpp
+#   test_fence_merge              —— 检测快照并两库（native+pad_fences）九条契约：cameraId 两套编号、Pad 优先、不自死锁
+#   test_media_prune              —— 报警媒体双闸门 8 条契约：过期整目录、超上限只端大文件保住 *_thumb.jpg
 
+!tests/test_fence_merge.cpp
+!tests/test_media_prune.cpp
 # 测试素材（*.jpg/*.mp4 全局忽略，此处显式放行；*_faces.json 等为运行产物不放行）
 !assets/test/1.mp4
 !assets/test/bus.jpg
