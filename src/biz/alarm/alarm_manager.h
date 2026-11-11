@@ -222,6 +222,20 @@ public:
                                           const FenceContext &fence = FenceContext());
 
     // ============================================================================
+    // ingestLadderAlarm: 登高守护报警（梯上有人、梯下无人看护）
+    // ============================================================================
+    // 由解码线程在状态机**进入 ALARM 的沿**对每把梯子调用一次（grace 宽限已在
+    // ladderguard::Tracker 里走完）。与 ingestFenceAlarm 同款：不做类别匹配、
+    // 不累加检测统计；限流键 "通道:ladder:梯子身份"，窗口 kAlarmThrottleNs 兜
+    // 状态机抖动（消警后再进入 ALARM 是新事件，键相同但已出窗口）。
+    // det 传攀爬者框，ctx 的 classNames 应只含 "ladder_no_spotter"（调用方构造），
+    // modelVersion 取检出人员的槽位版本。
+    // ============================================================================
+    QVector<AlarmRecord> ingestLadderAlarm(int channel, const object_detect_result &det,
+                                           const SlotContext &ctx, long timeNs,
+                                           int guardId);
+
+    // ============================================================================
     // storeAndNotify: 存储新报警并发出信号
     // ============================================================================
     // 存储新报警并发出 alarmGenerated / statsUpdated 信号

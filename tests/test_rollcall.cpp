@@ -57,8 +57,8 @@ int main(int argc, char** argv) {
     std::cout << "[test_rollcall] workspace=" << workspace.toStdString() << std::endl;
 
     if (!QFileInfo::exists(test_image) ||
-        !QFileInfo::exists(face_dir + "/detection.rknn") ||
-        !QFileInfo::exists(face_dir + "/recognition.rknn") ||
+        !QFileInfo::exists(face_dir + "/detection/model.rknn") ||
+        !QFileInfo::exists(face_dir + "/recognition/model.rknn") ||
         !QFileInfo::exists(face_dir + "/face_recognition")) {
         std::cout << "  [FAIL] 前置资源缺失：需在仓库根运行，且 model/face 下备齐"
                      "检测/识别权重与 face_recognition 对照工具" << std::endl;
@@ -81,14 +81,14 @@ int main(int argc, char** argv) {
     // =========================================================================
     FaceRecognitionWrapper exe_wrapper;
     exe_wrapper.setExecutablePath((face_dir + "/face_recognition").toUtf8().toStdString());
-    exe_wrapper.setDetectionModel((face_dir + "/detection.rknn").toUtf8().toStdString());
-    exe_wrapper.setRecognitionModel((face_dir + "/recognition.rknn").toUtf8().toStdString());
+    exe_wrapper.setDetectionModel((face_dir + "/detection/model.rknn").toUtf8().toStdString());
+    exe_wrapper.setRecognitionModel((face_dir + "/recognition/model.rknn").toUtf8().toStdString());
     exe_wrapper.setThresholds(det_th, nms_th);
     const FaceDetectionResult ref = exe_wrapper.detectAndExtract(img);
 
     InProcessFaceRecognizer recognizer;
-    check(recognizer.init((face_dir + "/detection.rknn").toStdString(),
-                          (face_dir + "/recognition.rknn").toStdString(),
+    check(recognizer.init((face_dir + "/detection/model.rknn").toStdString(),
+                          (face_dir + "/recognition/model.rknn").toStdString(),
                           RKNN_NPU_CORE_AUTO),
           "InProcessFaceRecognizer::init");
     recognizer.setThresholds(det_th, nms_th);
@@ -127,8 +127,8 @@ int main(int argc, char** argv) {
     // B. 业务全链（RollCallService，进程内识别器）
     // =========================================================================
     RollCallService service;
-    check(service.initialize((face_dir + "/detection.rknn").toStdString(),
-                             (face_dir + "/recognition.rknn").toStdString(),
+    check(service.initialize((face_dir + "/detection/model.rknn").toStdString(),
+                             (face_dir + "/recognition/model.rknn").toStdString(),
                              (tmp_root + "/roll_call.db").toUtf8().toStdString(),
                              (tmp_root + "/roll_call_data").toUtf8().toStdString()),
           "RollCallService::initialize");

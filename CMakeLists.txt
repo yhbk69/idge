@@ -245,6 +245,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/biz/alarm               # 报警管理（去重、限流）
     ${CMAKE_SOURCE_DIR}/src/biz/db                  # 数据持久层（业务 sqlite3 + 报警 QtSQL 两套）
     ${CMAKE_SOURCE_DIR}/src/biz/geofence            # 电子围栏（形状、检测、覆盖层）
+    ${CMAKE_SOURCE_DIR}/src/biz/ladderguard         # 登高守护规则引擎（几何匹配 + 三态状态机）
     ${CMAKE_SOURCE_DIR}/src/biz/pad                 # Pad 接口 v1 的服务端（WS 报警推送 + 出站 JSON 映射）
     ${CMAKE_SOURCE_DIR}/src/biz/qrcode              # 二维码解码（ZBar 封装，登录与智能识别共用）
     ${CMAKE_SOURCE_DIR}/src/biz/service             # 点名/盘点业务服务
@@ -895,6 +896,23 @@ target_link_libraries(test_geofence_role
 target_compile_definitions(test_geofence_role PRIVATE ZERO_COPY)
 
 # ============================================================================
+# 登高守护规则引擎离线自检（梯框聚合 / 攀爬者-扶梯人几何 / 三态状态机时序）
+# 只编 ladder_guard.cpp：纯 std 逻辑，不链 Qt 业务、不需要 config.json 与权重。
+# 为什么值得单独钉：状态机的 grace/clear/lost 三个计时写反任何一个，板端表现都是
+# "告警闪烁"或"永不告警"，肉眼盯屏很难复现；合成框在这里把时序钉死。
+# 契约清单见 tests/test_ladder_guard.cpp 文件头
+# 仓库根运行：./build/build_rk3588_linux/test_ladder_guard，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_ladder_guard
+    tests/test_ladder_guard.cpp
+    src/biz/ladderguard/ladder_guard.cpp
+)
+
+target_include_directories(test_ladder_guard PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/biz/ladderguard
+)
+
+# ============================================================================
 # 报警媒体按天目录裁剪的离线自检（过期整目录 / 超上限只端大文件保缩略图）
 # 为什么值得单独钉：这道闸门的后果只有两种，而且都是**事后**才看得见——删多了是
 # "三周前的报警点开没截图"，删少了是分区被 4GB 闸门之外的老库写满、落库直接失败。
@@ -1059,6 +1077,9 @@ add_executable(test_channel_reload
     src/biz/geofence/native_fence_store.cpp
     src/biz/geofence/pad_fence_store.cpp
     src/biz/geofence/fence_checker.cpp
+    # 登高守护：ffmpeg_video_decoder.cpp 调 Tracker::step/setParams/reset + mergeLadders，
+    # 依赖闭包里漏了它就是三个 undefined reference（test_stream_params 首个撞上的就是这个）
+    src/biz/ladderguard/ladder_guard.cpp
     src/base/imaging/image_utils.cpp
     src/base/imaging/image_drawing.cpp
     src/base/imaging/draw_utils.cpp
@@ -1147,6 +1168,9 @@ add_executable(test_stream_params
     src/biz/geofence/native_fence_store.cpp
     src/biz/geofence/pad_fence_store.cpp
     src/biz/geofence/fence_checker.cpp
+    # 登高守护：ffmpeg_video_decoder.cpp 调 Tracker::step/setParams/reset + mergeLadders，
+    # 依赖闭包里漏了它就是三个 undefined reference（test_stream_params 首个撞上的就是这个）
+    src/biz/ladderguard/ladder_guard.cpp
     src/base/imaging/image_utils.cpp
     src/base/imaging/image_drawing.cpp
     src/base/imaging/draw_utils.cpp

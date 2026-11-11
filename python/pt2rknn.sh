@@ -6,8 +6,9 @@
 #   校准清单默认为 model/train/calib/dataset_test.txt（仓库里那份是占位图，
 #   精度敏感的任务务必换成含目标物体的现场帧清单）。
 #
-# 只能跑在 x86_64 Linux/WSL 上：rknn-toolkit2 只提供 x86_64 wheel，
-# 板子（aarch64）装不上。转换产物与目标平台绑定，rk3588 转的不能跑在 rk3568。
+# x86_64 Linux/WSL 与板端 aarch64 都能跑：rknn-toolkit2 2.3.0 起提供 aarch64 wheel
+# （2026-11-10 板端实测；旧版"只有 x86_64"的说法已过时）。
+# 转换产物与目标平台绑定，rk3588 转的不能跑在 rk3568。
 #
 # 本脚本刻意只做转换，不写 labels.txt、不改 config.json —— 类别表是运行时的
 # 事实源（行序 = cls_id），必须由入库的人核对后钉死，不能让脚本猜。
@@ -38,13 +39,6 @@ case "$DTYPE" in
     i8|u8|fp) ;;
     *) echo "错误: dtype 只能是 i8 / u8 / fp，传入的是 \"$DTYPE\"。" >&2; exit 1 ;;
 esac
-
-if [ "$(uname -m)" != "x86_64" ]; then
-    echo "错误: rknn-toolkit2 只有 x86_64 wheel，当前架构 $(uname -m) 装不上。" >&2
-    echo "      请在一台 x86_64 Linux/WSL 机器上 clone 本仓库后执行本脚本，" >&2
-    echo "      产物 model/library/$LIB_ID/model.rknn 再拷回板子。" >&2
-    exit 1
-fi
 
 [ -f "$PT" ] || { echo "错误: 找不到权重文件 $PT" >&2; exit 1; }
 PT="$(cd "$(dirname "$PT")" && pwd)/$(basename "$PT")"

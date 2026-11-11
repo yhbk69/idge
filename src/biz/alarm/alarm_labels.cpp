@@ -45,6 +45,9 @@ TypeWire typeWireOf(const QString &alarmType, const QString &className)
         {"smoking",   "SMOKING", "吸烟",        "现场隐患"},
         {"fire",      "FIRE",    "明火",        "现场隐患"},
         {"smoke",     "SMOKE",   "烟雾",        "现场隐患"},
+        // 登高守护是规则报警（梯上有人+梯下无人），className 由解码器固定填这个串。
+        // code 取值表（歧义 A6）未定，先按语义自拟 LADDER，接口方确认后只改这一行。
+        {"ladder_no_spotter", "LADDER", "登高无人看护", "危险作业"},
     };
     for (const auto &row : kTable) {
         if (className == QLatin1String(row.cls)) {
@@ -68,6 +71,8 @@ QString ruleNameOf(const QString &alarmType, const QString &className)
         return QStringLiteral("离岗检测（在岗区域外）");
     if (alarmType.startsWith(QLatin1String("fence")))
         return QStringLiteral("禁区闯入检测");
+    if (alarmType == QLatin1String("ladder_no_spotter"))
+        return QStringLiteral("登高守护（梯上有人、梯下无人看护）");
     // 检测类：用同一张表的中文名，未登记的类别就报 labels.txt 原文，不编一个假中文
     const TypeWire wire = typeWireOf(alarmType, className);
     const bool known = wire.code != QLatin1String("UNKNOWN")

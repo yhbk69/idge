@@ -420,6 +420,46 @@ QVector<AlarmRecord> AlarmManager::ingestFenceAlarm(int channel, const object_de
 }
 
 // ============================================================================
+// ingestLadderAlarm: 登高守护报警（梯上有人、梯下无人看护）
+// ============================================================================
+// 调用方（解码线程的 ladderguard::Tracker）已走完 grace 宽限并确认是"进入 ALARM
+// 的沿"，本函数只负责限流与建记录，口径与 ingestFenceAlarm 一致：
+//   - 类别不做匹配，className 由 ctx.classNames 翻出（调用方填 ladder_no_spotter）；
+//   - 限流键带梯子身份：两把梯子同时违规互不压制；同一把梯子消警后再违规时
+//     已出 2 秒窗口，算新事件；
+//   - 统计不在这里累加（人员框已由该槽位的 ingest 计过）。
+// ============================================================================
+QVector<AlarmRecord> AlarmManager::ingestLadderAlarm(int channel, const object_detect_result &det,
+                                                     const SlotContext &ctx, long timeNs,
+                                                     int guardId)
+{
+    QVector<AlarmRecord> newAlarms;
+    const QString className = slotClassName(ctx, det.cls_id);
+    const long steadyNow = steadyNowNs();
+    {
+        QMutexLocker lock(&mutex_);
+        const QString key = QString("%1:ladder:%2").arg(channel).arg(guardId);
+        if (steadyNow - lastAlarmTime_.value(key, 0) < kAlarmThrottleNs)
+            return newAlarms;
+        lastAlarmTime_[key] = steadyNow;
+
+        const QString type = QStringLiteral("ladder_no_spotter");
+        AlarmRecord alarm = makeAlarmRecord(channel, det, className, timeNs, type,
+                                            ConfigManager::instance().alarmLevel(type));
+        alarm.modelVersion = ctx.modelVersion;
+
+        qDebug() << "AlarmManager: Creating ladder guard alarm - id:" << alarm.id
+                 << "channel:" << alarm.channel
+                 << "guard:" << guardId
+                 << "className:" << alarm.className;
+
+        newAlarms.append(alarm);
+        storeDetectionDetail(channel, det, ctx.classNames, timeNs, /*slot=*/-1);
+    }
+    return newAlarms;
+}
+
+// ============================================================================
 // storeAndNotify: 存储报警记录并通知界面
 // ============================================================================
 // 这是报警系统的出口函数，由解码线程调用。

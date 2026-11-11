@@ -62,8 +62,8 @@ int main(int argc, char** argv) {
     // 1. 点名服务（盘点共库依赖）：两件套权重同主程序约定（进程内识别器）
     auto roll_call = std::make_shared<RollCallService>();
     check(roll_call->initialize(
-              (face_dir + "/detection.rknn").toStdString(),
-              (face_dir + "/recognition.rknn").toStdString(),
+              (face_dir + "/detection/model.rknn").toStdString(),
+              (face_dir + "/recognition/model.rknn").toStdString(),
               (tmp_root + "/roll_call.db").toStdString(),
               (tmp_root + "/roll_call_data").toStdString()),
           "RollCallService::initialize");

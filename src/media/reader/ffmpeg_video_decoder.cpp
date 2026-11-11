@@ -1049,6 +1049,9 @@ void FFmpegVideoDecoder::releaseTasks()
         return;
     }
 
+    // 换模型列表后旧梯子身份/计时不再有意义（槽位类名表都换了）
+    ladderGuard_.reset();
+
     int freed = 0;
     for (PpeTask *task : tasks_) {
         if (!task)
@@ -2239,6 +2242,51 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
                     };
                     std::vector<FenceCandidate> fenceCandidates;
 
+                    // ===== 4.9c 登高守护候选：跨槽收梯框与人框 =====
+                    // 角色按类名子串识别（与 detect_ladderguard.py pick_classes 同口径）：
+                    // 含 ladder 的槽是触发源，含 worker/person/people/pedestrian 的槽出人框。
+                    // 不新增配置键指定槽位：换权重、重排槽位都不用改配置。
+                    const QJsonObject lgCfg = ConfigManager::instance().ladderguardConfig();
+                    const bool guardScan = lgCfg["enabled"].toBool(true);
+                    auto classRole = [](const QString &name) {
+                        const QString low = name.toLower();
+                        if (low.contains(QLatin1String("ladder")))
+                            return 1;
+                        if (low.contains(QLatin1String("worker"))
+                            || low.contains(QLatin1String("person"))
+                            || low.contains(QLatin1String("people"))
+                            || low.contains(QLatin1String("pedestrian")))
+                            return 2;
+                        return 0;
+                    };
+                    std::vector<char> slotIsLadder(slotQueues_.size(), 0);
+                    std::vector<char> slotIsPerson(slotQueues_.size(), 0);
+                    int ladderSlotCount = 0, personSlotCount = 0;
+                    if (guardScan) {
+                        for (size_t k = 0; k < slotQueues_.size(); ++k) {
+                            for (const auto &n : slotClassNames_[k]) {
+                                const int role = classRole(QString::fromStdString(n));
+                                if (role == 1) slotIsLadder[k] = 1;
+                                else if (role == 2) slotIsPerson[k] = 1;
+                            }
+                            ladderSlotCount += slotIsLadder[k];
+                            personSlotCount += slotIsPerson[k];
+                        }
+                    }
+                    // 只挂梯子没挂人模型（或反之）= 配置凑不齐判据，守护不激活
+                    const bool guardActive = guardScan && ladderSlotCount > 0 && personSlotCount > 0;
+                    // 不激活即清状态：否则停用期间 noSpotterSince 一直挂着，
+                    // 重新启用会拿停用前就走满的旧计时器立刻误报。
+                    if (!guardActive)
+                        ladderGuard_.reset();
+                    std::vector<ladderguard::Box> guardLadders, guardPersons;
+                    long guardLadderTs = -1, guardPersonTs = -1;
+                    auto guardBoxOf = [](const object_detect_result &d) {
+                        return ladderguard::Box{(float)d.box.left, (float)d.box.top,
+                                                (float)d.box.right, (float)d.box.bottom,
+                                                d.prop};
+                    };
+
                     for (size_t k = 0; k < slotQueues_.size(); ++k) {
                         ds.stage.restart();
                         // 从该模型的结果队列中取最新一次检测结果
@@ -2246,6 +2294,25 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
                         object_detect_result_list od;
                         memset(&od, 0, sizeof(od));
                         bool hasNewResult = slotQueues_[k]->tryPop(od);
+
+                        // 登高守护候选：跨槽对齐靠 od.time（两槽结果来自同一批 TaskData；
+                        // tryPop 拿到的可能是上一轮旧结果，时间戳不等就不配对）。
+                        // count==0 也要记时间戳：本帧"没梯子/没人"本身就是状态机的输入。
+                        if (guardActive && hasNewResult) {
+                            if (slotIsLadder[k]) {
+                                guardLadderTs = od.time;
+                                for (int i = 0; i < od.count; ++i)
+                                    if (classRole(slotClassNameAt(slotCtxs[k].classNames,
+                                                                  od.results[i].cls_id)) == 1)
+                                        guardLadders.push_back(guardBoxOf(od.results[i]));
+                            } else if (slotIsPerson[k]) {
+                                guardPersonTs = od.time;
+                                for (int i = 0; i < od.count; ++i)
+                                    if (classRole(slotClassNameAt(slotCtxs[k].classNames,
+                                                                  od.results[i].cls_id)) == 2)
+                                        guardPersons.push_back(guardBoxOf(od.results[i]));
+                            }
+                        }
 
                         // ===== 检测框时序平滑 =====
                         // 每 3 帧才推理一次，直接画原始坐标会导致框"跳"。
@@ -2554,6 +2621,88 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
                             }
                             deliverAlarms(channel_, fenceAlarms, dislayImage, videoRecorder_, &cf);
                         }
+                    }
+
+                    // ===== 4.10c 登高守护：通道级几何匹配 + 状态机沿触发报警 =====
+                    //
+                    // 与围栏同款位置（槽位循环后、frameReady 前）：梯框/人框已跨槽收齐，
+                    // 截图要用同一帧带框画面。违规 = 状态机**进入 ALARM**（grace 宽限已
+                    // 走完），不是"单帧没扶梯人"；消警后再次进入算新事件。
+                    // 两槽时间戳不等（某一槽还是上一轮旧结果）时本帧不推进，宁可少判
+                    // 一帧也不拿错帧的人框配梯框。
+                    if (guardActive && guardLadderTs >= 0 && guardLadderTs == guardPersonTs) {
+                        ladderguard::Params gp;
+                        gp.climberDx = (float)lgCfg["climberDx"].toDouble(0.20);
+                        gp.climberDy = (float)lgCfg["climberDy"].toDouble(0.20);
+                        gp.spotterDx = (float)lgCfg["spotterDx"].toDouble(0.80);
+                        gp.spotterDy = (float)lgCfg["spotterDy"].toDouble(0.15);
+                        gp.iouMatch = (float)lgCfg["iouMatch"].toDouble(0.30);
+                        gp.graceSec = lgCfg["graceSeconds"].toDouble(2.0);
+                        gp.clearSec = lgCfg["clearSeconds"].toDouble(1.0);
+                        gp.lostSec = lgCfg["lostSeconds"].toDouble(1.0);
+                        ladderGuard_.setParams(gp);
+                        const double nowSec =
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch()).count() / 1e9;
+                        const auto views = ladderGuard_.step(
+                            ladderguard::mergeLadders(guardLadders), guardPersons, nowSec);
+
+                        int personSlot = -1;
+                        for (size_t k = 0; k < slotIsPerson.size(); ++k)
+                            if (slotIsPerson[k]) { personSlot = (int)k; break; }
+
+                        QVector<AlarmRecord> guardAlarms;
+                        for (const auto &v : views) {
+                            const bool alarm = v.state == ladderguard::State::Alarm;
+                            char text[96];
+                            if (!noOverlayDraw()) {
+                                draw_rectangle(&dislayImage, (int)v.box.x1, (int)v.box.y1,
+                                               (int)(v.box.x2 - v.box.x1), (int)(v.box.y2 - v.box.y1),
+                                               COLOR_GREEN, 2);
+                                snprintf(text, sizeof(text), "LADDER#%d", v.id);
+                                draw_text(&dislayImage, text, (int)v.box.x1, (int)v.box.y1 - 20,
+                                          COLOR_GREEN, 10);
+                            }
+                            for (const auto &c : v.climbers) {
+                                if (noOverlayDraw())
+                                    break;
+                                const unsigned int color = alarm ? COLOR_RED : COLOR_ORANGE;
+                                draw_rectangle(&dislayImage, (int)c.x1, (int)c.y1,
+                                               (int)(c.x2 - c.x1), (int)(c.y2 - c.y1),
+                                               color, alarm ? 3 : 2);
+                                snprintf(text, sizeof(text),
+                                         alarm ? "NO SPOTTER %.0f%%" : "ON LADDER %.0f%%",
+                                         c.conf * 100);
+                                draw_text(&dislayImage, text, (int)c.x1, (int)c.y1 - 20, color, 10);
+                            }
+                            for (const auto &s : v.spotters) {
+                                if (noOverlayDraw())
+                                    break;
+                                draw_rectangle(&dislayImage, (int)s.x1, (int)s.y1,
+                                               (int)(s.x2 - s.x1), (int)(s.y2 - s.y1),
+                                               COLOR_BLUE, 2);
+                                snprintf(text, sizeof(text), "SPOTTER %.0f%%", s.conf * 100);
+                                draw_text(&dislayImage, text, (int)s.x1, (int)s.y1 - 20,
+                                          COLOR_BLUE, 10);
+                            }
+                            if (v.enteredAlarm && !v.climbers.empty()) {
+                                object_detect_result det;
+                                memset(&det, 0, sizeof(det));
+                                det.box.left = (int)v.climbers[0].x1;
+                                det.box.top = (int)v.climbers[0].y1;
+                                det.box.right = (int)v.climbers[0].x2;
+                                det.box.bottom = (int)v.climbers[0].y2;
+                                det.prop = v.climbers[0].conf;
+                                det.cls_id = 0;
+                                AlarmManager::SlotContext ctx = slotCtxs[personSlot];
+                                ctx.classNames = QStringList{QStringLiteral("ladder_no_spotter")};
+                                guardAlarms += AlarmManager::instance().ingestLadderAlarm(
+                                    channel_, det, ctx, guardLadderTs, v.id);
+                                qInfo() << "[LadderGuard] 通道" << channel_ + 1 << "梯#" << v.id
+                                        << "有人登高、无人看护超宽限 → 报警";
+                            }
+                        }
+                        deliverAlarms(channel_, guardAlarms, dislayImage, videoRecorder_);
                     }
 
                     

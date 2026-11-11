@@ -18,7 +18,7 @@
 ## 核心类与数据流
 - **ConfigManager**（单例）：`load()` 读入 `QJsonObject root_`；各 setter 只改内存，
   `save()` 才整体序列化写回文件。配置节：`video`（含 `models` 参数表与 `channels` 列表）/
-  `detect` / `geofence` / `recording` / `database` / `websocket` / `smartRecognition` /
+  `detect` / `geofence` / `ladderguard` / `recording` / `database` / `websocket` / `smartRecognition` /
   `alarm_uplink` / `pad_server`（WS 入站）/ `pad_http`（HTTP `/api/` 入站）/ `qr_login`
   （另有一整段 `gb28181` 由国标模块自己读，见下）。文件不存在时按 **schema V2** 写入内置默认并
   `save()`；JSON 解析失败置空 `root_`，getter 回退默认值（0.25 / 0.45 / "person" / 10 …，
@@ -94,6 +94,19 @@
 
 围栏不占推理任务：它复用该通道已有模型产出的检测结果，只做几何判定。若某通道挂了围栏却
 没有任何模型能产出 `alarmClass`，启动日志打 `[geofence] 通道N 无模型产出类别 person，围栏不会触发`。
+
+### ladderguard 段（登高守护：梯上有人、梯下无人看护）
+
+| 键 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | 总开关。激活还需**同一通道**级联里同时有梯子槽（类名含 `ladder`）与人槽（类名含 `worker/person/people/pedestrian`），缺一个就不激活；不激活即清状态机，重新启用不会拿旧计时器误报 |
+| `graceSeconds` | double | `2.0` | 无扶梯人持续多久升 ALARM（进入沿才报警/抓拍）；setter 把 ≤0 夹回默认 |
+| `clearSeconds` | double | `1.0` | 扶梯人连续在场多久消警降回 CLIMBING；setter 把 ≤0 夹回默认 |
+
+没有段级迁移：整段不存在时 getter 兜底（与 geofence 同口径），设置页「登高守护」分组
+写入后才出现。解码线程逐帧经 `ladderguardConfig()` 取整段快照，改动即时生效不用重开流。
+几何阈值（攀爬者/扶梯人判定比例、IoU 匹配、丢失超时）是 `src/biz/ladderguard/ladder_guard.h`
+的编译期默认，不走配置。报警类型 `ladder_no_spotter`，等级在 `alarm.levels` 配（出厂 2）。
 
 ### recording 段（报警视频硬件编码录制）
 | 键 | 类型 | 默认 | 说明 |

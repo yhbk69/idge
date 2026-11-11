@@ -1,3 +1,2 @@
-assets/test/bus.jpg
-assets/test/test.jpg
-assets/test/bus.jpg_result.jpg
+../../../assets/test/bus.jpg
+../../../assets/test/test.jpg

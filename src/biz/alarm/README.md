@@ -15,12 +15,13 @@
 | 文件 | 说明 |
 | --- | --- |
 | `alarm_manager.h` | `AlarmRecord` 结构体 + `AlarmManager` 单例声明、限流常量、`SlotContext` |
-| `alarm_manager.cpp` | `ingest()`/`ingestFenceAlarm()` 判定与限流、`storeAndNotify()` 存储与发信号、`attachVideoClip()` 片段回填、`cleanOldData()` 数据与媒体清理 |
+| `alarm_manager.cpp` | `ingest()`/`ingestFenceAlarm()`/`ingestLadderAlarm()` 判定与限流、`storeAndNotify()` 存储与发信号、`attachVideoClip()` 片段回填、`cleanOldData()` 数据与媒体清理 |
 
 ## 核心类与数据流
 - **AlarmManager**（`QObject` 单例）：全局唯一。
 - **AlarmRecord**：一条报警（时间戳、通道、类别、置信度、确认位、截图路径、视频片段路径、是否围栏报警）。
-  围栏报警的 `alarmType` 是 `fence_in`/`fence_out`（闯入禁区/离岗），普通检测报警是 `"detection"`。
+  围栏报警的 `alarmType` 是 `fence_in`/`fence_out`（闯入禁区/离岗），登高守护是 `ladder_no_spotter`
+  （梯上有人、梯下无人看护），普通检测报警是 `"detection"`。
   本轮加两个字段承载施工信息：`workerName`（列表那一列直接显示）与 `constructionJson`（整份载荷，
   详情框与上行都从它渲染）。**为什么只有两个**见 `src/biz/session/README.md`：字段还没定稿，
   两列的形状让"加字段只动 `ConstructionInfo` 一处"成立。
@@ -44,6 +45,7 @@
   → 生成 newAlarms(未存/未截图)
   → 收集本帧围栏候选（类别 == geofence.alarmClass 的目标）
   → 槽循环结束后一次通道级合并判定：ingestFenceAlarm(channel, det, ctx, timeNs, role)
+  → 同帧梯框+人框对齐后喂登高守护状态机，进入 ALARM 沿才调：ingestLadderAlarm(channel, det, ctx, timeNs, guardId)
   → storeAndNotify(newAlarms) → 存入内存环形列表(≤1000) + AlarmDAO::insertAlarms 落库
   → emit alarmGenerated / statsUpdated → UI 更新
   → (解码侧另投 ClipWriter 任务)
@@ -75,12 +77,13 @@ UI 两条按钮走这里；v1 §4 的三个 HTTP 入口 `disposeAlarmById` / `ma
 与 `/api/device/status` 的 `cameras[].online` 必须同源，两处各读各的就会出现
 "视频页说在线、设备页说离线"（实现是查那张 per-channel 的运行表，不新造状态）。
 
-两条判定路径的限流键与窗口**互相独立**：
+各判定路径的限流键与窗口**互相独立**：
 
 | 路径 | 键 | 窗口 |
 | --- | --- | --- |
 | 普通报警 `ingest` | `"通道:槽下标:cls_id"`（如 `"0:1:0"`） | `kAlarmThrottleNs` = 2 秒 |
 | 围栏报警 `ingestFenceAlarm` | `"通道:fence:角色:类别名"`（如 `"0:fence:in:person"`、`"0:fence:out:person"`） | `geofence.throttleSeconds`，默认 10 秒 |
+| 登高守护 `ingestLadderAlarm` | `"通道:ladder:guardId"`（如 `"0:ladder:3"`） | `kAlarmThrottleNs` = 2 秒 |
 
 普通报警键里带槽下标，不同级联槽恰好同类号不再互相压制；围栏键刻意**用类名而不是槽号**，
 配置重排槽位顺序后限流窗口依然稳定。
@@ -125,6 +128,10 @@ if (!news.isEmpty()) {
 
 // 围栏判定（通道级，槽循环结束后一次；几何判定出违规才调，role 来自 FenceViolation）
 alarms += AlarmManager::instance().ingestFenceAlarm(ch, det, ctx, timeNs, v.role);
+
+// 登高守护（通道级；状态机进入 ALARM 的沿才调，guardId 是 Tracker 给的梯子身份，
+// ctx.classNames 只放 "ladder_no_spotter"，det 取攀爬者框；见 src/biz/ladderguard/README.md）
+alarms += AlarmManager::instance().ingestLadderAlarm(ch, det, ctx, timeNs, v.id);
 
 // ClipWriter 后台线程（片段写完后；mp4 副本没写成时第三参传空串）
 AlarmManager::instance().attachVideoClip(ids, rawClipPath, mp4Path);
@@ -177,7 +184,7 @@ AlarmManager::instance().cleanOldData(30);
 - **`SlotContext` 没有拥有权也不共享**：由解码器每帧在栈上构造、按槽传入，`AlarmManager` 只在调用期间
   读取，不缓存。因此 4 个解码器并发报警不会互相覆盖类别名表（旧实现把全局槽表写进单例，
   按通道配置后通道 3 会覆盖通道 0 的表，报警判定串频道）。
-- `detections.frame_id` 存的是**产出该目标的槽下标**；围栏报警走 `ingestFenceAlarm`，
-  该列固定为 `-1`（围栏是通道级判定，不属于任何槽位）。
-- `ingestFenceAlarm` **不重复累计**统计（`totalDetections_`/`classCount_` 已由同帧的 `ingest` 记过），
-  它只出记录与明细。
+- `detections.frame_id` 存的是**产出该目标的槽下标**；围栏报警走 `ingestFenceAlarm`、
+  登高守护走 `ingestLadderAlarm`，该列固定为 `-1`（两者都是通道级判定，不属于任何槽位）。
+- `ingestFenceAlarm`/`ingestLadderAlarm` **不重复累计**统计（`totalDetections_`/`classCount_`
+  已由同帧的 `ingest` 记过），它们只出记录与明细。

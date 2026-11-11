@@ -356,6 +356,11 @@ private:
     /// 类别改动会立刻 FenceManager::loadFromConfig()（判定端逐帧现读，不用重开流）。
     void initGeofenceUi();
 
+    // ========== 登高守护（梯上有人、梯下无人看护才报警） ==========
+    /// 在设置页末尾加"登高守护"分组：启用开关 + 告警宽限/消警确认秒数。
+    /// 判定端在解码线程逐帧现读配置，改动立即生效，不用重开流。
+    void initLadderGuardUi();
+
     // ========== WebSocket 配置控件 ==========
     QLineEdit *wsUrlEdit_ = nullptr;         ///< 服务器地址输入框
     QLabel *wsStatusLabel_ = nullptr;        ///< 连接状态标签

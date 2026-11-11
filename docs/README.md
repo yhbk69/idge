@@ -11,6 +11,7 @@
 | 文件/目录 | 说明 |
 |-----------|------|
 | `knowledge/` | 技术文档主体（下表） |
+| `ladderguard/` | 登高守护参考实现三件套（`detect_ladderguard.py`、`登高守护实现方案.md`、几何示意 SVG）；C++ 落地在 `src/biz/ladderguard/` |
 
 > 原根下的两个备忘 `ref.txt`（3 行链接）与 `bug.txt`（1 行）已随仓库根整理删除——内容早已沉淀进 `knowledge/` 各篇。
 

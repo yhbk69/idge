@@ -7,9 +7,10 @@
 ```
 train/
 ├── README.md                    # 本文件
-├── calib/                       # INT8 量化校准清单（python/convert.py 的 dataset 参数）
-│   ├── dataset.txt              # 单行占位（assets/test 的图，仅供跑通流程）
-│   └── dataset_test.txt         # 三行占位（同上）
+├── calib/                       # INT8 量化校准清单（python/convert.py 的 DATASET 环境变量/默认清单）
+│   ├── dataset.txt              # 单行占位（assets/test/bus.jpg，仅供跑通流程）
+│   ├── dataset_test.txt         # 两行占位（bus.jpg + test.jpg，同上）
+│   └── dataset_onnx_generic.txt # 两行占位（ladder/fire 转换用；域内校准集请另行覆盖）
 ├── cigarette/
 │   └── yolo11n-cigarette.pt     # 吸烟检测权重（Ultralytics YOLO11n，nc=1，names={0:cigarette}，imgsz=640）
 └── ppe/
@@ -26,18 +27,19 @@ train/
 
 `*.pt` / `*.onnx` / `*.rknn` 都在 `.gitignore` 里（二进制不进 git，分发靠整库 zip 或设置页「导入模型」）。
 
-## 转换链路（只能在 x86 PC 上做）
+## 转换链路（x86 PC 或板端均可）
 
-`rknn-toolkit2`（`from rknn.api import RKNN`）**只发 x86_64 Linux 的 wheel**，
-板子是 aarch64，装不上也跑不了——这不是本项目的环境缺失，是 Rockchip 工具链的硬限制
-（见 `python/README.md` 注意事项）。所以：
+`rknn-toolkit2`（`from rknn.api import RKNN`）旧版只发 x86_64 Linux 的 wheel，
+**2.3.0 起提供 aarch64 wheel**：2026-11-10 在本板（RK3588）实测 load_onnx/build/export 全通，
+ladder/fire 两个 rknn 就是板端转的（`python/convert.py` 头部旧注释已改）。
+已导出的 onnx 源权重收在 `model/onnx/`（规格、sha256 与转换命令见其 README）：
 
 ```
 .pt ──(ultralytics: yolo export)──> .onnx ──(rknn-toolkit2: convert.py)──> .rknn
-                                                                   └──> model/library/<id>/model.rknn
+                                （收 model/onnx/）                    └──> model/library/<id>/model.rknn
 ```
 
-一步做完（PC，仓库根目录下）：
+一步做完（仓库根目录下）：
 
 ```bash
 python3 python/pt2rknn.sh model/train/cigarette/yolo11n-cigarette.pt yolo11n-cigarette rk3588 i8
@@ -45,3 +47,6 @@ python3 python/pt2rknn.sh model/train/cigarette/yolo11n-cigarette.pt yolo11n-cig
 
 脚本细节与手工分步命令见 `python/README.md`。产物落进 `library/<id>/` 后，
 按 `library/<id>/README.md` 的「启用步骤」把它写进 `config.json` 的通道模型列表。
+
+⚠ 校准清单里的图片路径**相对清单文件所在目录**解析（rknn 行为）：从 `calib/` 回仓库根
+要写 `../../../assets/...`。仓库原有两份清单曾因此一直是坏路径，2026-11-10 已修。

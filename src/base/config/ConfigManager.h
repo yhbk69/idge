@@ -329,6 +329,25 @@ public:
     int geofenceThrottleSeconds() const;
     void setGeofenceThrottleSeconds(int seconds);
 
+    // ========== 登高守护配置 ==========
+    // 通道挂了梯子类模型 + 人员类模型才激活；几何比例阈值只在本段手改 JSON，
+    // 设置页只暴露启用开关与两个时间门槛（见 frmMain::initLadderGuardUi）。
+
+    /** @brief 整段快照（解码线程每帧读一次）；缺键由消费方按默认值兜底 */
+    QJsonObject ladderguardConfig() const;
+
+    /** @brief 是否启用登高守护（默认 true：没挂梯子模型的通道自然不激活） */
+    bool ladderguardEnabled() const;
+    void setLadderguardEnabled(bool enabled);
+
+    /** @brief 无扶梯人持续多少秒才告警（默认 2.0；写 <=0 回落默认） */
+    double ladderguardGraceSeconds() const;
+    void setLadderguardGraceSeconds(double seconds);
+
+    /** @brief 扶梯人连续在场多少秒消警（默认 1.0；写 <=0 回落默认） */
+    double ladderguardClearSeconds() const;
+    void setLadderguardClearSeconds(double seconds);
+
     // ========== 数据库配置 ==========
 
     /**

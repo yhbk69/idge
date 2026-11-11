@@ -1,1 +1,1 @@
-bus.jpg
+../../../assets/test/bus.jpg

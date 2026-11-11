@@ -79,6 +79,7 @@
 #include <QListWidget>
 #include <QDialogButtonBox>
 #include <QSpinBox>
+#include <QDoubleSpinBox>
 #include <QTableWidget>
 #include <QProcess>
 #include <QComboBox>
@@ -1080,6 +1081,8 @@ bool frmMain::initRollCallService()
 //   - coco 槽：yolo11n-coco（80 类通用目标，当前作为盘点主力权重）；
 //   - fire 槽：库内 id 含 "fire" 的模型（用户日后用库管理导入明火 .rknn 即自动生效），
 //     未入库则跳过，仅用 COCO 单模型盘点。
+//   - tools 槽：库内 id 含 "tools" 的模型（yolo11n-tools，24 类工器具，2026-11-11 入库），
+//     与 fire 同款自动探测：导入即进盘点清单，未入库则跳过。
 // 核分配在服务层：首个模型绑 NPU 核0、其余核1（主检测流水线预算留核2）
 std::vector<EquipmentModelConfig> frmMain::equipmentModelConfigsFromLibrary()
 {
@@ -1090,18 +1093,24 @@ std::vector<EquipmentModelConfig> frmMain::equipmentModelConfigsFromLibrary()
         models.push_back({"", reg.modelPath(coco_id).toStdString(),
                           reg.labelPath(coco_id).toStdString()});
     }
-    QString fire_id;
+    QString fire_id, tools_id;
     for (const QString &id : reg.ids()) {
-        if (id != coco_id && id.contains("fire", Qt::CaseInsensitive)) {
+        if (id == coco_id)
+            continue;
+        if (fire_id.isEmpty() && id.contains("fire", Qt::CaseInsensitive))
             fire_id = id;
-            break;
-        }
+        else if (tools_id.isEmpty() && id.contains("tools", Qt::CaseInsensitive))
+            tools_id = id;
     }
     if (!fire_id.isEmpty()) {
         models.push_back({"", reg.modelPath(fire_id).toStdString(),
                           reg.labelPath(fire_id).toStdString()});
     } else {
         qWarning() << "明火模型未入库，暂用 COCO 单模型盘点";
+    }
+    if (!tools_id.isEmpty()) {
+        models.push_back({"", reg.modelPath(tools_id).toStdString(),
+                          reg.labelPath(tools_id).toStdString()});
     }
     return models;
 }
@@ -1900,6 +1909,9 @@ void frmMain::initDebugPage()
 
     // ========== 围栏配置区（独立于级联） ==========
     initGeofenceUi();
+
+    // ========== 登高守护配置区（跨槽几何判定 + 状态机） ==========
+    initLadderGuardUi();
 
     // ========== 报警类别已按模型配置（见"模型参数"表），隐藏旧的全局报警控件 ==========
     if (ui->editAlarmClasses) ui->editAlarmClasses->setVisible(false);
@@ -3130,6 +3142,82 @@ void frmMain::initGeofenceUi()
         c.setGeofenceThrottleSeconds(seconds);
         c.save();
         log("fence", QStringLiteral("围栏报警最小间隔: %1 秒").arg(seconds));
+    });
+
+    contentLayout->insertWidget(contentLayout->count() - 1, group);
+}
+
+// ============================================================
+// initLadderGuardUi: 登高守护配置区
+//   判据 = 梯上有人（攀爬者）且梯下无人看护（扶梯人）持续超过宽限期。
+//   需要本通道级联里同时挂梯子模型（类名含 ladder）和人模型
+//   （worker/person/people/pedestrian），缺一个守护就不激活。
+//   解码线程逐帧现读配置，这里改完即生效，不用重开流。
+// ============================================================
+void frmMain::initLadderGuardUi()
+{
+    ConfigManager &cfg = ConfigManager::instance();
+    QVBoxLayout *contentLayout = settingsContentLayout(ui->pageSettings);
+    if (!contentLayout) {
+        qWarning() << "initLadderGuardUi: settings scroll layout not found";
+        return;
+    }
+
+    QGroupBox *group = new QGroupBox("登高守护（梯上有人、梯下无人看护报警）");
+    group->setStyleSheet(theme::panel(theme::PANEL));
+    QGridLayout *gl = new QGridLayout(group);
+    gl->setHorizontalSpacing(10);
+    gl->setVerticalSpacing(6);
+
+    QCheckBox *enableBox = new QCheckBox("启用");
+    enableBox->setChecked(cfg.ladderguardEnabled());
+    enableBox->setMinimumHeight(theme::TOUCH_FIELD_H);
+    enableBox->setStyleSheet(theme::text(theme::TEXT, theme::FS_BODY));
+    gl->addWidget(enableBox, 0, 0, 1, 2);
+
+    QLabel *labGrace = new QLabel(QStringLiteral("告警宽限(秒):"));
+    labGrace->setMinimumWidth(120);
+    gl->addWidget(labGrace, 1, 0);
+
+    QDoubleSpinBox *graceSpin = new QDoubleSpinBox;
+    graceSpin->setRange(0.5, 60.0);
+    graceSpin->setDecimals(1);
+    graceSpin->setSingleStep(0.5);
+    graceSpin->setValue(cfg.ladderguardGraceSeconds());
+    graceSpin->setStyleSheet(theme::field(theme::PANEL));
+    gl->addWidget(graceSpin, 1, 1);
+
+    QLabel *labClear = new QLabel(QStringLiteral("消警确认(秒):"));
+    labClear->setMinimumWidth(120);
+    gl->addWidget(labClear, 2, 0);
+
+    QDoubleSpinBox *clearSpin = new QDoubleSpinBox;
+    clearSpin->setRange(0.5, 60.0);
+    clearSpin->setDecimals(1);
+    clearSpin->setSingleStep(0.5);
+    clearSpin->setValue(cfg.ladderguardClearSeconds());
+    clearSpin->setStyleSheet(theme::field(theme::PANEL));
+    gl->addWidget(clearSpin, 2, 1);
+
+    // 与 initGeofenceUi 同一口径：connect 排在所有程序化灌值之后，
+    // toggled/valueChanged 程序化触发也会发，先灌值后连线才不会白写盘。
+    connect(enableBox, &QCheckBox::toggled, this, [this](bool on) {
+        ConfigManager &c = ConfigManager::instance();
+        c.setLadderguardEnabled(on);
+        c.save();
+        log("ladderguard", QStringLiteral("登高守护: %1").arg(on ? "启用" : "停用"));
+    });
+    connect(graceSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double v) {
+        ConfigManager &c = ConfigManager::instance();
+        c.setLadderguardGraceSeconds(v);
+        c.save();
+        log("ladderguard", QStringLiteral("登高守护告警宽限: %1 秒").arg(v));
+    });
+    connect(clearSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double v) {
+        ConfigManager &c = ConfigManager::instance();
+        c.setLadderguardClearSeconds(v);
+        c.save();
+        log("ladderguard", QStringLiteral("登高守护消警确认: %1 秒").arg(v));
     });
 
     contentLayout->insertWidget(contentLayout->count() - 1, group);

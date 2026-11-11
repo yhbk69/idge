@@ -1,0 +1,18 @@
+{
+    "classes": [
+        "ladder"
+    ],
+    "display_name": "yolo11n-ladder",
+    "family": "yolo11n",
+    "id": "yolo11n-ladder",
+    "input_size": [
+        640,
+        640
+    ],
+    "notes": "梯子检测（1类 ladder），登高守护的触发源：画面里有梯子才激活守护逻辑，本身不报警（alarm_class 留空）。源 onnx 在 model/onnx/ladder.onnx（pytorch 2.4.1 / opset 12，split 输出 box_p3/4/5+cls_p3/4/5），2026-11-10 在板端 aarch64 由 rknn-toolkit2 2.3.0 转 i8；校准集为通用占位图（model/train/calib/dataset_onnx_generic.txt），非梯域图，现场验收前建议用含梯帧重转。规则引擎见 src/biz/ladderguard/。",
+    "num_classes": 1,
+    "quant": "i8",
+    "sha256": "89621989d99283db13e5be571637ee7bb36930787fff9422625221c371e130e2",
+    "task": "ladder",
+    "version": "2026-11-10"
+}

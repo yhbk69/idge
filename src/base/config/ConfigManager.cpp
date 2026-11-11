@@ -786,17 +786,35 @@ static QJsonObject makeAlarmDefaults()
             {"detection", 3},   // 普通检测报警：一般
             {"fence_in", 1},    // 围栏闯入禁区：紧急
             {"fence_out", 1},   // 围栏离岗：紧急
+            {"ladder_no_spotter", 2},  // 登高无人看护：重要
         }},
     };
 }
 
 bool ConfigManager::migrateAlarmDefaults()
 {
-    if (root_.contains("alarm")) {
-        return false;
+    const QJsonObject defaults = makeAlarmDefaults();
+    if (!root_.contains("alarm")) {
+        root_["alarm"] = defaults;
+        return true;
     }
-    root_["alarm"] = makeAlarmDefaults();
-    return true;
+    // 已有 alarm 段只补**新增类型**的等级键：现场改过的值一律不动，
+    // 否则老配置永远拿不到 ladder_no_spotter 的默认等级（getter 会兜底成 3）。
+    QJsonObject alarm = root_["alarm"].toObject();
+    QJsonObject levels = alarm["levels"].toObject();
+    const QJsonObject defLevels = defaults["levels"].toObject();
+    bool changed = false;
+    for (auto it = defLevels.begin(); it != defLevels.end(); ++it) {
+        if (!levels.contains(it.key())) {
+            levels[it.key()] = it.value();
+            changed = true;
+        }
+    }
+    if (changed) {
+        alarm["levels"] = levels;
+        root_["alarm"] = alarm;
+    }
+    return changed;
 }
 
 bool ConfigManager::migrateVideoSourcesDefaults()
@@ -1740,6 +1758,62 @@ void ConfigManager::setGeofenceThrottleSeconds(int seconds)
     QJsonObject gf = root_["geofence"].toObject();
     gf["throttleSeconds"] = seconds > 0 ? seconds : 10;
     root_["geofence"] = gf;
+}
+
+// ============================================================================
+// 登高守护配置
+// ============================================================================
+// 与 geofence 同款：不写默认段，getter 兜底（enabled 兜底 true——没挂梯子模型的
+// 通道根本不会激活守护，默认关只会重演"围栏默认不触发"那个现场坑）。
+// 几何比例阈值（climberDx/Dy、spotterDx/Dy、iouMatch、lostSeconds）没有独立
+// getter：解码线程拿 ladderguardConfig() 整段快照自己兜底，少九把锁。
+// ============================================================================
+QJsonObject ConfigManager::ladderguardConfig() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return root_["ladderguard"].toObject();
+}
+
+bool ConfigManager::ladderguardEnabled() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return root_["ladderguard"].toObject()["enabled"].toBool(true);
+}
+
+void ConfigManager::setLadderguardEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject lg = root_["ladderguard"].toObject();
+    lg["enabled"] = enabled;
+    root_["ladderguard"] = lg;
+}
+
+double ConfigManager::ladderguardGraceSeconds() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return root_["ladderguard"].toObject()["graceSeconds"].toDouble(2.0);
+}
+
+void ConfigManager::setLadderguardGraceSeconds(double seconds)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject lg = root_["ladderguard"].toObject();
+    lg["graceSeconds"] = seconds > 0 ? seconds : 2.0;
+    root_["ladderguard"] = lg;
+}
+
+double ConfigManager::ladderguardClearSeconds() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return root_["ladderguard"].toObject()["clearSeconds"].toDouble(1.0);
+}
+
+void ConfigManager::setLadderguardClearSeconds(double seconds)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject lg = root_["ladderguard"].toObject();
+    lg["clearSeconds"] = seconds > 0 ? seconds : 1.0;
+    root_["ladderguard"] = lg;
 }
 
 // ============================================================================

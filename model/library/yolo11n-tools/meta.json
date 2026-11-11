@@ -1,0 +1,41 @@
+{
+    "classes": [
+        "Adjustable Wrench",
+        "Allen Key",
+        "Allen Key Set",
+        "Bolt",
+        "Brush",
+        "Claw Hammer",
+        "Cutting Pliers",
+        "Flathead Screwdriver",
+        "Hand Saw",
+        "Knife",
+        "Nail",
+        "Needle-Nose Pliers",
+        "Non Adjustable Wrench",
+        "Nut",
+        "PTFE Thread Seal Tape",
+        "Phillips Screwdriver",
+        "Regular Pliers",
+        "Scissors",
+        "Screw",
+        "Steel Ruler",
+        "Tape Measure",
+        "Utility Cutter",
+        "Vernier Calipers",
+        "Voltage Tester"
+    ],
+    "display_name": "yolo11n-tools",
+    "family": "yolo11n",
+    "id": "yolo11n-tools",
+    "input_size": [
+        640,
+        640
+    ],
+    "notes": "工器具检测（24 类，labels.txt 由训练方随 onnx 提供，行序=cls_id）。设备盘点按 id 含 tools 自动探测入库即生效（frmMain::equipmentModelConfigsFromLibrary）；也可挂视频级联只画框（alarm_class 留空）。源 onnx 在 model/onnx/tools.onnx（pytorch 2.4.1 / opset 12，split 输出 box_p3/4/5+cls_p3/4/5，cls 头 24ch），2026-11-11 板端 aarch64 rknn-toolkit2 2.3.0 转 i8；校准集为通用占位图（model/train/calib/dataset_onnx_generic.txt），非工器具域图，现场验收前建议用含工具帧重转。",
+    "num_classes": 24,
+    "quant": "i8",
+    "sha256": "3a0ec5f8ac7c66d811dea757b45f6c169c1e2c317dc99587a0de05b404603873",
+    "task": "tools",
+    "version": "2026-11-11"
+}

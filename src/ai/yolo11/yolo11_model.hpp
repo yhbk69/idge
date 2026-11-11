@@ -62,7 +62,7 @@ public:
      * @param model_path:  RKNN 模型文件路径（.rknn 格式）
      * @param labels_path: 类别标签文件路径（每行一个类别名）
      * @param core_mask:   NPU 核心掩码（RKNN_NPU_CORE_0/1/2/AUTO）
-     * @param num_classes: 检测类别数（默认 80，COCO 数据集）
+     * @param num_classes: 检测类别数（默认 0＝按 labels.txt 行数自动取；显式传入须与模型一致）
      * @param dfl_len:     DFL 分布长度（默认 16，与模型训练时一致）
      *
      * @note 构造时自动加载模型到 NPU，失败会抛出 std::runtime_error
@@ -70,13 +70,17 @@ public:
     YOLO11Model(const std::string &modelPath,
                 const std::string &labelsPath,
                 rknn_core_mask core_mask,
-                int numClasses = 80,
+                int numClasses = 0,
                 int dflLen = 16)
         : dflLen(dflLen), modelPath(modelPath), labelsPath(labelsPath), numClasses(numClasses),
           preprocessType_(PreprocessType::LETTERBOX)
     {
         // 加载类别名称
         classNames_ = loadClassNames(labelsPath);
+        // 解码按 numClasses 遍历 cls 通道；写死 80 会让非 COCO 模型（如 24 类工器具）
+        // 越界读 NPU 输出缓冲而段错误，故缺省按标签表实际行数取。
+        if (this->numClasses <= 0)
+            this->numClasses = static_cast<int>(classNames_.size());
 
         int ret = init_yolo11_model(modelPath.c_str(), &this->app_ctx, core_mask);
         if (ret < 0) {

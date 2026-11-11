@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 680 470" width="680" height="470" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>登高守护几何判定示意</title>
+<desc>摄像头画面中梯子框、攀爬者框、扶梯人框的空间关系与判定阈值</desc>
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+</defs>
+<rect x="30" y="30" width="410" height="390" rx="12" fill="#F1EFE8" stroke="#B4B2A9" stroke-width="0.5"/>
+<text x="235" y="54" text-anchor="middle" font-size="13" fill="#444441">摄像头画面（y 轴向下）</text>
+<line x1="50" y1="340" x2="420" y2="340" stroke="#888780" stroke-width="1" stroke-dasharray="6 4"/>
+<text x="52" y="330" font-size="12" fill="#5F5E5A">地面</text>
+<rect x="250" y="90" width="100" height="250" fill="#97C459" fill-opacity="0.08" stroke="#97C459" stroke-width="1.5"/>
+<line x1="272" y1="100" x2="272" y2="332" stroke="#97C459" stroke-width="2" opacity="0.9"/>
+<line x1="328" y1="100" x2="328" y2="332" stroke="#97C459" stroke-width="2" opacity="0.9"/>
+<line x1="272" y1="120" x2="328" y2="120" stroke="#97C459" stroke-width="1.5" opacity="0.6"/>
+<line x1="272" y1="156" x2="328" y2="156" stroke="#97C459" stroke-width="1.5" opacity="0.6"/>
+<line x1="272" y1="192" x2="328" y2="192" stroke="#97C459" stroke-width="1.5" opacity="0.6"/>
+<line x1="272" y1="228" x2="328" y2="228" stroke="#97C459" stroke-width="1.5" opacity="0.6"/>
+<line x1="272" y1="264" x2="328" y2="264" stroke="#97C459" stroke-width="1.5" opacity="0.6"/>
+<line x1="272" y1="300" x2="328" y2="300" stroke="#97C459" stroke-width="1.5" opacity="0.6"/>
+<text x="300" y="82" text-anchor="middle" font-size="12" fill="#3B6D11">梯子 L（W×H）</text>
+<rect x="274" y="118" width="52" height="132" fill="#EF9F27" fill-opacity="0.08" stroke="#EF9F27" stroke-width="1.5"/>
+<circle cx="300" cy="133" r="9" fill="none" stroke="#EF9F27" stroke-width="1.5"/>
+<line x1="300" y1="142" x2="300" y2="198" stroke="#EF9F27" stroke-width="1.5"/>
+<line x1="300" y1="158" x2="284" y2="148" stroke="#EF9F27" stroke-width="1.5"/>
+<line x1="300" y1="158" x2="316" y2="148" stroke="#EF9F27" stroke-width="1.5"/>
+<line x1="300" y1="198" x2="291" y2="243" stroke="#EF9F27" stroke-width="1.5"/>
+<line x1="300" y1="198" x2="309" y2="243" stroke="#EF9F27" stroke-width="1.5"/>
+<text x="300" y="110" text-anchor="middle" font-size="12" fill="#854F0B">攀爬者</text>
+<rect x="140" y="230" width="54" height="110" fill="#85B7EB" fill-opacity="0.08" stroke="#378ADD" stroke-width="1.5"/>
+<circle cx="167" cy="245" r="9" fill="none" stroke="#378ADD" stroke-width="1.5"/>
+<line x1="167" y1="254" x2="167" y2="300" stroke="#378ADD" stroke-width="1.5"/>
+<line x1="167" y1="266" x2="194" y2="258" stroke="#378ADD" stroke-width="1.5"/>
+<line x1="167" y1="266" x2="150" y2="280" stroke="#378ADD" stroke-width="1.5"/>
+<line x1="167" y1="300" x2="158" y2="336" stroke="#378ADD" stroke-width="1.5"/>
+<line x1="167" y1="300" x2="176" y2="336" stroke="#378ADD" stroke-width="1.5"/>
+<text x="167" y="222" text-anchor="middle" font-size="12" fill="#185FA5">扶梯人</text>
+<line x1="358" y1="250" x2="358" y2="340" stroke="#BA7517" stroke-width="1.5" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+<text x="368" y="290" font-size="12" fill="#854F0B">Δy≥0.2H</text>
+<line x1="194" y1="310" x2="250" y2="310" stroke="#185FA5" stroke-width="1.5" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+<text x="222" y="298" text-anchor="middle" font-size="12" fill="#185FA5">≤0.8W</text>
+<text x="360" y="358" font-size="12" fill="#5F5E5A">梯底基线 L.y2</text>
+<rect x="460" y="30" width="180" height="72" rx="8" fill="#FAEEDA" stroke="#EF9F27" stroke-width="0.5"/>
+<text x="472" y="52" font-size="12" fill="#854F0B" dominant-baseline="central">攀爬者 = 在梯上</text>
+<text x="472" y="72" font-size="12" fill="#633806" dominant-baseline="central">脚高于梯底 ≥0.2H</text>
+<text x="472" y="90" font-size="12" fill="#633806" dominant-baseline="central">水平中心落在梯框±0.2W</text>
+<rect x="460" y="114" width="180" height="72" rx="8" fill="#E6F1FB" stroke="#378ADD" stroke-width="0.5"/>
+<text x="472" y="136" font-size="12" fill="#185FA5" dominant-baseline="central">扶梯人 = 在梯下值守</text>
+<text x="472" y="156" font-size="12" fill="#0C447C" dominant-baseline="central">脚在基线 ±0.15H</text>
+<text x="472" y="174" font-size="12" fill="#0C447C" dominant-baseline="central">水平距梯 ≤0.8W，非攀爬者</text>
+<rect x="460" y="198" width="180" height="72" rx="8" fill="#FCEBEB" stroke="#E24B4A" stroke-width="0.5"/>
+<text x="472" y="220" font-size="12" fill="#A32D2D" dominant-baseline="central">告警（红框+警报）</text>
+<text x="472" y="240" font-size="12" fill="#791F1F" dominant-baseline="central">攀爬者在梯且无扶梯人</text>
+<text x="472" y="258" font-size="12" fill="#791F1F" dominant-baseline="central">持续 ≥2s 才触发</text>
+<rect x="460" y="282" width="180" height="72" rx="8" fill="#EAF3DE" stroke="#639922" stroke-width="0.5"/>
+<text x="472" y="304" font-size="12" fill="#3B6D11" dominant-baseline="central">解除告警</text>
+<text x="472" y="324" font-size="12" fill="#27500A" dominant-baseline="central">扶梯人回归 ≥1s</text>
+<text x="472" y="342" font-size="12" fill="#27500A" dominant-baseline="central">或攀爬者已下梯</text>
+<text x="235" y="444" text-anchor="middle" font-size="12" fill="#5F5E5A">所有阈值取梯子框 W/H 的比例，与分辨率和拍摄距离无关</text>
+</svg>

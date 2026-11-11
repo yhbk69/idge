@@ -60,4 +60,4 @@ python3 python/pt2rknn.sh model/train/cigarette/yolo11n-cigarette.pt yolo11n-cig
 - **围栏无关**：围栏触发类别仍是 `geofence.alarmClass`（默认 `person`）。想"进入某区域抽烟才报警"
   需要把围栏类别设成 `cigarette`（本模型能产出它即可触发），这属于通道配置层面的组合，不是新代码。
 - 与 `yolo11n-behavior`（预留的行为分析多类模型）不冲突：那个目录规划的是
-  fall/phone_call/hot_work 等行为类别，烟支单独成一个模型更快落地。
+  phone_call/hot_work 等行为类别，烟支单独成一个模型更快落地。

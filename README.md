@@ -43,7 +43,7 @@ $IDGE_WORKSPACE/
 │   │   ├── recognition.rknn       # 人脸特征比对模型
 │   │   └── face_recognition       # CLI 对照工具构建产物（点名已进程内化，主程序不再调起）
 │   └── library/                   # 模型库：设备盘点权重经 ModelRegistry 从这里解析
-│       ├── yolo11n-coco/          # 当前盘点主力权重（明火模型入库后自动加入盘点清单）
+│       ├── yolo11n-coco/          # 当前盘点主力权重（明火/工器具模型入库后自动加入盘点清单）
 │       │   ├── model.rknn
 │       │   └── labels.txt
 │       └── ppocrv4-ocr/           # 智能识别铭牌 OCR 权重（det/rec + labels）
@@ -249,6 +249,10 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
   人在所有岗区域之外报「离岗」，回岗待一会儿再出来才算新的一条），
   禁区命中优先于离岗判定、一人一帧一条，
   `geofence.throttleSeconds`（默认 10 秒）只作每通道每角色每类别的节流下限
+- **登高守护**：梯上有人（攀爬者）且梯下无人看护（扶梯人）持续超过宽限期才报警（`ladder_no_spotter`）。
+  与围栏同思路——不占新推理任务，复用同通道级联里梯子模型（`yolo11n-ladder`）与人模型（ppe/coco）
+  的跨槽结果做几何判定 + 三态状态机（`src/biz/ladderguard/`）；几何阈值全是梯框 W/H 比例，
+  报警只在进入违规的沿出一次，扶梯人连续在场够久自动消警。配置段 `ladderguard`，设置页可改宽限/消警秒数
 - **扫码登录（门禁）**：启动后先进登录页，用本机摄像头扫现场张贴的施工二维码。码内容是
   `qr-login-edge-v1.md` 定的嵌套 JSON：`person{id,name,role}` + `plan{taskId,线路/车站/作业内容/
   计划时间窗,总人数}`，另有 `issuedAt/expiresAt/signature*`。**未登录不推流、不检测、不出报警**；
@@ -262,7 +266,7 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
   ⚠ 门挡的是"检测与报警产生"，**不是整个进程的网络出口**：GB28181 与 WsClient 仍按配置在启动时起来。
 - **报警管理**：限流去重、抓拍落盘、SQLite 持久化、GUI 悬浮提示与历史查询
 - **人员点名**：SCRFD 人脸检测 + 特征比对（进程内 RKNN 常驻推理），注册 / 点名 / 注销三阶段，余弦相似度 + 贪心一对一匹配
-- **设备盘点**：复用 YOLO11 RKNN 模型做设备识别与盘点任务管理
+- **设备盘点**：复用 YOLO11 RKNN 模型做设备识别与盘点任务管理（coco 主力 + 明火/工器具专用模型自动探测）
 - **智能识别**：二维码扫描（ZBar，模态窗格**打开即实时扫描**，解出后显示码内内容、点确认才关窗格）+ 设备铭牌文字识别（PP-OCRv4 det/rec 两阶段，外部 demo 经 QProcess 调用）。
   扫码器全程序**只有一份**（`uiwidgets::QrScanDialog`），登录页与智能识别页共用——`smartRecognition.camera`
   那个设备节点不能被开两次
@@ -353,7 +357,8 @@ Annex-B H.265（或 h264_rkmpp → H.264）AVPacket —— **同一份包两路�
     → 注册/比对/注销(src/biz/service/roll_call_service)
     → 余弦相似度(归一化点积) + 贪心一对一匹配 → roll_call.db
 
-设备盘点：拍照 → 进程内 YOLO11 识别(src/ai/yolo11，权重=model/library/yolo11n-coco)
+设备盘点：拍照 → 进程内 YOLO11 识别(src/ai/yolo11，权重=model/library/yolo11n-coco，
+    明火/工器具模型按 id 含 fire/tools 自动探测加入)
     → 结果去重汇总 → src/biz/service/equipment_inventory_service → roll_call.db 任务/设备表
 
 智能识别：对话框打开时新建 FFmpegVideoDecoder(InferenceMode::PreviewOnly——只解码取帧，
@@ -396,7 +401,7 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
 | `src/base/` 基础设施 | buffer、queue、config、imaging、runtime_paths.h、perf_probe.h |
 | `src/media/` 视频管线 | reader、rga、server(报警上行的内嵌 http 静态文件服务) |
 | `src/ai/` 推理与模型应用 | yolo11、model_repo、recognition、task |
-| `src/biz/` 业务域 | alarm、geofence、service、db(报警库+业务库)、sip(GB28181)、ws(Pad↔Aibox 客户端 + 报警上行引擎) |
+| `src/biz/` 业务域 | alarm、geofence、ladderguard(登高守护规则引擎)、service、db(报警库+业务库)、sip(GB28181)、ws(Pad↔Aibox 客户端 + 报警上行引擎) |
 | `src/ui/` 界面层 | form、widgets(原 src/ui)、core(主题/Qt 助手 + qss 皮肤与资源) |
 
 ### 模块速查
@@ -418,6 +423,7 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
 | `src/biz/service/` | 人员点名 / 设备盘点业务服务 | [README](src/biz/service/README.md) |
 | `src/biz/alarm/` | 报警管理（限流、去重、抓拍、SQLite 持久化） | [README](src/biz/alarm/README.md) |
 | `src/biz/geofence/` | 电子围栏两套：本机判定（形状、角色、`FenceChecker`、绘制 overlay，存 `config.json`）与 **Pad v1 的围栏版本库**（`pad_fence_store` + `fence_frame_renderer`，存 idge.db，**不驱动判定**） | [README](src/biz/geofence/README.md) |
+| `src/biz/ladderguard/` | 登高守护规则引擎（纯逻辑）：梯框聚合、攀爬者/扶梯人分类、三态状态机 + 跨帧 IoU 跟踪；解码器跨槽收框喂入，报警类型 `ladder_no_spotter` | [README](src/biz/ladderguard/README.md) |
 | `src/biz/db/` | 数据持久层：报警库 idge.db（QtSQL DAO，5 张表：alarms/detections + Pad 的 request_cache/fences/fence_versions）+ 业务库 roll_call.db（sqlite3 原生） | [README](src/biz/db/README.md) |
 | `src/biz/sip/` | GB/T 28181 设备侧：SIP 注册心跳、MANSCDP、PS 复用、RTP 推流 | [README](src/biz/sip/README.md) |
 | `src/biz/ws/` | Pad↔Aibox WebSocket 客户端（入站报警 + 心跳重连，预留 get_streams/set_fence）**与本机报警上行**：报文组装、内存队列、水位闸门、ack/退避、媒体读盘泵（`alarm_uplink*`/`media_pump`）。**旧协议**，v1 之后待整块退役（报告冲突 B1） | — |

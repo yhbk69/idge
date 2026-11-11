@@ -1,0 +1,19 @@
+{
+    "classes": [
+        "fire",
+        "smoke"
+    ],
+    "display_name": "yolo11n-fire",
+    "family": "yolo11n",
+    "id": "yolo11n-fire",
+    "input_size": [
+        640,
+        640
+    ],
+    "notes": "明火/烟雾检测（2类 fire/smoke），补齐 PDF §6.3.2 场景⑤的明火缺口。源 onnx 在 model/onnx/fire.onnx（pytorch 2.4.1 / opset 12，split 输出），2026-11-10 在板端 aarch64 由 rknn-toolkit2 2.3.0 转 i8；校准集为通用占位图（model/train/calib/dataset_onnx_generic.txt），非火域图，现场验收前建议用含明火/烟雾帧重转。挂通道后把 video.models[\"yolo11n-fire\"].alarm_class 设成 fire 或 smoke 才报警；设备盘点按 id 含 \"fire\" 自动探测，入库即生效。",
+    "num_classes": 2,
+    "quant": "i8",
+    "sha256": "387c1cc2d6ead8c5fd5661620a0f1ad38c0ed8808d6a05d4416edbbbfc72669a",
+    "task": "fire",
+    "version": "2026-11-10"
+}

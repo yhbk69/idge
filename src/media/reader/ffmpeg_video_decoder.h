@@ -52,6 +52,7 @@ extern "C" {
 #include "video_recorder.h"
 #include "fence_shape.h"
 #include "ConfigManager.h"   // VideoSourceCfg：一条流的打开参数（base 在 media 之下，方向合法）
+#include "ladder_guard.h"    // 登高守护状态机（纯逻辑，biz 在 media 之下，方向合法）
 
 /**
  * @brief 一个级联槽位在运行期可换的模型参数
@@ -292,6 +293,11 @@ private:
         std::vector<BoxTrack> tracks;
     };
     std::vector<BoxSmoother> boxSmoother_;
+
+    // ===== 登高守护：每通道一个跨帧状态机 =====
+    // 只在本通道同时挂了梯子类模型与人员类模型时推进（角色按类名子串识别，
+    // 与参考实现 pick_classes 同口径）；只被解码线程访问，无需加锁。
+    ladderguard::Tracker ladderGuard_;
 
     // ===== 围栏事件表（进入沿触发）=====
     // 每个元素 = 一次进行中的围栏违规事件，记最近一次命中时的框与时刻。
