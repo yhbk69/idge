@@ -408,7 +408,7 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
 
 | 目录 | 职责 | 文档 |
 |------|------|------|
-| `src/main.cpp` | 应用入口（CLI/GUI 双模式、EGL 初始化、data/ 旧布局迁移） | — |
+| `src/main.cpp` | 应用入口（EGL 初始化、data/ 旧布局迁移） | — |
 | `src/base/runtime_paths.h` | 运行时数据路径唯一事实源（data/ = **当前工作目录**相对，非源码根） | [README](src/base/README.md) |
 | `src/ui/form/` | 主窗口与全部页面/对话框（视频、看板、报警、点名、盘点、智能识别、设置） | [README](src/ui/form/README.md) |
 | `src/ui/widgets/` | EGL/OpenGL ES 零拷贝渲染、视频控件、看板、报警列表 | [README](src/ui/widgets/README.md) |

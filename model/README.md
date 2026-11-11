@@ -117,9 +117,6 @@ config.json（schema V2）里**不出现任何模型/标签路径**，只按**�
 ## 使用方法
 
 ```bash
-# CLI 检测（类别表取"模型同目录 labels.txt"，取不到才退回 library/yolo11n-coco/labels.txt）
-./idge -m model/library/yolo11n-coco/model.rknn -i assets/test/192.mp4
-
 # python 侧验证（见 python/README.md）
 python3 yolo11.py --model_path ../model/library/yolo11n-coco/model.rknn --target rk3588 --img_folder ../assets/test
 
@@ -143,7 +140,7 @@ python3 convert.py yolo11n.onnx rk3588 i8 ../model/library/yolo11n-coco/model.rk
 
 ## 注意事项
 
-- **模型与驱动版本强绑定**：librknnrt.so 过旧会报 RKNN_ERR_MODEL_INVALID，换板/换固件后先跑 CLI 冒烟。
+- **模型与驱动版本强绑定**：librknnrt.so 过旧会报 RKNN_ERR_MODEL_INVALID，换板/换固件后先在设置页挂一路做冒烟验证。
 - 二进制模型/权重不进 git：`.gitignore` 排除 `*.rknn`、`*.pt`、`*.onnx`。部署包需自行携带
   `library/`；`train/` 下只有 README 与 yaml 入库，`.pt` 靠训练方自存（丢失即无法重转，只能重新训练）。
 - `meta.json` 的 `sha256` 用于导入去重与完整性核对；删除后下次启动重扫会重新生成。

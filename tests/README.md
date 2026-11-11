@@ -340,7 +340,7 @@ curl -o /tmp/x.jpg '<sink 打出的 snapshot/media_begin url>' && sha256sum /tmp
   （`pad_http_alarms.cpp` 引 `AlarmManager`、`pad_http_device.cpp` 引 `PadWsServer::clientCount()`
   与 `ModelRegistry`，少一个就是一串链接错误，而链接错误比编译错误难归因）
 - `test_channel_reload` 链的是主流水线的依赖闭包：`ffmpeg_video_decoder` + `video_recorder` +
-  `ppe_task`/`base_task` + `model_registry` + `ConfigManager`/`parse_config` +
+  `ppe_task`/`base_task` + `model_registry` + `ConfigManager` +
   DMA 缓冲 + `alarm_manager`/`alarm_dao`/`detection_dao`/`database_manager` + 围栏两件 +
   `construction_session.cpp`（`makeAlarmRecord()` 给每条报警盖施工信息戳，于是
   `alarm_manager.cpp` 多了一个 TU 依赖——手写源列表漏它就是三个 undefined reference，

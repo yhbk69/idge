@@ -4,7 +4,7 @@
 
 ```
 src/
-├── main.cpp  head.h          # 入口：CLI/GUI 双模式、EGL 初始化、data/ 旧布局迁移
+├── main.cpp  head.h          # 入口：EGL 初始化、data/ 旧布局迁移
 ├── base/     基础设施域       # buffer queue config imaging runtime_paths.h perf_probe.h
 ├── media/    视频管线域       # reader(FFmpeg硬解/硬编环形录像) rga server(报警媒体的内嵌 http 文件服务)
 ├── ai/       推理与模型应用域  # yolo11 model_repo recognition task

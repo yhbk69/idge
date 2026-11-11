@@ -3,17 +3,15 @@
 > 所属域：**base 基础设施域**（目录重组 S4a 迁入，依赖方向 base ← media/ai/biz/ui）
 
 ## 功能概述
-配置模块。分两部分：
+配置模块：
 - **ConfigManager**（Qt/JSON）：`data/config.json` 的统一读写入口（路径常量见 `src/base/runtime_paths.h`），供 GUI/检测/报警/围栏共享。
-- **ConfigParser**（CLI）：基于 `getopt_long` 的命令行参数解析，产出 `AppConfig`。
 
 ## 文件清单
 
 | 文件 | 说明 |
 | --- | --- |
 | `ConfigManager.h/.cpp` | 单例，整份 config.json 载入内存 `root_`，分节 getter/setter + `save()` |
-| `parse_config.hpp/.cpp` | `ConfigParser::parse_arguments` 解析命令行 → `AppConfig` |
-| `SharedTypes.hpp` | 共享枚举/常量（`NPU_CORE_NUM`、加速/输入/引擎枚举）与 `AppConfig` |
+| `SharedTypes.hpp` | 共享常量（`NPU_CORE_NUM`） |
 
 ## 核心类与数据流
 - **ConfigManager**（单例）：`load()` 读入 `QJsonObject root_`；各 setter 只改内存，
@@ -35,8 +33,6 @@
 - **围栏形状的角色迁移不在这里**：`geofence` 段 `channels/*/shapes[]` 缺 `role` 时由
   `FenceManager::loadFromConfig()` 自己按老 `mode` 补齐并落盘。`migrateSchemaV2()` 是一次性闸门、
   板端已跑过，且不触碰 shapes；为角色重新武装它会误伤现场已画好的围栏。
-- **ConfigParser**（CLI 用）：解析 `-m/-i/-a/-t/-c/-d/-r/-s/-p/-v/-h` 等选项填充 `AppConfig`，
-  缺 `-m`/`-i` 或文件不存在即报错 `exit`。
 
 ### video 段（schema V2：按通道级联 + 模型参数）
 
@@ -233,7 +229,6 @@ MJPEG**，只认 MJPEG 会把这颗物理摄像头整个漏掉）。只出 10-bi
 ```
 GUI/启动 → ConfigManager::load() → 各模块 getter 读取 → setter 改内存 → save() 落盘
 PlayerWidget::open() → recording*() 组装 RecorderConfig → FFmpegVideoDecoder::setRecordingConfig()
-CLI 模式 → ConfigParser::parse_arguments(argc,argv) → AppConfig → 检测线程
 ```
 
 ## 使用方法
@@ -257,11 +252,9 @@ RecorderConfig rc;
 rc.enabled = ConfigManager::instance().recordingEnabled();
 rc.codec = ConfigManager::instance().recordingCodec();
 ```
-CLI：`./app -m model/yolo11n.rknn -i video.mp4 -t 3 -c true`
 
 ## 依赖关系
 - Qt：`QFile`/`QJsonDocument`/`QJsonObject`/`QJsonArray`（ConfigManager）。
-- `getopt.h`/标准库（ConfigParser）。
 - 被 `AlarmManager`、`FenceManager`、检测/模型初始化等广泛引用。
 
 ## 注意事项

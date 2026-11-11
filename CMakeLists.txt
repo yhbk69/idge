@@ -224,7 +224,7 @@ include_directories(
     # --- base 基础设施域（无业务依赖，被所有域引用）---
     ${CMAKE_SOURCE_DIR}/src/base                    # runtime_paths.h 路径唯一事实源、perf_probe.h 采样开关
     ${CMAKE_SOURCE_DIR}/src/base/buffer             # DMA 缓冲池、帧缓冲区
-    ${CMAKE_SOURCE_DIR}/src/base/config             # 配置管理（CLI/JSON 解析）
+    ${CMAKE_SOURCE_DIR}/src/base/config             # 配置管理（JSON 解析）
     ${CMAKE_SOURCE_DIR}/src/base/queue              # 阻塞队列/优先级队列/最新帧槽
     ${CMAKE_SOURCE_DIR}/src/base/imaging            # 图像读写/绘制/letterbox/Qt 安全解码（含文件读写原语）
     ${CMAKE_SOURCE_DIR}/src/base/sysinfo            # /proc 与 /sys 运行指标采样（看板与 Pad 接口共用同一份口径）
@@ -1060,7 +1060,6 @@ add_executable(test_channel_reload
     src/ai/task/base_task.cpp
     src/ai/model_repo/model_registry.cpp
     src/base/config/ConfigManager.cpp
-    src/base/config/parse_config.cpp
     src/base/buffer/dma_alloc.cpp
     src/base/buffer/DmaFrameBuffer.cpp
     src/biz/alarm/alarm_manager.cpp
@@ -1154,7 +1153,6 @@ add_executable(test_stream_params
     src/ai/task/base_task.cpp
     src/ai/model_repo/model_registry.cpp
     src/base/config/ConfigManager.cpp
-    src/base/config/parse_config.cpp
     src/base/buffer/dma_alloc.cpp
     src/base/buffer/DmaFrameBuffer.cpp
     src/biz/alarm/alarm_manager.cpp

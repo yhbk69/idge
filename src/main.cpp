@@ -5,15 +5,7 @@
 // main.cpp - 程序入口点
 // ============================================================================
 //
-// 本程序支持两种运行模式：
-//   1. CLI 模式：命令行直接运行检测（无 GUI）
-//   2. GUI 模式：Qt 图形界面（默认）
-//
-// CLI 模式用法：
-//   ./idge -m model/yolo11n.rknn -i input.mp4
-//
-// GUI 模式：
-//   ./idge
+// GUI 模式：./idge
 //
 // ============================================================================
 
@@ -37,37 +29,17 @@
 #include <algorithm>
 #include <map>
 #include <thread>
-#include <chrono>
-#include <opencv2/opencv.hpp>
-#include <iostream>
 #include <QTimer>
 #include <QDateTime>
 #include <QFileInfo>
 #include <QDir>
 
-// RGA (Rocket Graphics Acceleration) 头文件
-// 用于硬件加速的图像色彩转换和缩放
-#include "im2d.h"
-#include "rga.h"
-#include "RgaUtils.h"
-
-// RKNN (Rockchip Neural Network) 头文件
-// 用于 NPU 硬件加速的 AI 推理
-#include "rknn_api.h"
-
-//#include "rkmedia/utils/mpp_decoder.h"
-//#include "rkmedia/utils/mpp_encoder.h"
-
 #include "ConfigManager.h"
 #include <QWidget>
 #include <gelf.h>
 #include <GL/gl.h>
-#include "easy_timer.h"
-#include "priority_queue.h"
 #include "gl_video_widget.h"
 
-#include "parse_config.hpp"
-#include "yolo11_model.hpp"
 #include "alarm_manager.h"
 #include "http_file_service.h"   // 报警上行 url 模式的内嵌文件服务（进程退出时停在这里）
 #include "database_manager.h"
@@ -90,178 +62,14 @@ static void signalHandler(int signum)
 }
 
 // ============================================================================
-// 判断是否为 CLI 模式
-// ============================================================================
-// 通过检查命令行参数判断：
-//   -m / --model_path: 指定模型路径
-//   -i / --input: 指定输入（视频文件或摄像头）
-//   -h / --help: 显示帮助
-//
-// 如果包含这些参数，则进入 CLI 模式（无 GUI）
-// ============================================================================
-static bool isCliMode(int argc, char *argv[])
-{
-    for (int i = 1; i < argc; i++) {
-        std::string arg = argv[i];
-        if (arg == "-m" || arg == "--model_path" ||
-            arg == "-i" || arg == "--input" ||
-            arg == "-h" || arg == "--help") {
-            return true;
-        }
-    }
-    return false;
-}
-
-// ============================================================================
-// CLI 模式运行
-// ============================================================================
-// 不启动 Qt GUI，直接在命令行中运行检测
-//
-// 流程：
-//   1. 解析命令行参数
-//   2. 加载 RKNN 模型
-//   3. 打开视频源（文件或摄像头）
-//   4. 循环读取帧 → 检测 → 打印结果
-//
-// 参数：
-//   -m: 模型路径（如 model/yolo11n.rknn）
-//   -i: 输入源（视频文件路径或摄像头编号）
-//   -d: 解码器（默认 h264_rkmpp）
-//   -v: 显示 FPS
-// ============================================================================
-static int runCli(int argc, char *argv[])
-{
-    // 创建 QCoreApplication（无 GUI 的 Qt 应用）
-    QCoreApplication a(argc, argv);
-
-    // 解析命令行参数
-    ConfigParser parser;
-    AppConfig config = parser.parse_arguments(argc, argv);
-    if (config.verbose) {
-        parser.printConfig(config);
-    }
-
-    // 类别表口径与模型库结构一致：优先取**模型同目录**的 labels.txt
-    //（约定 model/library/<id>/{model.rknn,labels.txt}，与 camera_preview_decoder 同一规则）。
-    // 原来这里固定读 model/coco_80_labels_list.txt，而那个文件在模型库改造时已删除，
-    // 结果 CLI 模式所有类别名都是空的；不在库里的散装 .rknn 才退回 COCO 库表。
-    const QFileInfo modelInfo(QString::fromStdString(config.model_path));
-    QString labelsPath = modelInfo.dir().filePath(QStringLiteral("labels.txt"));
-    if (!QFileInfo::exists(labelsPath))
-        labelsPath = QStringLiteral("model/library/yolo11n-coco/labels.txt");
-
-    // 加载 RKNN 模型
-    printf("[CLI] Loading model: %s\n", config.model_path.c_str());
-    auto model = std::make_shared<YOLO11Model>(
-        config.model_path,
-        labelsPath.toStdString(),
-        RKNN_NPU_CORE_0);  // 使用 NPU 核心 0
-    printf("[CLI] Model loaded.\n");
-
-    // 打开视频源
-    cv::VideoCapture cap;
-    bool isCamera = (config.input_format == INPUT_FORMAT::IN_CAMERA);
-
-    if (isCamera) {
-        // 打开摄像头
-        int camIdx = std::stoi(config.input);
-        printf("[CLI] Opening camera /dev/video%d ...\n", camIdx);
-        if (!cap.open(camIdx)) {
-            fprintf(stderr, "[CLI] Failed to open camera %d\n", camIdx);
-            return -1;
-        }
-    } else {
-        // 打开视频文件
-        printf("[CLI] Opening video: %s\n", config.input.c_str());
-        if (!cap.open(config.input)) {
-            fprintf(stderr, "[CLI] Failed to open video: %s\n", config.input.c_str());
-            return -1;
-        }
-    }
-
-    // 主循环：读取帧 → 检测 → 打印结果
-    int frameCount = 0;
-    TIMER fpsTimer;
-    fpsTimer.tik();
-
-    while (true) {
-        cv::Mat frame;
-        if (!cap.read(frame)) {
-            printf("[CLI] End of stream.\n");
-            break;
-        }
-        if (frame.empty()) {
-            continue;
-        }
-
-        // 将 OpenCV Mat 转换为 RKNN 输入格式
-        image_buffer_t imgBuf;
-        memset(&imgBuf, 0, sizeof(imgBuf));
-        imgBuf.width = frame.cols;
-        imgBuf.height = frame.rows;
-        imgBuf.srcWidth = frame.cols;
-        imgBuf.srcHeight = frame.rows;
-        imgBuf.width_stride = frame.cols;
-        imgBuf.height_stride = frame.rows;
-        imgBuf.format = IMAGE_FORMAT_RGB888;
-        imgBuf.virt_addr = frame.data;
-        imgBuf.size = frame.total() * frame.elemSize();
-        imgBuf.time = cv::getTickCount();
-
-        // 执行目标检测
-        object_detect_result_list odResults;
-        model->detect(&imgBuf, &odResults, false);
-
-        frameCount++;
-
-        // 打印 FPS（每 30 帧）
-        if (config.print_fps && frameCount % 30 == 0) {
-            fpsTimer.tok();
-            float elapsed = fpsTimer.get_time();   // 最近 30 帧耗时（毫秒）
-            // 30000 = 30 帧 × 1000（毫秒/秒），即 FPS = 帧数×1000/耗时(ms)
-            float fps = 30000.0f / elapsed;
-            fpsTimer.tik();
-            printf("[CLI] FPS: %.1f  Frame: %d  Detected: %d\n",
-                   fps, frameCount, odResults.count);
-        }
-
-        // 打印检测结果（每 30 帧）
-        if (frameCount % 30 == 0) {
-            printf("----- Frame %d -----\n", frameCount);
-            for (int i = 0; i < odResults.count; i++) {
-                auto &r = odResults.results[i];
-                printf("  [%d] cls=%d  box=(%d,%d,%d,%d)  conf=%.3f\n",
-                       i, r.cls_id,
-                       r.box.left, r.box.top,
-                       r.box.right, r.box.bottom,
-                       r.prop);
-            }
-        }
-    }
-
-    fpsTimer.tok();
-    printf("[CLI] Done. Total frames: %d, elapsed: %.2f s\n",
-           frameCount, fpsTimer.get_time() / 1000.0f);
-
-    return 0;
-}
-
-// ============================================================================
 // 主函数
 // ============================================================================
-// 根据命令行参数选择运行模式：
-//   - CLI 模式：直接运行检测，无 GUI
-//   - GUI 模式：启动 Qt 图形界面
+// 启动 Qt 图形界面
 // ============================================================================
 int main(int argc, char *argv[])
 {
     // 运行时数据路径一次性迁移（旧布局 → data/），必须先于一切文件打开
     RuntimePaths::migrateLegacy();
-
-    // 检查是否为 CLI 模式
-    if (isCliMode(argc, argv)) {
-        return runCli(argc, argv);
-    }
 
     // 设置 Qt 使用 EGL 渲染（硬件加速 OpenGL）
     // QT_XCB_GL_INTEGRATION=xcb_egl: 使用 EGL 后端，支持硬件加速
