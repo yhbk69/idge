@@ -12,7 +12,9 @@
 // 【耗时口径】稳态一次刷新 = 一次 alarms() 快照拷贝（1~3ms）；
 //   全拆重建实测 600~765ms（会挤掉四路 paintGL 8~10 帧），增量化之后剩下的
 //   大头是抓拍图解码 —— 所以缩略图必须走 loadThumbnailScaled，不能用 QPixmap(path)。
-// 【线程】全部 GUI 线程；没有定时器，刷新时机由外部（frmMain 的 300ms 防抖）驱动。
+// 【线程】全部 GUI 线程；列表刷新时机由外部（frmMain 的 400ms 防抖）驱动。
+//   本类自带一个单次 QTimer，只用来补读"建卡时抓拍还没落盘"的缩略图（见
+//   retryPendingThumbs），不参与数据刷新。
 // ============================================================================
 #include "video_alarm_widget.h"
 #include "alarm_detail_dialog.h"
@@ -36,12 +38,27 @@
 #include <QScreen>
 #include <QGuiApplication>
 
+namespace {
+
+// "这条报警还有图可看吗"：整幅存在，或容量清理后留下的 sidecar 缩略图存在。
+// 判据与 AlarmDetailDialog::loadScreenshot 一致——列表判整幅、详情回退 sidecar
+// 会让同一条报警在两个地方一个"无图"一个"有图"。
+bool alarmImageExists(const QString &path)
+{
+    return QFile::exists(path) || QFile::exists(thumbnailSidecarPath(path));
+}
+
+} // namespace
+
 // 构造只做骨架（setupUi），**不查库**：本面板建好时可能一直不被切到，
 // 第一次数据由 showEvent 带进来（外部防抖调 refreshAlarms 时也会被 isVisible() 挡）。
 VideoAlarmWidget::VideoAlarmWidget(QWidget *parent)
     : QWidget(parent)
 {
     setupUi();
+    // 缩略图补读：单次触发，补读完再看还有没有在等的卡片决定是否续上（见 retryPendingThumbs）
+    thumbRetryTimer_.setSingleShot(true);
+    connect(&thumbRetryTimer_, &QTimer::timeout, this, &VideoAlarmWidget::retryPendingThumbs);
 }
 
 // 骨架：标题 + QScrollArea + 一个装卡片的 contentWidget。
@@ -138,6 +155,9 @@ void VideoAlarmWidget::refreshAlarms()
             delete w;
             ++removedCount;
         }
+        // 卡片没了，补读状态一起清（否则会对着已删除的 widget 空转）
+        itemImagePath_.remove(id);
+        thumbRetryLeft_.remove(id);
     }
 
     // 只给新报警建 widget 并按 wanted 下标升序插入，已有项原地不动。
@@ -174,6 +194,62 @@ void VideoAlarmWidget::showEvent(QShowEvent *event)
     QWidget::showEvent(event);
     // 隐藏期间的报警不刷新，回到本页时补一次
     refreshAlarms();
+    // 隐藏期间补读定时器会直接返回（见 retryPendingThumbs），回页时重新接上
+    if (!thumbRetryLeft_.isEmpty())
+        scheduleThumbRetry();
+}
+
+// ============================================================================
+// 缩略图补读（为什么需要：见头文件 kThumbRetryAttempts 的注释）
+// ============================================================================
+// 只在面板可见时跑：不可见时解码纯属浪费 GUI 线程，回页由 showEvent 重新排。
+// 每次只处理仍在 items_ 里的卡片（被挤出 top-20 的已随 refreshAlarms 清掉）。
+// 读到图就替换"无图"并出队；仍读不到就消耗一次额度，额度用完放弃（文件被裁剪/丢弃）。
+// ============================================================================
+void VideoAlarmWidget::retryPendingThumbs()
+{
+    if (!isVisible())
+        return;
+
+    bool keepGoing = false;
+    for (auto it = thumbRetryLeft_.begin(); it != thumbRetryLeft_.end(); ) {
+        const QString id = it.key();
+        const QString path = itemImagePath_.value(id);
+        QWidget *card = items_.value(id, nullptr);
+        QLabel *thumbLabel = card ? card->findChild<QLabel *>(QStringLiteral("alarmThumb"))
+                                  : nullptr;
+        if (path.isEmpty() || !thumbLabel) {
+            it = thumbRetryLeft_.erase(it);
+            continue;
+        }
+
+        QPixmap thumb;
+        if (alarmImageExists(path))
+            thumb = loadThumbnailScaled(path, 64, 48);
+        if (!thumb.isNull()) {
+            thumbLabel->setText(QString());
+            thumbLabel->setPixmap(thumb);
+            itemImagePath_.remove(id);
+            it = thumbRetryLeft_.erase(it);
+            continue;
+        }
+
+        if (--it.value() <= 0) {
+            it = thumbRetryLeft_.erase(it);
+        } else {
+            keepGoing = true;
+            ++it;
+        }
+    }
+
+    if (keepGoing)
+        scheduleThumbRetry();
+}
+
+void VideoAlarmWidget::scheduleThumbRetry()
+{
+    if (!thumbRetryTimer_.isActive())
+        thumbRetryTimer_.start(kThumbRetryIntervalMs);
 }
 
 // 建一张卡片：缩略图 + 两行文字，登记进 items_ 后交给调用方落位。
@@ -208,7 +284,12 @@ QWidget *VideoAlarmWidget::createAlarmItem(const AlarmRecord &alarm)
     imageLabel->setFixedSize(64, 48);
     imageLabel->setAlignment(Qt::AlignCenter);
 
-    if (!alarm.imagePath.isEmpty() && QFile::exists(alarm.imagePath)) {
+    // 判"有图"必须**整幅或 sidecar 任一存在**：容量裁剪只删整幅、保住 64x48 的
+    // *_thumb.jpg（alarm_media_prune 的闸门 1），只判整幅会让"图还在"的老报警显示无图。
+    // 与详情框 AlarmDetailDialog::loadScreenshot 同一条判据。
+    const bool hasSource = !alarm.imagePath.isEmpty() && alarmImageExists(alarm.imagePath);
+    bool thumbShown = false;
+    if (hasSource) {
         QElapsedTimer thumbProbe;
         thumbProbe.start();
         QPixmap thumb = loadThumbnailScaled(alarm.imagePath, 64, 48);
@@ -218,11 +299,20 @@ QWidget *VideoAlarmWidget::createAlarmItem(const AlarmRecord &alarm)
         }
         if (!thumb.isNull()) {
             imageLabel->setPixmap(thumb);
+            thumbShown = true;
         } else {
             imageLabel->setText("无图");
         }
     } else {
         imageLabel->setText("无图");
+    }
+
+    // 抓拍由解码线程异步落盘：上面这次读失败不代表永远没有（文件可能正在写，
+    // 或被 SnapWriter 的队列延后）。只要给了路径就登记有限次补读，读到就替换掉"无图"。
+    if (!alarm.imagePath.isEmpty() && !thumbShown) {
+        itemImagePath_.insert(alarm.id, alarm.imagePath);
+        thumbRetryLeft_.insert(alarm.id, kThumbRetryAttempts);
+        scheduleThumbRetry();
     }
     itemLayout->addWidget(imageLabel);
 

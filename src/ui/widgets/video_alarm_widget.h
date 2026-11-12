@@ -26,6 +26,7 @@
 #include <QVector>
 #include <QHash>
 #include <QStringList>
+#include <QTimer>
 #include "alarm_manager.h"
 
 class VideoAlarmWidget : public QWidget
@@ -49,6 +50,8 @@ private slots:
     // 打开这条报警的详情框（模态）。按 id 在内存窗口里找，找不到就直接返回：
     // 卡片一定来自同一份 alarms() 快照，所以"找不到"只可能是这条已被裁出 1000 条窗口。
     void onAlarmClicked(const QString &alarmId);
+    // 补读"建卡片时还没读出来"的缩略图（有限次，见 kThumbRetryAttempts）
+    void retryPendingThumbs();
 
 protected:
     // 整张卡片就是入口（原来那颗「详情」钮已撤）：卡片是普通 QWidget，
@@ -72,6 +75,14 @@ private:
     // 调大它会线性抬高每次刷新的建 widget 数量，先看 perfProbe 的 created 计数再动。
     static const int kMaxDisplay = 20;
 
+    // 【缩略图补读】抓拍是解码线程异步落盘的：deliverAlarms 先拿到路径就入库/发信号，
+    // SnapWriter 之后才把 JPEG 写出来。卡片建出来时文件可能还没写完（exists 失败）或
+    // 只写了一半（解码失败），以前判一次失败就永久显示"无图"。这里按 500ms × 6 次
+    // 做有限补读，文件一出现就补上；6 次约 3s，足够覆盖写盘积压，又不会无限解码。
+    static constexpr int kThumbRetryAttempts = 6;
+    static constexpr int kThumbRetryIntervalMs = 500;
+    void scheduleThumbRetry();
+
     QScrollArea *scrollArea_ = nullptr;
     QWidget *contentWidget_ = nullptr;
     QVBoxLayout *contentLayout_ = nullptr;
@@ -81,6 +92,13 @@ private:
     // 因此只对新报警建 widget、对消失的报警删 widget，其余原地挪位置。
     QHash<QString, QWidget *> items_;
     QStringList shownIds_;
+
+    // 补读用的旁挂状态（与 items_ 同生命周期，删卡片时一起清）：
+    //   itemImagePath_  —— 卡片对应的抓拍路径（补读时不必再翻一遍 alarms() 快照）
+    //   thumbRetryLeft_ —— 还在等图的报警 id -> 剩余补读次数
+    QHash<QString, QString> itemImagePath_;
+    QHash<QString, int> thumbRetryLeft_;
+    QTimer thumbRetryTimer_;
 };
 
 #endif // VIDEO_ALARM_WIDGET_H
