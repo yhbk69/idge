@@ -159,10 +159,15 @@ det.detectRgba(rgbaPixels, width, height, stride /*>=width*4*/,
 | `width`/`height` | 仅采集节点：写进 `video_size` dict。**两边都 >0 才算写了**，半套尺寸当没写 | 回落 `smartRecognition.camera_size` |
 | `fps` | 仅采集节点：写进 `framerate` dict | `<=0` → 30 |
 | `inputFormat` | 仅采集节点：非空 → 先试这一档，失败仍继续往下；空 → 三档 `nv12`/`yuyv`/`mjpeg` 顺序协商。阶梯**末位恒为空串档**（"什么都不指定"），填错格式不至于彻底打不开。文件与网络流只开一次，不跑阶梯（否则 RTSP 连不上要把超时乘四） | 三档协商 |
-| `timeoutMs` | `AVIOInterruptCB` 里的墙上时钟预算，**只夹"打开 + `av_find_stream_info`"这一段**；探测一结束就把回调换回"只看 `running_`"，否则 10 秒没新包的正确摄像头会被判成断流反复重开 | `<=0` = 不设限，只有 `stop()` 能打断 |
+| `timeoutMs` | `AVIOInterruptCB` 里的墙上时钟预算，**只夹"打开 + `av_find_stream_info`"这一段**；探测一结束就把回调换回"只看 `running_`"，否则 10 秒没新包的正确摄像头会被判成断流反复重开。**换回调之外还必须把 `openCtx.budgetMs` 清零**：rtsp 解复用器与内层 tcp 上下文在 open 时各拷了一份回调，opaque 仍指向 `openCtx`，只换 `fmt_ctx` 上那份够不着——实测 `timeoutMs=8000` 的 1080p 流每约 7 秒被 `AVERROR_EXIT` 打断、按 `reconnectMs` 重连（40 秒只出 665 帧），清零后 25 秒零断流 | `<=0` = 不设限，只有 `stop()` 能打断 |
 | `hardwareDecode` | `true` 才建 `rkmpp` 设备并挂 `get_format=GetHWFormat`；`false` 完全不碰硬解，帧是 CPU 内存里的软解帧（走已有的 `sws_scale` 分支） | `true` |
 | `loop` | 仅非采集节点：`av_read_frame` 返回 `AVERROR_EOF` → `av_seek_frame(-1, 0, BACKWARD)` + `avcodec_flush_buffers` 继续放，收场原因记一次 `looped` 日志 | `false` = 播完就停 |
 | `reconnectMs` | 只有以 `PassEnd::Failed` 收场才重连：等这个间隔（**100ms 分片睡**，`stop()` 不会被整段睡住）重建上下文再来一遍。`StoppedByUser` 与 `StreamEnded`（loop=false 的文件播完）**都不重连** | `<=0` = 打不开就报错、播完就停 |
+
+RTSP 源一律带 `rtsp_transport=tcp` 打开（判型 `isRtspSource`：`type` 非空看 `type=="rtsp"`，
+空则按 `rtsp://` 前缀嗅探），与国标路 `gb28181_media.cpp` 同口径。FFmpeg 默认走 UDP，
+本机 wlan 上拉 1080p HEVC 实测丢 RTP 包（`RTP: missed N packets` → `Could not find ref with POC`）
+导致花屏，同一路改 TCP 后 10 秒零告警。
 
 `decodeLoop()` 现在只是**外环**（要不要再来一遍），一遍的完整生命周期在 `decodeOnce()` 里；
 所有早退出口统一返回 `PassEnd`，所以"这一路是被谁结束的"只在一个地方判定一次。

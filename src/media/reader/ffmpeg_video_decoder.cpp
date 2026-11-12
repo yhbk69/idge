@@ -828,6 +828,15 @@ bool isCaptureNode(const VideoSourceCfg &s)
     return s.url.startsWith(QLatin1String("/dev/video"));
 }
 
+// RTSP 同一口径：type 声明优先，空则按地址前缀嗅探。
+bool isRtspSource(const VideoSourceCfg &s)
+{
+    if (!s.type.isEmpty()) {
+        return s.type.compare(QLatin1String("rtsp"), Qt::CaseInsensitive) == 0;
+    }
+    return s.url.startsWith(QLatin1String("rtsp://"), Qt::CaseInsensitive);
+}
+
 } // namespace
 
 // ============================================================================
@@ -1447,6 +1456,11 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
             av_dict_set(&options, "input_format", formatUtf8.constData(), 0);
             av_dict_set(&options, "framerate", frameRate.constData(), 0);
         }
+        // RTSP 强制 TCP（与国标路 gb28181_media 同口径）：默认 UDP 在本机 wlan 上丢 RTP 包，
+        // HEVC 缺参考帧直接花屏，实测 10 秒内就报 "Could not find ref with POC"。
+        if (isRtspSource(source_)) {
+            av_dict_set(&options, "rtsp_transport", "tcp", 0);
+        }
 
         ret = avformat_open_input(&fmt_ctx, url_.toUtf8().constData(), inputFormat,
                                   &options);
@@ -1490,6 +1504,10 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
     // 的本意是"别在 connect 上卡死"，不是"限制源的最长间隔"）。
     fmt_ctx->interrupt_callback.callback = decodeInterruptCallback;
     fmt_ctx->interrupt_callback.opaque = &running_;
+    // 只换 fmt_ctx 上的回调够不着内层：rtsp 解复用器与它的 tcp 上下文在 open 时各留了
+    // 一份回调拷贝，opaque 仍指向 openCtx。预算不清零，读帧阶段每到 timeoutMs 就被
+    // 判成 AVERROR_EXIT 当断流重连（实测 8000ms 的流每 7 秒断一次）。
+    openCtx.budgetMs = 0;
 
     // 在所有流中找到最佳的视频流（可能是多个视频流，选质量最高的）
     // vidx 是视频流在 fmt_ctx->streams[] 数组中的索引
