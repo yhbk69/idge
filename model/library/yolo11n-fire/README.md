@@ -6,7 +6,7 @@
 
 **对应 plan**: plan/roadmap.md §二 P0-3 / §九 - 增强AI能力
 
-**状态**: **已入库**（2026-11-10）。onnx 源权重在 `model/onnx/fire.onnx`，
+**状态**: **已入库**（2026-11-10，2026-11-12 更新权重）。onnx 源权重在 `model/onnx/fire.onnx`，
 板端 rknn-toolkit2 2.3.0 转 INT8 落本目录；转换命令与校准注意事项见 `model/onnx/README.md`。
 
 ---

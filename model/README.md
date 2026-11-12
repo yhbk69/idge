@@ -70,7 +70,7 @@ model/
 | `library/yolo11n-cigarette/` | 吸烟（手持烟支）检测 | 方向2 - 行为分析 / P0-3 场景⑤ | **已入库**（2026-10-28 转好 rknn），差 config 挂接：`alarm_class=cigarette` + 加进通道 |
 | `library/yolo11n-ladder/` | 梯子检测（登高守护触发源） | 登高守护实现方案（docs/ladderguard/） | **已入库**（2026-11-10）；与人类模型同挂一路即激活守护（`src/biz/ladderguard`），报警类型 `ladder_no_spotter` |
 | `library/yolo11n-behavior/` | 行为分析（打电话） | 方向2 - 行为分析 | 待模型选型（吸烟已单独立项；登高守护不等行为模型，已用 ladder+人模型规则引擎落地） |
-| `library/yolo11n-fire/` | 明火/烟雾检测 | 方向5 - 增强AI | **已入库**（2026-11-10，fire/smoke 两类）；盘点链路按 id 含 "fire" 自动探测，入库即生效 |
+| `library/yolo11n-fire/` | 明火/烟雾检测 | 方向5 - 增强AI | **已入库**（2026-11-10，fire/smoke 两类，2026-11-12 更新权重）；盘点链路按 id 含 "fire" 自动探测，入库即生效 |
 | `library/yolo11n-tools/` | 工器具检测（24 类） | P1-6 工器具清点 | **已入库**（2026-11-11）；盘点链路按 id 含 "tools" 自动探测，入库即生效；也可挂视频级联只画框 |
 | `library/pp-liteseg-seg/` | 语义分割（区域入侵精确判定） | 方向5 - 增强AI | 待模型转换 |
 | `library/ppocrv4-ocr/` | OCR文字识别（车牌/安全标识） | 方向5 - 增强AI | 已部署（两阶段模型，`SmartRecognitionWidget` 经 `3rdparty/ppocrv4/bin` 的外部可执行调用，不被 ModelRegistry 收录） |

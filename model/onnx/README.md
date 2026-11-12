@@ -12,12 +12,13 @@
 | `tools.onnx` | 24 类工器具（扳手/螺丝刀/钳子/锤/卷尺等，全表见 `library/yolo11n-tools/labels.txt`） | 同上，cls 头 24ch | `library/yolo11n-tools/model.rknn` |
 
 来源：2026-11-10 用户提供的训练导出件（ladder = 登高守护触发源，fire = PDF §6.3.2 场景⑤明火/烟雾）；
-2026-11-11 补充 tools（工器具盘点，labels.txt 随模型一并由用户提供，行序 = cls_id）。
+2026-11-11 补充 tools（工器具盘点，labels.txt 随模型一并由用户提供，行序 = cls_id）；
+2026-11-12 更新 fire 权重（仍 fire/smoke 两类、同架构，库 id 不变故盘点/级联接线沿用）。
 sha256：
 
 ```
 bb79875b180a5f5861afbe799fd4e71dd81b3c7aacdc693935187b137a408e02  ladder.onnx
-4a46d9ca4c9c8928142fedc485e759d9a45c1591f52080e8de039c2ac244fc04  fire.onnx
+b69cb21d375a967acfbb95a9fc4083dce5022b70ec0f8b853c0a1db2e38a03ef  fire.onnx
 9ac255e60a7c1479a1b0f1189cba09a7000013bcc82a134f638d12670e9a8d07  tools.onnx
 ```
 
