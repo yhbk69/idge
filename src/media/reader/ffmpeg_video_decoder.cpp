@@ -1458,8 +1458,21 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
         }
         // RTSP 强制 TCP（与国标路 gb28181_media 同口径）：默认 UDP 在本机 wlan 上丢 RTP 包，
         // HEVC 缺参考帧直接花屏，实测 10 秒内就报 "Could not find ref with POC"。
+        //
+        // 低延迟套件（仅 RTSP）：
+        //   fflags=nobuffer        —— 关闭解复用层的读缓冲，包到即出，不攒
+        //   max_delay=0            —— 解复用层最大重排延迟设为 0（配合 nobuffer）
+        //   reorder_queue_size=0   —— RTP 重排队列清零，不做乱序重排（TCP 已保证顺序）
+        //   probesize=32768        —— 探测只取 32KB，缩短开流阶段的缓冲
+        //   analyzeduration=500000 —— 探测时长 0.5s，避免 find_stream_info 吃掉几秒
+        // 这些参数只对"不丢包但求低延迟"的 TCP 流有意义；UDP 仍会丢包，靠 TCP 兜底。
         if (isRtspSource(source_)) {
             av_dict_set(&options, "rtsp_transport", "tcp", 0);
+            av_dict_set(&options, "fflags", "nobuffer", 0);
+            av_dict_set(&options, "max_delay", "0", 0);
+            av_dict_set(&options, "reorder_queue_size", "0", 0);
+            av_dict_set(&options, "probesize", "32768", 0);
+            av_dict_set(&options, "analyzeduration", "500000", 0);
         }
 
         ret = avformat_open_input(&fmt_ctx, url_.toUtf8().constData(), inputFormat,
@@ -1603,6 +1616,9 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
 
     // thread_count=1: 硬件解码器本身是单线程的，多线程反而会增加开销
     dec_ctx->thread_count = 1;
+    // 低延迟：不等待 B 帧重排，解到即出。对实时 RTSP 流意义最大——HEVC Main
+    // 通常带 B 帧，默认要等齐参考帧才输出，平白多几帧延迟。文件源也无副作用。
+    dec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
 
     // 打开解码器：此时解码器会初始化 MPP 硬件
     // 打开失败必须终止：继续跑 receive_frame 恒为错误，表现为"无画面但不崩溃"，
@@ -1828,13 +1844,17 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
     // 关键：限的是解码产生速率，不只是显示——否则解码/推理/RGA 会被超量喂爆（实测卡死根因）。
     // 落后时重锚到 now，绝不"睡到累计目标线去补追赶连发"（那正是 1↔50 的来源）。
     //
-    // 但**实时采集节点（/dev/videoN）必须跳过整个节拍器**：它的帧率上限就是设备出帧率，
-    // av_read_frame 天然阻塞在设备上，不存在"超量产生"可言；而这类节点的流元数据不可信
-    // ——本机 rkisp mainpath/selfpath 不支持 VIDIOC_G_PARM，ffmpeg 把残留的 timeperframe
-    // 倒数成 avg_fps=r_fps=0.0333（即"每帧 30 秒"），于是 target_fps 被 qBound 的下限
-    // 夹成 1 → 每帧睡满一秒 → 预览实测恒定 FPS 1.0，而节点本身能出 7.49fps。
+    // 但**实时采集节点（/dev/videoN）和 RTSP 网络流都必须跳过整个节拍器**：
+    //   - 采集节点：帧率上限就是设备出帧率，av_read_frame 天然阻塞在设备上，
+    //     不存在"超量产生"；且这类节点的流元数据不可信（rkisp 不支持
+    //     VIDIOC_G_PARM，ffmpeg 把残留 timeperframe 倒数成 avg_fps=0.0333，
+    //     节拍器会把 target_fps 夹成 1，画面卡死）。
+    //   - RTSP 流：节拍器按 frame_count×interval 主动 sleep，会让 TCP socket /
+    //     FFmpeg 内部已经积压的包**永远排不掉**——任何一次网络抖动都变成永久
+    //     延迟。关掉节拍器后 av_read_frame 阻塞在网络读，天然跟源同速，配合
+    //     下面的"陈旧帧跳过"把积压排干净。
     // 见下面 qInfo 里那行 pacer=off：现场核对摄像头帧率时，先看这条再看界面角标。
-    const bool pacerEnabled = !isV4l2Node;
+    const bool pacerEnabled = !isV4l2Node && !isRtspSource(source_);
     int target_fps = 25;
     {
         AVRational pfr = fmt_ctx->streams[vidx]->avg_frame_rate;
@@ -1869,10 +1889,26 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
     qint64 pacer_drift_us = 0;
 
     // ===== 节拍目标帧率识别（每路开流打印一次，便于核对源帧率口径）=====
-    qInfo() << "decoder pacer ch" << channel_ << (pacerEnabled ? "on" : "off(live v4l2)")
+    const char *pacerState =
+        pacerEnabled ? "on"
+                     : (isV4l2Node ? "off(live v4l2)" : "off(live rtsp)");
+    qInfo() << "decoder pacer ch" << channel_ << pacerState
             << "target_fps=" << target_fps
             << "(avg_fps=" << av_q2d(fmt_ctx->streams[vidx]->avg_frame_rate)
             << " r_fps=" << av_q2d(fmt_ctx->streams[vidx]->r_frame_rate) << ")";
+
+    // ===== 实时 RTSP 低延迟：陈旧帧跳过 =====
+    // 节拍器关掉后，av_read_frame 跟源同速，但如果本帧的 RGA+推理+绘制总耗时
+    // 偶尔超过源帧间隔，积压就会慢慢长出来。这里用"帧 PTS 换算出的采集墙钟"
+    // 跟当前墙钟比：超过 kMaxLiveLatencyMs 的帧只解码不渲染，把耗时留给后续帧，
+    // 直到积压被排空。PTS 不可用（AV_NOPTS_VALUE）的帧跳过判定。
+    // 只对 RTSP 生效：v4l2 不会积压，文件源没有"实时"概念。
+    const bool liveLowLatency = isRtspSource(source_);
+    const AVRational liveTb = fmt_ctx->streams[vidx]->time_base;
+    int64_t liveFirstPts = AV_NOPTS_VALUE;
+    qint64 liveFirstWallMs = 0;
+    int liveSkippedFrames = 0;
+    const int kMaxLiveLatencyMs = 800;
 
     // 软件帧转换上下文缓存：源格式/宽高在一路流内恒定，故只在建流后首次遇到
     // 软件帧时建一次（见 4.5 的软件分支）。三个变量都是本线程私有的。
@@ -1964,10 +2000,41 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
             ds.add(ds.recv);
             ds.stage.restart();
 
+            // ===== 4.3b 实时 RTSP：陈旧帧只解码不渲染 =====
+            // 节拍器关掉后，积压只靠这里排。用帧的 PTS 换算出采集墙钟，跟当前墙钟
+            // 比：差超过 kMaxLiveLatencyMs 说明这帧已经太旧，跳过 RGA/推理/绘制/emit，
+            // 只 unref 继续收下一帧。解码器仍按序喂帧（参考链不断），丢的只是显示。
+            // frame_count 已自增，推理的 frame_count%3 节拍仍按解码帧走，不会乱。
+            if (liveLowLatency && frame->pts != AV_NOPTS_VALUE) {
+                const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+                if (liveFirstPts == AV_NOPTS_VALUE) {
+                    liveFirstPts = frame->pts;
+                    liveFirstWallMs = nowMs;
+                } else {
+                    const int64_t ptsDelta = frame->pts - liveFirstPts;
+                    // ptsDelta * 1000 * num / den：秒级精度足够，int64 不会溢出
+                    // （25fps 流跑 24 小时 ptsDelta 约 2.16M，乘 1000 后仍在 int64 内）。
+                    const qint64 captureMs = liveFirstWallMs +
+                        ptsDelta * 1000 * liveTb.num / liveTb.den;
+                    const qint64 ageMs = nowMs - captureMs;
+                    if (ageMs > kMaxLiveLatencyMs) {
+                        ++liveSkippedFrames;
+                        // 每跳过 120 帧打一行，方便核对积压是否在排
+                        if (liveSkippedFrames % 120 == 0)
+                            qWarning() << "[LOWLAT] ch" << channel_
+                                       << "skipped stale frames" << liveSkippedFrames
+                                       << "ageMs=" << ageMs;
+                        av_frame_unref(frame);
+                        continue;   // 回 avcodec_receive_frame 拿下一帧
+                    }
+                }
+            }
+
             // 不在这里丢帧：解码帧率由循环末尾的"睡眠到点 + 落后重锚"节拍器整体限住
             // （见 4.12）。若在此丢弃超前的解码帧，解码线程仍会全速把源抽到 ~250fps，
             // 而推理(frame_count%3)、MPP 解码、RGA 缩放都跟着解码帧率走 → 会被超量喂爆
             // （实测 RGA_COLORFILL 每帧失败刷屏 + 卡死）。限住"产生"才是根治。
+            // （RTSP 实时流的陈旧帧已在上面 4.3b 处理，不走到这里。）
 
             // ===== 4.4 从解码帧中提取 DMA-BUF fd =====
             //

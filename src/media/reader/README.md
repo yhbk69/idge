@@ -169,6 +169,24 @@ RTSP 源一律带 `rtsp_transport=tcp` 打开（判型 `isRtspSource`：`type` �
 本机 wlan 上拉 1080p HEVC 实测丢 RTP 包（`RTP: missed N packets` → `Could not find ref with POC`）
 导致花屏，同一路改 TCP 后 10 秒零告警。
 
+### RTSP 低延迟（实时流专项）
+
+TCP 解决了丢包，但**固定节拍循环会把 TCP/FFmpeg 内部积压的包永久留住**——节拍器
+按 `frame_count×interval` 主动 sleep，任何一次网络抖动都变成一段只增不减的延迟。
+RTSP 路因此做三件事把延迟压住：
+
+1. **解复用低延迟参数**：`fflags=nobuffer` + `max_delay=0` + `reorder_queue_size=0`
+   （TCP 已保序，不用重排队列）+ `probesize=32768` + `analyzeduration=500000`（缩短开流探测）。
+2. **跳过节拍器**：`pacerEnabled` 对 RTSP 置 false（与 v4l2 同口径），让 `av_read_frame`
+   阻塞在网络读上、跟源同速，不再主动攒包。日志里 `pacer=off(live rtsp)` 即此路生效。
+3. **陈旧帧跳过**：用帧 PTS 换算采集墙钟，与当前墙钟比；超过 `kMaxLiveLatencyMs=800` 的
+   帧只解码不渲染（RGA/推理/绘制/emit 全跳），把耗时留给后续帧排积压。解码器仍按序
+   喂帧（参考链不断），丢的只是显示；`[LOWLAT] skipped stale frames` 日志反映积压量。
+4. **解码器 `AV_CODEC_FLAG_LOW_DELAY`**：不等待 B 帧重排，解到即出，对所有源无副作用。
+
+效果：端到端延迟稳定 < 800ms（无 `[LOWLAT]` 日志即零积压），界面帧率等于网络真实送达率
+（不再是"用积压换来的假 25fps"）。若仍嫌帧率低，根因在网络抖动/带宽，应换子码流或降规格。
+
 `decodeLoop()` 现在只是**外环**（要不要再来一遍），一遍的完整生命周期在 `decodeOnce()` 里；
 所有早退出口统一返回 `PassEnd`，所以"这一路是被谁结束的"只在一个地方判定一次。
 `emit finished()` 挪到外环，重连成功不会多发一次结束信号。
