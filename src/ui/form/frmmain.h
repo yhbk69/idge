@@ -20,6 +20,8 @@
 #include <QWidget>
 #include <QComboBox>
 #include <QTableWidget>
+#include <QTabWidget>
+#include <QVBoxLayout>
 #include <QTextCursor>
 #include <QTextCharFormat>
 #include <QCloseEvent>
@@ -286,6 +288,15 @@ private slots:
     void showEquipmentDialog();    ///< 智能识别页"设备盘点"卡片：弹出盘点任务页
 
 private:
+    // ========== 调试设置页子标签（12 个分组框从一条滚动长页收进 5 个页签） ==========
+    /// 五个页签：通道与检测 / 模型 / 报警规则 / 服务链路 / 运行日志。
+    /// 顶部 QTabWidget 不随内容滚动，每个页签页各带一个 QScrollArea 独立滚动。
+    QTabWidget *settingsTabs_ = nullptr;
+    /// 各页签滚动区的内容布局（尾部带 stretch，插入分组一律插 count-1 位）。
+    /// initDebugPage 建页时填好；只在 GUI 线程访问。
+    QVBoxLayout *settingsTabLayouts_[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+    QVBoxLayout *settingsTabLayout(int tabIndex) const;
+
     // ========== 视频通道配置控件（源/备注/启用/级联模型，通道号一律 0-based） ==========
     QLineEdit *chNoteEdit_[4] = {nullptr, nullptr, nullptr, nullptr};  // 每路通道备注
     /// 每路引用的视频流下拉。**只在 initDebugPage() 里建**，所以调用点都要判空
@@ -339,7 +350,7 @@ private:
     /// 加一列必须把 refreshModelParamsTable() 里的 setCellWidget 列号与
     /// initModelParamsUi() 里的 setSectionResizeMode 一起顺次挪（漏一处 = Stretch 落到错的列）。
     QTableWidget *modelParamTable_ = nullptr;
-    void initModelParamsUi();       ///< 在通道分组框后插入"模型参数"表格区
+    void initModelParamsUi();       ///< 在"模型"页签插入"模型参数"表格区
     /// 重建表格行（库内模型 + config 里残留的键）。
     /// ⚠ 里面第一句就是 reg.rescan()：**在 GUI 线程重扫整个模型库（逐模型 sha256）**。
     ///   改置信度/报警类别这类"每帧都点得到"的 handler 一律只 apply 不 refresh，
@@ -350,14 +361,14 @@ private:
     void openChannelModelsDialog(int channel);
 
     // ========== 围栏（独立于级联：类别单值 + 节流窗口） ==========
-    /// 在设置页末尾加"电子围栏"分组：围栏类别（单值，默认 person）+ 报警最小间隔秒数。
+    /// 在"报警规则"页签加"电子围栏"分组：围栏类别（单值，默认 person）+ 报警最小间隔秒数。
     /// 类别候选是**四路所用模型类名的并集**（围栏只问"这一路能不能产出该类别"），
     /// 当前值不在并集里时 prepend 进去，不让配置里的值在界面上凭空消失。
     /// 类别改动会立刻 FenceManager::loadFromConfig()（判定端逐帧现读，不用重开流）。
     void initGeofenceUi();
 
     // ========== 登高守护（梯上有人、梯下无人看护才报警） ==========
-    /// 在设置页末尾加"登高守护"分组：启用开关 + 告警宽限/消警确认秒数。
+    /// 在"报警规则"页签加"登高守护"分组：启用开关 + 告警宽限/消警确认秒数。
     /// 判定端在解码线程逐帧现读配置，改动立即生效，不用重开流。
     void initLadderGuardUi();
 
@@ -370,7 +381,7 @@ private:
     /// 只读表格（6 列：id/名称/任务/类别数/输入/被引用）。
     /// 「被引用」非 0 时删除会被 ModelRegistry 拒绝——这是删模型的唯一护栏。
     QTableWidget *modelLibTable_ = nullptr;
-    void initModelLibraryUi();       ///< 在"模型配置"分组框后插入管理区
+    void initModelLibraryUi();       ///< 在"模型"页签插入模型库管理区
     void refreshModelLibraryTable(); ///< rescan 库并重建表格（含被引用数）
     void importModelViaDialog();     ///< 三步导入：选 rknn → 选 labels → 起 id
     void importModelZip();           ///< zip 模型包一键导入（解压→逐目录 importModel）

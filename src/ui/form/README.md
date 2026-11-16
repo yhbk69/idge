@@ -13,6 +13,10 @@
   「报警上报 WebSocket（本机连出去）」/「Pad 服务端（WS 入站，本机推报警给 Pad）」/
   「Pad HTTP 服务端（`/api/` 入站，Pad 写入处置与围栏）」，端口行右侧的灰字各写自己的用途
   （WS 推报警、HTTP 收写入、媒体地址前缀拼图片/片段/处置照片的下载地址）；
+  **这页 2026-11-16 起分 5 个子标签**（顶部 `QTabWidget` 不随内容滚动、每页各带一个
+  `QScrollArea` 独立滚动，12 个分组框不再堆一条滚动长页）：通道与检测（系统信息/视频通道/检测配置/报警配置）、
+  模型（模型参数/模型库管理）、报警规则（电子围栏/登高守护）、服务链路（WebSocket/Pad 服务端/Pad HTTP 面）、
+  运行日志，默认落"通道与检测"；
 - **报警查询页**：数据看板（`dashboard_widget`）与报警记录列表（`alarm_list_widget`），本目录仅负责挂载与角标/toast 联动；
 - **人员点名页**（caichao 合入）：任务列表 + 拍照选图 + 登记识别 + 注销匹配全流程；
 - **设备盘点页**（caichao 合入）：复用点名选图界面做设备检测登记/注销与详情查看；
@@ -210,6 +214,13 @@
   `currentIndexChanged`，`refreshChannelSourceCombos()` 灌值时仍整段 `blockSignals`，
   handler 第一句再比一次"引用有没有真的变"——重新点中当前项也会发 `activated`，
   不判就成了"点一下没改配置却重开了一次流"。
+- **调试设置页的分组归属**：12 个分组框分装 5 个子标签，页签索引常量 `SettingsTab`
+  （通道与检测/模型/报警规则/服务链路/运行日志）与各页内容布局（`settingsTabLayouts_`，
+  尾部带 stretch）都在 `initDebugPage()` 里建好。**新增分组框一律
+  `settingsTabLayout(页签号)->insertWidget(count() - 1, …)`**；直接 `addWidget` 到
+  `pageSettings` 自己的布局 = 钉在滚动区之外（不参与滚动、白占一屏高度），后面的插入
+  还会静默失败。`.ui` 里 `pageSettings` 的原控件在 `initDebugPage()` 的 takeAt 循环里
+  按对象名路由到对应页，改分组归属时动那个分派，别动循环本身。
 - **每路的源是「选流」下拉，不是地址输入框**（`frmMain::chSourceCombo_`，占掉原
   `lineEditChN` 那一格；四颗手填框已从布局摘出并隐藏，**不再读写**，内联 `source` 的值直接从
   `ConfigManager::channelInlineSource()` 取）：

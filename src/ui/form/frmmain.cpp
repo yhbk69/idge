@@ -1694,8 +1694,8 @@ static int configuredTaskCount()
  *
  * 同时输出初始日志到运行日志面板
  */
-// ── 设置页三个"内容区"的可视档位 ─────────────────────────────
-// 为什么必须写**最小**高度：pageSettings 整体包在 QScrollArea(widgetResizable) 里，
+// ── 设置页各页签内容区的可视档位 ─────────────────────────────
+// 为什么必须写**最小**高度：每个页签的滚动区都是 QScrollArea(widgetResizable)，
 // 内容区只会被撑到"各块最小高度之和"（板端实测：内容 minimumSizeHint=1177 时布局就
 // 只给 1177，谁的下限小谁被压扁），没有下限的表格/日志会塌成表头那一截，表现就是
 // "模型参数/模型库/运行日志整块折叠、看不见内容"。上限只用来防止模型多了把页面撑得没边。
@@ -1709,13 +1709,26 @@ constexpr int kModelTableMaxRows = 8;   ///< 再多就靠页内滚动，不把�
 constexpr int kLogMinLines = 12;        ///< 运行日志至少 12 行（现场靠它排障）
 constexpr int kLogLineH = 24;           ///< 16px 字的行高
 
-// 取设置页滚动区的内容布局（定义在本文件后面，initDebugPage 要先用一次）
-static QVBoxLayout *settingsContentLayout(QWidget *page);
+// 调试设置页五个子标签的索引——分组归属的唯一事实源：
+//   页0 通道与检测：系统信息 / 视频通道 / 检测配置 / 报警配置
+//   页1 模型：模型参数 / 模型库管理
+//   页2 报警规则：电子围栏 / 登高守护
+//   页3 服务链路：WebSocket / Pad 服务端 / Pad HTTP 面
+//   页4 运行日志：运行日志
+// 改分组归属时只动这张表 + 各插入点的取值，不动分组框本身。
+enum SettingsTab {
+    kTabChannelDetect = 0,
+    kTabModels = 1,
+    kTabAlarmRules = 2,
+    kTabServices = 3,
+    kTabLog = 4,
+    kTabCount = 5
+};
 
 /// 上面的说明块讲"装什么"，这里补一条"怎么插"：本函数第一件事就是把 pageSettings 的
-/// 原控件整体搬进 QScrollArea，此后**所有**分组框都必须经 settingsContentLayout()
-/// 插进滚动内容里。直接 addWidget 到 pageSettings 自己的布局 = 钉在滚动区之外
-/// （不参与滚动、白占一屏高度），还会打破"第 0 项是滚动区"这个前提，
+/// 原控件整体搬进**各页签自己的滚动区**（顶部一条 QTabWidget + 每页一个 QScrollArea），
+/// 此后**所有**分组框都必须经 settingsTabLayout(页签号) 插进对应页的内容布局里。
+/// 直接 addWidget 到 pageSettings 自己的布局 = 钉在滚动区之外（不参与滚动、白占一屏高度），
 /// 后面每个分组框都只 qWarning 一句就静默加不进来（看着像功能消失）。
 void frmMain::initDebugPage()
 {
@@ -1727,35 +1740,71 @@ void frmMain::initDebugPage()
     ui->labVideoInVal->setText("RTSP / V4L2");
     ui->labMaxChannelsVal->setText("4");
 
-    // ========== 为 pageSettings 添加滚动支持 ==========
+    // ========== 为 pageSettings 加子标签：5 个页签，每页各自一个滚动区 ==========
+    // 原来 12 个分组框全堆在一条滚动长页上，找一项要一路往下翻；改成顶部一条
+    // QTabWidget（不随内容滚动）+ 每个页签页内一个 QScrollArea 独立滚动。
+    // 样式吃全局 QSS 的 QTabBar::tab 档（触屏 padding、ACCENT 选中描边），不在这里另写。
     {
         QVBoxLayout *pageSettingsLayout = qobject_cast<QVBoxLayout *>(ui->pageSettings->layout());
         if (pageSettingsLayout) {
-            QScrollArea *scrollArea = new QScrollArea(ui->pageSettings);
-            scrollArea->setWidgetResizable(true);
-            scrollArea->setFrameShape(QFrame::NoFrame);
-            scrollArea->setStyleSheet("QScrollArea { background: transparent; border: none; }");
+            settingsTabs_ = new QTabWidget(ui->pageSettings);
+            settingsTabs_->setTabPosition(QTabWidget::North);
+            const QString kTabLabels[kTabCount] = {
+                QStringLiteral("通道与检测"), QStringLiteral("模型"), QStringLiteral("报警规则"),
+                QStringLiteral("服务链路"), QStringLiteral("运行日志")};
+            QWidget *tabPages[kTabCount];
+            for (int t = 0; t < kTabCount; ++t) {
+                tabPages[t] = new QWidget;
+                settingsTabs_->addTab(tabPages[t], kTabLabels[t]);
+            }
+            // 默认落最常用的"通道与检测"
+            settingsTabs_->setCurrentIndex(kTabChannelDetect);
 
-            QWidget *scrollContent = new QWidget();
-            scrollContent->setStyleSheet("background: transparent;");
-            QVBoxLayout *contentLayout = new QVBoxLayout(scrollContent);
-            contentLayout->setContentsMargins(0, 0, 0, 0);
-            contentLayout->setSpacing(6);
+            // 每页：QWidget → QScrollArea（frameless + widgetResizable）→ 内容布局，
+            // 尾部带 stretch：分组框一律插在 stretch 之前（insertWidget(count-1)）。
+            for (int t = 0; t < kTabCount; ++t) {
+                QWidget *page = tabPages[t];
+                QVBoxLayout *pageLayout = new QVBoxLayout(page);
+                pageLayout->setContentsMargins(0, 0, 0, 0);
+                pageLayout->setSpacing(0);
 
-            // 将 pageSettings 中已有的控件移到 scrollContent
+                QScrollArea *scrollArea = new QScrollArea(page);
+                scrollArea->setWidgetResizable(true);
+                scrollArea->setFrameShape(QFrame::NoFrame);
+                scrollArea->setStyleSheet("QScrollArea { background: transparent; border: none; }");
+
+                QWidget *scrollContent = new QWidget();
+                scrollContent->setStyleSheet("background: transparent;");
+                QVBoxLayout *contentLayout = new QVBoxLayout(scrollContent);
+                contentLayout->setContentsMargins(0, 0, 0, 0);
+                contentLayout->setSpacing(6);
+                contentLayout->addStretch();
+
+                scrollArea->setWidget(scrollContent);
+                pageLayout->addWidget(scrollArea);
+                settingsTabLayouts_[t] = contentLayout;
+            }
+
+            // 将 pageSettings 中已有的控件按对象名搬进对应页的内容布局。
+            // ⚠ 归属分派只写在这一处：将来调整分组归属时改这个 if 链，别改 takeAt 循环本身。
             QLayoutItem *item;
             while ((item = pageSettingsLayout->takeAt(0)) != nullptr) {
-                if (item->widget()) {
-                    contentLayout->addWidget(item->widget());
+                QWidget *w = item->widget();
+                int tab = kTabChannelDetect;
+                if (w == ui->grpSystemInfo || w == ui->grpModelInfo
+                    || w == ui->grpDetectInfo || w == ui->grpAlarmConfig) {
+                    tab = kTabChannelDetect;
+                } else if (w == ui->grpLog) {
+                    tab = kTabLog;
+                }
+                QVBoxLayout *target = settingsTabLayouts_[tab];
+                if (w) {
+                    target->insertWidget(target->count() - 1, w);
                 } else if (item->layout()) {
-                    contentLayout->addLayout(item->layout());
+                    target->insertLayout(target->count() - 1, item->layout());
                 }
                 delete item;
             }
-            contentLayout->addStretch();
-
-            scrollArea->setWidget(scrollContent);
-            pageSettingsLayout->addWidget(scrollArea);
         }
     }
 
@@ -1901,11 +1950,11 @@ void frmMain::initDebugPage()
         refreshChannelSourceCombos();
     }
 
-    // ========== 模型库管理区 + 模型参数表 ==========
-    // 两者都插在"视频通道"分组框之后，所以先插库、后插参数表，
-    // 页面上的先后顺序才是 通道 → 模型参数 → 模型库。
-    initModelLibraryUi();
+    // ========== 模型参数表 + 模型库管理区（都在"模型"页签） ==========
+    // 两者都插进"模型"页，所以先插参数表、后插库管理，
+    // 页内的先后顺序才是 模型参数 → 模型库（与改造前一致）。
     initModelParamsUi();
+    initModelLibraryUi();
 
     // ========== 围栏配置区（独立于级联） ==========
     initGeofenceUi();
@@ -2020,16 +2069,16 @@ void frmMain::initDebugPage()
                 }
             });
 
-        // 放进滚动区的内容布局里，和围栏分组同一个写法。
+        // 放进"服务链路"页的内容布局，和围栏分组同一个写法。
         // 原来这里插的是 pageSettings 自己的布局：那段代码在开头已经把页内控件整体搬进
         // QScrollArea，该布局只剩滚动区一项，insertWidget(count-1=0, grpWs) 等于把这块
         // 钉在滚动区**之外**的页面顶部——它不参与滚动、白占一屏高度，还把
         // "滚动区是第 0 项"这个前提打破，后面任何分组框都会静默加不进来。
-        QVBoxLayout *contentLayout = settingsContentLayout(ui->pageSettings);
+        QVBoxLayout *contentLayout = settingsTabLayout(kTabServices);
         if (contentLayout) {
             contentLayout->insertWidget(contentLayout->count() - 1, grpWs);
         } else {
-            qWarning() << "initDebugPage: 找不到设置页滚动区，WebSocket 分组未加入";
+            qWarning() << "initDebugPage: 找不到服务链路页布局，WebSocket 分组未加入";
             grpWs->deleteLater();
         }
     }
@@ -2149,11 +2198,11 @@ void frmMain::initDebugPage()
                     }
                 });
 
-        QVBoxLayout *padContent = settingsContentLayout(ui->pageSettings);
+        QVBoxLayout *padContent = settingsTabLayout(kTabServices);
         if (padContent) {
             padContent->insertWidget(padContent->count() - 1, grpPad);
         } else {
-            qWarning() << "initDebugPage: 找不到设置页滚动区，Pad 服务端分组未加入";
+            qWarning() << "initDebugPage: 找不到服务链路页布局，Pad 服务端分组未加入";
             grpPad->deleteLater();
         }
     }
@@ -2262,11 +2311,11 @@ void frmMain::initDebugPage()
                     }
                 });
 
-        QVBoxLayout *httpContent = settingsContentLayout(ui->pageSettings);
+        QVBoxLayout *httpContent = settingsTabLayout(kTabServices);
         if (httpContent) {
             httpContent->insertWidget(httpContent->count() - 1, grpHttp);
         } else {
-            qWarning() << "initDebugPage: 找不到设置页滚动区，Pad HTTP 面分组未加入";
+            qWarning() << "initDebugPage: 找不到服务链路页布局，Pad HTTP 面分组未加入";
             grpHttp->deleteLater();
         }
     }
@@ -2623,25 +2672,16 @@ void frmMain::applyGlobalThresholdNow()
 }
 
 // ============================================================
-// settingsContentLayout: 设置页滚动区的内容布局
-//   initDebugPage 开头把 pageSettings 的原控件整体包进了 QScrollArea，
-//   它是 pageSettings 布局的第 0 项；要往页尾加分组框就往这里插。
+// settingsTabLayout: 调试设置页第 idx 个页签滚动区的内容布局
+//   initDebugPage 把 pageSettings 改成"顶部 QTabWidget + 每页一个 QScrollArea"：
+//   分组框一律往对应页的这个布局里插（尾部是 stretch，插 count-1 位）。
+//   布局由 initDebugPage 建好后存进成员；拿不到返回 nullptr，调用方按 qWarning 兜底。
 // ============================================================
-static QVBoxLayout *settingsContentLayout(QWidget *page)
+QVBoxLayout *frmMain::settingsTabLayout(int tabIndex) const
 {
-    QVBoxLayout *pageLayout = qobject_cast<QVBoxLayout *>(page->layout());
-    if (!pageLayout)
+    if (tabIndex < 0 || tabIndex >= kTabCount || !settingsTabLayouts_[tabIndex])
         return nullptr;
-    // 遍历找那个 QScrollArea，而不是认定它在第 0 项：曾经有一处把 WebSocket 分组框
-    // insertWidget(0, ...) 插到了页面布局里，于是"第 0 项是滚动区"这个前提一破，
-    // 所有后续分组框都只打一条 qWarning 就静默不加入页面（看着像功能消失）。
-    // 顺序不该决定控件在不在。
-    for (int i = 0; i < pageLayout->count(); ++i) {
-        QScrollArea *sa = qobject_cast<QScrollArea *>(pageLayout->itemAt(i)->widget());
-        if (sa)
-            return qobject_cast<QVBoxLayout *>(sa->widget()->layout());
-    }
-    return nullptr;
+    return settingsTabLayouts_[tabIndex];
 }
 
 // 置信度下拉的两个特殊项（存的是 QComboBox 的 itemData）：
@@ -2675,23 +2715,15 @@ static QString touchComboQss()
 //   ⚠ "每模型"≠"每通道"：键是库 id，两个通道都挂同一个模型就共用同一个阈值。
 //   备注只写在这里（video.models[<id>].note），路径/标签一律不出现——
 //   那些是 model/library 的事。
+//   位置：设置页"模型"页签，参数表在模型库管理之前（调用顺序见 initDebugPage）。
 // ============================================================
 void frmMain::initModelParamsUi()
 {
-    QVBoxLayout *contentLayout = settingsContentLayout(ui->pageSettings);
-    QWidget *modelGroup = ui->gridLayout_model->parentWidget();
-    if (!contentLayout || !modelGroup) {
-        qWarning() << "initModelParamsUi: settings scroll layout not found";
+    QVBoxLayout *contentLayout = settingsTabLayout(kTabModels);
+    if (!contentLayout) {
+        qWarning() << "initModelParamsUi: 模型页布局未找到，模型参数表未加入";
         return;
     }
-    int insertAt = -1;
-    for (int i = 0; i < contentLayout->count(); ++i) {
-        if (contentLayout->itemAt(i)->widget() == modelGroup) {
-            insertAt = i + 1;
-            break;
-        }
-    }
-    if (insertAt < 0) return;
 
     QGroupBox *group = new QGroupBox("模型参数（报警类别 / 置信度按模型配置）");
     group->setStyleSheet(theme::panel(theme::PANEL));
@@ -2729,7 +2761,7 @@ void frmMain::initModelParamsUi()
         .arg(theme::HOVER));
     v->addWidget(modelParamTable_);
 
-    contentLayout->insertWidget(insertAt, group);
+    contentLayout->insertWidget(contentLayout->count() - 1, group);
     refreshModelParamsTable();
 }
 
@@ -3073,9 +3105,9 @@ void frmMain::openChannelModelsDialog(int channel)
 void frmMain::initGeofenceUi()
 {
     ConfigManager &cfg = ConfigManager::instance();
-    QVBoxLayout *contentLayout = settingsContentLayout(ui->pageSettings);
+    QVBoxLayout *contentLayout = settingsTabLayout(kTabAlarmRules);
     if (!contentLayout) {
-        qWarning() << "initGeofenceUi: settings scroll layout not found";
+        qWarning() << "initGeofenceUi: 报警规则页布局未找到，围栏分组未加入";
         return;
     }
 
@@ -3157,9 +3189,9 @@ void frmMain::initGeofenceUi()
 void frmMain::initLadderGuardUi()
 {
     ConfigManager &cfg = ConfigManager::instance();
-    QVBoxLayout *contentLayout = settingsContentLayout(ui->pageSettings);
+    QVBoxLayout *contentLayout = settingsTabLayout(kTabAlarmRules);
     if (!contentLayout) {
-        qWarning() << "initLadderGuardUi: settings scroll layout not found";
+        qWarning() << "initLadderGuardUi: 报警规则页布局未找到，登高守护分组未加入";
         return;
     }
 
@@ -3225,25 +3257,16 @@ void frmMain::initLadderGuardUi()
 
 // ============================================================
 // initModelLibraryUi: 模型库管理区（P2）
-//   位置：设置页滚动内容中、"模型配置"分组框之后
+//   位置：设置页"模型"页签，模型参数表之后
 //   构成：工具行（刷新/导入/删除 + 提示） + 只读表格
 // ============================================================
 void frmMain::initModelLibraryUi()
 {
-    QVBoxLayout *contentLayout = settingsContentLayout(ui->pageSettings);
-    QWidget *modelGroup = ui->gridLayout_model->parentWidget();
-    if (!contentLayout || !modelGroup) {
-        qWarning() << "initModelLibraryUi: settings scroll layout not found";
+    QVBoxLayout *contentLayout = settingsTabLayout(kTabModels);
+    if (!contentLayout) {
+        qWarning() << "initModelLibraryUi: 模型页布局未找到，模型库管理区未加入";
         return;
     }
-    int insertAt = -1;
-    for (int i = 0; i < contentLayout->count(); ++i) {
-        if (contentLayout->itemAt(i)->widget() == modelGroup) {
-            insertAt = i + 1;
-            break;
-        }
-    }
-    if (insertAt < 0) return;
 
     QGroupBox *group = new QGroupBox("模型库管理");
     group->setStyleSheet(theme::panel(theme::PANEL));
@@ -3313,7 +3336,7 @@ void frmMain::initModelLibraryUi()
     connect(btnRollback, &QPushButton::clicked, this, &frmMain::rollbackSelectedModel);
     connect(btnDelete, &QPushButton::clicked, this, &frmMain::deleteSelectedModel);
 
-    contentLayout->insertWidget(insertAt, group);
+    contentLayout->insertWidget(contentLayout->count() - 1, group);
     refreshModelLibraryTable();
 }
 
