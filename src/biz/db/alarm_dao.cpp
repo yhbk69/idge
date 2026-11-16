@@ -818,7 +818,7 @@ AlarmRecord AlarmDAO::queryById(const QString &id)
 }
 
 QVector<AlarmRecord> AlarmDAO::queryUpdatedSince(const QString &sinceInternal, int limit,
-                                                 const QString &taskId)
+                                                 const QString &taskId, const QString &sinceId)
 {
     QVector<AlarmRecord> results;
     QSqlDatabase db = DatabaseManager::instance().database();
@@ -830,9 +830,23 @@ QVector<AlarmRecord> AlarmDAO::queryUpdatedSince(const QString &sinceInternal, i
     //   症状是"首次连接的全量同步永远返回空"。
     // ⚠ 计划过滤也在这条 SQL 里做完再 LIMIT（报告 §八 P1-2）：反过来"先 LIMIT 再在 C++ 里筛"
     //   在几万行历史上会让当前计划一条都进不了这一批——游标推不动、Pad 永远同步不到、全程零报错。
+    // ⚠ 并列键（sinceId）决定翻页能否前进：纯时间 `>=` 在"同一秒被盖了几千行"时
+    //   每页回同一批并列行、游标原地不动（活锁）。事故原型：2026-11-16 板端「全部确认」
+    //   一条 UPDATE 把 6216 行历史报警的 update_time 盖成同一秒，pad 补漏永远卡在
+    //   那一秒的并列页上，当天新报警**隔了多久都同步不到**且零报错。
+    //   传了 id 就走 (生效时间, id) 元组的严格比较——并列时按 id 前进，且边界行
+    //   不重取（id 全局唯一，前进方向与 ORDER BY (effective,id) 逐字同向）；
+    //   不传 id 维持旧 `>=` 口径（宁重不漏），老调用方与老 Pad 行为不变。
+    const QString effectiveExpr =
+        QStringLiteral("COALESCE(NULLIF(update_time, ''), alarm_time)");
     QStringList parts;
     if (!sinceInternal.isEmpty()) {
-        parts << QStringLiteral("COALESCE(NULLIF(update_time, ''), alarm_time) >= :since");
+        if (sinceId.isEmpty()) {
+            parts << QStringLiteral("%1 >= :since").arg(effectiveExpr);
+        } else {
+            parts << QStringLiteral("(%1 > :since OR (%1 = :since AND id > :since_id))")
+                         .arg(effectiveExpr);
+        }
     }
     if (!taskId.isEmpty()) {
         // task_id 等值（B2 定案后的一等列，判据与 buildFilterWhere 逐字同一套）。
@@ -851,6 +865,9 @@ QVector<AlarmRecord> AlarmDAO::queryUpdatedSince(const QString &sinceInternal, i
     query.prepare(sql);
     if (!sinceInternal.isEmpty()) {
         query.bindValue(QStringLiteral(":since"), sinceInternal);
+        if (!sinceId.isEmpty()) {
+            query.bindValue(QStringLiteral(":since_id"), sinceId);
+        }
     }
     if (!taskId.isEmpty()) {
         query.bindValue(QStringLiteral(":task_id"), taskId);

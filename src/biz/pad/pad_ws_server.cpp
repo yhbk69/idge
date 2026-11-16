@@ -404,9 +404,14 @@ void PadWsServer::handleSyncRequest(QWebSocket *socket, const QJsonObject &data)
         return;
     }
 
-    // §3.8：唯一过滤依据是 lastEventTime；lastAlarmId 只是辅助字段，本机不参与判断。
-    // 空游标 = 全量。游标认不出来时同样按全量处理（internalTimeFromWire 返回空串）。
+    // §3.8（2026-11-16 修订）：游标是 **(lastEventTime, lastAlarmId) 组合判据**。
+    // 只按 lastEventTime 的 `>=` 在同一秒行数超过 syncLimit 时会翻页活锁——
+    // 板端「全部确认」一条 UPDATE 把 6216 行盖成同一秒后，Pad 补漏永远卡在那一秒，
+    // 当天新报警同步不到且零报错（2026-11-16 现场事故，见 alarm_dao.cpp 同段注释）。
+    // lastAlarmId 为空的老 Pad 维持旧 `>=` 口径；游标认不出来时同样按全量处理
+    // （internalTimeFromWire 返回空串）。
     const QString sinceInternal = internalTimeFromWire(cursorWire);
+    const QString cursorId = data.value(QStringLiteral("lastAlarmId")).toString().trimmed();
 
     QJsonArray alarms;
     QString lastAlarmId;
@@ -417,15 +422,16 @@ void PadWsServer::handleSyncRequest(QWebSocket *socket, const QJsonObject &data)
         // 库里几万行历史时这批全是**别的应用最早期**的报警，筛完剩 0 条 → 游标回显 null →
         // Pad 存 null → 下次还是全量，当前计划的报警永远同步不到，而且一条错误都不出。
         const QVector<AlarmRecord> rows = dao.queryUpdatedSince(
-            sinceInternal, cfg_.syncLimit <= 0 ? 500 : cfg_.syncLimit, taskId);
+            sinceInternal, cfg_.syncLimit <= 0 ? 500 : cfg_.syncLimit, taskId, cursorId);
         for (const AlarmRecord &record : rows) {
-            const QString effective = record.updateTime.isEmpty() ? record.alarmTime
-                                                                  : record.updateTime;
-            if (effective > maxInternal) {
-                maxInternal = effective;
-                lastAlarmId = record.id;
-            }
             alarms.append(alarmJson(record, cfg_.mediaBaseUrl, cfg_.mediaRootDir));
+        }
+        // 行序就是 (生效时间, id) 升序：**末行**即本页游标落点。
+        // 用末行而不是"遍历时比大小"，并列秒才能靠 id 前进（事故根因的另一半）。
+        if (!rows.isEmpty()) {
+            const AlarmRecord &tail = rows.last();
+            maxInternal = tail.updateTime.isEmpty() ? tail.alarmTime : tail.updateTime;
+            lastAlarmId = tail.id;
         }
     }
 

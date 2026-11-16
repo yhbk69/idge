@@ -529,6 +529,22 @@ public:
      */
     int alarmLevel(const QString &alarmType) const;
 
+    /**
+     * @brief 普通检测报警的 track 限流三参数（config.json 的 alarm.track 段）
+     *
+     * 报警类别的连续检出先经 AlarmManager 的跨帧轨迹闸门确认成"事件"才出报警，
+     * 三个键就是这个闸门的阈值（语义与默认值见 alarm_track_gate.h）：
+     *   - alarm.track.minSeconds  目标最短存活时长（秒，默认 1.0）；
+     *   - alarm.track.minHits     最少命中的推理批次数（默认 3）；
+     *   - alarm.track.keepSeconds 目标连续消失多久判事件结束（秒，默认 3.0），
+     *     再出现算新事件、可再报。
+     * 缺省回内置默认；非法值（<=0 或非数）回默认并打 qWarning，不静默。
+     * 只有 getter、出厂默认会写入，设置页暂无控件（与 smartRecognition.camera_size 同口径）。
+     */
+    double alarmTrackMinSeconds() const;
+    int alarmTrackMinHits() const;
+    double alarmTrackKeepSeconds() const;
+
     // ========== WebSocket 配置 ==========
 
     /** @brief WebSocket 服务器地址（如 "ws://192.168.1.100:8765"） */

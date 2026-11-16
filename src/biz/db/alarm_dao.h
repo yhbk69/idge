@@ -138,9 +138,13 @@ public:
      * 2026-11-04 之前这里是 `instr(construction_info,'"construction_id":"X"')`（内嵌 SQLite
      * 3.31.1 没编 JSON1，json_extract 会 "no such function"），子串匹配依赖序列化形状且用不上
      * 索引，所以 B2 定案后把它升成了一等列 + idx_alarms_task_id。
+     * `sinceId`（2026-11-16 新增）：并列键的 id 半边。非空时时间条件从 `>=` 升级为
+     * `(effective, id)` 元组严格比较——同一秒行数超过 limit 时翻页才能前进
+     * （「全部确认」批量盖秒事故，见 .cpp 的 ⚠ 注释）；空串=旧 `>=` 口径，调用方不变。
      */
     QVector<AlarmRecord> queryUpdatedSince(const QString &sinceInternal, int limit = 500,
-                                           const QString &taskId = QString());
+                                           const QString &taskId = QString(),
+                                           const QString &sinceId = QString());
 
     // ========================================================================
     // 更新操作

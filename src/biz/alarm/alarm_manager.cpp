@@ -19,7 +19,7 @@
 //   │  ├── 每3帧做一次YOLO检测（每个槽位一路模型）                │
 //   │  │                                                          │
 //   │  ├── 逐槽位 ingest(channel, od, slotCtx)   → 普通检测报警   │
-//   │  │   ├── 按该槽位模型的报警类别判定 + 2 秒限流窗口          │
+//   │  │   ├── 按该槽位模型的报警类别判定 + 轨迹闸门确认沿        │
 //   │  │   └── 顺手收集本帧围栏候选（类别 = geofence.alarmClass） │
 //   │  │                                                          │
 //   │  ├── 槽位循环结束后，一次通道级合并围栏判定                 │
@@ -56,6 +56,7 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QUuid>
+#include <algorithm>   // ingest 里 std::max 兜底坐标倒置的异常框
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -314,6 +315,16 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
         // 不同模型恰好同类号时不应互相压制报警
         const int slot = results.id;
 
+        // 轨迹闸门参数每批取一次（getter 自带非法值回落默认）。hits 的单位是
+        // 推理批次数（解码循环每 3 帧推理一次），存活时长单位纳秒——双条件口径
+        // 见 alarm_track_gate.h 文件头。
+        alarmtrack::Params trackParams;
+        trackParams.minHits = ConfigManager::instance().alarmTrackMinHits();
+        trackParams.minAliveNs =
+            (long long)(ConfigManager::instance().alarmTrackMinSeconds() * 1e9);
+        trackParams.keepNs =
+            (long long)(ConfigManager::instance().alarmTrackKeepSeconds() * 1e9);
+
         for (int i = 0; i < results.count; i++) {
             const object_detect_result &det = results.results[i];
             const QString className = slotClassName(ctx, det.cls_id);
@@ -325,16 +336,28 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
             if (ctx.alarmClass.isEmpty() || ctx.alarmClass != className)
                 continue;
 
-            // 去重限流：同通道同槽位同类别在限流窗口内只报一次
+            // ===== 判定两层：轨迹闸门（每事件一条）→ 2 秒全局窗口兜底 =====
+            // 此前只有第二层：同一目标持续违规时每 2 秒重报一条。现在报警类别的
+            // 检出先进 alarmtrack::Gate 做跨批 IoU 关联，命中数/存活时长达标的
+            // "确认沿"才走到这一步（语义对齐 cigarette 跟踪 demo 的事件记录）。
             // key 格式: "通道:槽位:类别ID"，如 "0:1:0" 表示通道 0、级联第 2 槽的 cls_0。
             // 槽位入键后，不同模型恰好同类号（helmet cls_1 与 vest cls_1）
             // 不再互相压制报警。
-            QString key = QString("%1:%2:%3").arg(channel).arg(slot).arg(det.cls_id);
-            long last = lastAlarmTime_.value(key, 0);  // 首次为 0，必然放行
-            // 与 kAlarmThrottleNs 同为 steady 纳秒，量纲一致。
-            if (steadyNow - last < kAlarmThrottleNs) {
-                continue;  // 在限流窗口内，跳过
-            }
+            const QString key = QString("%1:%2:%3").arg(channel).arg(slot).arg(det.cls_id);
+            // 兜底窗口是否开着作为 allowRecord 传给闸门：窗口不开时轨迹照常
+            // 推进但**不置 recorded**，确认沿留作"未消耗"、下一批重试——同 demo
+            // 的 cooldown 拦截不烧事件。
+            const bool windowOpen =
+                steadyNow - lastAlarmTime_.value(key, 0) >= kAlarmThrottleNs;
+            const alarmtrack::Box trackBox{
+                (float)det.box.left, (float)det.box.top,
+                (float)std::max(0, det.box.right - det.box.left),
+                (float)std::max(0, det.box.bottom - det.box.top)};
+            // 闸门的分区键与限流键一一对应（通道/槽位/类别号三段十进制拼接）
+            const int trackKey = channel * 1000000 + slot * 1000 + det.cls_id;
+            if (!alarmTrackGate_.observe(trackKey, trackBox, steadyNow, trackParams,
+                                         windowOpen))
+                continue;  // 未确认的候选 / 已记录过 / 同一目标还在违规状态里
             lastAlarmTime_[key] = steadyNow;  // 记录本次报警的单调时钟值
 
             AlarmRecord alarm = makeAlarmRecord(channel, det, className, results.time,
@@ -1133,5 +1156,8 @@ void AlarmManager::resetThrottles()
     QMutexLocker lock(&mutex_);
     const int keys = lastAlarmTime_.size();
     lastAlarmTime_.clear();
+    // 轨迹闸门必须同清：只清窗口的话，重登后画面里的老轨迹还是 recorded 态，
+    // 新目标一 IoU 撞上它，报警被静默吃掉——与围栏事件表踩过同一个坑。
+    alarmTrackGate_.reset();
     qInfo() << "AlarmManager: throttle windows cleared (" << keys << "keys)";
 }

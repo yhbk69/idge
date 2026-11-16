@@ -256,10 +256,43 @@ try {
         }
     }
 
+    // ── 10：同一秒并列 + 组合游标翻页（2026-11-16「全部确认」事故的活锁本体）───
+    // 板上 6216 行被一条 UPDATE 盖成同一秒后，纯时间 `>=` 的补漏每页都回同一批并列行。
+    // 这里用 4 行同秒 + limit 2 把"翻不动"和"能翻页"两种行为钉死对照。
+    {
+        const QString tT = QStringLiteral("2026-11-03T10:00:00");
+        for (int i = 1; i <= 4; ++i) {
+            check(dao.insertAlarm(makeAlarm(QStringLiteral("T%1").arg(i), tT, tT)) > 0,
+                  "插入并列行 T1~T4（update_time 同秒）");
+        }
+        QStringList page1;
+        for (const AlarmRecord &r : dao.queryUpdatedSince(tT, 2)) {
+            page1 << r.id;
+        }
+        check(page1 == QStringList{QStringLiteral("T1"), QStringLiteral("T2")},
+              "并列秒内按 id 升序分页");
+        QStringList page2;
+        for (const AlarmRecord &r : dao.queryUpdatedSince(tT, 2, QString(),
+                                                          QStringLiteral("T2"))) {
+            page2 << r.id;
+        }
+        check(page2 == QStringList{QStringLiteral("T3"), QStringLiteral("T4")},
+              "传 lastAlarmId 后并列页前进（元组比较，活锁消失）");
+        QStringList page3;
+        for (const AlarmRecord &r : dao.queryUpdatedSince(tT, 2, QString(),
+                                                          QStringLiteral("T4"))) {
+            page3 << r.id;
+        }
+        check(!page3.contains(QStringLiteral("T1")) && !page3.contains(QStringLiteral("T2")) &&
+                  !page3.contains(QStringLiteral("T3")) && !page3.contains(QStringLiteral("T4")),
+              "并列组消费完不再回同一批");
+    }
+
     std::cout << "pad sync contracts passed: full/incremental cursor / legacy empty update_time "
                  "fallback to alarm_time / >= boundary / new rows visible / markRead keeps "
                  "earliest readAt while bumping update_time / status change bumps too / "
-                 "task filter pushed into SQL before LIMIT\n";
+                 "task filter pushed into SQL before LIMIT / same-second tie broken by "
+                 "lastAlarmId tuple cursor\n";
     return 0;
 } catch (const std::exception &e) {
     std::cerr << "FAIL: " << e.what() << '\n';

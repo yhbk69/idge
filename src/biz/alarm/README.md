@@ -16,6 +16,7 @@
 | --- | --- |
 | `alarm_manager.h` | `AlarmRecord` 结构体 + `AlarmManager` 单例声明、限流常量、`SlotContext` |
 | `alarm_manager.cpp` | `ingest()`/`ingestFenceAlarm()`/`ingestLadderAlarm()` 判定与限流、`storeAndNotify()` 存储与发信号、`attachVideoClip()` 片段回填、`cleanOldData()` 数据与媒体清理 |
+| `alarm_track_gate.h/.cpp` | `alarmtrack::Gate`：普通检测报警的跨批 IoU 轨迹闸门（"每目标事件一条"状态机，纯 STL、可脱离管理器单测，见 `tests/test_alarm_track.cpp`） |
 
 ## 核心类与数据流
 - **AlarmManager**（`QObject` 单例）：全局唯一。
@@ -33,10 +34,12 @@
 退出登录后重传的那条报警仍带着它产生时的归属；解码线程不持任何跨数据库写的锁。
 未登录 ⇒ `snapshot()` 返回空对象 ⇒ 两个字段都空 ⇒ 界面 `—`、上行不带 `construction` 键。
 
-`resetThrottles()`（新）只做一件事：`lastAlarmTime_.clear()`。**退出登录时必须调**——
+`resetThrottles()` 清两态：`lastAlarmTime_.clear()` + 轨迹闸门 `alarmTrackGate_.reset()`。
+**退出登录时必须调**——
 限流态是这个内存 map（检测与围栏共用键空间），不清的话重登后 2s（类别）/10s（围栏）窗口内的
-第一条报警会被静默吞掉，表现为"换了个人扫码，头一条报警没了"。实测日志：
-`AlarmManager: throttle windows cleared ( 7 keys)`。
+第一条报警会被静默吞掉，表现为"换了个人扫码，头一条报警没了"。轨迹闸门必须同清：
+只清窗口的话，画面里的老轨迹还是 recorded 态，新目标一 IoU 撞上它报警就被吃掉（围栏踩过同坑）。
+实测日志：`AlarmManager: throttle windows cleared ( 7 keys)`。
 
 数据流：
 ```
@@ -81,7 +84,7 @@ UI 两条按钮走这里；v1 §4 的三个 HTTP 入口 `disposeAlarmById` / `ma
 
 | 路径 | 键 | 窗口 |
 | --- | --- | --- |
-| 普通报警 `ingest` | `"通道:槽下标:cls_id"`（如 `"0:1:0"`） | `kAlarmThrottleNs` = 2 秒 |
+| 普通报警 `ingest` | `"通道:槽下标:cls_id"`（如 `"0:1:0"`） | 先过轨迹闸门（`alarm.track.*`，默认存活≥1s 且≥3 个推理批次、每事件一条），`kAlarmThrottleNs` = 2 秒兜底 |
 | 围栏报警 `ingestFenceAlarm` | `"通道:fence:角色:类别名"`（如 `"0:fence:in:person"`、`"0:fence:out:person"`） | `geofence.throttleSeconds`，默认 10 秒 |
 | 登高守护 `ingestLadderAlarm` | `"通道:ladder:guardId"`（如 `"0:ladder:3"`） | `kAlarmThrottleNs` = 2 秒 |
 
@@ -99,18 +102,31 @@ UI 两条按钮走这里；v1 §4 的三个 HTTP 入口 `disposeAlarmById` / `ma
 （历史：早期实现寄生在级联里且无限流，40 秒出 200~340 条；改成节流窗口后仍是"每 10 秒一条"的电平语义，
 人不动就一直报。`bypassThrottle` 形参已删除，不存在"豁免限流"的调用路径。）
 
-## 报警频率有三层旋钮，只有一层可配
+**普通报警的"每目标只报一条"同样不是 2 秒窗口给的**（2026-11-16 起）：没戴安全帽的人站在镜头前，
+过去每 2 秒重报一条，是电平语义。现在报警类别的检出先进 `alarmtrack::Gate`（`ingest` 锁内、
+key=通道×1e6+槽×1e3+cls_id）做跨批 IoU 关联：命中数与存活时长双双达标才确认成"事件"出**一条**，
+该轨迹存续期内不再重复；目标消失超过 `keepSeconds` 轨迹销毁，再出现算新事件。
+语义移植自 cigarette 跟踪 demo（min_hits / 每 ID 一条 / cooldown 兜底），两处本地化：
+关联用轻量 IoU 贪心（与 `fenceTracks_`、`BoxSmoother` 同型），阈值用"批次数 AND 时长"双条件
+——推理每 3 帧一次、各源帧率不同，纯帧数口径会随帧率漂。2 秒窗口留在闸门之下防 ID switch 连记；
+窗口不开时闸门**不烧掉确认沿**（对齐 demo 的 cooldown 拦截），下一批补记。
+围栏/登高各有事件表，不走这个闸门。
+
+## 报警频率的旋钮：哪些可配、哪些是编译期
 
 现场问"报警太频繁，怎么让它多少秒报一次"时，别把话指错层：
 
 1. **置信度**（✅ 可配）：`video.models[<库id>].conf_threshold` → `detect.conf_threshold` → 0.25。
    它决定"有没有这个框"，是**减少误报**的那颗旋钮。每模型一份、改完约 1 秒内生效、不用重开流。
-2. **同签名节流**（❌ 编译期）：`kAlarmThrottleNs = 2e9`（2 秒），同通道同类别同帧的重复报警丢弃。
-   它是 `const`、不是配置键；做成可配要先把"谁能改、改了要不要落盘"想清楚，本轮刻意没动。
-3. **抽帧与围栏沿**（❌ 编译期）：`frame_count % 3` 决定推理频率；围栏是**进入沿**事件
-   （人不动不再报）+ 它之下的 `throttleSeconds` 窗口。
+2. **轨迹闸门**（✅ 可配，2026-11-16 起）：`alarm.track.minSeconds`（默认 1.0）/ `minHits`（默认 3）/
+   `keepSeconds`（默认 3.0）。它决定"重复的同一目标算几条"，是**减少重报**的那颗旋钮。
+   只有 getter、出厂默认会写入，设置页暂无控件（与 `smartRecognition.camera_size` 同口径）。
+3. **同签名兜底窗口**（❌ 编译期）：`kAlarmThrottleNs = 2e9`（2 秒），闸门之下防
+   ID switch/多人同刻连记；它是 `const`，刻意不再做成可配——重报问题已由第 2 层接走。
+4. **抽帧与围栏沿**（❌ 编译期）：`frame_count % 3` 决定推理频率（也就是 `minHits` 的节拍）；
+   围栏是**进入沿**事件（人不动不再报）+ 它之下的 `throttleSeconds` 窗口。
 
-⇒ 想"少报"就拧第 1 层；第 2、3 层要改得动代码。
+⇒ 想"少报误报"拧第 1 层；想"少报重复"拧第 2 层；第 3、4 层要改得动代码。
 
 ## 使用方法
 ```cpp

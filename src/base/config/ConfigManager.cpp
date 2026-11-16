@@ -788,6 +788,14 @@ static QJsonObject makeAlarmDefaults()
             {"fence_out", 1},   // 围栏离岗：紧急
             {"ladder_no_spotter", 2},  // 登高无人看护：重要
         }},
+        // 普通检测报警的 track 限流阈值（语义见 alarm_track_gate.h）：
+        // 同一目标连续存在 minSeconds 且命中 minHits 个推理批次才算一次事件、只报一条；
+        // 消失超过 keepSeconds 再出现算新事件。
+        {"track", QJsonObject{
+            {"minSeconds", 1.0},
+            {"minHits", 3},
+            {"keepSeconds", 3.0},
+        }},
     };
 }
 
@@ -813,6 +821,13 @@ bool ConfigManager::migrateAlarmDefaults()
     if (changed) {
         alarm["levels"] = levels;
         root_["alarm"] = alarm;
+    }
+    // track 段整段补缺（同 migrateVideoSourcesDefaults 的"看得见能写"原则）：
+    // 老文件没有这一段，getter 兜底也能跑，但写出来运维才知道有这三个旋钮。
+    if (!alarm.contains("track")) {
+        alarm["track"] = defaults["track"].toObject();
+        root_["alarm"] = alarm;
+        changed = true;
     }
     return changed;
 }
@@ -2385,6 +2400,40 @@ int ConfigManager::alarmLevel(const QString &alarmType) const
     const QJsonObject levels = alarmSection(root_)["levels"].toObject();
     const int lv = levels.value(alarmType).toInt(3);
     return qBound(1, lv, 4);
+}
+
+// alarm.track 段三键的统一读法：缺省回默认；非正数/超上界视为非法，
+// 打 qWarning 后同样回默认——和 camera_size 那批键一个口径，不静默吞错配。
+static double readAlarmTrackNumber(const QJsonObject &root, const char *key,
+                                   double def, double hi)
+{
+    const QJsonObject track = alarmSection(root)["track"].toObject();
+    if (!track.contains(QLatin1String(key))) return def;
+    const double v = track.value(QLatin1String(key)).toDouble(def);
+    if (!(v > 0.0) || v > hi) {
+        qWarning() << "[ConfigManager] alarm.track." << key << "=" << v
+                   << "非法（应在 0~" << hi << "]，回落默认" << def;
+        return def;
+    }
+    return v;
+}
+
+double ConfigManager::alarmTrackMinSeconds() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return readAlarmTrackNumber(root_, "minSeconds", 1.0, 60.0);
+}
+
+int ConfigManager::alarmTrackMinHits() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return (int)readAlarmTrackNumber(root_, "minHits", 3.0, 100.0);
+}
+
+double ConfigManager::alarmTrackKeepSeconds() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return readAlarmTrackNumber(root_, "keepSeconds", 3.0, 60.0);
 }
 
 /**

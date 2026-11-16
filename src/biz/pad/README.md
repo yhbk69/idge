@@ -69,7 +69,8 @@ Pad 接口 v1（`plan/edge-pad-v1.md`）里**本机作为服务端**的那一面
    它同时也带 `dispose.photoUrls`/`personId`（与完整 `alarm` 共用同一个 builder），
    否则别的 Pad 只收到状态变化，处置现场照片永远补不上。
    **例外**：`acknowledgeAll()`（一键全部已读）故意不发信号——一次可能几千条，广播会把 GUI 线程钉住，
-   这批增量留给下一次 `sync_request` 补漏。
+   这批增量留给下一次 `sync_request` 补漏（⚠ 补漏能前进的前提是游标带 id：2026-11-16 一条批量
+   UPDATE 把 6216 行盖成同一秒，纯时间翻页在其上活锁，Pad 端表现为"收不到报警"）。
 6. **来源检查与鉴权是两件事**。§2.3 免的是鉴权，不是免来源检查：`originAllowed()` 只放行空 Origin
    与 `android-app://*`，带 `http(s)://` Origin 的握手直接 403（口径 A20）。不判的等价后果是
    "局域网里任何网页的 JS 都能连进来实时收报警"，而报警里带人名、电话、位置与截图地址。
@@ -153,7 +154,8 @@ AlarmManager::alarmStatusChanged（UI 线程：确认/误报成功之后）
 Pad: hello → hello_ack（serverTime/protocolVersion/capabilities.alarm）
      hello 缺 deviceId / 缺 token 键 / 缺 clientVersion → error 2001，连接不关
      ping  → pong（信封带 code=0/message=ok）
-     sync_request{lastEventTime,taskId} → AlarmDAO::queryUpdatedSince（计划过滤在 SQL 里）→ 一个 sync_result
+     sync_request{lastEventTime,lastAlarmId,taskId} → AlarmDAO::queryUpdatedSince（计划过滤在 SQL 里；
+       游标是 (生效时间,id) 元组比较——同一秒并列行超过 syncLimit 时靠 id 前进，2026-11-16 事故修订）→ 一个 sync_result
      sync_request 缺 taskId → error 2001，连接不关
      alarm_ack → 只记日志，不回复（§3.3 硬要求）
      未知 type → error 2001（信封层带 code/message，data.detail 带那个 type）
@@ -250,7 +252,7 @@ WS 侧无 setter：改端口/开关要重启进程，避免"界面改了、其�
 
 ## 自测
 - `tests/test_pad_wire.cpp` — 16 组映射契约（纯 Qt Core，与 cwd 无关；会打印派生 deviceId 真值）
-- `tests/test_pad_sync.cpp` — 9 组游标、已读与计划过滤语义（内存库）
+- `tests/test_pad_sync.cpp` — 10 组游标、已读、计划过滤与并列秒翻页语义（内存库）
 - `tests/test_pad_ws_server.cpp` — 16 组线上行为（loopback 起真服务端 + 真客户端，含 Origin 拒绝、
   2001 两类、`alarmStatusChanged` → `alarm_update`）
 - `tests/test_pad_http_message.cpp` — 19 组**传输层**契约（只喂字节，不起 socket）：chunked、

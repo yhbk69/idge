@@ -737,6 +737,7 @@ add_executable(test_pad_ws_server
     src/biz/alarm/alarm_media_prune.cpp
     src/biz/ws/alarm_uplink_engine.cpp
     src/biz/alarm/alarm_manager.cpp
+    src/biz/alarm/alarm_track_gate.cpp
     src/biz/db/database_manager.cpp
     src/biz/db/alarm_dao.cpp
     src/biz/db/detection_dao.cpp
@@ -820,6 +821,7 @@ add_executable(test_pad_http_api
     src/biz/geofence/fence_manager.cpp
     src/biz/geofence/fence_checker.cpp
     src/biz/alarm/alarm_manager.cpp
+    src/biz/alarm/alarm_track_gate.cpp
     src/biz/db/database_manager.cpp
     src/biz/db/alarm_dao.cpp
     src/biz/db/detection_dao.cpp
@@ -910,6 +912,47 @@ add_executable(test_ladder_guard
 
 target_include_directories(test_ladder_guard PRIVATE
     ${CMAKE_SOURCE_DIR}/src/biz/ladderguard
+)
+
+# ============================================================================
+# 报警轨迹闸门离线自检（合成框序列：每事件一条 / 事件结束再报 / cooldown 不烧事件）
+# 只编 alarm_track_gate.cpp：纯 std 逻辑，不链 Qt 业务、不需要 config.json 与权重。
+# 为什么值得单独钉：闸门是"帧级重复检出 → 轨迹级事件"的唯一防线，写反 recorded/
+# 保活任一分支，板端表现是"刷屏照旧"或"报警永久静默"，现场都很难当场看出来。
+# 语义基准是 cigarette 跟踪 demo 的 SmokeEventRecorder，契约清单见 tests/test_alarm_track.cpp 头
+# 仓库根运行：./build/build_rk3588_linux/test_alarm_track，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_alarm_track
+    tests/test_alarm_track.cpp
+    src/biz/alarm/alarm_track_gate.cpp
+    src/biz/alarm/alarm_manager.cpp
+    src/biz/alarm/alarm_labels.cpp
+    src/biz/alarm/alarm_media_prune.cpp
+    src/biz/db/database_manager.cpp
+    src/biz/db/alarm_dao.cpp
+    src/biz/db/detection_dao.cpp
+    src/biz/session/construction_session.cpp
+    src/base/config/ConfigManager.cpp
+)
+
+target_include_directories(test_alarm_track PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/biz/alarm
+    ${CMAKE_SOURCE_DIR}/src/biz/db
+    ${CMAKE_SOURCE_DIR}/src/biz/session
+    ${CMAKE_SOURCE_DIR}/src/base
+    ${CMAKE_SOURCE_DIR}/src/base/config
+    ${CMAKE_SOURCE_DIR}/src/ai/yolo11
+    ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/include
+    ${CMAKE_SOURCE_DIR}/3rdparty/sqlite
+)
+
+target_link_libraries(test_alarm_track
+    Qt5::Core
+    Qt5::Sql
+    sqlite3
+    ${CMAKE_SOURCE_DIR}/3rdparty/jsoncpp/lib/libjsoncpp.a
+    pthread
 )
 
 # ============================================================================
@@ -1063,6 +1106,7 @@ add_executable(test_channel_reload
     src/base/buffer/dma_alloc.cpp
     src/base/buffer/DmaFrameBuffer.cpp
     src/biz/alarm/alarm_manager.cpp
+    src/biz/alarm/alarm_track_gate.cpp
     src/biz/alarm/alarm_labels.cpp
     src/biz/alarm/alarm_media_prune.cpp
     # alarm_manager.cpp 的 makeAlarmRecord() 现在给每条报警盖施工信息戳，
@@ -1156,6 +1200,7 @@ add_executable(test_stream_params
     src/base/buffer/dma_alloc.cpp
     src/base/buffer/DmaFrameBuffer.cpp
     src/biz/alarm/alarm_manager.cpp
+    src/biz/alarm/alarm_track_gate.cpp
     src/biz/alarm/alarm_labels.cpp
     src/biz/alarm/alarm_media_prune.cpp
     src/biz/session/construction_session.cpp

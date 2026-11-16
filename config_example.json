@@ -261,13 +261,19 @@
             "报警等级按【报警类型】配置（1紧急 2重要 3一般 4提示），等级由服务端下发。",
             "所有报警（普通检测 detection / 围栏闯入 fence_in / 围栏离岗 fence_out / 登高无人看护 ladder_no_spotter）",
             "都从 alarm.levels 取等级，代码里不再硬编码。键名 = alarmType，未配置的类型兜底为 3（一般），并夹到 [1,4]。",
-            "老 config.json 缺的等级键由 migrateAlarmDefaults() 启动时补齐（只补缺失、不覆盖已有值）。"
+            "老 config.json 缺的等级键由 migrateAlarmDefaults() 启动时补齐（只补缺失、不覆盖已有值）。",
+            "alarm.track 是普通检测报警的跨帧轨迹闸门阈值：同一目标（跨批 IoU 关联）存活够 minSeconds 秒且命中够 minHits 个推理批次才确认成一次事件、只报一条；消失超过 keepSeconds 秒再出现算新事件。2 秒全局窗口在其下兜底防 ID switch 连记。非法值回默认并打 qWarning。"
         ],
         "levels": {
             "detection": 3,
             "fence_in": 1,
             "fence_out": 1,
             "ladder_no_spotter": 2
+        },
+        "track": {
+            "minSeconds": 1.0,
+            "minHits": 3,
+            "keepSeconds": 3.0
         }
     },
     "pad_server": {
