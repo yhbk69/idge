@@ -2613,7 +2613,7 @@ bool frmMain::pushSlotParamsToChannel(int ch)
     params.reserve(resolved.size());
     for (const ResolvedSlot &s : resolved) {
         SlotRuntimeParam p;
-        p.alarmClass = s.alarmClass;
+        p.alarmClasses = s.alarmClasses;
         p.confThreshold = s.confThreshold;
         p.nmsThreshold = s.nmsThreshold;
         params.push_back(p);
@@ -2770,6 +2770,19 @@ void frmMain::initModelParamsUi()
     refreshModelParamsTable();
 }
 
+// 报警类别按钮的显示文字：空="(不报警)"；≤3 类全列（顿号分隔）；
+// >3 类只列前 2 个再缀"等N类"，完整名单交给 tooltip——表格列宽有限，
+// 把十几个类名平铺进一颗钮会把整列撑爆。
+static QString alarmClassesButtonText(const QStringList &classes)
+{
+    if (classes.isEmpty())
+        return QStringLiteral("(不报警)");
+    if (classes.size() <= 3)
+        return classes.join(QStringLiteral("、"));
+    return QStringLiteral("%1、%2 等%3类")
+        .arg(classes.at(0), classes.at(1)).arg(classes.size());
+}
+
 // ============================================================
 // refreshModelParamsTable: 重建模型参数表
 //   行 = 库内模型 ∪ 配置里残留的键。后者标红提示"参数表指向的模型已不在库中"，
@@ -2807,32 +2820,20 @@ void frmMain::refreshModelParamsTable()
         }
         modelParamTable_->setItem(r, 0, idItem);
 
-        // --- 列 1：报警类别 ---
-        QComboBox *clsCombo = new QComboBox;
-        theme::makeComboTouch(clsCombo);   // 这一列与置信度同表，弹层行高必须一起给
-        clsCombo->addItem(QStringLiteral("(不报警)"), QString());
-        const QStringList classes = inLib ? reg.meta(id).classes : QStringList{};
-        for (const QString &c : classes)
-            clsCombo->addItem(c, c);
-        const QString cur = cfg.modelAlarmClass(id);
-        int idx = clsCombo->findData(cur);
-        if (idx < 0 && !cur.isEmpty()) {
-            // 老配置里的类别可能不在换过的新模型标签里，仍显示出来（不改写配置）
-            clsCombo->addItem(cur + QStringLiteral(" (不在标签)"), cur);
-            idx = clsCombo->count() - 1;
-        }
-        clsCombo->setCurrentIndex(qMax(0, idx));
-        connect(clsCombo, QOverload<int>::of(&QComboBox::activated), this,
-                [this, id, clsCombo](int) {
-                    ConfigManager &c = ConfigManager::instance();
-                    const QString cls = clsCombo->currentData().toString();
-                    c.setModelAlarmClass(id, cls);
-                    c.save();
-                    log("system", QString("模型 %1 报警类别: %2")
-                            .arg(id, cls.isEmpty() ? QStringLiteral("(不报警)") : cls));
-                    applyModelParamsNow(id);
-                });
-        modelParamTable_->setCellWidget(r, 1, clsCombo);
+        // --- 列 1：报警类别（多选，点开勾选对话框） ---
+        // 为什么不是下拉：报警类别现在可多选，QComboBox 单选模型表达不了"勾几个"，
+        // 改成一颗显示当前选择的钮 + 触屏勾选列表（与通道级联模型对话框同一套交互）。
+        QPushButton *clsBtn = new QPushButton;
+        clsBtn->setStyleSheet(theme::miniButton(theme::BTN_SECONDARY));  // 表格行内 T3 档
+        const QStringList curClasses = cfg.modelAlarmClasses(id);
+        clsBtn->setText(alarmClassesButtonText(curClasses));
+        clsBtn->setToolTip(curClasses.isEmpty()
+                               ? QStringLiteral("点击选择报警类别（可多选）；当前不报警")
+                               : QStringLiteral("已选报警类别：%1").arg(curClasses.join(QStringLiteral("、"))));
+        connect(clsBtn, &QPushButton::clicked, this, [this, id, clsBtn]() {
+            openModelAlarmClassesDialog(id, clsBtn);
+        });
+        modelParamTable_->setCellWidget(r, 1, clsBtn);
 
         // --- 列 2：置信度（档位点选） ---
         // 为什么是档位下拉而不是输入框：本轮不做虚拟键盘，任何输入框在 10 寸触屏上
@@ -2992,11 +2993,12 @@ void frmMain::openChannelModelsDialog(int channel)
 
     for (const QString &id : ordered) {
         QListWidgetItem *item = new QListWidgetItem(list);
-        const QString alarm = cfg.modelAlarmClass(id);
+        const QStringList alarm = cfg.modelAlarmClasses(id);
         item->setText(QStringLiteral("%1  ·  %2  ·  报警:%3")
                           .arg(id,
                                reg.displayName(id),
-                               alarm.isEmpty() ? QStringLiteral("(无)") : alarm));
+                               alarm.isEmpty() ? QStringLiteral("(无)")
+                                               : alarm.join(QStringLiteral("/"))));
         item->setData(Qt::UserRole, id);
         // T1 档行高（54 + 2*8 + 2*1 = 72px ≈ 8.1mm）。列表行高由 sizeHint 定，
         // 不写就还是样式管不到的默认 ~30px —— 触屏上点不中的第二个原因。
@@ -3100,6 +3102,149 @@ void frmMain::openChannelModelsDialog(int channel)
                                           : picked.join(QStringLiteral(" → "))));
     // 模型列表决定推理任务的槽位数与类名表，只能重建任务集合 → 重开本路
     applyChannelConfigNow(channel);
+}
+
+// ============================================================
+// openModelAlarmClassesDialog: 勾选某模型的报警类别（多选）
+//   候选 = 库内 labels.txt 的类名（行序）；配置里不在标签的旧类别仍列出并勾选，
+//   显示缀"(不在标签)"但存的是原值——换模型后旧配置不该在界面上凭空消失。
+//   交互与通道级联模型对话框同一套：清 ItemIsUserCheckable + itemClicked 手动切换、
+//   加粗/提亮区分勾选态（不换底色，QSS 会盖掉）、T1 行高 72、整行可点。
+//   确定后只 applyModelParamsNow + 就地回写按钮文字，**不** refreshModelParamsTable
+//   （那会在 GUI 线程重扫整库 sha256，见 refreshModelParamsTable 注释）。
+// ============================================================
+void frmMain::openModelAlarmClassesDialog(const QString &libId, QPushButton *btn)
+{
+    ConfigManager &cfg = ConfigManager::instance();
+    ModelRegistry &reg = ModelRegistry::instance();
+    const QStringList current = cfg.modelAlarmClasses(libId);
+    const QStringList labels = reg.contains(libId) ? reg.meta(libId).classes : QStringList{};
+
+    // 候选顺序：库内类名（标签行序）在前，配置里不在标签的旧类别缀后
+    QStringList ordered = labels;
+    for (const QString &c : current)
+        if (!ordered.contains(c)) ordered << c;
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("模型 %1 报警类别（可多选）").arg(libId));
+    dlg.resize(900, 760);
+    QVBoxLayout *v = new QVBoxLayout(&dlg);
+
+    QLabel *hint = new QLabel(&dlg);
+    hint->setWordWrap(true);
+    hint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
+    hint->setText(QStringLiteral("勾选的类别检出即报警，可多选；一个都不勾 = 这个模型只画框不报警。"));
+    v->addWidget(hint);
+
+    QListWidget *list = new QListWidget;
+    list->setStyleSheet(theme::field(theme::PANEL));
+    const QColor checkedFg = QColor(QString::fromLatin1(theme::TEXT));
+    const QColor normalFg = QColor(QString::fromLatin1(theme::TEXT_MUTED));
+    auto applyChecked = [checkedFg, normalFg](QListWidgetItem *row) {
+        const bool on = row->checkState() == Qt::Checked;
+        row->setForeground(on ? checkedFg : normalFg);
+        QFont f = row->font();
+        f.setBold(on);
+        row->setFont(f);
+    };
+
+    if (ordered.isEmpty()) {
+        QListWidgetItem *item = new QListWidgetItem(list);
+        item->setText(QStringLiteral("（该模型不在库中或无类名，无法选择报警类别）"));
+        item->setForeground(normalFg);
+        item->setFlags(item->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
+        item->setSizeHint(QSize(0, 72));
+    }
+    for (const QString &c : ordered) {
+        QListWidgetItem *item = new QListWidgetItem(list);
+        const bool stale = !labels.contains(c);
+        item->setText(stale ? QStringLiteral("%1  (不在标签)").arg(c) : c);
+        item->setData(Qt::UserRole, c);   // 存原值，显示后缀不进配置
+        item->setSizeHint(QSize(0, 72));
+        item->setFlags(item->flags() & ~Qt::ItemIsUserCheckable);
+        item->setCheckState(current.contains(c) ? Qt::Checked : Qt::Unchecked);
+        applyChecked(item);
+    }
+    v->addWidget(list);
+
+    QLabel *summary = new QLabel(&dlg);
+    summary->setWordWrap(true);
+    summary->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
+    auto pickedClasses = [list]() {
+        QStringList picked;
+        for (int i = 0; i < list->count(); ++i) {
+            QListWidgetItem *item = list->item(i);
+            if (item->checkState() == Qt::Checked)
+                picked << item->data(Qt::UserRole).toString();
+        }
+        return picked;
+    };
+    auto updateSummary = [pickedClasses, summary]() {
+        const QStringList picked = pickedClasses();
+        summary->setText(QStringLiteral("已选 %1 类：%2")
+                             .arg(picked.size())
+                             .arg(picked.isEmpty() ? QStringLiteral("(无，确定后该模型只画框不报警)")
+                                                   : picked.join(QStringLiteral("、"))));
+    };
+    v->addWidget(summary);
+
+    connect(list, &QListWidget::itemClicked, this,
+            [applyChecked, updateSummary](QListWidgetItem *item) {
+                if (!item || !(item->flags() & Qt::ItemIsEnabled)) return;
+                item->setCheckState(item->checkState() == Qt::Checked
+                                        ? Qt::Unchecked : Qt::Checked);
+                applyChecked(item);
+                updateSummary();
+            });
+    updateSummary();
+
+    QHBoxLayout *tools = new QHBoxLayout;
+    QPushButton *allBtn = new QPushButton(QStringLiteral("全选"));
+    QPushButton *noneBtn = new QPushButton(QStringLiteral("清空"));
+    allBtn->setMinimumSize(140, 72);
+    noneBtn->setMinimumSize(140, 72);
+    auto setAll = [list, applyChecked, updateSummary](Qt::CheckState st) {
+        for (int i = 0; i < list->count(); ++i) {
+            QListWidgetItem *item = list->item(i);
+            if (!(item->flags() & Qt::ItemIsEnabled)) continue;
+            item->setCheckState(st);
+            applyChecked(item);
+        }
+        updateSummary();
+    };
+    connect(allBtn, &QPushButton::clicked, this, [setAll]() { setAll(Qt::Checked); });
+    connect(noneBtn, &QPushButton::clicked, this, [setAll]() { setAll(Qt::Unchecked); });
+    tools->addWidget(allBtn);
+    tools->addWidget(noneBtn);
+    tools->addStretch();
+    v->addLayout(tools);
+
+    QtHelper::enableTouchScroll(list);
+
+    QDialogButtonBox *box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    box->button(QDialogButtonBox::Ok)->setText(QStringLiteral("确定"));
+    box->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
+    connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    v->addWidget(box);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    const QStringList picked = pickedClasses();
+    cfg.setModelAlarmClasses(libId, picked);
+    cfg.save();
+    log("system", QString("模型 %1 报警类别: %2")
+                    .arg(libId, picked.isEmpty() ? QStringLiteral("(不报警)")
+                                                 : picked.join(QStringLiteral("、"))));
+    applyModelParamsNow(libId);
+    // 就地回写这颗钮，不重扫整库重建表
+    if (btn) {
+        btn->setText(alarmClassesButtonText(picked));
+        btn->setToolTip(picked.isEmpty()
+                            ? QStringLiteral("点击选择报警类别（可多选）；当前不报警")
+                            : QStringLiteral("已选报警类别：%1").arg(picked.join(QStringLiteral("、"))));
+    }
 }
 
 // ============================================================

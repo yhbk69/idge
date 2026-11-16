@@ -359,6 +359,10 @@ private:
     /// 勾选并排序该通道的级联模型列表：**列表行序 = 槽位顺序 = result_id = 画面上的 M1/M2**，
     /// 所以必须能上下移动，只勾不排序会静默改变推理链顺序。确定后走整路重开。
     void openChannelModelsDialog(int channel);
+    /// 勾选该模型的报警类别（多选）：候选 = 库内 labels.txt 类名，配置里不在标签的
+    /// 旧类别仍列出并勾选（不改写配置）。确定后只 applyModelParamsNow + 就地更新按钮文字，
+    /// 不 refreshModelParamsTable（那会在 GUI 线程重扫整库 sha256）。btn 用于回写显示。
+    void openModelAlarmClassesDialog(const QString &libId, QPushButton *btn);
 
     // ========== 围栏（独立于级联：类别单值 + 节流窗口） ==========
     /// 在"报警规则"页签加"电子围栏"分组：围栏类别（单值，默认 person）+ 报警最小间隔秒数。

@@ -502,6 +502,9 @@ bool ConfigManager::hasSchemaV2(const QJsonObject &root)
     return root["video"].toObject().contains(QStringLiteral("channels"));
 }
 
+// alarm_class 列表解析（定义在模型参数段，迁移与解析共用）
+static QStringList parseAlarmClasses(const QJsonValue &v);
+
 bool ConfigManager::migrateSchemaV2()
 {
     if (hasSchemaV2(root_))
@@ -531,15 +534,13 @@ bool ConfigManager::migrateSchemaV2()
 
         QJsonObject o = params[libId].toObject();
         const QString alarmClass = slot["alarm_class"].toString().trimmed();
-        const QString existing = o["alarm_class"].toString();
-        if (!alarmClass.isEmpty() && existing.isEmpty()) {
-            o["alarm_class"] = alarmClass;
-        } else if (!alarmClass.isEmpty() && !existing.isEmpty() && alarmClass != existing) {
-            // 同一个库模型出现在多个槽位却配了不同报警类：V2 里它是模型属性，只能留一个。
-            // 保留先出现的那个并点名，否则操作者会以为两个类别都在生效。
-            qWarning() << "[ConfigManager] 模型" << libId
-                       << "在多个槽位配了不同报警类，保留" << existing
-                       << "，忽略" << alarmClass << "（V2 里报警类是模型参数，只能有一个）";
+        if (!alarmClass.isEmpty()) {
+            // 同一个库模型出现在多个槽位：报警类是模型属性，把各槽位配过的类别并成一份
+            // 去重列表（多选语义下不再需要"只能留一个"而丢弃其余）。
+            QStringList merged = parseAlarmClasses(o[QStringLiteral("alarm_class")]);
+            if (!merged.contains(alarmClass))
+                merged << alarmClass;
+            o["alarm_class"] = merged.join(QLatin1Char(','));
         }
 
         const QString label = slot["label"].toString().trimmed();
@@ -1366,12 +1367,32 @@ static QJsonObject videoModelsObject(const QJsonObject &root)
     return root["video"].toObject()["models"].toObject();
 }
 
+// alarm_class 兼容两种写法：字符串（逗号分隔，老配置的单值就是一个元素）与 JSON 数组
+// （手改配置时更直观）。统一成"去空白、去空项、去重、保序"的列表。
+static QStringList parseAlarmClasses(const QJsonValue &v)
+{
+    QStringList raw;
+    if (v.isArray()) {
+        for (const QJsonValue &e : v.toArray())
+            raw << e.toString();
+    } else {
+        raw = v.toString().split(QLatin1Char(','), QString::SkipEmptyParts);
+    }
+    QStringList out;
+    for (const QString &s : raw) {
+        const QString t = s.trimmed();
+        if (!t.isEmpty() && !out.contains(t))
+            out << t;
+    }
+    return out;
+}
+
 // 把一个参数条目解析成结构体（不加锁，供已持锁的成员函数复用）
 static VideoModelParam parseModelParam(const QJsonObject &models, const QString &libId)
 {
     const QJsonObject o = models[libId].toObject();
     VideoModelParam p;
-    p.alarmClass = o["alarm_class"].toString().trimmed();
+    p.alarmClasses = parseAlarmClasses(o[QStringLiteral("alarm_class")]);
     p.label = o["label"].toString().trimmed();
     p.note = o["note"].toString();
     // 必须先判键：QJsonValue 缺键时 toDouble() 返回 0.0，而 0.0 在阈值上是"看得见的合法值"，
@@ -1446,15 +1467,22 @@ VideoModelParam ConfigManager::modelParam(const QString &libId) const
     return parseModelParam(videoModelsObject(root_), libId);
 }
 
-QString ConfigManager::modelAlarmClass(const QString &libId) const
+QStringList ConfigManager::modelAlarmClasses(const QString &libId) const
 {
-    return modelParam(libId).alarmClass;
+    return modelParam(libId).alarmClasses;
 }
 
-void ConfigManager::setModelAlarmClass(const QString &libId, const QString &className)
+void ConfigManager::setModelAlarmClasses(const QString &libId, const QStringList &classes)
 {
+    QStringList clean;
+    for (const QString &s : classes) {
+        const QString t = s.trimmed();
+        if (!t.isEmpty() && !clean.contains(t))
+            clean << t;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
-    patchModelParamField(root_, libId, QStringLiteral("alarm_class"), className.trimmed());
+    // 存成逗号分隔字符串：与老配置的单值写法同键同形，单值就是没有逗号的特例。
+    patchModelParamField(root_, libId, QStringLiteral("alarm_class"), clean.join(QLatin1Char(',')));
 }
 
 void ConfigManager::setModelLabel(const QString &libId, const QString &label)

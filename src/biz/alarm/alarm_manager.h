@@ -177,7 +177,7 @@ public:
      */
     struct SlotContext
     {
-        QString     alarmClass;   ///< 该槽位模型的报警类别；空 = 只画框不报警
+        QStringList alarmClasses; ///< 该槽位模型的报警类别列表；空 = 只画框不报警
         QStringList classNames;   ///< 该槽位模型的类别名（labels.txt 行序 = cls_id）
         QString     modelVersion; ///< 该槽位模型的 "库id@meta.json版本"，空 = 取不到
     };

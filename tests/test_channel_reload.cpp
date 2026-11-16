@@ -392,7 +392,7 @@ int main(int argc, char *argv[])
             // 至于框是否真的少了，属于板上肉眼判据（见 plan §六-2），不在无头测试里断言。
             std::vector<SlotRuntimeParam> params(models.size());
             for (SlotRuntimeParam &p : params) {
-                p.alarmClass = QStringLiteral("__no_such_class__");
+                p.alarmClasses = QStringList() << QStringLiteral("__no_such_class__");
                 p.confThreshold = 0.95f;
                 p.nmsThreshold = 0.45f;
             }

@@ -67,7 +67,7 @@ extern "C" {
  */
 struct SlotRuntimeParam
 {
-    QString alarmClass;            ///< 报警类别，空 = 只画框不报警
+    QStringList alarmClasses;      ///< 报警类别列表，空 = 只画框不报警
     float confThreshold = 0.25f;   ///< 生效置信度（与 detect() 形参默认值同数）
     float nmsThreshold = 0.45f;    ///< 生效 NMS 阈值
 };

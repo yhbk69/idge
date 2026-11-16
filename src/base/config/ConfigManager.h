@@ -56,7 +56,7 @@
  */
 struct VideoModelParam
 {
-    QString alarmClass;  ///< 触发报警的类别名；空 = 只画框不报警
+    QStringList alarmClasses;  ///< 触发报警的类别名列表；空 = 只画框不报警
     QString label;       ///< 标签文件覆盖（一般留空，用库内 labels.txt）
     QString note;        ///< 备注
     // 该模型的置信度覆盖；**负数 = 未配置**（跟随全局 detect.conf_threshold）。
@@ -226,12 +226,12 @@ public:
     /** @brief 参数表里出现过的库 id（QJsonObject 按键升序） */
     QStringList modelParamKeys() const;
 
-    /** @brief 某库 id 的参数；无条目时 alarmClass/label/note 均为空 */
+    /** @brief 某库 id 的参数；无条目时 alarmClasses/label/note 均为空 */
     VideoModelParam modelParam(const QString &libId) const;
 
-    /** @brief 该模型的报警类别；"" = 只画框不报警（无条目也是 ""） */
-    QString modelAlarmClass(const QString &libId) const;
-    void setModelAlarmClass(const QString &libId, const QString &className);
+    /** @brief 该模型的报警类别列表；空 = 只画框不报警（无条目也是空） */
+    QStringList modelAlarmClasses(const QString &libId) const;
+    void setModelAlarmClasses(const QString &libId, const QStringList &classes);
 
     /** @brief 该模型的标签文件覆盖（空 = 用库内 labels.txt） */
     void setModelLabel(const QString &libId, const QString &label);

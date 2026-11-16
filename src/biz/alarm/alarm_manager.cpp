@@ -32,7 +32,7 @@
 //   └──────────────────────────────────────────────────────────────┘
 //
 // 类别判定的两个入口（历史易混淆）：
-//   - 普通报警：只看该槽位模型的 alarm_class（SlotContext.alarmClass，值来自
+//   - 普通报警：只看该槽位模型的 alarm_class 列表（SlotContext.alarmClasses，值来自
 //     config.json 的 video.models[<模型库id>].alarm_class）。
 //   - 围栏报警：FenceManager 的 geofence.alarmClass 单值，判定走几何命中。
 //   两者各用自己的限流窗口（2 秒检测限流 / geofence.throttleSeconds 围栏限流），互不影响。
@@ -285,7 +285,7 @@ void storeDetectionDetail(int channel, const object_detect_result &det,
 //      a. 将 cls_id 用 ctx.classNames 转换为类别名称（如 "person"、"helmet"）
 //      b. 统计各类别检测次数（用于仪表盘展示）
 //      c. 检查是否需要生成报警：
-//         - 类别必须等于该槽位模型的报警类别（ctx.alarmClass，空=只画框不报警）
+//         - 类别必须在该槽位模型的报警类别列表内（ctx.alarmClasses，空=只画框不报警）
 //         - 同通道同槽位同类别必须超过限流间隔（2秒）
 //      d. 创建 AlarmRecord 结构体
 //   3. 返回新报警列表
@@ -332,8 +332,8 @@ QVector<AlarmRecord> AlarmManager::ingest(int channel, const object_detect_resul
             // 统计各类别检测次数
             classCount_[className]++;
 
-            // 报警类别是"模型的参数"：空 = 这个模型只画框不报警
-            if (ctx.alarmClass.isEmpty() || ctx.alarmClass != className)
+            // 报警类别是"模型的参数"：空 = 这个模型只画框不报警；多选时命中其一即报
+            if (ctx.alarmClasses.isEmpty() || !ctx.alarmClasses.contains(className))
                 continue;
 
             // ===== 判定两层：轨迹闸门（每事件一条）→ 2 秒全局窗口兜底 =====

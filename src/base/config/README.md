@@ -38,7 +38,7 @@
 
 | 键 | 类型 | 说明 |
 | --- | --- | --- |
-| `models.<库目录名>.alarm_class` | string | **模型的参数**：该模型检出这一类才出报警；空 = 只画框不报警。不是通道或槽位属性，同一个模型挂在哪一路触发的都是同一个类别。设置页改动对引用它的通道即时生效（见 `frmMain::applyAlarmClassNow`） |
+| `models.<库目录名>.alarm_class` | string | **模型的参数**：该模型检出列表内任一类即出报警；**可多选**，逗号分隔（如 `un_helmet,vest`，也兼容 JSON 数组），空 = 只画框不报警。不是通道或槽位属性，同一个模型挂在哪一路触发的都是这同一组类别。设置页改动对引用它的通道即时生效（见 `frmMain::applyModelParamsNow`） |
 | `models.<库目录名>.label` | string | 标签文件覆盖，库外标签的逃生口；留空用库内 `labels.txt`（优先级：此值 > 库内） |
 | `models.<库目录名>.note` | string | 备注，仅供设置页展示 |
 | `sources` | array | **视频流注册表**：一条 = 一路可被引用的取流地址 + 它的全部打开参数，见下面那张表 |
@@ -244,8 +244,8 @@ ConfigManager::instance().save();                          // 显式落盘
 // "改完要不要重开该路"是设置页的事（见 README §八 第 10 条）
 ConfigManager::instance().setChannelSource(0, "rtsp://192.168.1.10/stream1");
 ConfigManager::instance().setChannelModelIds(0, {"yolo11n-ppe", "yolo11n-coco"}); // 顺序即槽位
-ConfigManager::instance().setModelAlarmClass("yolo11n-ppe", "un_helmet");         // 模型参数
-QString cls = ConfigManager::instance().modelAlarmClass("yolo11n-coco");           // 无条目返回 ""
+ConfigManager::instance().setModelAlarmClasses("yolo11n-ppe", {"un_helmet", "vest"}); // 模型参数，可多选
+QStringList cls = ConfigManager::instance().modelAlarmClasses("yolo11n-coco");        // 无条目返回空列表
 
 // 报警录制：只有 getter（见下方"无 setter"说明）
 RecorderConfig rc;

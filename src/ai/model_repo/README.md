@@ -27,8 +27,8 @@ ModelRegistry::instance().deleteModel(id, err); // 被引用则拒绝，否则�
 ModelRegistry::instance().findIdByModelFile(p); // 模型文件反查库内 id（迁移/排障用）
 ```
 
-`ResolvedSlot{modelPath, labelPath, libId, alarmClass, confThreshold, nmsThreshold}` 的字段来源：
-`modelPath`/`labelPath` 取自库目录，`alarmClass` 取自 `video.models[<libId>].alarm_class`，
+`ResolvedSlot{modelPath, labelPath, libId, alarmClasses, confThreshold, nmsThreshold}` 的字段来源：
+`modelPath`/`labelPath` 取自库目录，`alarmClasses`（多选列表）取自 `video.models[<libId>].alarm_class`，
 `confThreshold` 走回落链 `video.models[<libId>].conf_threshold` → `detect.conf_threshold` → 0.25
 （唯一实现点 `resolveConfThreshold()`，**UI 显示与推理用的是同一个函数**，不存在"页面上一个数、
 跑起来另一个数"），`nmsThreshold` 只有全局一档。

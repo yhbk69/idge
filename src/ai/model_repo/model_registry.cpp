@@ -678,7 +678,7 @@ QList<ResolvedSlot> ModelRegistry::resolveChannelSlots(int ch)
         s.libId = libId;
         s.modelPath = instance().modelPath(libId);  // 绝对路径，给加载器用
         const VideoModelParam param = cfg.modelParam(libId);
-        s.alarmClass = param.alarmClass;            // 空 = 这个模型只画框不报警
+        s.alarmClasses = param.alarmClasses;        // 空 = 这个模型只画框不报警
         // 标签优先级：参数表显式 label（库外标签文件的逃生口）> 库内 labels.txt
         s.labelPath = param.label.isEmpty() ? instance().labelPath(libId) : param.label;
         if (!QFile::exists(s.labelPath)) {

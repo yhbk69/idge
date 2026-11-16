@@ -44,7 +44,7 @@
 数据流：
 ```
 解码线程（每帧 × 每个级联槽位）
-  → ingest(channel, od, SlotContext{alarmClass, classNames})   ← 上下文由解码器按通道局部组装，栈上传入
+  → ingest(channel, od, SlotContext{alarmClasses, classNames})   ← 上下文由解码器按通道局部组装，栈上传入
   → 生成 newAlarms(未存/未截图)
   → 收集本帧围栏候选（类别 == geofence.alarmClass 的目标）
   → 槽循环结束后一次通道级合并判定：ingestFenceAlarm(channel, det, ctx, timeNs, role)
@@ -132,8 +132,8 @@ key=通道×1e6+槽×1e3+cls_id）做跨批 IoU 关联：命中数与存活时�
 ```cpp
 // 解码线程中：上下文每帧按通道局部组装一次（与阈值共用同一份 slotParams_ 快照），
 // 槽循环内逐槽传入
-AlarmManager::SlotContext ctx;                 // alarmClass 空 = 该模型只画框不报警
-ctx.alarmClass = slotParamSnap[k].alarmClass;
+AlarmManager::SlotContext ctx;                 // alarmClasses 空 = 该模型只画框不报警
+ctx.alarmClasses = slotParamSnap[k].alarmClasses;
 for (const auto &n : slotClassNames_[k]) ctx.classNames << QString::fromStdString(n);
 
 QVector<AlarmRecord> news = AlarmManager::instance().ingest(ch, od, ctx);

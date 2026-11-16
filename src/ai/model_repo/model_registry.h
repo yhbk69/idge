@@ -44,7 +44,7 @@ struct ResolvedSlot
     QString modelPath;   ///< model.rknn 绝对路径（给加载器）
     QString labelPath;   ///< 该模型的 labels.txt（参数表覆盖 > 库内默认）
     QString libId;       ///< 模型库目录名，config 里就是这个键
-    QString alarmClass;  ///< 该模型的报警类别（video.models[<id>].alarm_class），空=不报警
+    QStringList alarmClasses;  ///< 该模型的报警类别列表（video.models[<id>].alarm_class），空=不报警
     // 该槽位的**生效**阈值：回落链（每模型 conf_threshold → detect.conf_threshold → 0.25）
     // 已在 resolveChannelSlots() 里走完并夹过下限，调用方拿到的就是最终值，不必再判缺键。
     // 类内默认值等于 detect() 的形参默认值，语义是"谁都没配 ⇒ 行为与接通阈值前逐字节相同"。

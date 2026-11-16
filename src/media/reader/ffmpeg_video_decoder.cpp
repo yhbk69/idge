@@ -923,7 +923,7 @@ void FFmpegVideoDecoder::buildCascadeTasks()
         fb.libId = fbId;
         fb.modelPath = fbModel;
         fb.labelPath = ModelRegistry::instance().labelPath(fbId);
-        fb.alarmClass = cfg.modelAlarmClass(fbId);
+        fb.alarmClasses = cfg.modelAlarmClasses(fbId);
         // 兜底槽也必须走同一条阈值链：不填的话它拿的是 ResolvedSlot 的类内默认 0.25，
         // 于是"这一路没配模型"的通道会静默无视 config 里的阈值——正是最难查的那种不一致。
         fb.confThreshold = ModelRegistry::resolveConfThreshold(fbId);
@@ -992,7 +992,7 @@ void FFmpegVideoDecoder::buildCascadeTasks()
         // 加锁是因为运行期 GUI 可以经 updateSlotParams() 改写这张表（槽位数不变时）。
         {
             SlotRuntimeParam p;
-            p.alarmClass = s.alarmClass;
+            p.alarmClasses = s.alarmClasses;
             p.confThreshold = s.confThreshold;
             p.nmsThreshold = s.nmsThreshold;
             std::lock_guard<std::mutex> lk(slotParamMtx_);
@@ -1013,7 +1013,7 @@ void FFmpegVideoDecoder::buildCascadeTasks()
     for (size_t k = 0; k < tasks_.size(); ++k) {
         qDebug() << "  slot" << k << "->" << QString::fromStdString(tasks_[k]->getModelPath())
                  << "labels:" << (int)slotClassNames_[k].size()
-                 << "alarm_class:" << slotParams_[k].alarmClass;
+                 << "alarm_class:" << slotParams_[k].alarmClasses.join(QStringLiteral(","));
     }
 
     // 围栏前置条件：围栏是通道级判定，需要本通道至少有一个模型能产出围栏类别。
@@ -2297,8 +2297,8 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
                     // 直接复用 4.5b 那份快照（≤5 元素的拷贝，锁只在那一次覆盖）：
                     // 设置页改报警类别或阈值都不需要重启、不需要重开本路。
                     for (size_t k = 0; k < slotQueues_.size(); ++k) {
-                        slotCtxs[k].alarmClass =
-                            (k < slotParamSnap.size()) ? slotParamSnap[k].alarmClass : QString();
+                        slotCtxs[k].alarmClasses =
+                            (k < slotParamSnap.size()) ? slotParamSnap[k].alarmClasses : QStringList();
                         slotCtxs[k].modelVersion =
                             (k < slotModelVersions_.size()) ? slotModelVersions_[k] : QString();
                         slotCtxs[k].classNames.reserve((int)slotClassNames_[k].size());
@@ -2673,9 +2673,9 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
                             QStringList alarmClassDesc;
                             for (size_t k = 0; k < slotCtxs.size(); ++k)
                                 alarmClassDesc << QString("M%1=%2").arg(k + 1)
-                                        .arg(slotCtxs[k].alarmClass.isEmpty()
+                                        .arg(slotCtxs[k].alarmClasses.isEmpty()
                                                  ? QStringLiteral("(不报警)")
-                                                 : slotCtxs[k].alarmClass);
+                                                 : slotCtxs[k].alarmClasses.join(QStringLiteral("/")));
                             // 报警条数可能少于"新事件"数：同一通道同一角色同一类别被
                             // geofence.throttleSeconds 兜住了（进入沿抖动/两人几乎同时违规），
                             // 这两个数并排打出来就是为了能看出来被兜住了。
