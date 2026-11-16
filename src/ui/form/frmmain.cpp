@@ -1805,6 +1805,11 @@ void frmMain::initDebugPage()
                 }
                 delete item;
             }
+
+            // ⚠ 搬运循环**之后**才把 QTabWidget 挂进 pageSettings 自己的布局：
+            // 它必须经布局管理，否则只是 pageSettings 下的一个游离子件——不参与布局、
+            // 停在左上角、只按 sizeHint 大小摆着，整页内容就全堆在那（2026-11-16 板端实测）。
+            pageSettingsLayout->addWidget(settingsTabs_);
         }
     }
 
