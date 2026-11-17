@@ -24,7 +24,7 @@
 | `fence_manager.h/.cpp` | 单例数据管理：config.json 读写、per-channel 围栏；**老配置的像素坐标在 `loadFromConfig` 里一次性换算成归一化** |
 | `fence_overlay.h/.cpp` | 透明覆盖层 QWidget：绘制与鼠标交互（矩形/多边形/删除），按角色配色与 `setRole`；归一化↔像素的换算基准由 `setContentRect` 提供 |
 | `pad_fence_store.h/.cpp` | **Pad 接口 v1 §5 那套围栏**的存储与版本状态机：`pad_fences`/`pad_fence_versions` 两张表、`regions` 的 8 条校验、草稿/生效/停用三态流转。与上面 `FenceManager` **没有任何共享**（见下节） |
-| `fence_frame_renderer.h/.cpp` | §5.3 要的"合成生效画面"PNG：1280×720，背景网格 + 按 `ruleType` 填色的区域 + 编号圆盘，写到 `<媒体根>/fence-frames/<fenceId>/v<n>.png` |
+| `fence_frame_renderer.h/.cpp` | §5.3 要的"合成生效画面"PNG：1280×720，apply 时刻的真实帧等比铺底（取不到帧退深色底 + 网格）+ 按 `ruleType` 填色的区域 + 编号圆盘，写到 `<媒体根>/fence-frames/<fenceId>/v<n>.png`；`renderFenceImage` 另供管理页草稿黑底预览（不落盘）；RECT 一律按外接矩形画，点序出口归一为 左上→右上→右下→左下 |
 
 ## 核心类与数据流
 - **FenceChecker**（全静态方法）：

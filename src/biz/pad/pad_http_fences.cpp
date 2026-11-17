@@ -444,10 +444,13 @@ void registerFenceRoutes(PadHttpServer *server, const HttpApiContext &ctx)
                                  QString absolutePath;
                                  QString relativePath;
                                  QString renderError;
+                                 // 底图 = 下发时刻该通道的真实帧（UI 域注册的提供者）；
+                                 // 取不到时渲染器退回网格底，不伪造画面。
                                  if (!geofence::renderFenceFrame(fenceId, version, target.regions,
                                                                  ctx.mediaRootDir,
                                                                  ctx.fenceFrameDir, &absolutePath,
-                                                                 &relativePath, &renderError)) {
+                                                                 &relativePath, &renderError,
+                                                                 geofence::frameForCamera(fence.cameraId))) {
                                      return padhttp::replyError(503, 3003,
                                                                 QString::fromUtf8("围栏生效画面渲染不出来"),
                                                                 renderError);

@@ -16,6 +16,8 @@
 #include <QPen>
 #include <QPolygonF>
 
+#include <utility>
+
 namespace geofence {
 namespace {
 
@@ -42,11 +44,115 @@ QPointF labelAnchor(const QPolygonF &polygon)
     return QPointF(x / polygon.size(), y / polygon.size());
 }
 
+/// RECT 的外接矩形四点，顺序固定 左上→右上→右下→左下（2026-11-17 用户裁定）。
+/// 不依赖存储顺序：旧数据里有过 (左上,右下,左下,右上) 的交叉序，直接 drawPolygon
+/// 会画成蝴蝶结；按 min/max 重建后无论来源顺序如何都是正矩形。
+QPolygonF rectPolygon(const PadRegion &region)
+{
+    double xMin = 1.0, xMax = 0.0, yMin = 1.0, yMax = 0.0;
+    for (const QPointF &point : region.points) {
+        xMin = qMin(xMin, point.x());
+        xMax = qMax(xMax, point.x());
+        yMin = qMin(yMin, point.y());
+        yMax = qMax(yMax, point.y());
+    }
+    QPolygonF polygon;
+    polygon << QPointF(xMin * kFrameWidth, yMin * kFrameHeight)
+            << QPointF(xMax * kFrameWidth, yMin * kFrameHeight)
+            << QPointF(xMax * kFrameWidth, yMax * kFrameHeight)
+            << QPointF(xMin * kFrameWidth, yMax * kFrameHeight);
+    return polygon;
+}
+
+std::function<QImage(const QString &)> g_frameProvider;
+
 }  // namespace
+
+void setFrameProvider(std::function<QImage(const QString &cameraId)> provider)
+{
+    g_frameProvider = std::move(provider);
+}
+
+QImage frameForCamera(const QString &cameraId)
+{
+    if (!g_frameProvider)
+        return {};
+    return g_frameProvider(cameraId);
+}
+
+QImage renderFenceImage(const QVector<PadRegion> &regions, const QImage &background)
+{
+    QImage image(kFrameWidth, kFrameHeight, QImage::Format_RGB32);
+    image.fill(QColor(16, 20, 28));   // 深底：非主题色板成员，理由同视频预览留边用的纯黑
+
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    if (!background.isNull()) {
+        // 真实画面等比居中（letterbox），与编辑画布/视频页同一口径，
+        // 围栏叠上去的位置才和现场看到的一致。
+        const QSize scaled = background.size().scaled(image.size(), Qt::KeepAspectRatio);
+        const QRect target(QPoint((kFrameWidth - scaled.width()) / 2,
+                                  (kFrameHeight - scaled.height()) / 2), scaled);
+        painter.drawImage(target, background.scaled(scaled, Qt::IgnoreAspectRatio,
+                                                    Qt::SmoothTransformation));
+    } else {
+        // 十等分网格：没有视频帧可叠时（草稿预览/取不到帧），给现场一个比例参照。
+        QPen grid(QColor(255, 255, 255, 26));
+        grid.setWidth(1);
+        painter.setPen(grid);
+        for (int i = 1; i < 10; ++i) {
+            const int x = kFrameWidth * i / 10;
+            const int y = kFrameHeight * i / 10;
+            painter.drawLine(QPoint(x, 0), QPoint(x, kFrameHeight));
+            painter.drawLine(QPoint(0, y), QPoint(kFrameWidth, y));
+        }
+    }
+
+    QFont labelFont = painter.font();
+    labelFont.setPixelSize(34);
+    labelFont.setBold(true);
+    painter.setFont(labelFont);
+
+    // 顺序即界面上的"围栏 1..N"（§5.2 明写数组顺序就是编号），所以序号用数组下标 +1，
+    // 而不是从 regionId 里解析什么——regionId 是 Pad 生成的任意串。
+    for (int index = 0; index < regions.size(); ++index) {
+        const PadRegion &region = regions.at(index);
+        QPolygonF polygon;
+        if (region.shapeType == QLatin1String("RECT")) {
+            polygon = rectPolygon(region);
+        } else {
+            polygon.reserve(region.points.size());
+            for (const QPointF &point : region.points) {
+                polygon << QPointF(point.x() * kFrameWidth, point.y() * kFrameHeight);
+            }
+        }
+        if (polygon.size() < 2)
+            continue;   // validateRegions 已经把点数判过，这里是防御性跳过而不是新规则
+        const QColor color = ruleColor(region.ruleType);
+        QColor fill = color;
+        fill.setAlpha(72);              // 半透明：多个区域叠在一起时能看见彼此的边
+        painter.setBrush(fill);
+        QPen outline(color);
+        outline.setWidth(3);
+        painter.setPen(outline);
+        painter.drawPolygon(polygon);
+
+        const QPointF anchor = labelAnchor(polygon);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0, 0, 0, 190));
+        painter.drawEllipse(anchor, 24, 24);
+        painter.setPen(Qt::white);
+        painter.drawText(QRectF(anchor.x() - 24, anchor.y() - 24, 48, 48),
+                         Qt::AlignCenter, QString::number(index + 1));
+    }
+    painter.end();
+    return image;
+}
 
 bool renderFenceFrame(const QString &fenceId, int version, const QVector<PadRegion> &regions,
                       const QString &mediaRootDir, const QString &subDir,
-                      QString *absPathOut, QString *relPathOut, QString *err)
+                      QString *absPathOut, QString *relPathOut, QString *err,
+                      const QImage &background)
 {
     if (fenceId.isEmpty() || mediaRootDir.isEmpty() || version <= 0) {
         if (err)
@@ -64,59 +170,7 @@ bool renderFenceFrame(const QString &fenceId, int version, const QVector<PadRegi
         return false;
     }
 
-    QImage image(kFrameWidth, kFrameHeight, QImage::Format_RGB32);
-    image.fill(QColor(16, 20, 28));   // 深底：非主题色板成员，理由同视频预览留边用的纯黑
-
-    {
-        QPainter painter(&image);
-        painter.setRenderHint(QPainter::Antialiasing, true);
-        // 十等分网格：给现场一个"这条围栏大概在画面中间偏右"的比例参照。
-        // 没有视频帧可叠的时候（见头文件那段），这是唯一能估位置的东西。
-        QPen grid(QColor(255, 255, 255, 26));
-        grid.setWidth(1);
-        painter.setPen(grid);
-        for (int i = 1; i < 10; ++i) {
-            const int x = kFrameWidth * i / 10;
-            const int y = kFrameHeight * i / 10;
-            painter.drawLine(QPoint(x, 0), QPoint(x, kFrameHeight));
-            painter.drawLine(QPoint(0, y), QPoint(kFrameWidth, y));
-        }
-
-        QFont labelFont = painter.font();
-        labelFont.setPixelSize(34);
-        labelFont.setBold(true);
-        painter.setFont(labelFont);
-
-        // 顺序即界面上的"围栏 1..N"（§5.2 明写数组顺序就是编号），所以序号用数组下标 +1，
-        // 而不是从 regionId 里解析什么——regionId 是 Pad 生成的任意串。
-        for (int index = 0; index < regions.size(); ++index) {
-            const PadRegion &region = regions.at(index);
-            QPolygonF polygon;
-            polygon.reserve(region.points.size());
-            for (const QPointF &point : region.points) {
-                polygon << QPointF(point.x() * kFrameWidth, point.y() * kFrameHeight);
-            }
-            if (polygon.size() < 2)
-                continue;   // validateRegions 已经把点数判过，这里是防御性跳过而不是新规则
-            const QColor color = ruleColor(region.ruleType);
-            QColor fill = color;
-            fill.setAlpha(72);              // 半透明：多个区域叠在一起时能看见彼此的边
-            painter.setBrush(fill);
-            QPen outline(color);
-            outline.setWidth(3);
-            painter.setPen(outline);
-            painter.drawPolygon(polygon);
-
-            const QPointF anchor = labelAnchor(polygon);
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(0, 0, 0, 190));
-            painter.drawEllipse(anchor, 24, 24);
-            painter.setPen(Qt::white);
-            painter.drawText(QRectF(anchor.x() - 24, anchor.y() - 24, 48, 48),
-                             Qt::AlignCenter, QString::number(index + 1));
-        }
-        painter.end();
-    }
+    const QImage image = renderFenceImage(regions, background);
 
     if (!image.save(absolute, "PNG")) {
         if (err)

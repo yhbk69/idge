@@ -84,9 +84,11 @@ test_*.cpp
 !tests/test_net_route.cpp
 #   test_fence_merge              —— 检测快照并两库（native+pad_fences）九条契约：cameraId 两套编号、Pad 优先、不自死锁
 #   test_media_prune              —— 报警媒体双闸门 8 条契约：过期整目录、超上限只端大文件保住 *_thumb.jpg
+#   test_fence_canvas             —— 围栏编辑画布/管理页离屏自检：合成鼠标事件验几何与各版本态构造
 
 !tests/test_fence_merge.cpp
 !tests/test_media_prune.cpp
+!tests/test_fence_canvas.cpp
 # 测试素材（*.jpg/*.mp4 全局忽略，此处显式放行；*_faces.json 等为运行产物不放行）
 !assets/test/1.mp4
 !assets/test/bus.jpg

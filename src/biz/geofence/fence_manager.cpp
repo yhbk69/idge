@@ -350,6 +350,12 @@ void FenceManager::refreshFromStoresLocked()
     // config 的 geofence.enabled 可能是模板默认的 false，而围栏是刚生效的。
     if (!fences_.empty())
         enabled_ = true;
+    // 通知所有通道的显示层重读快照（含"清空"：没围栏的通道也要发，overlay 才会擦掉旧线框）。
+    // ⚠ 这里持有 mutex_，订阅方必须用 Qt::QueuedConnection——直连会在槽里调
+    // channelFence() 再抢同一把不可重入锁，当场死锁（FenceOverlay 已按此连接）。
+    const int channels = ConfigManager::instance().channelCount();
+    for (int ch = 0; ch < channels; ++ch)
+        emit fenceChanged(ch);
 }
 
 void FenceManager::loadNativeFencesLocked()

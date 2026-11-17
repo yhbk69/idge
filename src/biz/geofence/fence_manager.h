@@ -58,6 +58,8 @@ public:
      *
      * 只能在 GUI 线程调（两个 store 都是 GUI 线程专用），且要已登录：
      * 未登录时 currentTaskId_ 是空串，读的是"全局那一桶"。
+     * 刷新后对每个通道发 fenceChanged（持锁 emit，订阅方必须 QueuedConnection），
+     * 视频页的 FenceOverlay 据此自动重读快照。
      */
     void refreshFromStores();
     // ========================================================================

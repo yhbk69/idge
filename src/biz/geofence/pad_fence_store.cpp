@@ -81,8 +81,25 @@ QJsonObject PadRegion::toJson() const
     QJsonObject obj;
     obj.insert(QStringLiteral("regionId"), regionId);
     obj.insert(QStringLiteral("shapeType"), shapeType);
+    // RECT 出口点序固定 左上→右上→右下→左下（2026-11-17 用户裁定）。
+    // 在这里归一而不是只改绘制端：落库（regionsToJsonText）与 HTTP 出参
+    // （versionToJson）都经 toJson，一处改写两路都合规，旧数据再出口也跟着修正。
+    // 轴对齐矩形按 min/max 重建四点与原形状语义相同，不算改写 Pad 的形状。
+    QVector<QPointF> ordered = points;
+    if (shapeType == QLatin1String("RECT") && ordered.size() == 4) {
+        double xMin = ordered.at(0).x(), xMax = ordered.at(0).x();
+        double yMin = ordered.at(0).y(), yMax = ordered.at(0).y();
+        for (const QPointF &point : ordered) {
+            xMin = qMin(xMin, point.x());
+            xMax = qMax(xMax, point.x());
+            yMin = qMin(yMin, point.y());
+            yMax = qMax(yMax, point.y());
+        }
+        ordered = {QPointF(xMin, yMin), QPointF(xMax, yMin),
+                   QPointF(xMax, yMax), QPointF(xMin, yMax)};
+    }
     QJsonArray pointArray;
-    for (const QPointF &point : points) {
+    for (const QPointF &point : ordered) {
         // 每个点写回**两个数**，且按 double 出：规约 §13.4.3 是 array<array<number>>。
         // 归一化值 0~1 用 QJsonValue(double) 会写成 0.5/0.25 这种最短形式，
         // 与对端发来的字符串可能差在末尾零上——那是 JSON 数字的正常表现，

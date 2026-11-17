@@ -6,7 +6,7 @@
 
 `src/ui/form` 是 IDGE（RK3588 施工行为监测与分析系统）的**顶层窗体目录**，包含主窗口 `frmMain` 及其挂载的全部页面控件：
 
-- **视频监控页**：4 路视频 2x2 网格实时显示（`frmVideoWindow` + `src/ui/PlayerWidget` + `src/ui/GLVideoWidget`），含单通道全屏放大与电子围栏绘制工具栏（画之前先选角色：禁区红 / 岗区域绿）；
+- **视频监控页**：4 路视频 2x2 网格实时显示（`frmVideoWindow` + `src/ui/PlayerWidget` + `src/ui/GLVideoWidget`），含单通道全屏放大；围栏只经 FenceOverlay 显示，绘制/编辑统一在「电子围栏」管理页（`src/ui/widgets/fence_manage_widget`）；
 - **调试设置页**（导航文本"调试设置" → `ui->pageSettings`）：`config.json` 的编辑界面（视频通道选流/视频流管理/模型/阈值/报警类别/围栏类别）、WebSocket 地址与连接状态、**Pad 服务端（WS 入站 8900）的开关/端口/路径/设备 ID/媒体地址前缀/同步上限**（「保存并应用」会停服再起服，已连的 Pad 自己重连）、**Pad HTTP 服务端（`/api/` 入站 8899）的开关/端口/正文上限 MB/围栏合成画面/是否暴露取流口令 + 当前路由数与连接数**（同一个「保存并应用」写法：五个 setter → `save()` → `PadHttpServer::stop()` → 按新配置 `start()`；8899 用的是自建 `QTcpServer`，可以重绑，这与 8090 那台进程级一次的 ZLM 静态服务不同）、级联模型 5 槽位配置、通道备注与清空，页底是带颜色分类的运行日志（`textBrowserLog`）。配置控件与日志同在一页，全部内嵌在 `frmmain.cpp` 的 `initDebugPage()`/`initCascadeUi()`，没有独立的"系统设置/帮助"页；
   ⚠ **这一页的可见文案只写"这个口/这个地址做什么"，不写协议条款号**（`§4.2`/`A4 分配` 这类只留在代码注释与
   README 里，现场运维看界面不需要反查规约）。三个分组标题也按方向区分：
@@ -36,7 +36,7 @@
 | 文件 | 职责 | 来源 |
 |---|---|---|
 | frmmain.h/.cpp/.ui | 主窗口：导航、页面装配、config.json 编辑、级联模型配置、日志、报警 toast/角标、**标题栏右上角登录人角标**、业务服务初始化与注入 | main |
-| frmvideowindow.h/.cpp/.ui | 4 路视频 2x2 网格窗口 + 围栏绘制工具栏（**角色：禁区/岗区域**、矩形/多边形、删除、清空） | main |
+| frmvideowindow.h/.cpp/.ui | 4 路视频 2x2 网格窗口（围栏只显示不绘制，编辑在电子围栏管理页） | main |
 | video_decoder.h/.cpp | FFmpeg 软解码器（录像回放），独立线程 + PTS 帧同步；**当前无实例化点** | main |
 | roll_call_widget.h/.cpp | 人员点名任务列表页（创建/查看/注销/删除/导出报告） | caichao 合入 |
 | photo_selection_widget.h/.cpp | 拍照/选图对话框（点名与设备盘点共用；GL 预览 + 快门 + 上传） | caichao 合入 |
@@ -162,8 +162,7 @@
 - `src/ui/widgets`：PlayerWidget/GLVideoWidget/DashboardWidget/AlarmListWidget；
 - `src/media/reader`：FFmpegVideoDecoder（实时）、CameraPreviewDecoder（摄像头预览/拍照，取流地址同 `smartRecognition.camera`）；
 - `src/biz/geofence`（经 `src/fence_manager.h` 等）：FenceManager、FenceOverlay、DrawMode、FenceRole；
-  视频监控页的角色按钮**必须放在独立的 `fenceRoleGroup_`**，不能塞进 `fenceDrawGroup_`——
-  后者的 id 空间 0/1/2 在 `onFenceToolClicked` 里被直接翻译成 `DrawMode`，混进去会让"点角色按钮"变成"换绘制工具"。
+  视频监控页只保留 FenceOverlay 的显示；绘制/编辑在电子围栏管理页（FenceCanvas + FenceManageWidget）。
 - `src/base/imaging`：qt_image_utils 的 `loadPixmapSafe`（板端 Qt JPEG 插件与 libjpeg ABI 冲突的安全解码，业务页所有图片加载必须走它）；
 - `src/ui/form/smart_recognition_widget`：二维码链路依赖 `3rdparty/zbar`（编译期 `HAS_ZBAR`，见 `3rdparty/README.md`），OCR 链路用 `QProcess` 起 `3rdparty/ppocrv4/bin` 的两个 rknn_model_zoo demo（不链接，见 `3rdparty/ppocrv4/README.md`），权重在 `model/library/ppocrv4-ocr/`；取流地址读 `config.json` 的 `smartRecognition.camera`；
 - 根目录：`ConfigManager`（config.json）、`AlarmManager`、`SharedTypes.hpp`、`src/ui/core`（IconHelper/QtHelper/theme/AppInit）；
@@ -275,15 +274,8 @@
   槽函数换成 `isFullScreen()` 切换 + `setProperty("canMove", ...)`。为什么非 `_NET_WM_STATE_FULLSCREEN`
   不可（dock 是 shell actor，`setGeometry` 与 `X11BypassWindowManagerHint` 都动不了它）见
   `src/ui/core/README.md`「真全屏」。
-- **围栏工具栏**：`frmvideowindow.cpp` 的整条工具栏是内联 QSS（不经 `getStyle()`，多 token 值正常），
-  高度 86、钮 T1 档；通道钮固定 56x72，**角色钮不设固定宽**（固定 44px 撞上 `padding:8px 14px` 会吃掉"岗区域"三字）。
-  角色语义不能只写 tooltip——触屏 hover 不到，所以文字前挂了 12px 实色方块，
-  颜色取 `geofence::FenceOverlay::roleColor`（已提到 public），与画布上围栏同口径、改一处两边同步。
-  **工具栏必须 `addWidget(toolbar, 2, 0, 1, 2)` 跨两列**：插进单列会把那一列的最小宽度顶到 ~700px，
-  四宫格左右两列立刻不等宽（这就是"四个监控不一样大"的唯一成因）。
-  同理**不要在网格里放横向 `QSpacerItem` 撑居左**——弹簧的最小宽度同样会灌进第二列，
-  居左交给工具栏自己 `QHBoxLayout` 末尾的 `addStretch()`。
-  放大模式（player 占 `(0,0,2,2)`）下跨列写法同样成立，别把它拆回单列。
+- **围栏工具栏已移除**（2026-11-17）：视频监控页不再提供绘制入口，围栏编辑统一在
+  「电子围栏」管理页；`frmVideoWindow` 只剩 2x2 网格 + 放大切换，两列两行等分在构造函数里显式声明。
 - **表格行高只能走代码**：`QTableView::item{padding}` 不改行高，必须
   `verticalHeader()->setDefaultSectionSize(theme::TOUCH_TABLE_ROW)`（本目录 2 张 + `alarm_list_widget` 2 张）。
 - **行内"容器 + 布局"必须显式给到行高**：`setCellWidget` 的容器按自身 sizeHint 居中放行格、不拉满，

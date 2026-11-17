@@ -25,6 +25,14 @@ FenceOverlay::FenceOverlay(QWidget *parent)
     setAttribute(Qt::WA_NoSystemBackground, true);
     setAttribute(Qt::WA_TranslucentBackground, true);
     setMouseTracking(true);
+    // 围栏库刷新（管理页应用/停用、Pad HTTP 下发、登录切换）后自动重读快照。
+    // 必须 QueuedConnection：FenceManager 持锁 emit，直连会在 loadFences →
+    // channelFence 里再抢同一把不可重入锁，当场死锁。
+    connect(&FenceManager::instance(), &FenceManager::fenceChanged,
+            this, [this](int channel) {
+                if (channel == channel_)
+                    loadFences();
+            }, Qt::QueuedConnection);
 }
 
 // ============================================================================

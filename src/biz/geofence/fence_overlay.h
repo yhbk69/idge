@@ -85,6 +85,9 @@ public:
     // 从 FenceManager 加载围栏数据并刷新显示
     void loadFences();
 
+    // 当前显示的围栏快照（只读；自检用它断言"库刷新后 overlay 真的跟着重读了"）
+    const ChannelFence &channelFence() const { return channelFence_; }
+
     // 将当前围栏数据保存到 FenceManager
     void saveFences();
 

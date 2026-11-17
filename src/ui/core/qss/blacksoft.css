@@ -172,6 +172,26 @@ background:qlineargradient(spread:pad,x1:0,y1:0,x2:0,y2:1,stop:0 #3d3d4d,stop:1 
 background:qlineargradient(spread:pad,x1:0,y1:0,x2:0,y2:1,stop:0 #2d2d3d,stop:1 #262636);
 }
 
+/* 可选中按钮（围栏工具/规则等 setCheckable 的钮）的选中态：强调色实底，
+   与 theme::ACCENT(#4fc3f7) 同源；浅底配深字保证对比度。没有这一档时
+   checkable 钮按下后外观与未选完全一样，用户看不出当前工具是哪个。 */
+.QPushButton:checked,.QToolButton:checked{
+background:#4fc3f7;
+color:#0b1220;
+border:1px solid #4fc3f7;
+}
+
+.QPushButton:checked:hover,.QToolButton:checked:hover{
+background:#81d4fa;
+border:1px solid #81d4fa;
+}
+
+.QPushButton:checked:disabled,.QToolButton:checked:disabled{
+background:#2d2d3d;
+color:#7a8494;
+border:1px solid #3d3d4d;
+}
+
 .QToolButton::menu-indicator{
 image:None;
 }

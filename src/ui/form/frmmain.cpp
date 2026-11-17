@@ -32,6 +32,7 @@
 #include "alarm_manager.h"
 #include "video_alarm_widget.h"
 #include "fence_manager.h"
+#include "fence_frame_renderer.h"   // setFrameProvider：HTTP apply 生效画面叠真实帧
 #include "ws_client.h"
 #include "alarm_uplink.h"
 #include "http_file_service.h"   // 报警媒体的内嵌文件服务（url 模式；装配点在此）
@@ -44,6 +45,8 @@
 #include "equipment_inventory_widget.h"
 #include "smart_recognition_widget.h"
 #include "login_widget.h"        // 扫码登录页（stackedWidget 第 0 页 = 门）
+#include "fence_manage_widget.h" // 电子围栏管理页（§5 围栏的本地管理）
+#include "qr_scan_dialog.h"      // captureFrameAsImage（围栏管理页背景帧复用通道解码器）
 #include "construction_session.h"
 #include "construction_detail_dialog.h"  // 点右上角登录人弹出的施工详情
 #include "stream_editor_dialog.h"        // 视频流注册表（video.sources[]）编辑对话框
@@ -502,9 +505,12 @@ void frmMain::initNewPages()
     // 真正的退出程序入口在登录页那颗按钮与标题栏 ×（buttonClick 里按对象身份分派，
     // 不再按文字 —— 改文字不改分派会让这颗钮静默失效）。
     ui->btnExit->setText("退出登录");
-    // 隐藏多余的占位按钮（人员点名/设备盘点原义、报警查询、系统设置）
+    // 隐藏多余的占位按钮（人员点名/设备盘点原义、系统设置）。
+    // btnData 复用为「电子围栏」导航项：.ui 不手改（src/ui/form/README.md 约定），
+    // 它已被 initForm 的 findChildren 循环连进 buttonClick()，改文字即接入文字分派。
     // btnSmart（智能识别）的标签由 .ui 直接提供，无需在此处理
-    ui->btnData->hide();
+    ui->btnData->setText("电子围栏");
+    ui->btnData->show();
     ui->btnConfig->hide();
 
     // 向 stackedWidget 添加数据看板和报警记录页面
@@ -514,6 +520,35 @@ void frmMain::initNewPages()
     // 插入到 pageMonitor(视频监控) 之后：index 1=数据看板, 2=报警数据
     ui->stackedWidget->insertWidget(1, dashboardWidget_);
     ui->stackedWidget->insertWidget(2, alarmListWidget_);
+
+    // 电子围栏管理页：尾追加（切页按控件指针，不依赖索引）。背景帧从视频页
+    // 对应通道的解码器抓（复用，不另开一路流），以回调注入——页面不握视频页指针。
+    fenceManageWidget_ = new FenceManageWidget();
+    fenceManageWidget_->setFrameGrabber([this](int ch) -> QImage {
+        if (!videoWindow)
+            return {};
+        PlayerWidget *pw = videoWindow->playerWidget(ch);
+        if (!pw || !pw->decoder())
+            return {};
+        return captureFrameAsImage(pw->decoder());
+    });
+    // HTTP apply 路由的生效画面也要带真实帧：biz 域不握视频页指针，
+    // 经渲染器的帧提供者回调注入（路由跑在 GUI 线程，取帧路径与上面同源）。
+    geofence::setFrameProvider([this](const QString &cameraId) -> QImage {
+        if (!videoWindow || !cameraId.startsWith(QStringLiteral("CH")))
+            return {};
+        const int ch = cameraId.mid(2).toInt() - 1;   // "CH1" → 0
+        if (ch < 0 || ch >= 4)
+            return {};
+        PlayerWidget *pw = videoWindow->playerWidget(ch);
+        if (!pw || !pw->decoder())
+            return {};
+        return captureFrameAsImage(pw->decoder());
+    });
+    // 必须带类型选择器：无选择器的 background 会沿对象树压住所有子控件，
+    // 且祖先样式表优先级高于应用级 QSS——工具钮的 :checked 强调色会被它盖掉。
+    fenceManageWidget_->setStyleSheet(QString("FenceManageWidget{background:%1;}").arg(theme::BG));
+    ui->stackedWidget->addWidget(fenceManageWidget_);
 
     // ===== 扫码登录页：stackedWidget 的第 0 页（门）=====
     // 代码里 insertWidget，不碰 .ui（src/ui/form/README.md 的既有约定）。
@@ -1201,6 +1236,9 @@ void frmMain::buttonClick()
         ui->stackedWidget->setCurrentWidget(alarmListWidget_);
     } else if (name == "智能识别") {
         ui->stackedWidget->setCurrentWidget(smartPage_);
+    } else if (name == "电子围栏") {
+        ui->stackedWidget->setCurrentWidget(fenceManageWidget_);
+        if (fenceManageWidget_) fenceManageWidget_->refresh();
     } else if (name == "调试设置") {
         ui->stackedWidget->setCurrentWidget(ui->pageSettings);
     }
@@ -1575,6 +1613,8 @@ void frmMain::onLoginSucceeded()
     // 未登录时内存里没有围栏，登录后才加载并驱动检测。
     geofence::FenceManager::instance().reloadForTask(
         session::ConstructionSession::instance().snapshot().taskId);
+    // 围栏管理页跟着换任务：它按当前会话的 taskId 读 Pad 围栏库。
+    if (fenceManageWidget_) fenceManageWidget_->refresh();
     log("system", QString("扫码登录成功：%1")
                       .arg(session::ConstructionSession::instance().summary()));
 }

@@ -46,6 +46,7 @@ class RollCallWidget;
 class EquipmentInventoryWidget;
 class SmartRecognitionWidget;
 class LoginWidget;
+class FenceManageWidget;
 class RollCallService;
 class EquipmentInventoryService;
 struct EquipmentModelConfig;   // 完整定义见 equipment_inventory_service.h（仅 .cpp 用到）
@@ -156,6 +157,7 @@ private:
     std::shared_ptr<EquipmentInventoryService> equipmentService_;
     SmartRecognitionWidget *smartRecognitionWidget_ = nullptr; ///< 智能识别页（QR + OCR + 点名 + 盘点）
     QWidget *smartPage_ = nullptr;   ///< 智能识别页容器
+    FenceManageWidget *fenceManageWidget_ = nullptr;   ///< 电子围栏管理页（§5 围栏的本地管理，导航「电子围栏」）
     LoginWidget *login_ = nullptr;   ///< 扫码登录页（stackedWidget 的第 0 页，未登录时唯一可见页）
     QPushButton *sessionBadge_ = nullptr;  ///< 标题栏右上角的登录人角标（未登录时隐藏），点开=施工详情
     bool streamsRunning_ = false;    ///< 四路是否已在跑（start/stopAllStreams 的幂等守卫）

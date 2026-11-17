@@ -15,10 +15,22 @@
 
 namespace {
 
+// QSS 的 font-size 只改绘制不改 QLabel 的字体度量：sizeHint 仍按控件默认
+// 字体算，行高按小字排，16px 的字就被截掉下半截、行距也显得挤（实测踩过）。
+// 所以 QSS 之外必须把 QFont 同步设成同一像素字号，布局才按真实字高分配。
+void applyPixelFont(QLabel *label, int px, bool bold)
+{
+    QFont font = label->font();
+    font.setPixelSize(px);
+    font.setBold(bold);
+    label->setFont(font);
+}
+
 QLabel *makeValueLabel(const QString &text)
 {
     QLabel *val = new QLabel(text);
     val->setStyleSheet(theme::text(theme::TEXT, theme::FS_BODY, true));
+    applyPixelFont(val, theme::FS_BODY, true);
     // 现场要照着抄电话号码，值必须能选中（触屏上的长按选中走的就是鼠标事件）
     val->setTextInteractionFlags(Qt::TextSelectableByMouse);
     val->setWordWrap(true);
@@ -47,17 +59,19 @@ void ConstructionDetailDialog::setupUi()
 
     auto *title = new QLabel(QString::fromUtf8("当前登录的施工信息"));
     title->setStyleSheet(theme::text(theme::ACCENT, theme::FS_PAGE, true));
+    applyPixelFont(title, theme::FS_PAGE, true);
     mainLay->addWidget(title);
 
     // 逐键渲染：fields() 里有什么就列什么，加字段不改本文件（口径见 construction_session.h）
     auto *grid = new QGridLayout();
     grid->setHorizontalSpacing(16);
-    grid->setVerticalSpacing(12);
+    grid->setVerticalSpacing(14);
     int row = 0;
     const QVector<session::ConstructionField> fields = session::ConstructionInfo::fields(info.toJson());
     for (const session::ConstructionField &f : fields) {
         auto *label = new QLabel(f.label + QStringLiteral("："));
         label->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
+        applyPixelFont(label, theme::FS_BODY, false);
         grid->addWidget(label, row, 0);
         grid->addWidget(makeValueLabel(f.value), row, 1);
         ++row;
@@ -67,6 +81,7 @@ void ConstructionDetailDialog::setupUi()
     auto *note = new QLabel(QString::fromUtf8(
         "本时段产生的每一条报警都会记到这份信息名下（落库、报警详情、WebSocket 上行同一份）。"));
     note->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
+    applyPixelFont(note, theme::FS_HINT, false);
     note->setWordWrap(true);
     note->setTextInteractionFlags(Qt::TextSelectableByMouse);
     mainLay->addWidget(note);
@@ -108,4 +123,8 @@ void ConstructionDetailDialog::setupUi()
     btnRow->addWidget(closeBtn);
 
     mainLay->addLayout(btnRow);
+
+    // adjustSize 在部分平台（含 offscreen）不会把窗口撑到 sizeHint，
+    // 网格行会被压成 0 高、文字截断——显式按 sizeHint 定尺寸。
+    resize(sizeHint().expandedTo(minimumSize()));
 }

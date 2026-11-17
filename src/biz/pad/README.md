@@ -120,9 +120,10 @@ Pad 接口 v1（`plan/edge-pad-v1.md`）里**本机作为服务端**的那一面
   同时生效"，就得改成并集而不是覆盖。
   ⚠ 两库的 `cameraId` **编号口径不同**（本机 0-based、Pad 按 §7.1 是 1-based），解析必须分开走，
   合错了整条围栏会下移一路、判到别的画面上；换算与判据见 `tests/test_fence_merge.cpp`。
-- **`frameUrl` 底下没有真实视频帧**。§5.3 要"合成生效画面 PNG"，本机渲的是
-  背景网格 + 区域填色 + 编号（`biz/geofence/fence_frame_renderer.cpp`），没有叠任何一路实时帧——
-  那需要 `biz → ui` 反向拿最新帧，本轮没做。
+- ~~**`frameUrl` 底下没有真实视频帧**~~ **已解决（2026-11-17）**：apply 的合成画面现在叠
+  下发时刻该通道的真实帧——UI 域经 `geofence::setFrameProvider()` 注入按 cameraId 取帧的回调
+  （`frmmain.cpp` 装配处），HTTP apply 路由与管理页 `onApply` 都走它；取不到帧时退回
+  深色底 + 网格，不伪造画面。草稿预览则是黑底 + 区域（`renderFenceImage`，不落盘）。
 - **`GET /api/streams?taskId=` 不按 taskId 过滤**：本机没有"哪一路属于哪个计划"这层绑定
   （报警有 `task_id`，通道没有），所以要求带上、原样回显、返回全部通道。
 - **`/dispose-options` 的 `alarmType` 不参与分组**：§13.3.1 收了它但没给"哪种报警配哪些选项"的表，

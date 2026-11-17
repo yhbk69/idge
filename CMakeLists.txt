@@ -1008,6 +1008,41 @@ target_link_libraries(test_fence_merge
 target_compile_definitions(test_fence_merge PRIVATE ZERO_COPY)
 
 # ============================================================================
+# 围栏草稿编辑画布 + 管理页离屏自检（tests/test_fence_canvas.cpp）
+# 真 FenceCanvas + 合成鼠标事件验几何（画矩形/多边形、拖锚点、平移、删除、撤销），
+# 真 FenceManageWidget 在各版本状态下构造+refresh。管理页的背景帧走注入回调，
+# 不依赖视频/FFmpeg 链，所以本目标只编两张围栏表 + 渲染器 + 会话 + 配置 + 两个控件。
+# 仓库根运行：./build/build_rk3588_linux/test_fence_canvas，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_fence_canvas
+    tests/test_fence_canvas.cpp
+    src/ui/widgets/fence_canvas.cpp
+    src/ui/widgets/fence_manage_widget.cpp
+    src/ui/core/qthelper.cpp
+    src/biz/geofence/fence_overlay.cpp
+    src/biz/geofence/fence_manager.cpp
+    src/biz/geofence/fence_checker.cpp
+    src/biz/geofence/fence_frame_renderer.cpp
+    src/biz/geofence/pad_fence_store.cpp
+    src/biz/geofence/native_fence_store.cpp
+    src/biz/db/database_manager.cpp
+    src/biz/session/construction_session.cpp
+    src/base/config/ConfigManager.cpp
+)
+
+target_link_libraries(test_fence_canvas
+    Qt5::Core
+    Qt5::Gui
+    Qt5::Widgets
+    Qt5::Sql
+    Qt5::Network
+    sqlite3
+    pthread
+)
+
+target_compile_definitions(test_fence_canvas PRIVATE ZERO_COPY)
+
+# ============================================================================
 # 施工信息 + 二维码离线自检（解析/校验/会话状态机 + 真解一张码图）
 # 只编 construction_session.cpp 与 qr_decoder.cpp：两头都只用 Qt，不开摄像头、
 # 不碰 GUI 线程，所以本目标不链 AlarmManager/DAO/ConfigManager，也不需要 X11。
