@@ -45,7 +45,7 @@ ModelRegistry::instance().findIdByModelFile(p); // 模型文件反查库内 id�
   （报警类 + 生效阈值）留在解码器（`slotClassNames_` / `slotParams_`），前者随结果组成
   `AlarmManager::SlotContext` 传入 `ingest()`，后者随 `TaskData` 传进推理线程；
 - `src/ui/form/frmmain.cpp`：`initEquipmentService()` 设备盘点模型清单的单一来源
-  （coco 槽固定取 `yolo11n-coco`；明火按 id 含 "fire" 探测，入库即自动生效）；
+  （基础槽固定取 `yolo11n-ppe`；明火按 id 含 "fire" 探测，入库即自动生效）；
   设置页"模型参数表/通道配置区"以 `ids()` + `resolveChannelSlots()` 为数据源；
 - `src/base/config/ConfigManager.cpp`：`migrateSchemaV2()` 把旧 V1 配置（`model.path` +
   `cascade.models[]`）翻译成新的"按通道库 id 列表 + 每模型报警类"。

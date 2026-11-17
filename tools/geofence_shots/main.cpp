@@ -3,7 +3,9 @@
 // ----------------------------------------------------------------------------
 // 产物是**生产代码自己画出来的**，不是手工拼的示意图：
 //   - 底图：板端真实抓拍帧（data/alarms/... 里的报警快照，检测框已烧在画面上）
-//   - 围栏：真 FenceOverlay，顶点由合成鼠标事件走真交互路径提交
+//   - 围栏：真 FenceCanvas，顶点由合成鼠标事件走真交互路径提交（第 3 点自动闭合；
+//     >3 点走 Edit 态空白处单击按点序追加），再经 FenceManager 交给
+//     只读 FenceOverlay 显示（绘制入口迁到管理页后 overlay 不再收鼠标）
 //   - 结论：真 FenceChecker::checkDetection 对同一帧的脚点裁决
 //   - 落库：真 FenceManager → NativeFenceStore → 临时 idge.db
 //   - Pad 合成画面：真 renderFenceFrame
@@ -17,6 +19,7 @@
 #include "ConfigManager.h"
 #include "construction_session.h"
 #include "database_manager.h"
+#include "fence_canvas.h"
 #include "fence_checker.h"
 #include "fence_frame_renderer.h"
 #include "fence_manager.h"
@@ -37,7 +40,9 @@
 #include <iostream>
 #include <vector>
 
+using geofence::CanvasMode;
 using geofence::ChannelFence;
+using geofence::FenceCanvas;
 using geofence::FenceChecker;
 using geofence::FenceOverlay;
 using geofence::FenceRole;
@@ -108,31 +113,95 @@ PixelBox measureBlueBox(const QImage &image)
     return out;
 }
 
-// ── 合成鼠标事件：让围栏经由真的绘制路径提交 ────────────────────────────────
-void sendMouse(FenceOverlay *overlay, QEvent::Type type, const QPoint &pos,
+// ── 合成鼠标事件：让围栏经由真的绘制路径提交（FenceCanvas，管理页同款画布）──
+void sendMouse(FenceCanvas *canvas, QEvent::Type type, const QPoint &pos,
                Qt::MouseButton button)
 {
     const Qt::MouseButtons buttons =
         (type == QEvent::MouseButtonRelease) ? Qt::NoButton : Qt::LeftButton;
     QMouseEvent event(type, QPointF(pos), QPointF(pos), QPointF(pos), button, buttons,
                       Qt::NoModifier);
-    QApplication::sendEvent(overlay, &event);
+    QApplication::sendEvent(canvas, &event);
 }
 
-void dragRect(FenceOverlay *overlay, const QPoint &a, const QPoint &b)
+void click(FenceCanvas *canvas, const QPoint &pos)
 {
-    sendMouse(overlay, QEvent::MouseButtonPress, a, Qt::LeftButton);
-    sendMouse(overlay, QEvent::MouseMove, b, Qt::LeftButton);
-    sendMouse(overlay, QEvent::MouseButtonRelease, b, Qt::LeftButton);
+    sendMouse(canvas, QEvent::MouseButtonPress, pos, Qt::LeftButton);
+    sendMouse(canvas, QEvent::MouseButtonRelease, pos, Qt::LeftButton);
 }
 
-void clickPolygon(FenceOverlay *overlay, const QVector<QPoint> &points)
+void drag(FenceCanvas *canvas, const QPoint &a, const QPoint &b)
 {
-    for (const QPoint &pt : points) {
-        sendMouse(overlay, QEvent::MouseButtonPress, pt, Qt::LeftButton);
-        sendMouse(overlay, QEvent::MouseButtonRelease, pt, Qt::LeftButton);
+    sendMouse(canvas, QEvent::MouseButtonPress, a, Qt::LeftButton);
+    sendMouse(canvas, QEvent::MouseMove, b, Qt::LeftButton);
+    sendMouse(canvas, QEvent::MouseButtonRelease, b, Qt::LeftButton);
+}
+
+void dragRect(FenceCanvas *canvas, const QPoint &a, const QPoint &b)
+{
+    canvas->setMode(CanvasMode::RectDraw);
+    drag(canvas, a, b);
+}
+
+// 多边形：前 3 点走 PolyDraw（第 3 点落地自动闭合提交，2026-11-17 用户裁定）；
+// 第 4 点起画布已自动回 Edit，空白处单击按点序追加顶点（1-2-…-n-1 闭合）。
+// 不直接 setRegions：出图承诺的是真交互路径。
+void clickPolygon(FenceCanvas *canvas, const QVector<QPoint> &points)
+{
+    canvas->setMode(CanvasMode::PolyDraw);
+    for (const QPoint &pt : points)
+        click(canvas, pt);
+}
+
+// 画布草稿（PadRegion 0~1）→ 视频页围栏（FenceShape 0..kFenceNormBase）。
+// 规则配色同源：INTRUSION↔Forbidden 红、CROSS↔Workzone 琥珀。
+ChannelFence fenceFromCanvas(const FenceCanvas *canvas)
+{
+    ChannelFence fence;
+    fence.enabled = true;
+    for (const PadRegion &region : canvas->regions()) {
+        FenceShape shape;
+        shape.role = region.ruleType == QLatin1String("CROSS") ? FenceRole::Workzone
+                                                               : FenceRole::Forbidden;
+        if (region.shapeType == QLatin1String("RECT")) {
+            shape.type = ShapeType::Rectangle;
+            double minX = 1.0, maxX = 0.0, minY = 1.0, maxY = 0.0;
+            for (const QPointF &p : region.points) {
+                minX = qMin(minX, p.x()); maxX = qMax(maxX, p.x());
+                minY = qMin(minY, p.y()); maxY = qMax(maxY, p.y());
+            }
+            shape.points.push_back(Point(qRound(minX * geofence::kFenceNormBase),
+                                         qRound(minY * geofence::kFenceNormBase)));
+            shape.points.push_back(Point(qRound(maxX * geofence::kFenceNormBase),
+                                         qRound(maxY * geofence::kFenceNormBase)));
+        } else {
+            shape.type = ShapeType::Polygon;
+            for (const QPointF &p : region.points) {
+                shape.points.push_back(Point(qRound(p.x() * geofence::kFenceNormBase),
+                                             qRound(p.y() * geofence::kFenceNormBase)));
+            }
+        }
+        fence.shapes.push_back(shape);
     }
-    overlay->closePolygon();   // 等价于点工具栏「闭合」；不点就只是临时图形
+    return fence;
+}
+
+// 画布出图：背景帧由画布自己 letterbox（与视频页同口径），直接 render 整块画布。
+// 用于"画到一半"的临时图形——那种状态只存在于画布，不在只读 overlay 里。
+bool captureCanvas(FenceCanvas *canvas, const QSize &widgetSize, const QString &outPath,
+                   QString *err)
+{
+    canvas->resize(widgetSize);
+    QImage shot(widgetSize, QImage::Format_ARGB32_Premultiplied);
+    shot.fill(Qt::black);
+    canvas->render(&shot);
+    if (!shot.save(outPath)) {
+        *err = QStringLiteral("写不出 %1").arg(outPath);
+        return false;
+    }
+    std::cout << "[shot] " << outPath.toStdString() << "  widget=" << widgetSize.width() << "x"
+              << widgetSize.height() << std::endl;
+    return true;
 }
 
 // ── 出图：底图按 letterbox 铺进 widget，overlay 叠在上面 ─────────────────────
@@ -321,15 +390,23 @@ int main(int argc, char *argv[])
     // 自身尺寸换算，默认构造的 640x480 会把顶点算成 1.3 万这种越界归一化值。
     overlay.resize(kW);
     overlay.setContentRect(contentRectFor(kW, kSrc));
+
+    // 绘制画布铺同一张底图：它的 contentRect 与 overlay 的换算基准同口径
+    // （等比居中），合成鼠标坐标在两层里才是一致的。
+    FenceCanvas canvas;
+    canvas.resize(kW);
+    canvas.setBackground(frame);
     QString err;
     const object_detect_result det = detectionFromBox(box);
 
     // ── 图 1：禁区盖住人 → 闯入 ──────────────────────────────────────────────
     std::cout << "\n=== 图1 禁区盖住人 ===" << std::endl;
+    canvas.setRegions({});
+    canvas.setCreateRule(QStringLiteral("INTRUSION"));
+    dragRect(&canvas, QPoint(box.left - 45, box.top - 25), QPoint(box.right + 45, box.bottom + 25));
+    geofence::FenceManager::instance().setChannelFence(1, fenceFromCanvas(&canvas));
     overlay.setChannel(1);
-    overlay.setDrawMode(DrawMode::RectDraw);
-    overlay.setRole(FenceRole::Forbidden);
-    dragRect(&overlay, QPoint(box.left - 45, box.top - 25), QPoint(box.right + 45, box.bottom + 25));
+    overlay.loadFences();
     dumpShapes(1);
     {
         const FenceViolation v =
@@ -341,10 +418,12 @@ int main(int argc, char *argv[])
 
     // ── 图 2：禁区只圈右侧脚手架 → 合规不报 ─────────────────────────────────
     std::cout << "\n=== 图2 禁区在右侧，人不在里面 ===" << std::endl;
+    canvas.setRegions({});
+    canvas.setCreateRule(QStringLiteral("INTRUSION"));
+    dragRect(&canvas, QPoint(860, 60), QPoint(1240, 690));
+    geofence::FenceManager::instance().setChannelFence(2, fenceFromCanvas(&canvas));
     overlay.setChannel(2);
-    overlay.setDrawMode(DrawMode::RectDraw);
-    overlay.setRole(FenceRole::Forbidden);
-    dragRect(&overlay, QPoint(860, 60), QPoint(1240, 690));
+    overlay.loadFences();
     dumpShapes(2);
     {
         const FenceViolation v =
@@ -356,14 +435,15 @@ int main(int argc, char *argv[])
 
     // ── 图 3：同一通道混用岗区域 + 禁区，人守着岗 → 合规 ────────────────────
     std::cout << "\n=== 图3 岗区域圈住人 + 右侧禁区（混用）===" << std::endl;
+    canvas.setRegions({});
+    canvas.setCreateRule(QStringLiteral("CROSS"));
+    clickPolygon(&canvas, {QPoint(545, 130), QPoint(845, 130), QPoint(860, 400), QPoint(800, 700),
+                           QPoint(560, 700), QPoint(500, 400)});
+    canvas.setCreateRule(QStringLiteral("INTRUSION"));
+    dragRect(&canvas, QPoint(860, 60), QPoint(1240, 690));
+    geofence::FenceManager::instance().setChannelFence(3, fenceFromCanvas(&canvas));
     overlay.setChannel(3);
-    overlay.setDrawMode(DrawMode::PolyDraw);
-    overlay.setRole(FenceRole::Workzone);
-    clickPolygon(&overlay, {QPoint(545, 130), QPoint(845, 130), QPoint(860, 400), QPoint(800, 700),
-                            QPoint(560, 700), QPoint(500, 400)});
-    overlay.setDrawMode(DrawMode::RectDraw);
-    overlay.setRole(FenceRole::Forbidden);
-    dragRect(&overlay, QPoint(860, 60), QPoint(1240, 690));
+    overlay.loadFences();
     dumpShapes(3);
     {
         const FenceViolation v =
@@ -375,10 +455,12 @@ int main(int argc, char *argv[])
 
     // ── 图 4：岗区域画在左侧空处，人在所有岗区域之外 → 离岗 ─────────────────
     std::cout << "\n=== 图4 岗区域在左侧，人不在里面 ===" << std::endl;
+    canvas.setRegions({});
+    canvas.setCreateRule(QStringLiteral("CROSS"));
+    clickPolygon(&canvas, {QPoint(60, 120), QPoint(430, 120), QPoint(430, 700), QPoint(60, 700)});
+    geofence::FenceManager::instance().setChannelFence(4, fenceFromCanvas(&canvas));
     overlay.setChannel(4);
-    overlay.setDrawMode(DrawMode::PolyDraw);
-    overlay.setRole(FenceRole::Workzone);
-    clickPolygon(&overlay, {QPoint(60, 120), QPoint(430, 120), QPoint(430, 700), QPoint(60, 700)});
+    overlay.loadFences();
     dumpShapes(4);
     {
         const FenceViolation v =
@@ -388,31 +470,27 @@ int main(int argc, char *argv[])
     }
     capture(&overlay, frame, kW, outDir + "/geofence_04_workzone_absence.png", &err);
 
-    // ── 图 5：多边形画到一半（临时图形：虚线 + 顶点圆点 + 跟随线）───────────
+    // ── 图 5：多边形画到一半（2 点 + 光标预览闭合三角形：虚线 + 顶点序号）─────
     std::cout << "\n=== 图5 多边形画到一半 ===" << std::endl;
-    overlay.setChannel(5);
-    overlay.setDrawMode(DrawMode::PolyDraw);
-    overlay.setRole(FenceRole::Workzone);
-    sendMouse(&overlay, QEvent::MouseButtonPress, QPoint(545, 130), Qt::LeftButton);
-    sendMouse(&overlay, QEvent::MouseButtonRelease, QPoint(545, 130), Qt::LeftButton);
-    sendMouse(&overlay, QEvent::MouseButtonPress, QPoint(845, 130), Qt::LeftButton);
-    sendMouse(&overlay, QEvent::MouseButtonRelease, QPoint(845, 130), Qt::LeftButton);
-    sendMouse(&overlay, QEvent::MouseButtonPress, QPoint(860, 400), Qt::LeftButton);
-    sendMouse(&overlay, QEvent::MouseButtonRelease, QPoint(860, 400), Qt::LeftButton);
-    sendMouse(&overlay, QEvent::MouseMove, QPoint(700, 620), Qt::LeftButton);
-    std::cout << "  （还没点「闭合」，形状没落库，通道5 形状数应为 0）" << std::endl;
+    canvas.setRegions({});
+    canvas.setCreateRule(QStringLiteral("CROSS"));
+    canvas.setMode(CanvasMode::PolyDraw);
+    click(&canvas, QPoint(545, 130));
+    click(&canvas, QPoint(845, 130));
+    sendMouse(&canvas, QEvent::MouseMove, QPoint(700, 620), Qt::LeftButton);
+    std::cout << "  （第 3 点没落地，形状没提交，通道5 形状数应为 0）" << std::endl;
     dumpShapes(5);
-    capture(&overlay, frame, kW, outDir + "/geofence_05_polygon_in_progress.png", &err);
+    captureCanvas(&canvas, kW, outDir + "/geofence_05_polygon_in_progress.png", &err);
 
     // ── 图 6：矩形拖动中（临时矩形，虚线）───────────────────────────────────
     std::cout << "\n=== 图6 矩形拖动中 ===" << std::endl;
-    overlay.setChannel(6);
-    overlay.setDrawMode(DrawMode::RectDraw);
-    overlay.setRole(FenceRole::Forbidden);
-    sendMouse(&overlay, QEvent::MouseButtonPress, QPoint(810, 60), Qt::LeftButton);
-    sendMouse(&overlay, QEvent::MouseMove, QPoint(1150, 640), Qt::LeftButton);
+    canvas.setRegions({});
+    canvas.setCreateRule(QStringLiteral("INTRUSION"));
+    canvas.setMode(CanvasMode::RectDraw);
+    sendMouse(&canvas, QEvent::MouseButtonPress, QPoint(810, 60), Qt::LeftButton);
+    sendMouse(&canvas, QEvent::MouseMove, QPoint(1150, 640), Qt::LeftButton);
     dumpShapes(6);
-    capture(&overlay, frame, kW, outDir + "/geofence_06_rect_dragging.png", &err);
+    captureCanvas(&canvas, kW, outDir + "/geofence_06_rect_dragging.png", &err);
 
     // ── 图 7：同一批归一化顶点，三种画布（单路 / 2x2 / 带黑边）───────────────
     std::cout << "\n=== 图7 换视图不漂 ===" << std::endl;
@@ -431,6 +509,7 @@ int main(int argc, char *argv[])
         strip.fill(QColor(12, 14, 18));
         int x = 0;
         overlay.setChannel(7);
+        overlay.loadFences();
         for (const auto &panel : panels) {
             const QRect content = contentRectFor(panel.widget, kSrc);
             overlay.resize(panel.widget);

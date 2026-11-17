@@ -246,6 +246,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/biz/db                  # 数据持久层（业务 sqlite3 + 报警 QtSQL 两套）
     ${CMAKE_SOURCE_DIR}/src/biz/geofence            # 电子围栏（形状、检测、覆盖层）
     ${CMAKE_SOURCE_DIR}/src/biz/ladderguard         # 登高守护规则引擎（几何匹配 + 三态状态机）
+    ${CMAKE_SOURCE_DIR}/src/biz/fireguard           # 动火监护规则引擎（明火在场需≥2人）
     ${CMAKE_SOURCE_DIR}/src/biz/pad                 # Pad 接口 v1 的服务端（WS 报警推送 + 出站 JSON 映射）
     ${CMAKE_SOURCE_DIR}/src/biz/qrcode              # 二维码解码（ZBar 封装，登录与智能识别共用）
     ${CMAKE_SOURCE_DIR}/src/biz/service             # 点名/盘点业务服务
@@ -915,6 +916,20 @@ target_include_directories(test_ladder_guard PRIVATE
 )
 
 # ============================================================================
+# 动火监护规则引擎离线自检（明火在场 / 人数门槛 / grace-clear-lost 时序）
+# 只编 fire_guard.cpp：纯 std 逻辑，不需要 Qt/配置/权重。
+# 仓库根运行：./build/build_rk3588_linux/test_fire_guard，rc 0=PASS 1=FAIL
+# ============================================================================
+add_executable(test_fire_guard
+    tests/test_fire_guard.cpp
+    src/biz/fireguard/fire_guard.cpp
+)
+
+target_include_directories(test_fire_guard PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/biz/fireguard
+)
+
+# ============================================================================
 # 报警轨迹闸门离线自检（合成框序列：每事件一条 / 事件结束再报 / cooldown 不烧事件）
 # 只编 alarm_track_gate.cpp：纯 std 逻辑，不链 Qt 业务、不需要 config.json 与权重。
 # 为什么值得单独钉：闸门是"帧级重复检出 → 轨迹级事件"的唯一防线，写反 recorded/
@@ -1158,6 +1173,7 @@ add_executable(test_channel_reload
     # 登高守护：ffmpeg_video_decoder.cpp 调 Tracker::step/setParams/reset + mergeLadders，
     # 依赖闭包里漏了它就是三个 undefined reference（test_stream_params 首个撞上的就是这个）
     src/biz/ladderguard/ladder_guard.cpp
+    src/biz/fireguard/fire_guard.cpp
     src/base/imaging/image_utils.cpp
     src/base/imaging/image_drawing.cpp
     src/base/imaging/draw_utils.cpp
@@ -1249,6 +1265,7 @@ add_executable(test_stream_params
     # 登高守护：ffmpeg_video_decoder.cpp 调 Tracker::step/setParams/reset + mergeLadders，
     # 依赖闭包里漏了它就是三个 undefined reference（test_stream_params 首个撞上的就是这个）
     src/biz/ladderguard/ladder_guard.cpp
+    src/biz/fireguard/fire_guard.cpp
     src/base/imaging/image_utils.cpp
     src/base/imaging/image_drawing.cpp
     src/base/imaging/draw_utils.cpp
@@ -1328,12 +1345,14 @@ target_link_libraries(test_net_route
 
 # ============================================================================
 # 电子围栏图文说明的离屏出图工具（tools/geofence_shots）
-# 底图用板端真实报警快照，围栏由真 FenceOverlay + 合成鼠标事件提交，判定由真
-# FenceChecker 出，落库写到临时 idge.db —— 不碰现场的库和 config.json。
+# 底图用板端真实报警快照，围栏由真 FenceCanvas + 合成鼠标事件提交（只读
+# FenceOverlay 负责显示），判定由真 FenceChecker 出，落库写到临时 idge.db
+# —— 不碰现场的库和 config.json。
 # 仓库根运行：./build/build_rk3588_linux/geofence_shots <出图目录> <底图jpg>
 # ============================================================================
 add_executable(geofence_shots
     tools/geofence_shots/main.cpp
+    src/ui/widgets/fence_canvas.cpp
     src/biz/geofence/fence_overlay.cpp
     src/biz/geofence/fence_manager.cpp
     src/biz/geofence/fence_checker.cpp

@@ -61,7 +61,7 @@ cmake --build build/build_rk3588_linux --target test_ladder_guard
 - 报警走 `AlarmManager::ingestLadderAlarm`（类型 `ladder_no_spotter`，键 `通道:ladder:guardId`）；
 - 配置段 `ladderguard`（enabled/graceSeconds/clearSeconds，见 `src/base/config/README.md`），
   设置页「登高守护」分组写入；解码线程逐帧现读，改动即时生效；
-- 激活前提：同一通道级联里同时挂梯子模型（`yolo11n-ladder`）与人模型（ppe/coco 均可），
+- 激活前提：同一通道级联里同时挂梯子模型（`yolo11n-ladder`）与人模型（如 `yolo11n-ppe`），
   角色按类名子串识别，**不新增槽位配置键**。
 
 ## 注意事项

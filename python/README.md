@@ -35,16 +35,16 @@ yolo export model=yolo11n.pt format=onnx imgsz=640 simplify=True opset=12
 
 # 2) 手工分步 —— ONNX → RKNN（cd 进 python/ 再跑；输出路径必填，直接落库）
 #    用法: python3 convert.py <onnx路径> <平台> [i8|u8|fp] <输出.rknn路径>
-python3 convert.py yolo11n.onnx rk3588 i8 ../model/library/yolo11n-coco/model.rknn
-python3 convert.py yolo11n.onnx rk3588 fp  ../model/library/yolo11n-coco/model.rknn   # 不量化
+python3 convert.py yolo11n.onnx rk3588 i8 ../model/library/yolo11n-ppe/model.rknn
+python3 convert.py yolo11n.onnx rk3588 fp  ../model/library/yolo11n-ppe/model.rknn   # 不量化
 # 平台可选：rk3562 / rk3566 / rk3568 / rk3588 / rk3576
 # 校准清单：DATASET=~/calib/xxx.txt python3 convert.py ...（默认用仓库内占位清单）
 
 # 3) 推理验证（板端或 PC；argparse 命名参数）
-python3 yolo11.py --model_path ../model/library/yolo11n-coco/model.rknn --target rk3588 --img_folder ../assets/test
-python3 yolo11.py --model_path ../model/library/yolo11n-coco/model.rknn --target rk3588 --img_show --img_save
+python3 yolo11.py --model_path ../model/library/yolo11n-ppe/model.rknn --target rk3588 --img_folder ../assets/test
+python3 yolo11.py --model_path ../model/library/yolo11n-ppe/model.rknn --target rk3588 --img_show --img_save
 python3 yolo11.py --model_path yolo11n.onnx            # PC 上跑 ONNX 对照
-python3 yolo11.py --model_path ../model/library/yolo11n-coco/model.rknn --target rk3588 --coco_map_test
+python3 yolo11.py --model_path ../model/library/yolo11n-ppe/model.rknn --target rk3588 --coco_map_test
 ```
 
 `yolo11.py` 全部参数：`--model_path`(必填) `--target`(默认 rk3566) `--device_id` `--img_show` `--img_save` `--anno_json`(默认 `../../../datasets/COCO/annotations/instances_val2017.json`) `--img_folder`(默认 `../model`) `--coco_map_test`。

@@ -18,6 +18,7 @@
 // ============================================================================
 #include "video_alarm_widget.h"
 #include "alarm_detail_dialog.h"
+#include "alarm_labels.h"   // 类名中文显示（label_zh.txt），仅本机 UI
 #include "theme.h"
 #include "qt_image_utils.h"
 #include "perf_probe.h"
@@ -325,7 +326,7 @@ QWidget *VideoAlarmWidget::createAlarmItem(const AlarmRecord &alarm)
     infoLayout->setSpacing(2);
 
     QLabel *classLabel = new QLabel(QString("%1 %2%")
-        .arg(alarm.className)
+        .arg(alarm_labels::classNameZh(alarm.className))
         .arg(alarm.confidence * 100, 0, 'f', 0));
     classLabel->setObjectName("alarmClass");
     infoLayout->addWidget(classLabel);

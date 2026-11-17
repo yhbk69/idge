@@ -3,7 +3,7 @@
  * @brief 扫码登录页实现（主界面放行前的门；头文件的口径与版面说明见 login_widget.h）
  *
  * 本页只做三件事：把二维码原文（或伪造 JSON）交给 ConstructionSession::startLogin()、
- * 把结果作为信号报给 frmMain、把失败原因显示在状态行。
+ * 把结果作为信号报给 frmMain、把失败原因经 loginFailed 报给 frmMain 日志。
  * 不解析字段、不判合法性、不存会话——那些全在 src/biz/session，界面上不存第二套规则。
  *
  * 线程与设备占用（本页存在的前提）：
@@ -15,21 +15,23 @@
  *     能成立的前提，也避免与智能识别页抢同一个 /dev/videoNN。
  *   - 「测试登录」与扫码走**完全同一条** startLogin(qrText) 路径，没有第二套解析分支；
  *     测试数据（plan/construction_qr.json）不进仓，多候选路径的找法见 loadFakePayload。
+ *     入口不上面：点左侧 IDGE 字样触发，属于隐蔽调试入口，避免无关人员登入。
  */
 #include "login_widget.h"
 
 #include "construction_session.h"
-#include "qr_decoder.h"        // unavailableReason()：状态行要说清"这台构建根本没编进 ZBar"
 #include "qr_scan_dialog.h"
 #include "theme.h"
 
 #include <QByteArray>
 #include <QDebug>
 #include <QDir>
+#include <QEvent>
 #include <QFile>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QSizePolicy>
 #include <QVBoxLayout>
@@ -75,9 +77,8 @@ constexpr int kButtonColumnWidth = 480;
  * 信号出口只有 loginSucceeded / loginFailed / exitProgramRequested 三条，
  * 本页不认识 frmMain 的任何内部状态——frmMain 把它 insertWidget 成 stackedWidget
  * 的第 0 页并接这三条线（见 frmmain.cpp 的 initNewPages）。
- * 末尾必调 resetStatus()：新构造出来的页也要按"本构建有没有编进 ZBar"决定状态行，
- * 否则缺 ZBar 的构建上会显示一句"请扫描现场施工二维码"这种做不到的事。
- * 刻意不做的事：不放常驻摄像头预览（会一直占着 /dev/videoNN，见文件头）。
+ * 刻意不做的事：不放常驻摄像头预览（会一直占着 /dev/videoNN，见文件头）；
+ * 也不放状态行——失败原因只经 loginFailed 进 frmMain 日志，页面保持干净。
  */
 LoginWidget::LoginWidget(QWidget *parent) : QWidget(parent)
 {
@@ -94,6 +95,9 @@ LoginWidget::LoginWidget(QWidget *parent) : QWidget(parent)
     kicker->setStyleSheet(QString("QLabel { color:%1; font-size:%2px; font-weight:700; }")
                               .arg(theme::ACCENT)
                               .arg(theme::FS_PAGE));
+    // 隐蔽调试入口：「测试登录」不给现场用，点这行品牌字样才触发（见 eventFilter）
+    kicker->installEventFilter(this);
+    kicker_ = kicker;
     left->addWidget(kicker);
 
     // 品牌块：与顶部标题同源文案（frmmain.cpp 里 labTitle 写的是"施工行为监测与分析"）。
@@ -104,22 +108,9 @@ LoginWidget::LoginWidget(QWidget *parent) : QWidget(parent)
                              .arg(theme::TEXT));
     left->addWidget(brand);
 
-    auto *tagline = new QLabel(
-        QString::fromUtf8("边缘智能视频分析终端 · 登录成功后才开始视频检测与报警"), this);
-    tagline->setWordWrap(true);
-    tagline->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_BODY));
-    left->addWidget(tagline);
-
-    left->addSpacing(24);
-
-    statusLabel_ = new QLabel(this);
-    statusLabel_->setWordWrap(true);
-    statusLabel_->setTextInteractionFlags(Qt::NoTextInteraction);
-    left->addWidget(statusLabel_);
-
     left->addStretch(2);
 
-    // ── 右：三个操作，竖排 ─────────────────────────────────
+    // ── 右：两个操作，竖排 ─────────────────────────────────
     auto *rightColumn = new QWidget(this);
     rightColumn->setFixedWidth(kButtonColumnWidth);
     auto *right = new QVBoxLayout(rightColumn);
@@ -132,66 +123,44 @@ LoginWidget::LoginWidget(QWidget *parent) : QWidget(parent)
     scanButton_->setStyleSheet(bigButtonQss(theme::ACCENT, theme::BG, theme::BTN_SECONDARY_HOVER));
     connect(scanButton_, &QPushButton::clicked, this, &LoginWidget::onScanClicked);
 
-    testButton_ = new QPushButton(QString::fromUtf8("测试登录"), rightColumn);
-    applyBigButton(testButton_);
-    testButton_->setStyleSheet(bigButtonQss(theme::PANEL, theme::TEXT, theme::HOVER));
-    connect(testButton_, &QPushButton::clicked, this, &LoginWidget::onTestLoginClicked);
-
     exitButton_ = new QPushButton(QString::fromUtf8("退出程序"), rightColumn);
     applyBigButton(exitButton_);
     exitButton_->setStyleSheet(bigButtonQss(theme::DANGER, "#FFFFFF", theme::DANGER_PRESSED));
     connect(exitButton_, &QPushButton::clicked, this, &LoginWidget::exitProgramRequested);
 
     right->addWidget(scanButton_);
-    right->addWidget(testButton_);
     right->addWidget(exitButton_);
     right->addStretch(1);
 
     root->addLayout(left, 1);
     root->addWidget(rightColumn, 0);
-
-    resetStatus();
 }
 
 /**
- * @brief 把状态行复位到初始提示（frmMain 每次合门时调一次）
+ * @brief 遮起来的测试登录入口：点 IDGE 字样触发
  *
- * 为什么必须复位：状态行是本页唯一的错误出口，不清的话新来的班次看到的是上一班
- * "缺字段"的红字，会以为是自己的码坏了。
- * 优先级：先判 QrScanDialog::available()（编译期没 HAS_ZBAR 时扫码器根本不存在，
- * 提示要说清"这台构建没编进 ZBar"，让人去查构建而不是去查摄像头），
- * 不可用就直接显示 unavailableReason() 并停在错误态。
+ * 为什么不做成按钮：现场人员看到任何"测试"字样的按钮都会去按，结果就是绕过扫码
+ * 直接登进系统。IDGE 是品牌标识，正常没人点，调试人员知道这一下就是测试登录。
  */
-void LoginWidget::resetStatus()
+bool LoginWidget::eventFilter(QObject *watched, QEvent *event)
 {
-    if (!QrScanDialog::available()) {
-        setStatus(qrcode::unavailableReason(), true);
-        return;
+    if (watched == kicker_ && event->type() == QEvent::MouseButtonRelease) {
+        auto *mouse = static_cast<QMouseEvent *>(event);
+        if (mouse->button() == Qt::LeftButton) {
+            onTestLoginClicked();
+            return true;
+        }
     }
-    setStatus(QString::fromUtf8("未登录：请扫描现场施工二维码"), false);
-}
-
-/**
- * @brief 写状态行
- * @param text  要显示的文本（可以是多行；statusLabel_ 开了 wordWrap）
- * @param error true=DANGER 色 + 加粗，false=TEXT_MUTED 常规
- * 空串是允许的（会把状态行清空），但正常流程不要这么用：本页一屏只有这一行提示，
- * 空白会让人以为按钮点不动。
- */
-void LoginWidget::setStatus(const QString &text, bool error)
-{
-    statusLabel_->setText(text);
-    statusLabel_->setStyleSheet(
-        theme::text(error ? theme::DANGER : theme::TEXT_MUTED, theme::FS_CARD, error));
+    return QWidget::eventFilter(watched, event);
 }
 
 /**
  * @brief 「扫码登录」：拉起全屏扫码窗格 → 解出原文 → 交 startLogin()
  *
  * QrScanDialog::scan() 是**阻塞式模态**，返回 false 有两种情况，必须分开处理：
- *   - error 为空 = 用户自己关掉了窗格（不是故障）→ 状态行回到初始提示，
+ *   - error 为空 = 用户自己关掉了窗格（不是故障）→ 什么都不做，
  *     不发 loginFailed（发了会在 frmMain 日志里留一条"登录失败：（空）"的假事故）；
- *   - error 非空 = 真的没解出来/设备打不开 → 显示错误 + 发 loginFailed(reason)。
+ *   - error 非空 = 真的没解出来/设备打不开 → 发 loginFailed(reason) 进日志。
  * 成功路径：startLogin 已经把会话写好（归属从这一刻起定死），这里只发信号，
  * 开流/亮导航都是 frmMain::onLoginSucceeded 的事。窗格本身解出即返回（2026-11-04：
  * 不显示码内内容、不等确认），所以"扫码 → 进主界面"中间没有第二次点击。
@@ -202,9 +171,10 @@ void LoginWidget::onScanClicked()
     QString content;
     QString error;
     if (!QrScanDialog::scan(this, &content, &error)) {
-        // error 为空 = 用户自己关掉了预览窗口，不是故障：状态行回到初始提示即可
-        setStatus(error.isEmpty() ? QString::fromUtf8("未登录：请扫描现场施工二维码") : error,
-                  !error.isEmpty());
+        // error 为空 = 用户自己关掉了预览窗口，不是故障，不报；
+        // 非空 = 真没解出来/设备打不开 → 经 loginFailed 进 frmMain 日志。
+        if (!error.isEmpty())
+            emit loginFailed(error);
         return;
     }
 
@@ -216,7 +186,6 @@ void LoginWidget::onScanClicked()
     }
 
     qWarning() << "QR scan rejected:" << error;
-    setStatus(error, true);
     emit loginFailed(error);
 }
 
@@ -294,7 +263,7 @@ bool LoginWidget::loadFakePayload(QString *jsonText, QString *err)
  *
  * 存在的意义是"没有真码也能验会话链路"，不是一条平行实现：解析/校验/落会话
  * 全部同一个 ConstructionSession::startLogin(qrText,&err)，所以它通过就等于扫码通过。
- * 失败一律 setStatus(error,true) + emit loginFailed(reason)，与扫码路径同一套出口，
+ * 失败一律 emit loginFailed(reason)，与扫码路径同一套出口，
  * frmMain 侧不需要区分是谁登的录（日志文案由 reason 自己带）。
  */
 void LoginWidget::onTestLoginClicked()
@@ -303,7 +272,6 @@ void LoginWidget::onTestLoginClicked()
     QString error;
     if (!loadFakePayload(&jsonText, &error)) {
         qWarning() << "Test login failed:" << error;
-        setStatus(error, true);
         emit loginFailed(error);
         return;
     }
@@ -317,6 +285,5 @@ void LoginWidget::onTestLoginClicked()
     }
 
     qWarning() << "Test login payload rejected:" << error;
-    setStatus(error, true);
     emit loginFailed(error);
 }

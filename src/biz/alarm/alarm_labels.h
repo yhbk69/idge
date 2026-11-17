@@ -16,6 +16,7 @@
 // ============================================================================
 
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 namespace alarm_labels {
@@ -43,6 +44,26 @@ TypeWire typeWireOf(const QString &alarmType, const QString &className);
  *       （modelVersion / fenceVersion），这里只给**规则名**，不重复拼版本。
  */
 QString ruleNameOf(const QString &alarmType, const QString &className);
+
+/**
+ * @brief 英文类名 → 中文显示名（仅本机 UI 用）
+ *
+ * 数据源是 model/library/<id>/ 下与 labels.txt 逐行对齐的 label_zh.txt。
+ * 未收录（模型没写中文表、OCR 字符字典、库外自定义标签）时**原样返回入参**，
+ * 因此调用方可以无条件替换显示文本，协议/入库字段仍用英文原值。
+ *
+ * ⚠ 不要用它改写 AlarmRecord.className、数据库列或 Pad HTTP/WS JSON：
+ *   这些是对外口径（v1 §13.2.1），中文只属于本地展示层。
+ */
+QString classNameZh(const QString &className);
+
+/**
+ * @brief 按 labels.txt 路径返回逐行对齐的中文名表
+ *
+ * 优先读取同目录的 label_zh.txt；没有该文件或某行为空时，按英文名查全局映射，
+ * 仍查不到就保留英文。行序与传入的 labels.txt 完全一致（视频叠加按 cls_id 下标取）。
+ */
+QStringList zhNamesForLabelFile(const QString &labelPath);
 
 /// v1 §4.1 的处置选项。id 就是落进 alarms.dispose_option_id 的那个数。
 struct DisposeOption {

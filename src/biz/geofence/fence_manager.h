@@ -111,8 +111,11 @@ private:
 
     // 从 native_fences 读当前 taskId 的围栏进 fences_（调用方已持锁）。
     void loadNativeFencesLocked();
-    // 从 pad_fences 读当前 taskId 的 ACTIVE 围栏，覆盖同通道那版（调用方已持锁）。
+    // 从 pad_fences 读当前 taskId 的围栏：任何版本都算"Pad 占位"，
+    // 该通道不再露出本机旧围栏；只有 ACTIVE 才提供形状（调用方已持锁）。
     void mergePadFencesLocked();
+    // Pad 已接管当前 task 时，清理 task_id='' 的旧版本地围栏（迁移残留）。
+    void purgeLegacyGlobalIfPadManagedLocked();
     // refreshFromStores 的免锁版：mutex_ 已由调用方持有时必须用它——QMutex 不可重入，
     // 持锁再调 refreshFromStores() 就是自己把自己锁死（loadFromConfig/reloadForTask
     // 在启动和登录路径上各踩一次，界面直接挂在第一帧之前）。

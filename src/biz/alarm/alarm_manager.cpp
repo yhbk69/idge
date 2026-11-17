@@ -483,6 +483,41 @@ QVector<AlarmRecord> AlarmManager::ingestLadderAlarm(int channel, const object_d
 }
 
 // ============================================================================
+// ingestFireAlarm: 动火监护报警（动火作业现场不足两人）
+// ============================================================================
+// 口径与 ingestLadderAlarm 一致：状态机走完宽限、只在进入 ALARM 的沿调用；
+// 本函数只做限流与建记录。className 固定 fire_no_watcher（与 fire/smoke 的
+// 普通检测报警分开），所以 Pad/列表上看到的是"动火无人监护"而不是"明火"。
+// ============================================================================
+QVector<AlarmRecord> AlarmManager::ingestFireAlarm(int channel, const object_detect_result &det,
+                                                   const SlotContext &ctx, long timeNs)
+{
+    QVector<AlarmRecord> newAlarms;
+    const QString className = slotClassName(ctx, det.cls_id);
+    const long steadyNow = steadyNowNs();
+    {
+        QMutexLocker lock(&mutex_);
+        const QString key = QString("%1:fire").arg(channel);
+        if (steadyNow - lastAlarmTime_.value(key, 0) < kAlarmThrottleNs)
+            return newAlarms;
+        lastAlarmTime_[key] = steadyNow;
+
+        const QString type = QStringLiteral("fire_no_watcher");
+        AlarmRecord alarm = makeAlarmRecord(channel, det, className, timeNs, type,
+                                            ConfigManager::instance().alarmLevel(type));
+        alarm.modelVersion = ctx.modelVersion;
+
+        qDebug() << "AlarmManager: Creating fire guard alarm - id:" << alarm.id
+                 << "channel:" << alarm.channel
+                 << "className:" << alarm.className;
+
+        newAlarms.append(alarm);
+        storeDetectionDetail(channel, det, ctx.classNames, timeNs, /*slot=*/-1);
+    }
+    return newAlarms;
+}
+
+// ============================================================================
 // storeAndNotify: 存储报警记录并通知界面
 // ============================================================================
 // 这是报警系统的出口函数，由解码线程调用。

@@ -1492,11 +1492,12 @@ void QtHelper::localizeButtonBox(QDialogButtonBox *box)
 
 // 询问框：只给"确定/取消"，返回 Ok 表示用户确认
 QMessageBox::StandardButton QtHelper::askConfirm(QWidget *parent, const QString &title,
-                                                 const QString &text)
+                                                 const QString &text, bool defaultCancel)
 {
     QMessageBox box(QMessageBox::Question, title, text,
                     QMessageBox::Ok | QMessageBox::Cancel, parent);
     localizeMessageBoxButtons(&box);
+    box.setDefaultButton(defaultCancel ? QMessageBox::Cancel : QMessageBox::Ok);
     return static_cast<QMessageBox::StandardButton>(box.exec());
 }
 

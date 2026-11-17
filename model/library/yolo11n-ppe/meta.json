@@ -2,7 +2,7 @@
     "classes": [
         "un_helmet",
         "helmet",
-        "people",
+        "person",
         "vest",
         "workWear"
     ],
@@ -13,7 +13,7 @@
         640,
         640
     ],
-    "notes": "PPE detection model (helmet/vest/workwear/people)",
+    "notes": "PPE detection model (helmet/vest/workwear/person)",
     "num_classes": 5,
     "quant": "i8",
     "sha256": "",

@@ -5,6 +5,7 @@
 // 这一边是 QPainter 与 QtGui；混在一起会让"围栏库"莫名其妙依赖起 GUI 栈。
 // ============================================================================
 #include "fence_frame_renderer.h"
+#include "fence_palette.h"
 
 #include <QColor>
 #include <QDir>
@@ -21,12 +22,10 @@
 namespace geofence {
 namespace {
 
-/// 两种 ruleType 的画法。颜色只是"一眼分清这条是闯入还是越界"，
-/// 规约没规定配色，所以这里用与本机界面同一族的两档（禁区红、越界琥珀）。
+/// 两种 ruleType 的画法直接取 fence_palette，避免与管理页/视频页各写一套。
 QColor ruleColor(const QString &ruleType)
 {
-    return ruleType == QLatin1String("CROSS") ? QColor(0xFB, 0x8C, 0x00)
-                                              : QColor(0xE5, 0x39, 0x35);
+    return fenceLineColor(roleFromRuleType(ruleType));
 }
 
 /// 一个区域的标注点：顶点的算术平均（多边形内部一点，够写序号用）。
@@ -47,7 +46,9 @@ QPointF labelAnchor(const QPolygonF &polygon)
 /// RECT 的外接矩形四点，顺序固定 左上→右上→右下→左下（2026-11-17 用户裁定）。
 /// 不依赖存储顺序：旧数据里有过 (左上,右下,左下,右上) 的交叉序，直接 drawPolygon
 /// 会画成蝴蝶结；按 min/max 重建后无论来源顺序如何都是正矩形。
-QPolygonF rectPolygon(const PadRegion &region)
+/// 换算基准是底图的内容矩形（letterbox 扣黑边后那块），不是整幅画布——
+/// 与视频页 overlay / 编辑画布同一口径，否则非 16:9 帧上围栏会拉宽偏移。
+QPolygonF rectPolygon(const PadRegion &region, const QRect &content)
 {
     double xMin = 1.0, xMax = 0.0, yMin = 1.0, yMax = 0.0;
     for (const QPointF &point : region.points) {
@@ -57,10 +58,14 @@ QPolygonF rectPolygon(const PadRegion &region)
         yMax = qMax(yMax, point.y());
     }
     QPolygonF polygon;
-    polygon << QPointF(xMin * kFrameWidth, yMin * kFrameHeight)
-            << QPointF(xMax * kFrameWidth, yMin * kFrameHeight)
-            << QPointF(xMax * kFrameWidth, yMax * kFrameHeight)
-            << QPointF(xMin * kFrameWidth, yMax * kFrameHeight);
+    polygon << QPointF(content.left() + xMin * content.width(),
+                       content.top() + yMin * content.height())
+            << QPointF(content.left() + xMax * content.width(),
+                       content.top() + yMin * content.height())
+            << QPointF(content.left() + xMax * content.width(),
+                       content.top() + yMax * content.height())
+            << QPointF(content.left() + xMin * content.width(),
+                       content.top() + yMax * content.height());
     return polygon;
 }
 
@@ -87,14 +92,18 @@ QImage renderFenceImage(const QVector<PadRegion> &regions, const QImage &backgro
 
     QPainter painter(&image);
     painter.setRenderHint(QPainter::Antialiasing, true);
+    // 归一化坐标的唯一换算基准：底图 letterbox 后的内容矩形；无底图时满幅
+    // （网格底把整幅画布当作画面参照）。底图与围栏必须共用这一个 QRect，
+    // 各算各的就是"示意图围栏与现场位置对不上"那条 bug 的来源。
+    QRect content(0, 0, kFrameWidth, kFrameHeight);
     if (!background.isNull()) {
         // 真实画面等比居中（letterbox），与编辑画布/视频页同一口径，
         // 围栏叠上去的位置才和现场看到的一致。
         const QSize scaled = background.size().scaled(image.size(), Qt::KeepAspectRatio);
-        const QRect target(QPoint((kFrameWidth - scaled.width()) / 2,
-                                  (kFrameHeight - scaled.height()) / 2), scaled);
-        painter.drawImage(target, background.scaled(scaled, Qt::IgnoreAspectRatio,
-                                                    Qt::SmoothTransformation));
+        content = QRect(QPoint((kFrameWidth - scaled.width()) / 2,
+                               (kFrameHeight - scaled.height()) / 2), scaled);
+        painter.drawImage(content, background.scaled(scaled, Qt::IgnoreAspectRatio,
+                                                     Qt::SmoothTransformation));
     } else {
         // 十等分网格：没有视频帧可叠时（草稿预览/取不到帧），给现场一个比例参照。
         QPen grid(QColor(255, 255, 255, 26));
@@ -119,11 +128,12 @@ QImage renderFenceImage(const QVector<PadRegion> &regions, const QImage &backgro
         const PadRegion &region = regions.at(index);
         QPolygonF polygon;
         if (region.shapeType == QLatin1String("RECT")) {
-            polygon = rectPolygon(region);
+            polygon = rectPolygon(region, content);
         } else {
             polygon.reserve(region.points.size());
             for (const QPointF &point : region.points) {
-                polygon << QPointF(point.x() * kFrameWidth, point.y() * kFrameHeight);
+                polygon << QPointF(content.left() + point.x() * content.width(),
+                                   content.top() + point.y() * content.height());
             }
         }
         if (polygon.size() < 2)

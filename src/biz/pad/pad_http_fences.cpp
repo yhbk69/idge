@@ -445,12 +445,18 @@ void registerFenceRoutes(PadHttpServer *server, const HttpApiContext &ctx)
                                  QString relativePath;
                                  QString renderError;
                                  // 底图 = 下发时刻该通道的真实帧（UI 域注册的提供者）；
-                                 // 取不到时渲染器退回网格底，不伪造画面。
+                                 // 取不到时渲染器退回网格底，不伪造画面——但出声，
+                                 // 否则现场只看到一张网格示意图，不知道帧没叠上。
+                                 const QImage background =
+                                     geofence::frameForCamera(fence.cameraId);
+                                 if (background.isNull())
+                                     qWarning() << "HTTP apply 没抓到实时帧，生效画面退网格底："
+                                                << fenceId << version << fence.cameraId;
                                  if (!geofence::renderFenceFrame(fenceId, version, target.regions,
                                                                  ctx.mediaRootDir,
                                                                  ctx.fenceFrameDir, &absolutePath,
                                                                  &relativePath, &renderError,
-                                                                 geofence::frameForCamera(fence.cameraId))) {
+                                                                 background)) {
                                      return padhttp::replyError(503, 3003,
                                                                 QString::fromUtf8("围栏生效画面渲染不出来"),
                                                                 renderError);

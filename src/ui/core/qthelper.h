@@ -233,8 +233,10 @@ public:
     // 询问框：固定"确定/取消"两个按钮，返回 QMessageBox::Ok 表示用户确认。
     // 新增询问一律走这里，不要直接 QMessageBox::question（那会给英文 Yes/No，
     // 靠全局过滤器兜底也只能译成"是/否"，与本项目的"确定/取消"文案不一致）。
+    // defaultCancel=true 时默认按钮落在"取消"：不可逆操作（删除等）必须传 true，
+    // 否则回车就把东西删了。
     static QMessageBox::StandardButton askConfirm(QWidget *parent, const QString &title,
-                                                  const QString &text);
+                                                  const QString &text, bool defaultCancel = false);
 
     // 挂一个全局事件过滤器：任何 QMessageBox / QDialogButtonBox / QFileDialog 显示前
     // 自动走上面几个改写函数。静态版 QMessageBox::information/warning/critical 与

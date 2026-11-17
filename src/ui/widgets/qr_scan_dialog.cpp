@@ -416,8 +416,6 @@ Outcome runLiveScan(QWidget *parent, const QString &confirmText, bool autoAccept
         return button;
     };
 
-    auto *cancelBtn = makeButton(QString::fromUtf8("取消"), theme::FIELD, theme::TEXT,
-                                 theme::HOVER, 1);
     // 登录路径**解出即返回**：既没有"确认"，也没有"重新扫描"（扫描本身是连续的，
     // 按住这颗按钮的窗口期根本不存在）。两颗都只在手动档建，免得底部留两个按不动的
     // 大按钮，现场反而以为界面卡住了。
@@ -431,6 +429,9 @@ Outcome runLiveScan(QWidget *parent, const QString &confirmText, bool autoAccept
         confirmBtn->setEnabled(false);
         againBtn->setEnabled(false);   // 还没解出码时"重新扫描"无意义，先按住
     }
+    // 取消最后建：手搭的 QHBoxLayout 按 addWidget 先后排位，口径是确认在左、取消在右。
+    auto *cancelBtn = makeButton(QString::fromUtf8("取消"), theme::FIELD, theme::TEXT,
+                                 theme::HOVER, 1);
     root->addWidget(buttonRow);
 
     // ── 扫描状态机 ─────────────────────────────────────────────

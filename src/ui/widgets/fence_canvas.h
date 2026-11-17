@@ -22,15 +22,23 @@
 //   画围栏（norm → 像素）与收输入（像素 → norm）必须走同一对函数、同一个
 //   contentRect，否则"看到的围栏"与"存出去的 0~1"会分家。
 //
-// 交互（对应用户定的两条生命周期规则的编辑侧）：
-//   Edit      拖锚点（顶点）改形状；拖形状内部整体平移；右键删除
+// 交互（对应用户定的两条生命周期规则的编辑侧；**全触屏口径：不收右键**）：
+//   Edit      拖锚点（顶点）改形状；拖形状内部整体平移；**空白处单击给当前
+//             多边形追加顶点**（追加在末尾，按 1-2-…-n-1 点序自动闭合，
+//             三角形由此长成任意 n 边形；按下到松手位移 ≤4px 才算点击）；
+//             删除区域走 DeleteMode 工具钮（触屏没有右键）
 //   RectDraw  按下拖动画矩形（松开落一个 RECT 区域）
-//   PolyDraw  逐点画多边形；闭合有三个入口：工具栏「闭合」钮、右键、双击
+//   PolyDraw  画多边形：点 3 个点，**第 3 点落地自动闭合提交**（2026-11-17 用户裁定），
+//             绘制中每个点带序号；提交后自动回到 Edit。
+//             要更多顶点：提交后在 Edit 态往空白处逐点单击追加（2026-11-17 用户裁定
+//             "在其他位置加点，每次加点按照 1-2-3-4-…-1 闭合"）。
+//             Esc / 双击 = 取消重画，Backspace 撤点；触屏走工具栏「取消绘制」「撤销顶点」。
 //   DeleteMode 点击区域删除
 //   —— 锚点拖动是本画布相对 FenceOverlay 新增的能力（FenceOverlay 画完即定，
 //   顶点不可再动；草稿要反复改，不能每改一次就删了重画）。
+//   画布不叠操作提示文字（2026-11-17 用户裁定"操作提示删除"）。
 //
-// 任何几何改动只在**松开/闭合/删除那一刻**发一次 regionsChanged()，
+// 任何几何改动只在**松开/提交/删除那一刻**发一次 regionsEdited()，
 // 拖动过程只重绘不发信号——管理页的「已修改」标记与落库都该在动作结束时发生，
 // 鼠标每挪一像素就触发一次是无意义的抖动。
 //
@@ -51,7 +59,7 @@ namespace geofence {
 enum class CanvasMode {
     Edit,        // 拖锚点改形状、拖内部平移、右键删除区域
     RectDraw,    // 画矩形区域
-    PolyDraw,    // 画多边形区域
+    PolyDraw,    // 画多边形区域（第 3 点自动闭合）
     DeleteMode   // 点区域删除
 };
 
@@ -64,8 +72,7 @@ public:
     void setRegions(const QVector<PadRegion> &regions);
     QVector<PadRegion> regions() const { return regions_; }
 
-    // 当前模式。切模式清掉进行中的绘制（与 FenceOverlay::setDrawMode 同口径：
-    // 换工具意味着上一个图形作废）。
+    // 当前模式。切模式清掉进行中的绘制（换工具意味着上一个图形作废）。
     void setMode(CanvasMode mode);
     CanvasMode mode() const { return mode_; }
 
@@ -81,9 +88,10 @@ public:
     // 无背景时等于 rect()。
     QRect contentRect() const;
 
-    // 多边形的手势闭合/撤销入口。公开的理由与 FenceOverlay 相同：
-    // 触屏没有可靠的右键与双击，闭合必须能由可见按钮触发，且闭合语义只有一份。
-    void closePolygon();
+    // 多边形绘制的取消/撤销入口。公开的理由与 FenceOverlay 相同：
+    // 触屏没有可靠的右键与键盘，取消/撤点必须能由可见按钮触发。
+    // 闭合没有公开入口——第 3 点落地自动闭合，语义只有一份。
+    void cancelPolygon();
     void undoLastPolyPoint();
 
     // 画布可见时每秒发出一次，外部抓一帧新背景推回来。
@@ -95,6 +103,9 @@ signals:
     void regionsEdited();
     // 请求外部抓一帧新背景
     void frameRefreshRequested();
+    // 模式变化（含多边形第 3 点闭合后自动回 Edit）。管理页据此同步工具钮高亮，
+    // 否则画布已在 Edit、工具栏还亮着「画多边形」。
+    void modeChanged(CanvasMode mode);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -102,6 +113,7 @@ protected:
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
@@ -131,12 +143,16 @@ private:
     /// 矩形绘制完成：两个对角点 → 规范四点 RECT 区域，追加进 regions_
     void finishRect(const QPointF &start, const QPointF &end);
 
+    /// 多边形闭合提交：3 个顶点 → POLYGON 区域，追加进 regions_，回到 Edit 模式。
+    /// 只由第 3 次左击触发，没有别的入口。
+    void commitPolygon();
+
     /// 拖动进行中：把 delta 应用到被拖区域。delta 是 widget 像素，换算回 0~1 后逐顶点应用。
     void applyDragDelta(const QPointF &deltaWidget);
     /// 拖动开始：记录被拖区域的原始顶点（widget 像素）与被拖顶点下标
     void beginDrag(int regionIndex, int vertexIndex, const QPointF &pressPoint);
 
-    // 模式切换时清进行中的绘制状态（同 FenceOverlay::setDrawMode）
+    // 模式切换时清进行中的绘制状态（换工具意味着上一个图形作废）
     void clearInProgressDrawing();
 
     void updateCursor();
@@ -168,6 +184,10 @@ private:
     int dragVertex_ = -1;             // 被拖顶点下标；-1 = 拖整体
     QPointF dragPress_;               // 按下点（widget 像素）
     QVector<QPointF> dragOriginPoints_;  // 按下时该区域的顶点（widget 像素）
+
+    // 空白处单击追加顶点的候选（Edit 按下落在空白时记录，松手位移 ≤slop 才真追加）
+    bool appendPending_ = false;
+    QPointF appendPos_;               // 按下点（widget 像素，已钳进内容区）
 
     QPointF cursorPos_;               // 最近一次鼠标位置（画多边形虚线用）
 

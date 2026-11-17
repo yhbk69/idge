@@ -255,7 +255,7 @@ cmake --build build/build_rk3588_linux --target test_geofence_role -j"$(nproc)"
 cmake --build build/build_rk3588_linux --target test_construction_qr -j"$(nproc)"
 ./build/build_rk3588_linux/test_construction_qr [码图路径...]   # 无 GUI、与 cwd 无关；路径含 "bad" 的按坏码处理
 
-# 盘点/点名自测必须在仓库根运行（依赖 assets/test/ + model/library/yolo11n-coco +
+# 盘点/点名自测必须在仓库根运行（依赖 assets/test/ + model/library/yolo11n-ppe +
 # model/face/ 两件套权重；点名对照还需 model/face/face_recognition）；
 # 直接跑主程序同目录产物即可（test_equipment 内部已 qputenv offscreen）
 cd "$(git rev-parse --show-toplevel)"

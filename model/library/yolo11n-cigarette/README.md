@@ -47,7 +47,7 @@ python3 python/pt2rknn.sh model/train/cigarette/yolo11n-cigarette.pt yolo11n-cig
    "video": { "models": { "yolo11n-cigarette": { "alarm_class": "cigarette", "note": "吸烟检测" } } }
    ```
    （设置页「模型参数」表里也能改，等效）
-3. 在需要它的通道按槽序追加 id：`"video": { "channels": [ { "models": ["yolo11n-ppe","yolo11n-coco","yolo11n-cigarette"] } ] }`；
+3. 在需要它的通道按槽序追加 id：`"video": { "channels": [ { "models": ["yolo11n-ppe","yolo11n-cigarette"] } ] }`；
 4. 重启程序（改模型列表当前不做热更新）。
 
 ## 注意事项

@@ -14,7 +14,7 @@ train/
 ├── cigarette/
 │   └── yolo11n-cigarette.pt     # 吸烟检测权重（Ultralytics YOLO11n，nc=1，names={0:cigarette}，imgsz=640）
 └── ppe/
-    └── ppe.yaml                 # PPE 数据集配置（5 类：un_helmet/helmet/people/vest/workWear）
+    └── ppe.yaml                 # PPE 数据集配置（5 类：un_helmet/helmet/person/vest/workWear）
 ```
 
 ## 为什么这些不进 runtime

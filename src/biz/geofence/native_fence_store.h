@@ -51,6 +51,10 @@ public:
     /// 库里本机围栏总数（诊断用）
     int fenceCount() const;
 
+    /// 删除 task_id='' 的全局历史桶（config.json 迁移残留）及其版本行。
+    /// 返回删除的围栏条数；失败返回 0。只应在 Pad 围栏已接管当前 task 后调用。
+    int purgeGlobalLegacy() const;
+
 private:
     /// 分配下一个 fenceId：NFENCE-<自增号>，永不复用
     QString nextFenceId() const;

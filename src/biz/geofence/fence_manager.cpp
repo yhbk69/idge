@@ -270,22 +270,34 @@ void FenceManager::loadFromConfig()
 // ============================================================================
 void FenceManager::reloadForTask(const QString &taskId)
 {
-    QMutexLocker locker(&mutex_);
-    currentTaskId_ = taskId;
-    fences_.clear();
+    const bool loggedOut = taskId.isEmpty();
+    {
+        QMutexLocker locker(&mutex_);
+        currentTaskId_ = taskId;
+        fences_.clear();
 
-    if (taskId.isEmpty()) {
-        // 未登录：内存清空，检测不再用围栏（DB 历史保留）。
-        // ⚠ 这里与启动时的 loadFromConfig 不同：没登录时启动读的是"全局那一桶"
-        // （task_id=''，迁移进来的历史围栏），而**登出**是明确要停用的动作。
-        qDebug() << "[Fence] reloadForTask: 未登录，清空内存围栏";
-        return;
+        if (loggedOut) {
+            // 未登录：内存清空，检测不再用围栏（DB 历史保留）。
+            // ⚠ 这里与启动时的 loadFromConfig 不同：没登录时启动读的是"全局那一桶"
+            // （task_id=''，迁移进来的历史围栏），而**登出**是明确要停用的动作。
+            enabled_ = false;
+            qDebug() << "[Fence] reloadForTask: 未登录，清空内存围栏";
+        } else {
+            // 抬开关（config 的 geofence.enabled 可能是模板默认的 false）由
+            // refreshFromStoresLocked 统一做，这里不再重复判一次。
+            refreshFromStoresLocked();
+            qDebug() << "[Fence] reloadForTask:" << taskId << "channels=" << fences_.size();
+        }
     }
 
-    // 抬开关（config 的 geofence.enabled 可能是模板默认的 false）由
-    // refreshFromStoresLocked 统一做，这里不再重复判一次。
-    refreshFromStoresLocked();
-    qDebug() << "[Fence] reloadForTask:" << taskId << "channels=" << fences_.size();
+    // 登出分支没有走 refreshFromStoresLocked，必须在这里补发 fenceChanged：
+    // 否则视频页的 FenceOverlay 收不到"清空"，旧线框会一直留到下次登录刷新。
+    // 解锁后再发，避免订阅方在槽里回调时撞上不可重入的 mutex_。
+    if (loggedOut) {
+        const int channels = ConfigManager::instance().channelCount();
+        for (int ch = 0; ch < channels; ++ch)
+            emit fenceChanged(ch);
+    }
 }
 
 // ============================================================================
@@ -300,8 +312,9 @@ void FenceManager::reloadForTask(const QString &taskId)
 //   pad_fences：Pad 原样存进来的 cameraId，而 §7.1 的 channelIdentity() 发给对端的是
 //              "CH"+**1-based**（CH1..CH4）。同一个 "CH2" 在两张表里是两个通道，
 //              所以这里按各自口径解析，绝不能共用一句 mid(2).toInt()。
-// 【与 GET /fences 的差一处】那边只要该 cameraId 上有 Pad 围栏就藏掉本机那条
-//   （草稿也算占位），这边只认 ACTIVE：草稿还没生效，拿它去判帧就是替对端改了主意。
+// 【与 GET /fences 同口径】只要该 cameraId 上有 Pad 围栏（含草稿/停用），本机旧
+//   围栏就不露出；但只有 ACTIVE 才提供形状——草稿还没生效，拿它去判帧等于替
+//   对端改了主意。
 // 【未登录（taskId 空）不并 Pad 的】pad_fences 每条都挂在具体 taskId 上，
 //   空 taskId 查出来本来就是空表，不特判也不会错。
 // ============================================================================
@@ -344,6 +357,9 @@ void FenceManager::refreshFromStores()
 void FenceManager::refreshFromStoresLocked()
 {
     fences_.clear();
+    // Pad 已接管的 task：先清掉 task_id='' 的迁移残留，再读 native，
+    // 避免这批既不能在管理页编辑、又会在视频页重新露出的旧围栏。
+    purgeLegacyGlobalIfPadManagedLocked();
     loadNativeFencesLocked();
     mergePadFencesLocked();
     // 内存里有形状就允许判定（与 loadFromConfig/reloadForTask 同一口径）：
@@ -393,18 +409,44 @@ void FenceManager::mergePadFencesLocked()
                        << f.cameraId << "对不上本机任何一路通道，这条不驱动检测";
             continue;
         }
+
+        // Pad 占位：不管 ACTIVE / DRAFT / DISABLED，该 cameraId 上的本机旧围栏
+        // 都不再露出。与 GET /api/fences 的口径一致，也避免"管理页停用/删除后
+        // 视频页又冒出迁移前的老线"。
+        fences_.remove(ch);
+
         PadFenceVersion active;
         if (!activeVersionOf(f, &active))
-            continue;   // 只有草稿/已停用的版本：不覆盖，继续用本机手绘那版
+            continue;   // 只有草稿/已停用：该通道当前无围栏，不回退本机旧数据
+
         ChannelFence cf;
         cf.enabled = true;
         cf.fenceId = f.fenceId;
         cf.version = active.version;
         cf.shapes = regionsToShapes(active.regions);
-        // Pad 优先：与 GET /api/fences 一样，同一 cameraId 上 Pad 那台占位时本机那条
-        // 不露出。差一处判据说明在这儿：那边连草稿也算占位，这边**只认 ACTIVE**——
-        // 草稿还没生效，拿它去判帧等于替对端改了主意，报警也发不出去。
         fences_[ch] = cf;
+    }
+}
+
+// ============================================================================
+// 旧版本残留清理：task_id='' 是 config.json 形状迁移进 native_fences 时的历史桶。
+// 新管理页只操作 pad_fences，既看不到也删不掉这批行；一旦当前 task 已经有 Pad
+// 围栏（说明管理页已接管），就把这个全局桶连同版本行一起删掉，避免它继续在
+// 视频页/检测里出现。没有任何 Pad 围栏的设备不动，保留旧的纯本机围栏用法。
+// ============================================================================
+void FenceManager::purgeLegacyGlobalIfPadManagedLocked()
+{
+    if (currentTaskId_.isEmpty())
+        return;
+    PadFenceStore padStore;
+    if (padStore.fencesForTask(currentTaskId_).isEmpty())
+        return;
+
+    NativeFenceStore nativeStore;
+    const int removed = nativeStore.purgeGlobalLegacy();
+    if (removed > 0) {
+        qInfo() << "[Fence] Pad 围栏已接管，清理" << removed
+                << "条 task_id='' 的旧版本地围栏（native_fences）";
     }
 }
 

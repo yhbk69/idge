@@ -22,7 +22,7 @@
 - **AlarmManager**（`QObject` 单例）：全局唯一。
 - **AlarmRecord**：一条报警（时间戳、通道、类别、置信度、确认位、截图路径、视频片段路径、是否围栏报警）。
   围栏报警的 `alarmType` 是 `fence_in`/`fence_out`（闯入禁区/离岗），登高守护是 `ladder_no_spotter`
-  （梯上有人、梯下无人看护），普通检测报警是 `"detection"`。
+  （梯上有人、梯下无人看护），动火监护是 `fire_no_watcher`（动火现场不足两人），普通检测报警是 `"detection"`。
   本轮加两个字段承载施工信息：`workerName`（列表那一列直接显示）与 `constructionJson`（整份载荷，
   详情框与上行都从它渲染）。**为什么只有两个**见 `src/biz/session/README.md`：字段还没定稿，
   两列的形状让"加字段只动 `ConstructionInfo` 一处"成立。

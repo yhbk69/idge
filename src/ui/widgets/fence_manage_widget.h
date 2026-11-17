@@ -118,8 +118,8 @@ private:
 
     QButtonGroup *modeGroup_ = nullptr;
     QButtonGroup *ruleGroup_ = nullptr;
-    QPushButton *polyCloseBtn_ = nullptr;
     QPushButton *polyUndoBtn_ = nullptr;
+    QPushButton *polyCancelBtn_ = nullptr;
 
     geofence::FenceCanvas *canvas_ = nullptr;
     QListWidget *regionList_ = nullptr;

@@ -30,6 +30,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QObject>
 #include <QPointF>
 #include <QTemporaryDir>
 #include <QVector>
@@ -182,12 +183,13 @@ int main(int argc, char *argv[])
         expectChannel(1, pf2, "3) 同通道 Pad 优先（与 GET /api/fences 合并口径一致）");
 
         // ====================================================================
-        // 契约 4：只有草稿的 Pad 围栏不覆盖本机那版（草稿还没"生效"）
-        // pad "CH1" → ch0，与 native "CH0"(→ch0) 撞车；不下发时 ch0 仍是本机那条。
+        // 契约 4：只要 Pad 有这条围栏（草稿也算占位），本机旧围栏就不再露出
+        // pad "CH1" → ch0，与 native "CH0"(→ch0) 撞车；草稿不驱动检测，
+        // 但该通道也不能回退到迁移前的本机旧线。
         // ====================================================================
         const QString pfCh1 = putPad(QStringLiteral("CH1"), QStringLiteral("RG-P1"), false);
         fm.reloadForTask(kTask);
-        expectChannel(0, nf0, "4) Pad 草稿不驱动检测");
+        expectChannel(0, QString(), "4) Pad 草稿占位，隐藏本机旧围栏");
         check(!pfCh1.isEmpty(), "4) draft id");
 
         // ====================================================================
@@ -206,9 +208,9 @@ int main(int argc, char *argv[])
         }
 
         // ====================================================================
-        // 契约 6：停用之后这一路**退回本机手绘那版**，不是清空、也不是继续按停用版判
-        // （disable 是撤掉 Pad 的覆盖，本机自己的围栏从来没被删过——这才是"停用"
-        // 在两套来源并存时的正确语义，与 GET /api/fences 露出本机那条一致。）
+        // 契约 6：停用之后这一路是**清空**，不再回退本机手绘那版
+        // （Pad 一旦在该 cameraId 上占位，本机旧数据就不可见；停用 = 当前无围栏，
+        //   否则管理页停用/删除后视频页又会冒出迁移前的老线。）
         // ====================================================================
         {
             PadFenceStore store;
@@ -217,7 +219,7 @@ int main(int argc, char *argv[])
             check(d == PadFenceStore::DisableOutcome::Disabled, "6) disableVersion failed");
             check(pf2 != nf1, "6) 两条围栏必须是不同身份，否则这条判据没意义");
             fm.refreshFromStores();
-            expectChannel(1, nf1, "6) 停用后回落本机那版");
+            expectChannel(1, QString(), "6) 停用 Pad 后通道清空，不回退本机旧围栏");
         }
 
         // ====================================================================
@@ -234,9 +236,35 @@ int main(int argc, char *argv[])
         }
 
         // ====================================================================
-        // 契约 8：登出清空内存围栏，但库里历史还在
+        // 契约 10：Pad 已接管当前 task 后，task_id='' 的迁移残留被清理
+        // 这批行是 config.json 形状迁移时留下的历史桶，新管理页看不到也删不掉；
+        // 只要出现 Pad 围栏，就必须把它连同版本行删掉，避免旧线继续露出。
         // ====================================================================
-        fm.reloadForTask(QString());
+        {
+            NativeFenceStore store;
+            const QString legacyId = store.saveActiveVersion(
+                QString(), QStringLiteral("CH3"), QStringLiteral("CH3"),
+                QStringLiteral("迁移旧围栏"), {makeRegion(QStringLiteral("RG-G3"))});
+            check(!legacyId.isEmpty(), "10) 准备全局历史围栏失败");
+            fm.refreshFromStores();
+            check(NativeFenceStore().fencesForTask(QString()).isEmpty(),
+                  "10) task_id='' 的全局历史桶应被清理");
+            check(!fm.hasFence(3), "10) 清理后该通道不该再出现迁移旧围栏");
+        }
+
+        // ====================================================================
+        // 契约 8：登出清空内存围栏，并通知每一路清空（overlay 才会擦掉旧线框）
+        // ====================================================================
+        {
+            int notified = 0;
+            const auto conn = QObject::connect(
+                &fm, &FenceManager::fenceChanged,
+                [&notified](int) { ++notified; });
+            fm.reloadForTask(QString());
+            QObject::disconnect(conn);
+            check(notified == ConfigManager::instance().channelCount(),
+                  "8) 登出必须对每一路发 fenceChanged");
+        }
         check(!fm.hasFence(0) && !fm.hasFence(1) && !fm.hasFence(2) && !fm.hasFence(3),
               "8) 登出后内存不该留着围栏");
         fm.reloadForTask(kTask);

@@ -16,13 +16,11 @@ RKNN 模型收编进 `library/<id>/`，一个模型一个目录；测试素材�
 ```
 model/
 ├── library/                      # 视频级联检测模型库（运行时唯一事实源）
-│   ├── yolo11n-coco/             # YOLO11n INT8，默认模型（COCO 80 类）
+│   ├── yolo11n-ppe/              # PPE安全装备检测（5类：un_helmet/helmet/person/vest/workWear），默认模型
 │   │   ├── model.rknn            # 固定文件名
 │   │   ├── labels.txt            # 专属类别表（行序 = cls_id）
+│   │   ├── label_zh.txt          # [可选] 逐行对齐的中文显示名，仅本机 UI（叠加/报警展示），不影响推理与协议
 │   │   └── meta.json             # 元数据（首次扫描自动生成，可手工修订）
-│   ├── yolo11s-coco/             # YOLO11s（精度优先备选）
-│   ├── yolo11m-coco/             # YOLO11m（对照实验用）
-│   ├── yolo11n-ppe/              # PPE安全装备检测（5类：un_helmet/helmet/people/vest/workWear）
 │   ├── yolo11n-cigarette/        # 吸烟检测（1类：cigarette，2026-10-28 转好 rknn，尚未挂通道）
 │   ├── yolo11n-ladder/           # 梯子检测（1类：ladder，2026-11-10 入库；登高守护触发源）
 │   ├── yolo11n-fire/             # 明火/烟雾检测（2类：fire/smoke，2026-11-10 入库）
@@ -55,9 +53,8 @@ model/
   或调用 `ModelRegistry::importModel()`（设置页「模型管理」在用）。
 - `rescan()` **只登记存在 `model.rknn` 的目录**（`model_registry.cpp:143`），且**文件名必须正好是
   `model.rknn`**——所以先建 labels/meta 的占位目录不会出现在 UI 里，也不会被任何通道引用；
-  反过来，产物叫别的名字（如 `cigarette.rknn`）也会被静默忽略。当前注册表可见 8 个：
-  `yolo11n-coco` / `yolo11s-coco` / `yolo11m-coco` / `yolo11n-ppe` / `yolo11n-cigarette` /
-  `yolo11n-ladder` / `yolo11n-fire` / `yolo11n-tools`。
+  反过来，产物叫别的名字（如 `cigarette.rknn`）也会被静默忽略。当前注册表可见 5 个：
+  `yolo11n-ppe` / `yolo11n-cigarette` / `yolo11n-ladder` / `yolo11n-fire` / `yolo11n-tools`。
   `ppocrv4-ocr`（det.rknn + rec.rknn 两件套）与 `model/face/` 两件套按约定**不进注册表**，
   由各自模块直接加载。
 
@@ -87,8 +84,8 @@ config.json（schema V2）里**不出现任何模型/标签路径**，只按**�
 ```json
 "video": {
   "sources":  [ { "id": "demo-mp4", "type": "file", "url": "assets/test/192.mp4" } ],
-  "models":   { "yolo11n-coco": { "alarm_class": "", "note": "COCO通用检测" } },
-  "channels": [ { "channel": 0, "source_id": "demo-mp4", "models": ["yolo11n-ppe", "yolo11n-coco"] } ]
+  "models":   { "yolo11n-ppe": { "alarm_class": "un_helmet", "note": "PPE安全装备检测" } },
+  "channels": [ { "channel": 0, "source_id": "demo-mp4", "models": ["yolo11n-ppe"] } ]
 }
 ```
 
@@ -112,18 +109,18 @@ config.json（schema V2）里**不出现任何模型/标签路径**，只按**�
 
 设备盘点不再依赖外部 demo 与 `model/coco|fire/` 目录（2026-09-24 内化改造）：
 `frmMain::initEquipmentService()` 经 ModelRegistry 从 `library/` 解析权重
-（coco 槽固定 `yolo11n-coco`；明火按 id 含 "fire"、工器具按 id 含 "tools" 自动探测，入库即生效）。
+（基础槽固定 `yolo11n-ppe`；明火按 id 含 "fire"、工器具按 id 含 "tools" 自动探测，入库即生效）。
 
 ## 使用方法
 
 ```bash
 # python 侧验证（见 python/README.md）
-python3 yolo11.py --model_path ../model/library/yolo11n-coco/model.rknn --target rk3588 --img_folder ../assets/test
+python3 yolo11.py --model_path ../model/library/yolo11n-ppe/model.rknn --target rk3588 --img_folder ../assets/test
 
 # 模型转换：.pt 一步到库目录（x86 PC 或板端均可，toolkit2 2.3.0 起 aarch64 可用）
 ./python/pt2rknn.sh model/train/cigarette/yolo11n-cigarette.pt yolo11n-cigarette
 # 或已有 onnx 时手工转（输出路径必填，直接落库；onnx 源权重收在 model/onnx/）
-python3 convert.py yolo11n.onnx rk3588 i8 ../model/library/yolo11n-coco/model.rknn
+python3 convert.py yolo11n.onnx rk3588 i8 ../model/library/yolo11n-ppe/model.rknn
 # ladder/fire 的实际转换命令与校准注意事项见 model/onnx/README.md
 ```
 
@@ -146,6 +143,6 @@ python3 convert.py yolo11n.onnx rk3588 i8 ../model/library/yolo11n-coco/model.rk
 - `meta.json` 的 `sha256` 用于导入去重与完整性核对；删除后下次启动重扫会重新生成。
 - `model/face/` 的**两件套权重**（detection/model.rknn 和 recognition/model.rknn）缺失时，人员点名初始化会失败
   （`initRollCallService` 返回 false；`face_recognition` exe 已降级为 CLI 对照工具，缺失不影响点名运行）；
-  盘点权重改从 `library/` 解析，库中无任何可用盘点模型（coco/明火/工器具都未入库）时 `initEquipmentService`
+  盘点权重改从 `library/` 解析，库中无任何可用盘点模型（ppe/明火/工器具都未入库）时 `initEquipmentService`
   返回 false——均为弹警告降级，视频监控主流程不受影响。
 - 标签 txt 每行一个类名、不要带引号或逗号；新增类别后需重新导出模型保持 cls_id 对齐。

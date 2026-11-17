@@ -308,7 +308,6 @@ public:
     // 退役键：报警规则改由每个围栏形状自带的 role 决定（见 geofence/FenceRole）。
     // 只有 FenceManager::loadFromConfig 读它一次，用于给老配置里缺 role 的形状补角色。
     QString geofenceMode() const;
-    void setGeofenceMode(const QString &mode);
 
     QJsonObject geofenceChannels() const;
     void setGeofenceChannels(const QJsonObject &channels);
@@ -347,6 +346,30 @@ public:
     /** @brief 扶梯人连续在场多少秒消警（默认 1.0；写 <=0 回落默认） */
     double ladderguardClearSeconds() const;
     void setLadderguardClearSeconds(double seconds);
+
+    // ========== 动火监护配置 ==========
+    // 通道同时挂了明火类模型（类名含 fire/smoke）与人模型才激活；
+    // 判据 = 明火在场且人数不足 minPersons 持续 graceSeconds。
+    // 设置页只暴露启用开关、人数门槛与两个时间门槛（见 frmMain::initFireGuardUi）。
+
+    /** @brief 整段快照（解码线程每帧读一次）；缺键由消费方按默认值兜底 */
+    QJsonObject fireguardConfig() const;
+
+    /** @brief 是否启用动火监护（默认 true：没挂明火模型的通道自然不激活） */
+    bool fireguardEnabled() const;
+    void setFireguardEnabled(bool enabled);
+
+    /** @brief 动火现场最少在场人数（默认 2；写 <1 回落默认） */
+    int fireguardMinPersons() const;
+    void setFireguardMinPersons(int persons);
+
+    /** @brief 人数不足持续多少秒才告警（默认 2.0；写 <=0 回落默认） */
+    double fireguardGraceSeconds() const;
+    void setFireguardGraceSeconds(double seconds);
+
+    /** @brief 人数连续达标多少秒消警（默认 1.0；写 <=0 回落默认） */
+    double fireguardClearSeconds() const;
+    void setFireguardClearSeconds(double seconds);
 
     // ========== 数据库配置 ==========
 
@@ -603,8 +626,6 @@ private:
      *
      * 规则：
      *   1) 绝对路径去前缀：/任意前缀/model/xxx → model/xxx（保持仓库可搬迁）
-     *   2) 旧平铺模型 model/yolo11{,n,s,m}.rknn → model/library/yolo11X-coco/model.rknn
-     *      （仅当库内新文件存在时替换）
      * @return true=root_ 有改动（调用方负责 saveUnsafe 落盘）
      */
     bool migrateModelPaths();

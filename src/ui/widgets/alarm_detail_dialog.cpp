@@ -204,7 +204,7 @@ void AlarmDetailDialog::setupUi()
     infoLay->setVerticalSpacing(8);
     addField(infoLay, 0, 0, "通道", QStringLiteral("通道 %1").arg(alarm_.channel + 1),
              theme::TEXT, false);
-    addField(infoLay, 0, 1, "类别", alarm_.className, theme::TEXT, false);
+    addField(infoLay, 0, 1, "类别", alarm_labels::classNameZh(alarm_.className), theme::TEXT, false);
     addField(infoLay, 1, 0, "报警级别", levelText, levelColor, true);
     addField(infoLay, 1, 1, "置信度",
              QStringLiteral("%1%").arg(alarm_.confidence * 100, 0, 'f', 1),

@@ -2,7 +2,7 @@ path: E:/data/yoloTrain/data2
 train: train/images
 val: val/images
 
-names: ['un_helmet','helmet','people','vest','workWear']
+names: ['un_helmet','helmet','person','vest','workWear']
 nc: 5
 
 

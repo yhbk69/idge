@@ -48,7 +48,8 @@
    先于 `addButton(Ok)` 也一样——Qt 按 `ButtonRole` 重排。**手搭的 `QHBoxLayout` 没有这个待遇**，
    排位就是 `addWidget` 的先后，所以每个自建按钮对要自己排成"确认、取消"
    （已按这条改过：`equipment_recognition_dialog`、`recognition_result_dialog`、
-   `smart_recognition_widget` 的拍照确认框）。
+   `cancellation_result_dialog`、`smart_recognition_widget` 的拍照确认框、
+   `qr_scan_dialog` 的手动确认档）。
    单颗按钮（关闭/保存/确定）不构成"对"，不参与这条判据。
 
 已随死代码清理删除（零 include、零调用）：`appdata.*`、`customstyle.*`、`delegate.*`（`DelegateComboBox`）、

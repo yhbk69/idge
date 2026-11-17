@@ -22,6 +22,7 @@
 #include <QDebug>
 #include "runtime_paths.h"
 #include "alarm_manager.h"
+#include "alarm_labels.h"   // 类名中文显示（label_zh.txt），仅本机 UI
 #include "construction_session.h"   // ConstructionInfo::display()：空值统一成 "—" 的唯一口径
 #include "qthelper.h"
 #include "alarm_detail_dialog.h"
@@ -743,7 +744,7 @@ void AlarmListWidget::refreshTable()
         const AlarmRecord &a = pageAlarms_.at(i);
 
         // 类别列
-        table_->setItem(i, 0, new QTableWidgetItem(a.className));
+        table_->setItem(i, 0, new QTableWidgetItem(alarm_labels::classNameZh(a.className)));
 
         // 置信度列
         QTableWidgetItem *confItem = new QTableWidgetItem(QString("%1%").arg(a.confidence * 100, 0, 'f', 1));
@@ -810,7 +811,7 @@ void AlarmListWidget::refreshFenceTable()
         const AlarmRecord &a = pageFenceAlarms_.at(i);
 
         // 前六列与类别报警表同序同口径
-        fenceTable_->setItem(i, 0, new QTableWidgetItem(a.className));
+        fenceTable_->setItem(i, 0, new QTableWidgetItem(alarm_labels::classNameZh(a.className)));
 
         QTableWidgetItem *confItem = new QTableWidgetItem(QString("%1%").arg(a.confidence * 100, 0, 'f', 1));
         confItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
@@ -877,7 +878,7 @@ void AlarmListWidget::refreshDetectionTable()
         detTable_->setItem(i, 0, new QTableWidgetItem(
             QDateTime::fromMSecsSinceEpoch(d.timestamp).toString("yyyy-MM-dd HH:mm:ss.zzz")));
         detTable_->setItem(i, 1, new QTableWidgetItem(QString("通道 %1").arg(d.channel + 1)));
-        detTable_->setItem(i, 2, new QTableWidgetItem(d.className));
+        detTable_->setItem(i, 2, new QTableWidgetItem(alarm_labels::classNameZh(d.className)));
 
         QTableWidgetItem *confItem =
             new QTableWidgetItem(QString("%1%").arg(d.confidence * 100, 0, 'f', 1));

@@ -482,7 +482,7 @@ void StreamEditorDialog::addStream()
  * 本对话框改的是 streams_，通道侧的 source_id 还留在配置里，"谁在用这条流"只能问配置。
  * 计数含两处消费者（video.channels[].source_id 与 gb28181.streams[].source_id），
  * 提示文案必须把两处都说到，否则用户以为只是断了视频通道。
- * 默认按钮是 No：这是不可逆的一删（引用被连带清空、那些路会停流），要点确认。
+ * 默认按钮是"取消"：这是不可逆的一删（引用被连带清空、那些路会停流），要点确认。
  * 国标那段程序从不写回配置，所以这里只提醒不动它：引用断掉的国标流
  * 下次启动会被整条丢弃（日志给出行号与原因），本次运行仍然照推。
  * 无选中（id 空）时静默返回。
@@ -500,13 +500,15 @@ void StreamEditorDialog::removeStream()
     // 引用被删断的那条国标流下次启动会整条丢弃，日志给出行号与原因。
     const int users = ConfigManager::instance().videoSourceReferrerCount(id);
     if (users > 0) {
-        const auto ans = QMessageBox::question(
-            this, QStringLiteral("删除视频流"),
-            QStringLiteral("这条流正被 %1 处引用（视频通道 + 国标推流）。\n"
-                           "通道侧的引用会一起清掉（内联地址还在的会继续用内联）；\n"
-                           "国标那段程序不写回，引用断掉的流下次启动会被整条丢弃。\n确认删除？").arg(users),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (ans != QMessageBox::Yes) {
+        // 不可逆的一删：默认按钮落"取消"，回车不会把流删掉。
+        if (QtHelper::askConfirm(
+                this, QStringLiteral("删除视频流"),
+                QStringLiteral("这条流正被 %1 处引用（视频通道 + 国标推流）。\n"
+                               "通道侧的引用会一起清掉（内联地址还在的会继续用内联）；\n"
+                               "国标那段程序不写回，引用断掉的流下次启动会被整条丢弃。\n确认删除？")
+                    .arg(users),
+                true)
+            != QMessageBox::Ok) {
             return;
         }
     }

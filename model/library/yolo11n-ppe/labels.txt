@@ -1,5 +1,5 @@
 un_helmet
 helmet
-people
+person
 vest
 workWear

@@ -31,7 +31,7 @@
 #   python3 convert.py <onnx_model_path> <platform> [dtype] <output_rknn_path>
 #
 #   示例（输出直接落到模型库目录，schema V2 里运行时只认 library/<id>/model.rknn）：
-#   python3 convert.py yolo11n.onnx rk3588 i8 ../model/library/yolo11n-coco/model.rknn
+#   python3 convert.py yolo11n.onnx rk3588 i8 ../model/library/yolo11n-ppe/model.rknn
 #   python3 convert.py yolo11n.onnx rk3588 fp ../model/library/yolo11n-smoke/model.rknn
 #   也可以一步从 .pt 做完（含 yolo export）：见 pt2rknn.sh
 #

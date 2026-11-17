@@ -43,7 +43,7 @@ $IDGE_WORKSPACE/
 │   │   ├── recognition.rknn       # 人脸特征比对模型
 │   │   └── face_recognition       # CLI 对照工具构建产物（点名已进程内化，主程序不再调起）
 │   └── library/                   # 模型库：设备盘点权重经 ModelRegistry 从这里解析
-│       ├── yolo11n-coco/          # 当前盘点主力权重（明火/工器具模型入库后自动加入盘点清单）
+│       ├── yolo11n-ppe/           # 当前盘点基础权重（明火/工器具模型入库后自动加入盘点清单）
 │       │   ├── model.rknn
 │       │   └── labels.txt
 │       └── ppocrv4-ocr/           # 智能识别铭牌 OCR 权重（det/rec + labels）
@@ -250,9 +250,13 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
   禁区命中优先于离岗判定、一人一帧一条，
   `geofence.throttleSeconds`（默认 10 秒）只作每通道每角色每类别的节流下限
 - **登高守护**：梯上有人（攀爬者）且梯下无人看护（扶梯人）持续超过宽限期才报警（`ladder_no_spotter`）。
-  与围栏同思路——不占新推理任务，复用同通道级联里梯子模型（`yolo11n-ladder`）与人模型（ppe/coco）
+  与围栏同思路——不占新推理任务，复用同通道级联里梯子模型（`yolo11n-ladder`）与人模型（ppe）
   的跨槽结果做几何判定 + 三态状态机（`src/biz/ladderguard/`）；几何阈值全是梯框 W/H 比例，
   报警只在进入违规的沿出一次，扶梯人连续在场够久自动消警。配置段 `ladderguard`，设置页可改宽限/消警秒数
+- **动火监护**：画面出现明火/烟雾（动火作业）且现场人数不足门槛（默认 2 人 = 作业人 + 监火人）
+  持续超过宽限期才报警（`fire_no_watcher`）。复用同通道明火模型（`yolo11n-fire`）与人模型的
+  跨槽结果，通道级三态状态机（`src/biz/fireguard/`）；与 fire/smoke 的普通检测报警分开，
+  报警只在进入违规的沿出一次，人数连续达标够久自动消警。配置段 `fireguard`，设置页可改人数门槛/宽限/消警秒数
 - **扫码登录（门禁）**：启动后先进登录页，用本机摄像头扫现场张贴的施工二维码。码内容是
   `qr-login-edge-v1.md` 定的嵌套 JSON：`person{id,name,role}` + `plan{taskId,线路/车站/作业内容/
   计划时间窗,总人数}`，另有 `issuedAt/expiresAt/signature*`。**未登录不推流、不检测、不出报警**；
@@ -266,7 +270,7 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/mali:3rdparty/ffmpeg-rkmpp/lib
   ⚠ 门挡的是"检测与报警产生"，**不是整个进程的网络出口**：GB28181 与 WsClient 仍按配置在启动时起来。
 - **报警管理**：限流去重、抓拍落盘、SQLite 持久化、GUI 悬浮提示与历史查询
 - **人员点名**：SCRFD 人脸检测 + 特征比对（进程内 RKNN 常驻推理），注册 / 点名 / 注销三阶段，余弦相似度 + 贪心一对一匹配
-- **设备盘点**：复用 YOLO11 RKNN 模型做设备识别与盘点任务管理（coco 主力 + 明火/工器具专用模型自动探测）
+- **设备盘点**：复用 YOLO11 RKNN 模型做设备识别与盘点任务管理（ppe 基础模型 + 明火/工器具专用模型自动探测）
 - **智能识别**：二维码扫描（ZBar，模态窗格**打开即实时扫描**，解出后显示码内内容、点确认才关窗格）+ 设备铭牌文字识别（PP-OCRv4 det/rec 两阶段，外部 demo 经 QProcess 调用）。
   扫码器全程序**只有一份**（`uiwidgets::QrScanDialog`），登录页与智能识别页共用——`smartRecognition.camera`
   那个设备节点不能被开两次
@@ -357,7 +361,7 @@ Annex-B H.265（或 h264_rkmpp → H.264）AVPacket —— **同一份包两路�
     → 注册/比对/注销(src/biz/service/roll_call_service)
     → 余弦相似度(归一化点积) + 贪心一对一匹配 → roll_call.db
 
-设备盘点：拍照 → 进程内 YOLO11 识别(src/ai/yolo11，权重=model/library/yolo11n-coco，
+设备盘点：拍照 → 进程内 YOLO11 识别(src/ai/yolo11，权重=model/library/yolo11n-ppe，
     明火/工器具模型按 id 含 fire/tools 自动探测加入)
     → 结果去重汇总 → src/biz/service/equipment_inventory_service → roll_call.db 任务/设备表
 
@@ -434,7 +438,7 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
 | `src/base/imaging/` | 图像读写/格式转换/letterbox、软件画框、Qt 安全解码、文件读写原语 | [README](src/base/imaging/README.md) |
 | `src/base/sysinfo/` | 设备运行指标采样（CPU/内存/温度/电池/NPU/磁盘/uptime/系统版本）——看板与 Pad `/api/device/status` 的同一份口径 | [README](src/base/sysinfo/README.md) |
 | `tools/face_recognition/` | 人脸识别命令行工具（CLI 验证/点名对照回归基准，产物输出 model/face/） | [README](tools/face_recognition/README.md) |
-| `model/` | 模型库 `library/<id>/`（yolo11n/s/m-coco、ppe、ocr 等，一个模型一个目录）+ `train/`（训练侧 .pt/yaml/校准清单，程序不读） | [README](model/README.md) |
+| `model/` | 模型库 `library/<id>/`（ppe、ladder、fire、tools、ocr 等，一个模型一个目录）+ `train/`（训练侧 .pt/yaml/校准清单，程序不读） | [README](model/README.md) |
 | `data/` | 运行时数据（config/idge.db/alarms/backups/roll_call_data，内容不入库） | — |
 | `python/` | 模型转换与验证脚本：`.pt → onnx → rknn`（`pt2rknn.sh`）、ONNX→RKNN（`convert.py`）、推理/mAP 验证（`yolo11.py`） | [README](python/README.md) |
 | `tests/` | 测试程序（test_database 数据库层；test_equipment 设备盘点、test_rollcall 人员点名全链离线自测；test_latest_frame_slot 帧广播槽跳帧/生命周期；test_video_sources 视频流注册表与通道引用解析；test_stream_params 流参数板端实测；test_gb28181_source_ref 国标流引用注册表；test_pad_* Pad v1 三连，均随主构建生成） | [README](tests/README.md) |
@@ -463,7 +467,7 @@ Pad↔Aibox 入站：frmMain 构造 → WsClient::start() → QWebSocket 连 web
 # 六、模型信息
 
 - **模型格式**：RKNN (Rockchip Neural Network)，转换方法见 [python/README.md](python/README.md)
-- **检测模型**：YOLO11 nano/small/medium（COCO 80 类），输入 640×640（LetterBox 预处理）
+- **检测模型**：YOLO11 nano/small/medium（类别以各库 `labels.txt` 为准），输入 640×640（LetterBox 预处理）
 - **人脸模型**：SCRFD 检测 + 特征识别，放置于 `$IDGE_WORKSPACE/model/face/`
 - **OCR 模型**：PP-OCRv4 det/rec 两件套（`model/library/ppocrv4-ocr/` 的 `det.rknn`/`rec.rknn`/`labels.txt`），
   由 `3rdparty/ppocrv4/bin/` 的两个 demo 进程加载，主程序只传图路径、解析 stdout

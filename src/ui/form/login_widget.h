@@ -15,16 +15,19 @@
 // 没有第二套解析/校验分支，测试登录通过就等于扫码登录通过。
 //
 // 版面（2026-10-30 触屏复核后改）：**左品牌块 + 右操作列**两栏。
-// 左边给设备身份（IDGE / 施工行为监测与分析）、登录状态行与取景说明，
-// 右边只有三颗按钮并竖排。按钮都是 T1 档（min-height 72px ≈ 8.1mm，480px 宽 ≈ 54mm），
+// 左边给设备身份（IDGE / 施工行为监测与分析），右边只有两颗按钮并竖排。
+// 按钮都是 T1 档（min-height 72px ≈ 8.1mm，480px 宽 ≈ 54mm），
 // 岗位戴手套也能按到；「退出程序」是全机唯一的退出通道之一（另一条是标题栏 ×），
 // 顶部导航那颗现在叫「退出登录」，只回本页、不结束进程。
+// 「测试登录」不上面：入口是**点左侧 IDGE 字样**（隐藏入口，只给调试人员用，
+// 避免现场无关人员随手把系统登进去）。
 // 本页不放摄像头预览：预览在扫码窗格里，页面常驻会让门禁一直占着 /dev/video22。
 //
 // ============================================================================
 
 #include <QWidget>
 
+class QEvent;
 class QLabel;
 class QPushButton;
 
@@ -35,27 +38,25 @@ class LoginWidget : public QWidget
 public:
     explicit LoginWidget(QWidget *parent = nullptr);
 
-    // 每次回到登录页（启动 / 退出登录后）调一次：把上一次的失败原因擦掉，
-    // 否则新来的班次看到的是上一班"缺字段"的红字，会以为是自己的码坏了。
-    void resetStatus();
+protected:
+    // 隐藏入口：IDGE 不是按钮，只有这里接住它的鼠标释放
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 signals:
     void loginSucceeded();                     ///< 会话已写好，frmMain 放行主界面并开流
-    void loginFailed(const QString &reason);   ///< 已在页面状态行显示，这里只给日志留一份
+    void loginFailed(const QString &reason);   ///< 登录失败原因，frmMain 记日志（页面无状态行）
     void exitProgramRequested();               ///< 走 frmMain::systemExit()（按所在屏居中）
 
 private slots:
     void onScanClicked();
-    void onTestLoginClicked();
+    void onTestLoginClicked();                 ///< 由 IDGE 隐藏入口触发
 
 private:
-    void setStatus(const QString &text, bool error);
     // 伪造信息的落点：按候选路径顺序找第一个存在的文件，全找不到时
     // err 里把**每个试过的路径都列出来**（现场排障靠这行，绝不静默）
     static bool loadFakePayload(QString *jsonText, QString *err);
 
-    QLabel *statusLabel_ = nullptr;
+    QLabel *kicker_ = nullptr;
     QPushButton *scanButton_ = nullptr;
-    QPushButton *testButton_ = nullptr;
     QPushButton *exitButton_ = nullptr;
 };

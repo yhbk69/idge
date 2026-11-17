@@ -9,19 +9,18 @@
 //   {
 //     "video": {
 //       "models": {                        // 模型参数表：键 = 模型库目录名
-//         "yolo11n-ppe":  {"alarm_class": "un_helmet", "note": "PPE安全装备检测"},
-//         "yolo11n-coco": {"alarm_class": "",          "note": "COCO通用检测"}
+//         "yolo11n-ppe": {"alarm_class": "un_helmet", "note": "PPE安全装备检测"}
 //       },
 //       "channels": [                      // 下标即通道号（0-based），条目内 channel 字段仅供人看
 //         {"channel": 0, "source": "assets/test/192.mp4", "note": "东门",
-//          "enabled": true, "models": ["yolo11n-ppe", "yolo11n-coco"]}
+//          "enabled": true, "models": ["yolo11n-ppe"]}
 //       ]
 //     },
 //     "detect":   {"conf_threshold":0.25, "nms_threshold":0.45, "class_num":80, "threads":3},
 //                  // ⚠ 四个键当前只有 conf/nms 被界面读写，且都没接进推理（README 已知问题）；
 //                  //    class_num/threads 无任何消费者，已删掉 getter：类别数属于每个模型，
 //                  //    推理线程数 = 各通道模型数之和（一个模型一个 PpeTask 线程）。
-//     "geofence": {"enabled":true, "mode":"inside_alarm", "alarmClass":"person",
+//     "geofence": {"enabled":true, "alarmClass":"person",
 //                  "throttleSeconds":10, "channels":{ "0":{...形状...} }},
 //     "recording":{...}, "alarm_uplink":{...}, "pad_server":{...}, "database":{...}, "websocket":{...}, "gb28181":{...}
 //   }
@@ -145,8 +144,8 @@ ConfigManager &ConfigManager::instance()
 // ============================================================================
 // 如果文件不存在，自动创建默认配置并保存。
 // 默认配置（schema V2）：
-//   - 模型参数表：ppe 报 un_helmet、coco 不报警（都按模型库目录名索引，配置里没有路径）
-//   - 4 路视频都指向 "assets/test/192.mp4"，每路挂满参数表里的两个模型
+//   - 模型参数表：ppe 报 un_helmet（按模型库目录名索引，配置里没有路径）
+//   - 4 路视频都指向 "assets/test/192.mp4"，每路挂 ppe
 //   - 围栏：启用、inside_alarm、类别 person、节流 10 秒
 //   - 置信度阈值 0.25 / NMS 0.45
 //   - recording.enabled=true（报警必带关联片段）、alarm_uplink.enabled=false（默认不往外发）
@@ -180,7 +179,7 @@ static QJsonObject makeVideoDefaults()
     QJsonArray sources;
     sources.append(sourceToJson(demo));
 
-    const QJsonArray kModels{"yolo11n-ppe", "yolo11n-coco"};
+    const QJsonArray kModels{"yolo11n-ppe"};
     QJsonArray channels;
     for (int ch = 0; ch < 4; ++ch) {
         channels.append(QJsonObject{{"channel", ch},
@@ -194,8 +193,6 @@ static QJsonObject makeVideoDefaults()
         {"models", QJsonObject{
             {"yolo11n-ppe", QJsonObject{{"alarm_class", "un_helmet"},
                                         {"note", "PPE安全装备检测"}}},
-            {"yolo11n-coco", QJsonObject{{"alarm_class", ""},
-                                         {"note", "COCO通用检测"}}},
         }},
         {"sources", sources},
         {"channels", channels},
@@ -356,9 +353,10 @@ void ConfigManager::load(const QString &path)
 // migrateSchemaV2() 用纯字符串提出库目录名当模型键。规则（详见
 // plan/model_management.md §一"路径迁移规则"）：
 //   1) 绝对路径去前缀：/任意前缀/model/xxx → model/xxx，仓库整体搬迁后配置不失效
-//   2) 旧平铺模型路径 → 模型库路径（仅当库内文件确实存在时才改写）
 // V2 文件里没有 model/cascade 两段，本函数不再被调用（配置里根本不存路径）。
 // 返回是否发生了修改；调用方据此决定是否 saveUnsafe() 落盘。
+// 注：coco 权重已从 model/library 删除，旧平铺路径不再映射到库内文件，
+// 因此这里只保留"绝对路径去前缀"，避免把老配置指向已不存在的目录。
 // ============================================================================
 static QString migrateOneModelPath(QString p)
 {
@@ -370,17 +368,6 @@ static QString migrateOneModelPath(QString p)
     if (cut >= 0 && p.startsWith('/'))
         p = p.mid(cut + 1);  // "/xxx/model/yyy" → "model/yyy"
 
-    static const struct { const char *legacySuffix; const char *libPath; } kMap[] = {
-        { "yolo11n.rknn", "model/library/yolo11n-coco/model.rknn" },
-        { "yolo11s.rknn", "model/library/yolo11s-coco/model.rknn" },
-        { "yolo11m.rknn", "model/library/yolo11m-coco/model.rknn" },
-    };
-    for (const auto &m : kMap) {
-        if (p.endsWith(m.legacySuffix) && QFile::exists(m.libPath)) {
-            p = m.libPath;
-            break;
-        }
-    }
     return p;
 }
 
@@ -592,7 +579,7 @@ bool ConfigManager::migrateSchemaV2()
     // ---- 3. geofence.alarmClasses[] → alarmClass 单值 ----
     // V1 那个列表是"哪些类名允许进围栏判定"的白名单，V2 里围栏只认一类目标，
     // 所以取"本配置里真有模型能产出它"的第一项：现场 ["person","people"] 且挂了
-    // COCO → person；只挂 PPE 的现场 → people。挑不到就回落 person（与旧硬编码一致）。
+    // PPE → person；老权重若仍输出 people 也能命中。挑不到就回落 person（与旧硬编码一致）。
     QJsonObject gf = root_["geofence"].toObject();
     if (!gf.isEmpty()) {
         const QJsonArray list = gf["alarmClasses"].toArray();
@@ -788,6 +775,7 @@ static QJsonObject makeAlarmDefaults()
             {"fence_in", 1},    // 围栏闯入禁区：紧急
             {"fence_out", 1},   // 围栏离岗：紧急
             {"ladder_no_spotter", 2},  // 登高无人看护：重要
+            {"fire_no_watcher", 2},    // 动火无人监护：重要
         }},
         // 普通检测报警的 track 限流阈值（语义见 alarm_track_gate.h）：
         // 同一目标连续存在 minSeconds 且命中 minHits 个推理批次才算一次事件、只报一条；
@@ -1649,8 +1637,7 @@ void ConfigManager::setNmsThreshold(double val)
 //     "enabled": true,                    // 是否启用围栏检测
 //     "mode": "inside_alarm",             // 【退役键】报警规则改由每个形状的 role 决定。
 //                                         // 运行期无人读它；只在 FenceManager::loadFromConfig
-//                                         // 里给没有 role 的老形状补一次角色，之后固定写回
-//                                         // 一个占位值。新配置不必再管这个键。
+//                                         // 里给没有 role 的老形状补一次角色。新配置不再写它。
 //     "channels": {                       // 各通道围栏配置
 //       "0": {                            // 通道 0（通道 1）
 //         "shapes": [                     // 围栏形状列表
@@ -1704,29 +1691,17 @@ void ConfigManager::setGeofenceEnabled(bool enabled)
 }
 
 /**
- * @brief 读退役键 geofence.mode
+ * @brief 读退役键 geofence.mode（只读，供老形状迁移补角色）
  * @return: "inside_alarm"（默认）或 "outside_alarm"
  *
  * 运行期已无判断读它 —— 报警规则现在是每个围栏形状自带的 role。
  * 唯一的消费者是 FenceManager::loadFromConfig()：给 role 缺失的老形状补角色
- * （outside_alarm → workzone，其余 → forbidden）。
+ * （outside_alarm → workzone，其余 → forbidden）。新配置不再写这个键。
  */
 QString ConfigManager::geofenceMode() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return root_["geofence"].toObject()["mode"].toString("inside_alarm");
-}
-
-/**
- * @brief 写退役键 geofence.mode（保留键本身，值不再有语义）
- * @param mode: 由调用方给出；FenceManager 固定写 "inside_alarm"
- */
-void ConfigManager::setGeofenceMode(const QString &mode)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    QJsonObject gf = root_["geofence"].toObject();
-    gf["mode"] = mode;
-    root_["geofence"] = gf;
 }
 
 /**
@@ -1857,6 +1832,75 @@ void ConfigManager::setLadderguardClearSeconds(double seconds)
     QJsonObject lg = root_["ladderguard"].toObject();
     lg["clearSeconds"] = seconds > 0 ? seconds : 1.0;
     root_["ladderguard"] = lg;
+}
+
+// ============================================================================
+// 动火监护配置
+// ============================================================================
+// 与 ladderguard 同款：不写默认段，getter 兜底（enabled 兜底 true——没挂明火模型
+// 的通道根本不会激活，默认关只会重演"功能默认不触发"那个现场坑）。
+// ============================================================================
+QJsonObject ConfigManager::fireguardConfig() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return root_["fireguard"].toObject();
+}
+
+bool ConfigManager::fireguardEnabled() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return root_["fireguard"].toObject()["enabled"].toBool(true);
+}
+
+void ConfigManager::setFireguardEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject fg = root_["fireguard"].toObject();
+    fg["enabled"] = enabled;
+    root_["fireguard"] = fg;
+}
+
+int ConfigManager::fireguardMinPersons() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const int n = root_["fireguard"].toObject()["minPersons"].toInt(2);
+    return n >= 1 ? n : 2;
+}
+
+void ConfigManager::setFireguardMinPersons(int persons)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject fg = root_["fireguard"].toObject();
+    fg["minPersons"] = persons >= 1 ? persons : 2;
+    root_["fireguard"] = fg;
+}
+
+double ConfigManager::fireguardGraceSeconds() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return root_["fireguard"].toObject()["graceSeconds"].toDouble(2.0);
+}
+
+void ConfigManager::setFireguardGraceSeconds(double seconds)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject fg = root_["fireguard"].toObject();
+    fg["graceSeconds"] = seconds > 0 ? seconds : 2.0;
+    root_["fireguard"] = fg;
+}
+
+double ConfigManager::fireguardClearSeconds() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return root_["fireguard"].toObject()["clearSeconds"].toDouble(1.0);
+}
+
+void ConfigManager::setFireguardClearSeconds(double seconds)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    QJsonObject fg = root_["fireguard"].toObject();
+    fg["clearSeconds"] = seconds > 0 ? seconds : 1.0;
+    root_["fireguard"] = fg;
 }
 
 // ============================================================================

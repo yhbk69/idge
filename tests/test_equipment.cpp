@@ -49,8 +49,8 @@ int main(int argc, char** argv) {
 
     // ModelRegistry 单例的自动扫描挂在 frmmain 页构建路径上，离线自测需显式 rescan
     ModelRegistry::instance().rescan();
-    if (!QFileInfo::exists(test_image) || !ModelRegistry::instance().contains("yolo11n-coco")) {
-        std::cout << "  [FAIL] 前置资源缺失：需在仓库根运行（assets/test/bus.jpg + model/library/yolo11n-coco）" << std::endl;
+    if (!QFileInfo::exists(test_image) || !ModelRegistry::instance().contains("yolo11n-ppe")) {
+        std::cout << "  [FAIL] 前置资源缺失：需在仓库根运行（assets/test/bus.jpg + model/library/yolo11n-ppe）" << std::endl;
         return 1;
     }
 
@@ -71,14 +71,14 @@ int main(int argc, char** argv) {
     // 2. 盘点服务：模型清单与 frmMain::equipmentModelConfigsFromLibrary 同口径
     auto inventory = std::make_shared<EquipmentInventoryService>(roll_call);
     ModelRegistry& reg = ModelRegistry::instance();
-    const std::string coco_id = "yolo11n-coco";
+    const std::string model_id = "yolo11n-ppe";
     check(inventory->initialize({{"",
-              reg.modelPath(QString::fromStdString(coco_id)).toStdString(),
-              reg.labelPath(QString::fromStdString(coco_id)).toStdString()}}),
-          "EquipmentInventoryService::initialize (yolo11n-coco, 进程内)");
+              reg.modelPath(QString::fromStdString(model_id)).toStdString(),
+              reg.labelPath(QString::fromStdString(model_id)).toStdString()}}),
+          "EquipmentInventoryService::initialize (yolo11n-ppe, 进程内)");
     if (g_failures) { std::cout << "FAIL: 服务初始化未通过，终止" << std::endl; QDir(tmp_root).removeRecursively(); return 1; }
 
-    // 3. 建任务 -> 批量检测（bus.jpg：COCO 类预期 bus/person 等计数>0）
+    // 3. 建任务 -> 批量检测（bus.jpg：PPE 类预期 person 等计数>0）
     const int task_id = inventory->createEquipmentTask("离线自测任务");
     check(task_id > 0, "createEquipmentTask");
     const auto result = inventory->processPhotos(
@@ -112,10 +112,10 @@ int main(int argc, char** argv) {
 
     // 5. 热更新原子性（frmMain::reloadEquipmentService 的语义底座）：
     //    合法新清单 -> 换模型成功；非法清单 -> 返回 false 且旧模型完整可用
-    const std::string coco_model = reg.modelPath(QString::fromStdString(coco_id)).toStdString();
-    const std::string coco_labels = reg.labelPath(QString::fromStdString(coco_id)).toStdString();
-    check(inventory->initialize({{"", coco_model, coco_labels},
-                                {"", coco_model, coco_labels}}) &&
+    const std::string base_model = reg.modelPath(QString::fromStdString(model_id)).toStdString();
+    const std::string base_labels = reg.labelPath(QString::fromStdString(model_id)).toStdString();
+    check(inventory->initialize({{"", base_model, base_labels},
+                                {"", base_model, base_labels}}) &&
               inventory->modelConfigs().size() == 2,
           "热更新：双模型清单加载成功");
     const bool ready_before = inventory->isReady();

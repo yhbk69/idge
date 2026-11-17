@@ -83,10 +83,10 @@
 | 键 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | 总开关；有围栏数据时 `FenceManager::loadFromConfig` 会自动置 true。**通道级**——混用两种角色的通道无法只关其中一种 |
-| `mode` | string | `inside_alarm` | **已退役**：运行期无任何判断读它。唯一读者是 `FenceManager::loadFromConfig` 的迁移分支，用来给没有 `role` 键的老形状补角色；`saveToConfig` 固定写 `"inside_alarm"` 只为不让键消失。`geofenceMode()`/`setGeofenceMode()` 因此是遗留 API，**别再拿它做判断** |
+| `mode` | string | `inside_alarm` | **已退役**：运行期无任何判断读它。唯一读者是 `FenceManager::loadFromConfig` 的迁移分支，用来给没有 `role` 键的老形状补角色；新配置不再写这个键。`geofenceMode()` 因此是遗留只读 API，**别再拿它做判断** |
 | `alarmClass` | string | `person` | 触发围栏报警的**单一类别**（旧列表 `alarmClasses` 已废弃）。产不出这个类名的通道，禁区和岗区域两条规则**都**静默失效 |
 | `throttleSeconds` | int | `10` | 围栏报警**节流下限**：每通道**每角色**每类别窗口内只出一条（节流键含角色段，闯禁区后 10 秒内的离岗不会被吞），由 `AlarmManager::ingestFenceAlarm` 执行。"同一个人站进去只报一次"不靠它，靠解码器的进入沿事件表（见 `src/biz/geofence/README.md`） |
-| `channels.<ch>` | object | — | 围栏形状 + `overlay_w/h`（顶点是 overlay 像素坐标）。每个形状带 `role`：`forbidden` 禁区（进去就报）/ `workzone` 岗区域（待在外面就报）；**缺键时按 `mode` 推断、并立即落盘补齐**（幂等），解析不出来的值一律回落 `forbidden`。角色创建后不可改，改角色 = 删了重画 |
+| `channels.<ch>` | object | — | 围栏形状（顶点是归一化视频内容坐标 0..10000，见 `fence_shape.h`）。每个形状带 `role`：`forbidden` 禁区（进去就报）/ `workzone` 岗区域（待在外面就报）；**缺键时按 `mode` 推断、并立即落盘补齐**（幂等），解析不出来的值一律回落 `forbidden`。角色创建后不可改，改角色 = 删了重画 |
 
 围栏不占推理任务：它复用该通道已有模型产出的检测结果，只做几何判定。若某通道挂了围栏却
 没有任何模型能产出 `alarmClass`，启动日志打 `[geofence] 通道N 无模型产出类别 person，围栏不会触发`。
@@ -103,6 +103,8 @@
 写入后才出现。解码线程逐帧经 `ladderguardConfig()` 取整段快照，改动即时生效不用重开流。
 几何阈值（攀爬者/扶梯人判定比例、IoU 匹配、丢失超时）是 `src/biz/ladderguard/ladder_guard.h`
 的编译期默认，不走配置。报警类型 `ladder_no_spotter`，等级在 `alarm.levels` 配（出厂 2）。
+`fireguard`（动火监护，类型 `fire_no_watcher`，出厂等级 2）结构同 `ladderguard`，另多一个 `minPersons`
+（动火现场最少在场人数，默认 2）。
 
 ### recording 段（报警视频硬件编码录制）
 | 键 | 类型 | 默认 | 说明 |
@@ -243,9 +245,9 @@ ConfigManager::instance().save();                          // 显式落盘
 // schema V2：按通道 + 按模型（ch 一律 0-based）。本类只负责存值，
 // "改完要不要重开该路"是设置页的事（见 README §八 第 10 条）
 ConfigManager::instance().setChannelSource(0, "rtsp://192.168.1.10/stream1");
-ConfigManager::instance().setChannelModelIds(0, {"yolo11n-ppe", "yolo11n-coco"}); // 顺序即槽位
+ConfigManager::instance().setChannelModelIds(0, {"yolo11n-ppe", "yolo11n-tools"}); // 顺序即槽位
 ConfigManager::instance().setModelAlarmClasses("yolo11n-ppe", {"un_helmet", "vest"}); // 模型参数，可多选
-QStringList cls = ConfigManager::instance().modelAlarmClasses("yolo11n-coco");        // 无条目返回空列表
+QStringList cls = ConfigManager::instance().modelAlarmClasses("yolo11n-ppe");         // 无条目返回空列表
 
 // 报警录制：只有 getter（见下方"无 setter"说明）
 RecorderConfig rc;

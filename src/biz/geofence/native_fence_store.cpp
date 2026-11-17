@@ -122,6 +122,51 @@ QList<PadFence> NativeFenceStore::fencesForTask(const QString &taskId) const
 }
 
 // ============================================================================
+// 清理 task_id='' 的全局历史桶（旧 config.json 形状迁移残留）
+// ============================================================================
+int NativeFenceStore::purgeGlobalLegacy() const
+{
+    QSqlDatabase db = storeDb("purgeGlobalLegacy");
+    if (!db.isOpen())
+        return 0;
+
+    if (!db.transaction()) {
+        qWarning() << "native_fence_store purgeGlobalLegacy begin failed:"
+                   << db.lastError().text();
+        return 0;
+    }
+
+    QSqlQuery delVersions(db);
+    delVersions.prepare(QStringLiteral(
+        "DELETE FROM native_fence_versions WHERE fence_id IN "
+        "(SELECT fence_id FROM native_fences WHERE task_id = '')"));
+    if (!delVersions.exec()) {
+        qWarning() << "native_fence_store purgeGlobalLegacy versions failed:"
+                   << delVersions.lastError().text();
+        db.rollback();
+        return 0;
+    }
+
+    QSqlQuery delFences(db);
+    delFences.prepare(QStringLiteral("DELETE FROM native_fences WHERE task_id = ''"));
+    if (!delFences.exec()) {
+        qWarning() << "native_fence_store purgeGlobalLegacy fences failed:"
+                   << delFences.lastError().text();
+        db.rollback();
+        return 0;
+    }
+    const int removed = delFences.numRowsAffected();
+
+    if (!db.commit()) {
+        qWarning() << "native_fence_store purgeGlobalLegacy commit failed:"
+                   << db.lastError().text();
+        db.rollback();
+        return 0;
+    }
+    return removed;
+}
+
+// ============================================================================
 // 按 (taskId, cameraId) 查主行
 // ============================================================================
 bool NativeFenceStore::loadFenceByTaskCamera(const QString &taskId, const QString &cameraId,

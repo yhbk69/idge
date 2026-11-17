@@ -115,6 +115,7 @@
 #include "image_drawing.h"   // 围栏报警截图：把围栏边线补画进 RGB 像素
 #include "alarm_manager.h"
 #include "fence_manager.h"
+#include "fence_palette.h"   // 围栏配色唯一出处（与管理页同色）
 #include "fence_checker.h"
 // X11 头文件把 None/Null/Bool 等定义成宏(0/int)，会顶掉 Qt 头文件里同名的
 // 枚举成员（如 QUrl::None、QJsonValue::Null），这里统一去掉这些宏避免解析报错
@@ -125,6 +126,18 @@
 #include "rtsp_live_service.h"   // 带检测框视频的 RTSP 直播分发（复用 VideoRecorder 的硬编码码流）
 #include <fstream>
 #include <arm_neon.h>   // ARM NEON SIMD 加速
+
+#include <QCoreApplication>
+#include <QFont>
+#include <QFontMetrics>
+#include <QGuiApplication>
+#include <QHash>
+#include <QImage>
+#include <QPainter>
+#include <QString>
+#include <mutex>
+
+#include "alarm_labels.h"   // 类名中文显示名（label_zh.txt）
 
 // ============================================================
 // 报警截图异步写入器
@@ -146,8 +159,9 @@ namespace {
 // 先按 fillAlpha 铺半透明底色，再描边线。
 struct FenceOutline {
     QVector<QPoint> points;
-    unsigned int color = COLOR_RED;   // image_drawing 的 ARGB 口径（边线与填充同色）
-    int fillAlpha = 50;               // 区域填充不透明度 0..255，与界面 roleFillColor 同档
+    unsigned int color =
+        geofence::fenceArgb(geofence::FenceRole::Forbidden);   // image_drawing 的 ARGB 口径
+    int fillAlpha = geofence::fenceFillAlpha();
 };
 
 // 在 RGB888 像素上按奇偶规则填充多边形（alpha 混合）。
@@ -204,6 +218,106 @@ static void fillPolygonRgb(unsigned char *pixels, int w, int h,
             }
         }
     }
+}
+
+// ============================================================
+// 在 RGBA8888 画布上绘制 UTF-8 文本（含中文）
+//
+// image_drawing 的 draw_text 是 ASCII 20×40 点阵（isprint 过滤非 ASCII），中文会被
+// 整段吞掉；类名要中文化就必须另走 Qt 的字体栅格。文本按 (内容, 字号) 缓存成透明底
+// 掩膜，解码线程每帧只做一次小的 alpha 混合，不重复排版。
+//
+// 返回 false 表示当前环境画不了（非 RGBA、没有 QGuiApplication 等），
+// 调用方用英文类名 + draw_text 回落，行为与改动前一致。
+// ============================================================
+static bool drawTextUtf8(image_buffer_t *image, const char *utf8Text, int x, int y,
+                         unsigned int argb, int pixelSize)
+{
+    if (!image || !utf8Text || !*utf8Text || pixelSize <= 0)
+        return false;
+    if (image->format != IMAGE_FORMAT_RGBA8888 || !image->virt_addr)
+        return false;
+    // 测试进程只有 QCoreApplication，没有字体环境；此时不要碰 QFontDatabase。
+    if (qobject_cast<QGuiApplication *>(QCoreApplication::instance()) == nullptr)
+        return false;
+
+    const QString text = QString::fromUtf8(utf8Text);
+    if (text.isEmpty())
+        return false;
+
+    struct MaskCache {
+        QHash<QString, QImage> masks;
+        std::mutex mtx;
+    };
+    static MaskCache cache;
+
+    const QString key = text + QLatin1Char('|') + QString::number(pixelSize);
+    QImage mask;
+    {
+        std::lock_guard<std::mutex> lk(cache.mtx);
+        auto it = cache.masks.constFind(key);
+        if (it != cache.masks.constEnd())
+            mask = it.value();
+    }
+
+    if (mask.isNull()) {
+        // 用界面默认字体（中文由系统字体回落补齐），字号即像素高
+        QFont font;
+        font.setPixelSize(pixelSize);
+        font.setBold(true);
+        const QFontMetrics fm(font);
+        QImage img(fm.width(text) + 4, fm.height() + 4, QImage::Format_ARGB32);
+        img.fill(Qt::transparent);
+        QPainter p(&img);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setRenderHint(QPainter::TextAntialiasing, true);
+        p.setFont(font);
+        p.setPen(Qt::white);
+        p.drawText(2, 3 + fm.ascent(), text);
+        p.end();
+        mask = img;
+
+        std::lock_guard<std::mutex> lk(cache.mtx);
+        if (cache.masks.size() > 256)
+            cache.masks.clear();   // 类名集合很小，超限整体清空即可
+        cache.masks.insert(key, mask);
+    }
+
+    const int w = image->width;
+    const int h = image->height;
+    const int cw = mask.width();
+    const int ch = mask.height();
+    unsigned char *base = image->virt_addr;
+
+    // 把掩膜按给定颜色混进画布；先画黑色阴影再画本体，亮背景下也看得清
+    auto blend = [&](int ox, int oy, int color) {
+        const int cr = (color >> 16) & 0xFF;
+        const int cg = (color >> 8) & 0xFF;
+        const int cb = color & 0xFF;
+        for (int row = 0; row < ch; ++row) {
+            const int dy = oy + row;
+            if (dy < 0 || dy >= h)
+                continue;
+            const QRgb *src = reinterpret_cast<const QRgb *>(mask.constScanLine(row));
+            unsigned char *dstRow = base + (size_t)dy * w * 4;
+            for (int col = 0; col < cw; ++col) {
+                const int dx = ox + col;
+                if (dx < 0 || dx >= w)
+                    continue;
+                const int a = qAlpha(src[col]);
+                if (a == 0)
+                    continue;
+                unsigned char *p = dstRow + (size_t)dx * 4;
+                p[0] = (unsigned char)((p[0] * (255 - a) + cr * a) / 255);
+                p[1] = (unsigned char)((p[1] * (255 - a) + cg * a) / 255);
+                p[2] = (unsigned char)((p[2] * (255 - a) + cb * a) / 255);
+                p[3] = 255;
+            }
+        }
+    };
+    blend(x + 1, y + 1, 0x000000);
+    blend(x, y, (int)(argb & 0x00FFFFFF));
+    return true;
 }
 
 // 一张待写盘的任务：存一份 RGB 像素（去掉 alpha，体积比 RGBA 小 25%）+ 路径
@@ -623,18 +737,15 @@ static void submitAlarmClip(const std::shared_ptr<VideoRecorder> &recorder,
 }
 
 // 围栏形状（归一化 0..10000）→ 帧像素边线；矩形展开成四个角。
-// 颜色走 image_drawing 的 ARGB 常量，红=禁区、绿=岗区域（与界面配色一致）。
+// 颜色走 fence_palette：与管理页、视频叠加层同一份（禁区 #E53935、岗区域 #FB8C00）。
 static QVector<FenceOutline> fenceOutlinesForSnapshot(const geofence::ChannelFence &fence,
                                                       int w, int h)
 {
     QVector<FenceOutline> out;
     for (const geofence::FenceShape &shape : fence.shapes) {
         FenceOutline outline;
-        const bool workzone = shape.role == geofence::FenceRole::Workzone;
-        outline.color = workzone ? COLOR_GREEN : COLOR_RED;
-        // 与界面 FenceOverlay::roleFillColor 同一档：绿 45、红 50（255 制），
-        // 低到不挡画面，又能一眼看出区域范围。
-        outline.fillAlpha = workzone ? 45 : 50;
+        outline.color = geofence::fenceArgb(shape.role);
+        outline.fillAlpha = geofence::fenceFillAlpha();
         if (shape.type == geofence::ShapeType::Rectangle && shape.points.size() >= 2) {
             const geofence::Rectangle rect = shape.toRect();
             outline.points = {
@@ -912,7 +1023,7 @@ void FFmpegVideoDecoder::buildCascadeTasks()
     if (resolved.isEmpty()) {
         // 兜底：这一路没配模型（或配的全不在库中），回退库内默认模型，
         // 保证画面仍有检测框，而不是整路不建推理任务。
-        const QString fbId = QStringLiteral("yolo11n-coco");
+        const QString fbId = QStringLiteral("yolo11n-ppe");
         const QString fbModel = ModelRegistry::instance().modelPath(fbId);
         if (fbModel.isEmpty() || !QFile::exists(fbModel)) {
             qWarning() << "[decoder] 通道" << channel_
@@ -983,6 +1094,15 @@ void FFmpegVideoDecoder::buildCascadeTasks()
 
         // 类名表：画框用 std 版，报警侧用 QString 版（同一数据源，同下标）
         slotClassNames_.push_back(readLabelNames(lp));
+        // 画面叠加用中文名：与 labels.txt 逐行对齐的 label_zh.txt，缺表回落英文
+        std::vector<std::string> zhNames;
+        {
+            const QStringList zh = alarm_labels::zhNamesForLabelFile(lp);
+            zhNames.reserve((size_t)zh.size());
+            for (const QString &n : zh)
+                zhNames.push_back(n.toStdString());
+        }
+        slotClassNamesZh_.push_back(std::move(zhNames));
         // 与 slotClassNames_ 同下标：建任务这刻写定，之后只读（见头文件注释）
         slotModelVersions_.push_back(slotVersion);
 
@@ -1060,6 +1180,7 @@ void FFmpegVideoDecoder::releaseTasks()
 
     // 换模型列表后旧梯子身份/计时不再有意义（槽位类名表都换了）
     ladderGuard_.reset();
+    fireGuard_.reset();
 
     int freed = 0;
     for (PpeTask *task : tasks_) {
@@ -1079,6 +1200,7 @@ void FFmpegVideoDecoder::releaseTasks()
     tasks_.clear();
     slotQueues_.clear();
     slotClassNames_.clear();
+    slotClassNamesZh_.clear();
     slotModelVersions_.clear();
     {
         std::lock_guard<std::mutex> lk(slotParamMtx_);
@@ -1790,7 +1912,7 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
     // cvt 0.8~1.1k——每帧 import/release 只占 1.7ms 里的 0.5ms，缓存句柄不值得。
     //
     // 本轮三个 commit 在同一口径下复测（4 路同一份 1280×720@30 循环源、每路
-    // ppe+coco 两槽位、测试登录后连续采样、每路 77 个 120 帧窗口）：
+    // ppe 两槽位、测试登录后连续采样、每路 77 个 120 帧窗口）：
     //   draw   2.24k → 1.43k   （987e9a6 矩形改整行 32 位纯写）
     //   推理侧 letterbox 段 1.05ms → 0.64ms/次（1cc6f2d 源缓冲带上 DMA-BUF fd）
     //   抓拍单次 28.3ms → 2.5ms（8aa94f3 RGBA→RGB 交给 RGA，见 SnapWriter::submit）
@@ -2332,7 +2454,9 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
                     // 含 ladder 的槽是触发源，含 worker/person/people/pedestrian 的槽出人框。
                     // 不新增配置键指定槽位：换权重、重排槽位都不用改配置。
                     const QJsonObject lgCfg = ConfigManager::instance().ladderguardConfig();
+                    const QJsonObject fgCfg = ConfigManager::instance().fireguardConfig();
                     const bool guardScan = lgCfg["enabled"].toBool(true);
+                    const bool fireGuardScan = fgCfg["enabled"].toBool(true);
                     auto classRole = [](const QString &name) {
                         const QString low = name.toLower();
                         if (low.contains(QLatin1String("ladder")))
@@ -2342,34 +2466,53 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
                             || low.contains(QLatin1String("people"))
                             || low.contains(QLatin1String("pedestrian")))
                             return 2;
+                        if (low.contains(QLatin1String("fire"))
+                            || low.contains(QLatin1String("smoke"))
+                            || low.contains(QLatin1String("flame")))
+                            return 3;
                         return 0;
                     };
                     std::vector<char> slotIsLadder(slotQueues_.size(), 0);
                     std::vector<char> slotIsPerson(slotQueues_.size(), 0);
-                    int ladderSlotCount = 0, personSlotCount = 0;
-                    if (guardScan) {
+                    std::vector<char> slotIsFire(slotQueues_.size(), 0);
+                    int ladderSlotCount = 0, personSlotCount = 0, fireSlotCount = 0;
+                    if (guardScan || fireGuardScan) {
                         for (size_t k = 0; k < slotQueues_.size(); ++k) {
                             for (const auto &n : slotClassNames_[k]) {
                                 const int role = classRole(QString::fromStdString(n));
                                 if (role == 1) slotIsLadder[k] = 1;
                                 else if (role == 2) slotIsPerson[k] = 1;
+                                else if (role == 3) slotIsFire[k] = 1;
                             }
                             ladderSlotCount += slotIsLadder[k];
                             personSlotCount += slotIsPerson[k];
+                            fireSlotCount += slotIsFire[k];
                         }
                     }
-                    // 只挂梯子没挂人模型（或反之）= 配置凑不齐判据，守护不激活
+                    // 只挂梯子没挂人模型（或反之）= 配置凑不齐判据，守护不激活；
+                    // 动火监护同理：没明火模型或没人模型都不判（否则会拿"人数不足"误报）
                     const bool guardActive = guardScan && ladderSlotCount > 0 && personSlotCount > 0;
+                    const bool fireGuardActive = fireGuardScan && fireSlotCount > 0
+                                                 && personSlotCount > 0;
                     // 不激活即清状态：否则停用期间 noSpotterSince 一直挂着，
                     // 重新启用会拿停用前就走满的旧计时器立刻误报。
                     if (!guardActive)
                         ladderGuard_.reset();
+                    if (!fireGuardActive)
+                        fireGuard_.reset();
                     std::vector<ladderguard::Box> guardLadders, guardPersons;
-                    long guardLadderTs = -1, guardPersonTs = -1;
+                    std::vector<fireguard::Box> guardFires, guardFirePersons;
+                    long guardLadderTs = -1, guardPersonTs = -1, guardFireTs = -1;
+                    int fireSlot = -1;
                     auto guardBoxOf = [](const object_detect_result &d) {
                         return ladderguard::Box{(float)d.box.left, (float)d.box.top,
                                                 (float)d.box.right, (float)d.box.bottom,
                                                 d.prop};
+                    };
+                    auto fireBoxOf = [](const object_detect_result &d) {
+                        return fireguard::Box{(float)d.box.left, (float)d.box.top,
+                                              (float)d.box.right, (float)d.box.bottom,
+                                              d.prop};
                     };
 
                     for (size_t k = 0; k < slotQueues_.size(); ++k) {
@@ -2383,19 +2526,32 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
                         // 登高守护候选：跨槽对齐靠 od.time（两槽结果来自同一批 TaskData；
                         // tryPop 拿到的可能是上一轮旧结果，时间戳不等就不配对）。
                         // count==0 也要记时间戳：本帧"没梯子/没人"本身就是状态机的输入。
-                        if (guardActive && hasNewResult) {
-                            if (slotIsLadder[k]) {
+                        if ((guardActive || fireGuardActive) && hasNewResult) {
+                            if (slotIsLadder[k] && guardActive) {
                                 guardLadderTs = od.time;
                                 for (int i = 0; i < od.count; ++i)
                                     if (classRole(slotClassNameAt(slotCtxs[k].classNames,
                                                                   od.results[i].cls_id)) == 1)
                                         guardLadders.push_back(guardBoxOf(od.results[i]));
-                            } else if (slotIsPerson[k]) {
-                                guardPersonTs = od.time;
+                            }
+                            if (slotIsFire[k] && fireGuardActive) {
+                                guardFireTs = od.time;
+                                fireSlot = (int)k;
                                 for (int i = 0; i < od.count; ++i)
                                     if (classRole(slotClassNameAt(slotCtxs[k].classNames,
-                                                                  od.results[i].cls_id)) == 2)
-                                        guardPersons.push_back(guardBoxOf(od.results[i]));
+                                                                  od.results[i].cls_id)) == 3)
+                                        guardFires.push_back(fireBoxOf(od.results[i]));
+                            }
+                            if (slotIsPerson[k]) {
+                                guardPersonTs = od.time;
+                                for (int i = 0; i < od.count; ++i) {
+                                    if (classRole(slotClassNameAt(slotCtxs[k].classNames,
+                                                                  od.results[i].cls_id)) != 2)
+                                        continue;
+                                    guardPersons.push_back(guardBoxOf(od.results[i]));
+                                    // 动火监护用的是 fireguard::Box（与登高守护的 Box 不同命名空间）
+                                    guardFirePersons.push_back(fireBoxOf(od.results[i]));
+                                }
                             }
                         }
 
@@ -2508,15 +2664,30 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
                             if (!noOverlayDraw())
                                 draw_rectangle(&dislayImage, dl, dt, dw, dh, color, 3);
 
-                            const std::vector<std::string> &slotNames = slotClassNames_[k];
-                            if (tr.cls_id >= 0 && tr.cls_id < (int)slotNames.size())
-                                snprintf(text, sizeof(text), "M%zu %s %.1f%%",
-                                         k + 1, slotNames[tr.cls_id].c_str(), tr.prop * 100);
-                            else
-                                snprintf(text, sizeof(text), "M%zu cls_%d %.1f%%",
-                                         k + 1, tr.cls_id, tr.prop * 100);
-                            if (!noOverlayDraw())
-                                draw_text(&dislayImage, text, dl, dt - 20, color, 10);
+                            const std::vector<std::string> *slotNames =
+                                k < slotClassNames_.size() ? &slotClassNames_[k] : nullptr;
+                            const std::vector<std::string> *slotNamesZh =
+                                k < slotClassNamesZh_.size() ? &slotClassNamesZh_[k] : nullptr;
+                            // 优先中文（label_zh.txt）；画不了 CJK 时回落英文点阵
+                            bool drewZh = false;
+                            if (!noOverlayDraw() && slotNamesZh
+                                && tr.cls_id >= 0 && tr.cls_id < (int)slotNamesZh->size()) {
+                                char zhText[320];
+                                snprintf(zhText, sizeof(zhText), "M%zu %s %.1f%%",
+                                         k + 1, (*slotNamesZh)[tr.cls_id].c_str(), tr.prop * 100);
+                                drewZh = drawTextUtf8(&dislayImage, zhText, dl, dt - 22, color, 14);
+                            }
+                            if (!drewZh) {
+                                if (slotNames && tr.cls_id >= 0
+                                    && tr.cls_id < (int)slotNames->size())
+                                    snprintf(text, sizeof(text), "M%zu %s %.1f%%",
+                                             k + 1, (*slotNames)[tr.cls_id].c_str(), tr.prop * 100);
+                                else
+                                    snprintf(text, sizeof(text), "M%zu cls_%d %.1f%%",
+                                             k + 1, tr.cls_id, tr.prop * 100);
+                                if (!noOverlayDraw())
+                                    draw_text(&dislayImage, text, dl, dt - 20, color, 10);
+                            }
                         }
 
                         ds.add(ds.sDraw); ds.stage.restart();
@@ -2553,7 +2724,7 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
                     // ===== 4.10b 电子围栏：通道级合并判定 + 进入沿触发报警 =====
                     //
                     // 判定放在这里（槽位循环之后、emit frameReady 之前）：
-                    //   - 候选已跨槽位收齐，挂 PPE 还是挂 COCO 都能检出 person；
+                    //   - 候选已跨槽位收齐，挂 PPE 还是挂梯子/明火模型都能检出 person；
                     //   - 围栏坐标是归一化内容坐标，判定只与本帧 dislayImage 的尺寸有关，
                     //     与 overlay/widget 几何无关（换视图、全屏、拖窗口都不改语义）；
                     //   - 截图要用同一帧带框画面，deliverAlarms 才能拍到越界目标。
@@ -2785,6 +2956,60 @@ FFmpegVideoDecoder::PassEnd FFmpegVideoDecoder::decodeOnce()
                                     channel_, det, ctx, guardLadderTs, v.id);
                                 qInfo() << "[LadderGuard] 通道" << channel_ + 1 << "梯#" << v.id
                                         << "有人登高、无人看护超宽限 → 报警";
+                            }
+                        }
+                        deliverAlarms(channel_, guardAlarms, dislayImage, videoRecorder_);
+                    }
+
+                    // ===== 4.10d 动火监护：明火在场且人数不足 → 独立报警 =====
+                    //
+                    // 与登高守护并列：明火框/人框跨槽收齐后推进通道级状态机。
+                    // 报的是 fire_no_watcher（动火无人监护），与 fire/smoke 的普通
+                    // 检测报警分开，Pad/列表能看出是"作业无人监护"而非"发现明火"。
+                    if (fireGuardActive && guardFireTs >= 0 && guardFireTs == guardPersonTs) {
+                        fireguard::Params fp;
+                        // 现读配置也要夹一遍：手改出 0 会让"人数不足"永远不成立（等于静默停用）
+                        fp.minPersons = qMax(1, fgCfg["minPersons"].toInt(2));
+                        fp.graceSec = qMax(0.1, fgCfg["graceSeconds"].toDouble(2.0));
+                        fp.clearSec = qMax(0.1, fgCfg["clearSeconds"].toDouble(1.0));
+                        fp.lostSec = qMax(0.1, fgCfg["lostSeconds"].toDouble(1.0));
+                        fireGuard_.setParams(fp);
+                        const double nowSec =
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch()).count() / 1e9;
+                        const auto views = fireGuard_.step(guardFires, guardFirePersons, nowSec);
+
+                        QVector<AlarmRecord> guardAlarms;
+                        for (const auto &v : views) {
+                            const bool alarm = v.state == fireguard::State::Alarm;
+                            const unsigned int color = alarm ? COLOR_RED : COLOR_ORANGE;
+                            if (!noOverlayDraw()) {
+                                draw_rectangle(&dislayImage, (int)v.box.x1, (int)v.box.y1,
+                                               (int)(v.box.x2 - v.box.x1),
+                                               (int)(v.box.y2 - v.box.y1), color, alarm ? 3 : 2);
+                                char text[96];
+                                snprintf(text, sizeof(text),
+                                         alarm ? "NO WATCHER %d/%d" : "HOTWORK %d/%d",
+                                         v.personCount, fp.minPersons);
+                                draw_text(&dislayImage, text, (int)v.box.x1, (int)v.box.y1 - 20,
+                                          color, 10);
+                            }
+                            if (v.enteredAlarm) {
+                                object_detect_result det;
+                                memset(&det, 0, sizeof(det));
+                                det.box.left = (int)v.box.x1;
+                                det.box.top = (int)v.box.y1;
+                                det.box.right = (int)v.box.x2;
+                                det.box.bottom = (int)v.box.y2;
+                                det.prop = v.box.conf;
+                                det.cls_id = 0;
+                                AlarmManager::SlotContext ctx = slotCtxs[fireSlot];
+                                ctx.classNames = QStringList{QStringLiteral("fire_no_watcher")};
+                                guardAlarms += AlarmManager::instance().ingestFireAlarm(
+                                    channel_, det, ctx, guardFireTs);
+                                qInfo() << "[FireGuard] 通道" << channel_ + 1
+                                        << "明火在场、人数" << v.personCount << "<" << fp.minPersons
+                                        << "超宽限 → 动火无人监护报警";
                             }
                         }
                         deliverAlarms(channel_, guardAlarms, dislayImage, videoRecorder_);

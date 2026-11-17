@@ -141,8 +141,9 @@ CancellationResultDialog::CancellationResultDialog(int id, const QStringList& pa
     confirm_btn_->setEnabled(false);
     buttons->addWidget(previous_btn_);
     buttons->addStretch();
-    buttons->addWidget(cancel_btn_);
+    // 口径：确认在左、取消在右（手搭的 QHBoxLayout 按 addWidget 先后排位）
     buttons->addWidget(confirm_btn_);
+    buttons->addWidget(cancel_btn_);
     layout->addLayout(buttons);
     connect(previous_btn_, &QPushButton::clicked, this, &CancellationResultDialog::previous);
     connect(cancel_btn_, &QPushButton::clicked, this, &QDialog::reject);

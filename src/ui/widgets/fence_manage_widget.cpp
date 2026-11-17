@@ -27,6 +27,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QDebug>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRandomGenerator>
@@ -228,10 +229,11 @@ void FenceManageWidget::buildUi()
     toolLay->addWidget(btnCross);
 
     toolLay->addStretch(1);
-    polyCloseBtn_ = new QPushButton(QStringLiteral("闭合多边形"));
     polyUndoBtn_ = new QPushButton(QStringLiteral("撤销顶点"));
-    toolLay->addWidget(polyCloseBtn_);
     toolLay->addWidget(polyUndoBtn_);
+    // 触屏没有右键/Esc：取消重画必须有可见按钮（画布 cancelPolygon 的唯一触屏入口）
+    polyCancelBtn_ = new QPushButton(QStringLiteral("取消绘制"));
+    toolLay->addWidget(polyCancelBtn_);
     editorLay->addLayout(toolLay);
 
     canvas_ = new FenceCanvas(this);
@@ -298,8 +300,16 @@ void FenceManageWidget::buildUi()
             this, &FenceManageWidget::onVersionSelected);
     connect(btnMoveUp_, &QPushButton::clicked, this, [this] { onMoveRegion(true); });
     connect(btnMoveDown_, &QPushButton::clicked, this, [this] { onMoveRegion(false); });
-    connect(polyCloseBtn_, &QPushButton::clicked, canvas_, &FenceCanvas::closePolygon);
     connect(polyUndoBtn_, &QPushButton::clicked, canvas_, &FenceCanvas::undoLastPolyPoint);
+    connect(polyCancelBtn_, &QPushButton::clicked, canvas_, &FenceCanvas::cancelPolygon);
+    // 画布自己切模式（多边形第 3 点闭合后自动回 Edit）时，工具钮高亮跟着走
+    connect(canvas_, &FenceCanvas::modeChanged, this, [this](CanvasMode mode) {
+        const int id = mode == CanvasMode::RectDraw ? 2
+                     : mode == CanvasMode::PolyDraw ? 3
+                     : mode == CanvasMode::DeleteMode ? 4 : 1;
+        modeGroup_->button(id)->setChecked(true);
+        polyCancelBtn_->setEnabled(polyUndoBtn_->isEnabled() && mode == CanvasMode::PolyDraw);
+    });
     connect(btnRefresh_, &QPushButton::clicked, this, &FenceManageWidget::onRefresh);
     connect(btnNew_, &QPushButton::clicked, this, &FenceManageWidget::onNewFence);
     connect(btnSave_, &QPushButton::clicked, this, &FenceManageWidget::onSaveDraft);
@@ -421,8 +431,8 @@ void FenceManageWidget::applyEditorState()
         btn->setEnabled(editable);
     for (QAbstractButton *btn : ruleGroup_->buttons())
         btn->setEnabled(editable);
-    polyCloseBtn_->setEnabled(editable);
     polyUndoBtn_->setEnabled(editable);
+    polyCancelBtn_->setEnabled(editable && canvas_->mode() == CanvasMode::PolyDraw);
 
     btnNew_->setEnabled(logged && !hasFence);
     btnSave_->setEnabled(editable);
@@ -814,6 +824,9 @@ void FenceManageWidget::onApply()
     QImage background;
     if (frameGrabber_)
         background = frameGrabber_(currentChannelIndex());
+    if (background.isNull())
+        qWarning() << "围栏应用没抓到实时帧，生效画面退网格底："
+                   << currentFence_.fenceId << editingVersion_;
     QString absolutePath, relativePath, renderError;
     if (!geofence::renderFenceFrame(currentFence_.fenceId, editingVersion_, version.regions,
                                     RuntimePaths::alarmsDir(), QStringLiteral("fence-frames"),
@@ -852,7 +865,11 @@ void FenceManageWidget::onApply()
     // 让这一版立刻参与检测（检测读的是 FenceManager 的内存快照）。
     geofence::FenceManager::instance().refreshFromStores();
     loadFenceForChannel();
-    setStatus(QStringLiteral("已应用 v%1，原生效版本已停用").arg(editingVersion_));
+    setStatus(QStringLiteral("已应用 v%1，原生效版本已停用%2")
+                  .arg(editingVersion_)
+                  .arg(background.isNull()
+                           ? QStringLiteral("（未取到实时帧，生效画面为网格底）")
+                           : QString()));
 }
 
 // ============================================================================

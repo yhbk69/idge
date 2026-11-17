@@ -4,7 +4,7 @@
 //
 // 库目录结构（每个模型一个子目录，目录名即 id）：
 //   model/library/
-//     ├── yolo11n-coco/
+//     ├── yolo11n-ppe/
 //     │     ├── model.rknn
 //     │     ├── labels.txt     # 一行一类，行序 = 模型输出的 cls_id
 //     │     └── meta.json      # 元数据，缺失时扫描自动生成

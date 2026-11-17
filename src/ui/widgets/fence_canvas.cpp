@@ -12,10 +12,13 @@
 
 #include "fence_canvas.h"
 
+#include "fence_palette.h"   // 与视频叠加层/截图同一套配色
+
 #include <QBrush>
 #include <QColor>
 #include <QCursor>
 #include <QFont>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPen>
@@ -32,6 +35,10 @@ namespace {
 constexpr double kAnchorHitRadius = 12.0;
 // 矩形绘制的最小尺寸（widget 像素）。防误触：轻点不该落一个零面积区域。
 constexpr double kMinRectPixels = 3.0;
+// "单击"与"拖动"的分界（widget 像素）：Edit 态空白处按下到松手位移不超过它
+// 才算一次点击（给多边形追加顶点），超过就什么都不做——触屏上没有右键，
+// 误拖不该留下一个用户没点过的顶点。
+constexpr double kTapSlop = 4.0;
 
 }  // namespace
 
@@ -39,6 +46,7 @@ FenceCanvas::FenceCanvas(QWidget *parent)
     : QWidget(parent)
 {
     setMouseTracking(true);
+    setFocusPolicy(Qt::ClickFocus);   // Esc/Backspace 走 keyPressEvent，点画布即拿焦点
     setMinimumSize(320, 240);
     refreshTimer_.setInterval(1000);
     connect(&refreshTimer_, &QTimer::timeout, this, &FenceCanvas::frameRefreshRequested);
@@ -53,6 +61,7 @@ void FenceCanvas::setRegions(const QVector<PadRegion> &regions)
     regions_ = regions;
     dragRegion_ = -1;
     dragVertex_ = -1;
+    appendPending_ = false;
     polyPoints_.clear();
     rectDragging_ = false;
     update();
@@ -64,6 +73,7 @@ void FenceCanvas::setMode(CanvasMode mode)
     clearInProgressDrawing();
     updateCursor();
     update();
+    emit modeChanged(mode_);
 }
 
 void FenceCanvas::setCreateRule(const QString &ruleType)
@@ -85,6 +95,7 @@ void FenceCanvas::clearInProgressDrawing()
     rectDragging_ = false;
     dragRegion_ = -1;
     dragVertex_ = -1;
+    appendPending_ = false;
 }
 
 void FenceCanvas::updateCursor()
@@ -293,20 +304,23 @@ void FenceCanvas::applyDragDelta(const QPointF &deltaWidget)
             region.points[dragVertex_] = toPad(vertex, canvas);
         }
     } else {
-        // 整体平移：delta 只除以内容矩形尺寸（位移没有原点，不能减 left/top），
-        // 钳到"所有顶点都留在画布内"的范围内再施加
+        // 整体平移：delta 是**从按下起的总位移**，必须叠在原始顶点上——
+        // 累加到已移动的点上会越拖越快（用户报的"乱跳"）；钳制边界也必须用
+        // **原始**包围盒，用移动后的边界会随拖动不断收缩，表现为"自动贴边"。
+        // 位移没有原点，只除以内容矩形尺寸，不能减 left/top。
         QPointF deltaPad(deltaWidget.x() / canvas.width(), deltaWidget.y() / canvas.height());
         double minX = 1.0, maxX = 0.0, minY = 1.0, maxY = 0.0;
-        for (const QPointF &point : region.points) {
-            minX = qMin(minX, point.x());
-            maxX = qMax(maxX, point.x());
-            minY = qMin(minY, point.y());
-            maxY = qMax(maxY, point.y());
+        for (const QPointF &origin : dragOriginPoints_) {
+            const QPointF pad = toPad(origin, canvas);
+            minX = qMin(minX, pad.x());
+            maxX = qMax(maxX, pad.x());
+            minY = qMin(minY, pad.y());
+            maxY = qMax(maxY, pad.y());
         }
         deltaPad.setX(qBound(-minX, deltaPad.x(), 1.0 - maxX));
         deltaPad.setY(qBound(-minY, deltaPad.y(), 1.0 - maxY));
-        for (QPointF &point : region.points) {
-            point += deltaPad;
+        for (int i = 0; i < region.points.size() && i < dragOriginPoints_.size(); ++i) {
+            region.points[i] = toPad(dragOriginPoints_.at(i), canvas) + deltaPad;
         }
     }
 }
@@ -338,12 +352,8 @@ void FenceCanvas::finishRect(const QPointF &start, const QPointF &end)
     emit regionsEdited();
 }
 
-void FenceCanvas::closePolygon()
+void FenceCanvas::commitPolygon()
 {
-    // 不足 3 点静默作废：不弹框、不落区域——与 FenceOverlay 的闭合口径一致，
-    // 误点不会多出一个用户没见过的形状。
-    if (polyPoints_.size() < 3)
-        return;
     const QRect canvas = contentRect();
     PadRegion region;
     region.shapeType = QStringLiteral("POLYGON");
@@ -353,7 +363,18 @@ void FenceCanvas::closePolygon()
     }
     regions_.append(region);
     polyPoints_.clear();
+    // 闭合后回 Edit：形状已成型，下一次点击不该又起一个新形状；
+    // 要接着画由用户再点工具钮，误触成本最低。
+    setMode(CanvasMode::Edit);
     emit regionsEdited();
+}
+
+void FenceCanvas::cancelPolygon()
+{
+    // 不足 3 点的进行中绘制直接作废：不弹框、不落区域，
+    // 误点不会多出一个用户没见过的形状。
+    polyPoints_.clear();
+    update();
 }
 
 void FenceCanvas::undoLastPolyPoint()
@@ -381,16 +402,14 @@ void FenceCanvas::mousePressEvent(QMouseEvent *event)
                 beginDrag(regionIndex, vertexIndex, pos);   // 拖锚点
             } else if (hitRegionBody(pos) >= 0) {
                 beginDrag(hitRegionBody(pos), -1, pos);     // 拖整体
+            } else {
+                // 空白处：候选"追加顶点"。松手位移没超过 slop 才真追加到
+                // 当前多边形末尾（按 1-2-…-n-1 点序闭合）；触屏没有右键，
+                // 删除走 DeleteMode 工具，这里不收右键。
+                appendPending_ = true;
+                appendPos_ = clampToContent(pos);
             }
             update();
-        } else if (event->button() == Qt::RightButton) {
-            // Edit 模式下右键 = 删除命中的区域（鼠标侧的快捷，触屏走 DeleteMode）
-            const int regionIndex = hitRegionBody(pos);
-            if (regionIndex >= 0) {
-                regions_.remove(regionIndex);
-                emit regionsEdited();
-                update();
-            }
         }
     } else if (mode_ == CanvasMode::RectDraw) {
         if (event->button() == Qt::LeftButton) {
@@ -402,9 +421,8 @@ void FenceCanvas::mousePressEvent(QMouseEvent *event)
     } else if (mode_ == CanvasMode::PolyDraw) {
         if (event->button() == Qt::LeftButton) {
             polyPoints_.append(clampToContent(pos));
-            update();
-        } else if (event->button() == Qt::RightButton) {
-            closePolygon();
+            if (polyPoints_.size() >= 3)
+                commitPolygon();   // 第 3 点落地自动闭合（2026-11-17 用户裁定）
             update();
         }
     } else if (mode_ == CanvasMode::DeleteMode) {
@@ -446,15 +464,49 @@ void FenceCanvas::mouseReleaseEvent(QMouseEvent *event)
         rectDragging_ = false;
         finishRect(rectStart_, rectEnd_);
         update();
+    } else if (appendPending_) {
+        appendPending_ = false;
+        const QPointF pos = event->pos();
+        const double dx = pos.x() - appendPos_.x();
+        const double dy = pos.y() - appendPos_.y();
+        if (qSqrt(dx * dx + dy * dy) > kTapSlop)
+            return;   // 是拖不是点：不留顶点
+        // 追加到**最后一个多边形**末尾：点序即 1-2-…-n，画闭合多边形时
+        // 自动 n→1 收口（2026-11-17 用户裁定"在其他位置加点，按点序闭合"）。
+        // 只有 RECT 时不追加：矩形加第 5 点会破坏矩形语义。
+        for (int r = regions_.size() - 1; r >= 0; --r) {
+            if (regions_[r].shapeType != QLatin1String("POLYGON"))
+                continue;
+            regions_[r].points.append(toPad(clampToContent(pos), contentRect()));
+            emit regionsEdited();
+            update();
+            break;
+        }
     }
 }
 
 void FenceCanvas::mouseDoubleClickEvent(QMouseEvent *event)
 {
+    // 双击的第二下 press 已先落了点，这里统一按"取消重画"处理：
+    // 手抖双击不该提交一个带重复顶点的形状。
     if (mode_ == CanvasMode::PolyDraw && event->button() == Qt::LeftButton) {
-        closePolygon();
-        update();
+        cancelPolygon();
     }
+}
+
+void FenceCanvas::keyPressEvent(QKeyEvent *event)
+{
+    if (mode_ == CanvasMode::PolyDraw) {
+        if (event->key() == Qt::Key_Escape) {
+            cancelPolygon();
+            return;
+        }
+        if (event->key() == Qt::Key_Backspace) {
+            undoLastPolyPoint();
+            return;
+        }
+    }
+    QWidget::keyPressEvent(event);
 }
 
 void FenceCanvas::resizeEvent(QResizeEvent *event)
@@ -481,9 +533,8 @@ void FenceCanvas::hideEvent(QHideEvent *event)
 
 QColor FenceCanvas::ruleColor(const QString &ruleType)
 {
-    // 与 fence_frame_renderer 同色：INTRUSION 红、CROSS 琥珀。
-    return ruleType == QLatin1String("CROSS") ? QColor(0xFB, 0x8C, 0x00)
-                                              : QColor(0xE5, 0x39, 0x35);
+    // 配色唯一出处：fence_palette.h（INTRUSION 红 #E53935、CROSS 琥珀 #FB8C00）。
+    return geofence::fenceLineColor(geofence::roleFromRuleType(ruleType));
 }
 
 void FenceCanvas::paintEvent(QPaintEvent *)
@@ -502,6 +553,7 @@ void FenceCanvas::paintEvent(QPaintEvent *)
         painter.drawText(rect(), Qt::AlignCenter, QStringLiteral("等待视频画面…"));
     }
 
+    // 提示条已按用户要求移除（2026-11-17）：触屏界面不叠操作说明文字。
     for (int index = 0; index < regions_.size(); ++index) {
         drawRegion(painter, regions_.at(index), index);
     }
@@ -572,6 +624,9 @@ void FenceCanvas::drawRegion(QPainter &painter, const PadRegion &region, int ind
 void FenceCanvas::drawAnchors(QPainter &painter)
 {
     const QRect canvas = contentRect();
+    QFont numFont = painter.font();
+    numFont.setPixelSize(10);
+    numFont.setBold(true);
     for (int r = 0; r < regions_.size(); ++r) {
         const QColor color = ruleColor(regions_.at(r).ruleType);
         const QVector<QPointF> points = regionWidgetPoints(regions_.at(r), canvas);
@@ -580,6 +635,16 @@ void FenceCanvas::drawAnchors(QPainter &painter)
             painter.setPen(QPen(color, hot ? 2 : 1));
             painter.setBrush(hot ? color : Qt::white);
             painter.drawEllipse(points.at(v), hot ? 6 : 4.5, hot ? 6 : 4.5);
+            // 顶点序号 = 存储点序（RECT 为 左上1→右上2→右下3→左下4），
+            // 拖锚点时能对上号；黑底白字小圆盘，与区域编号同款。
+            const QPointF label = points.at(v) + QPointF(10, -10);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(0, 0, 0, 190));
+            painter.drawEllipse(label, 7, 7);
+            painter.setFont(numFont);
+            painter.setPen(Qt::white);
+            painter.drawText(QRectF(label.x() - 7, label.y() - 7, 14, 14),
+                             Qt::AlignCenter, QString::number(v + 1));
         }
     }
 }
@@ -601,25 +666,40 @@ void FenceCanvas::drawTempPolygon(QPainter &painter)
     const QColor color = ruleColor(createRule_);
     QColor fill = color;
     fill.setAlpha(45);
-    painter.setPen(QPen(color.lighter(120), 2, Qt::DashLine));
-    painter.setBrush(fill);
 
     if (polyPoints_.size() >= 2) {
-        QPolygonF polygon;
-        polygon.reserve(polyPoints_.size());
-        for (const QPointF &point : polyPoints_) {
-            polygon << point;
-        }
-        painter.drawPolyline(polygon);
+        // 已有 2 点：光标就是第 3 点，直接预览**闭合后的多边形**——
+        // 用户落第 3 点前看到的就是将要提交的形状。
+        QPolygonF preview;
+        preview << polyPoints_.at(0) << polyPoints_.at(1) << clampToContent(cursorPos_);
+        painter.setPen(QPen(color.lighter(120), 2, Qt::DashLine));
+        painter.setBrush(fill);
+        painter.drawPolygon(preview);
+    } else {
+        // 只有 1 点：到光标的虚线
+        painter.setPen(QPen(color.lighter(120), 1, Qt::DashLine));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawLine(polyPoints_.last(), clampToContent(cursorPos_));
     }
-    painter.setPen(QPen(color.lighter(120), 1, Qt::DashLine));
-    if (!polyPoints_.isEmpty()) {
-        painter.drawLine(polyPoints_.last(), cursorPos_);   // 到光标的虚线
-    }
-    painter.setBrush(QColor(color.red(), color.green(), color.blue(), 150));
-    painter.setPen(Qt::NoPen);
-    for (const QPointF &point : polyPoints_) {
-        painter.drawEllipse(point, 4, 4);
+
+    // 顶点圆点加大到 6px 并描白边：暗背景上 4px 纯色点几乎看不见。
+    // 每个点带序号（落笔顺序 = 存储点序），与区域编号圆盘同款黑底白字。
+    QFont numFont = painter.font();
+    numFont.setPixelSize(11);
+    numFont.setBold(true);
+    for (int i = 0; i < polyPoints_.size(); ++i) {
+        const QPointF &point = polyPoints_.at(i);
+        painter.setPen(QPen(Qt::white, 1));
+        painter.setBrush(QColor(color.red(), color.green(), color.blue(), 200));
+        painter.drawEllipse(point, 6, 6);
+        const QPointF label = point + QPointF(11, -11);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0, 0, 0, 190));
+        painter.drawEllipse(label, 8, 8);
+        painter.setFont(numFont);
+        painter.setPen(Qt::white);
+        painter.drawText(QRectF(label.x() - 8, label.y() - 8, 16, 16),
+                         Qt::AlignCenter, QString::number(i + 1));
     }
 }
 

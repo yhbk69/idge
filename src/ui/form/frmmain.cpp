@@ -30,6 +30,7 @@
 #include "dashboard_widget.h"
 #include "alarm_list_widget.h"
 #include "alarm_manager.h"
+#include "alarm_labels.h"   // 类名中文显示（label_zh.txt），仅本机 UI
 #include "video_alarm_widget.h"
 #include "fence_manager.h"
 #include "fence_frame_renderer.h"   // setFrameProvider：HTTP apply 生效画面叠真实帧
@@ -861,7 +862,7 @@ bool frmMain::startPadHttpFromConfig(QString *err)
  *
  * 线程：槽经队列连接在 GUI 线程执行（发方是解码线程的 storeAndNotify）。
  * 措辞分三种口径是**有意的**，别合并成一条模板：
- *   - 围栏 vs 类别："检测到 person"会让现场以为围栏那几路的 COCO 也在按类别报警，
+ *   - 围栏 vs 类别："检测到 person"会让现场以为围栏那几路的通用模型也在按类别报警，
  *     而那个模型的 alarm_class 明明为空（只画框不报警）；
  *   - 围栏内部再分闯入禁区 / 离岗（alarmType == "fence_out"）：都写成"围栏侵入"
  *     就会把人往反方向找；
@@ -883,10 +884,13 @@ void frmMain::showAlarmToast(const AlarmRecord &alarm)
     QString head;
     if (alarm.isFenceAlarm) {
         head = alarm.alarmType == QLatin1String("fence_out")
-            ? QString("⚠ 通道%1 离岗（在岗区域外） %2").arg(alarm.channel + 1).arg(alarm.className)
-            : QString("⚠ 通道%1 闯入禁区 %2").arg(alarm.channel + 1).arg(alarm.className);
+            ? QString("⚠ 通道%1 离岗（在岗区域外） %2").arg(alarm.channel + 1)
+                  .arg(alarm_labels::classNameZh(alarm.className))
+            : QString("⚠ 通道%1 闯入禁区 %2").arg(alarm.channel + 1)
+                  .arg(alarm_labels::classNameZh(alarm.className));
     } else {
-        head = QString("⚠ 通道%1 检测到 %2").arg(alarm.channel + 1).arg(alarm.className);
+        head = QString("⚠ 通道%1 检测到 %2").arg(alarm.channel + 1)
+                   .arg(alarm_labels::classNameZh(alarm.className));
     }
     // 负责人不再出现在 toast 上：它是会话级常量（同一批报警全都一样），
     // 而这一页的口径是"列表与提示只看事件本身，人/计划进详情看"。
@@ -1113,24 +1117,23 @@ bool frmMain::initRollCallService()
 }
 
 // 盘点模型清单解析（启动 init 与模型库变更 reload 共用的单一口径）：
-//   - coco 槽：yolo11n-coco（80 类通用目标，当前作为盘点主力权重）；
-//   - fire 槽：库内 id 含 "fire" 的模型（用户日后用库管理导入明火 .rknn 即自动生效），
-//     未入库则跳过，仅用 COCO 单模型盘点。
-//   - tools 槽：库内 id 含 "tools" 的模型（yolo11n-tools，24 类工器具，2026-11-11 入库），
+//   - 基础槽：yolo11n-ppe（人员/PPE 检测，coco 权重已删除后的盘点主力）；
+//   - fire 槽：库内 id 含 "fire" 的模型（导入明火 .rknn 即自动生效），未入库则跳过；
+//   - tools 槽：库内 id 含 "tools" 的模型（yolo11n-tools，24 类工器具），
 //     与 fire 同款自动探测：导入即进盘点清单，未入库则跳过。
 // 核分配在服务层：首个模型绑 NPU 核0、其余核1（主检测流水线预算留核2）
 std::vector<EquipmentModelConfig> frmMain::equipmentModelConfigsFromLibrary()
 {
     ModelRegistry &reg = ModelRegistry::instance();
     std::vector<EquipmentModelConfig> models;
-    const QString coco_id = QStringLiteral("yolo11n-coco");
-    if (reg.contains(coco_id)) {
-        models.push_back({"", reg.modelPath(coco_id).toStdString(),
-                          reg.labelPath(coco_id).toStdString()});
+    const QString base_id = QStringLiteral("yolo11n-ppe");
+    if (reg.contains(base_id)) {
+        models.push_back({"", reg.modelPath(base_id).toStdString(),
+                          reg.labelPath(base_id).toStdString()});
     }
     QString fire_id, tools_id;
     for (const QString &id : reg.ids()) {
-        if (id == coco_id)
+        if (id == base_id)
             continue;
         if (fire_id.isEmpty() && id.contains("fire", Qt::CaseInsensitive))
             fire_id = id;
@@ -1141,7 +1144,7 @@ std::vector<EquipmentModelConfig> frmMain::equipmentModelConfigsFromLibrary()
         models.push_back({"", reg.modelPath(fire_id).toStdString(),
                           reg.labelPath(fire_id).toStdString()});
     } else {
-        qWarning() << "明火模型未入库，暂用 COCO 单模型盘点";
+        qWarning() << "明火模型未入库，暂用 PPE 基础模型盘点";
     }
     if (!tools_id.isEmpty()) {
         models.push_back({"", reg.modelPath(tools_id).toStdString(),
@@ -1152,7 +1155,7 @@ std::vector<EquipmentModelConfig> frmMain::equipmentModelConfigsFromLibrary()
 
 /**
  * @brief 创建设备盘点服务并加载模型
- * @return false = 模型库里既没有 yolo11n-coco 也没有明火模型（调用方弹警告、卡片置灰）
+ * @return false = 模型库里没有任何可用盘点模型（调用方弹警告、卡片置灰）
  *
  * ⚠ 必须在 initRollCallService() **之后**调用：构造时把 rollCallService_ 交给它，
  *   两者共用 roll_call.db 的同一张 task 表（盘点任务 type="equipment_registration"），
@@ -1166,7 +1169,7 @@ bool frmMain::initEquipmentService()
     equipmentService_ = std::make_shared<EquipmentInventoryService>(rollCallService_);
     const std::vector<EquipmentModelConfig> models = equipmentModelConfigsFromLibrary();
     if (models.empty()) {
-        qWarning() << "设备盘点初始化失败：模型库中无 yolo11n-coco 也无明火模型";
+        qWarning() << "设备盘点初始化失败：模型库中无可用盘点模型（ppe/明火/工器具均未入库）";
         return false;
     }
     return equipmentService_->initialize(models);
@@ -1504,32 +1507,30 @@ void frmMain::stopAllStreams()
 }
 
 /**
- * @brief 合门：显示登录页、收起顶部导航、清掉登录态显示
+ * @brief 合门：显示登录页、收起标题栏、清掉登录态显示
  *
  * 调用点两处：构造的**最后一步**（门必须盖住所有已建好的页面）与退出登录后。
  * login_ 为空直接返回——它是在 initNewPages() 里建的，构造顺序若被打乱（比如有人
  * 把合门提前到 initForm 末尾），这里就会静默什么都不做，表现是"启动直接进主页"。
- * resetStatus() 不能省：否则新来的班次看到的是上一班的"缺字段"红字。
- * 只收 widgetTop、不收 widgetMenu：× 就是退出程序，与登录页那颗按钮同义、不冲突。
+ * 登录页要一块干净的整屏：整个标题栏（widgetTitle，含右侧最小化/最大化/× 的
+ * widgetMenu）一并收起，不放宽这一条的理由：.ui 里 widgetTitle 与 stackedWidget
+ * **是平级的**，登录页盖不住标题栏。只收导航行（widgetTop）的话，最小化/最大化
+ * 三钮仍露在角上；而导航行露着就能点「智能识别」，那页一进去就开
+ * smartRecognition.camera 的设备节点，与登录页的扫码器抢同一个 /dev/videoNN
+ * （ConfigManager.h 明令禁止第二次打开）。
+ * 退出通道不受影响：登录页右列有「退出程序」，与 × 同义。
  */
 void frmMain::showLoginGate()
 {
     if (!login_) {
         return;
     }
-    login_->resetStatus();
 
-    // 光切页面挡不住：.ui 里 widgetTitle{ widgetTop, widgetMenu } 与 stackedWidget
-    // **是平级的**，登录页盖不住导航行。不收起 widgetTop 的话，登录期间照样能点
-    // 「智能识别」，而那页一进去就开 smartRecognition.camera 的设备节点 ——
-    // 与登录页的扫码器抢同一个 /dev/videoNN（ConfigManager.h 明令禁止第二次打开）。
-    // 角标 alarmBadge_ 是 btnEquipCheck 的子件，跟着一起藏，不用单独处理。
-    // 标题栏三钮区 widgetMenu 留着：× 就是退出程序，与登录页那颗按钮同义、不冲突。
-    if (ui->widgetTop) {
-        ui->widgetTop->hide();
+    if (ui->widgetTitle) {
+        ui->widgetTitle->hide();
     }
-    // 登录人角标也一起收：它不在 widgetTop 里（是 widgetTitle 的直接子件），
-    // 不单独处理的话未登录时右上角会挂着一颗"登录人 —"，看着像还登着。
+    // 登录人角标是 widgetTitle 的直接子件，跟着一起藏；这里仍显式调一次，
+    // 因为 updateSessionBadge() 还要负责"未登录就 hide"的状态复位。
     updateSessionBadge();
 
     ui->stackedWidget->setCurrentWidget(login_);
@@ -1588,7 +1589,7 @@ void frmMain::openSessionDetail()
  * @brief 开门：登录成功（扫码或测试登录同一条路径）后的恢复动作
  *
  * 由 LoginWidget::loginSucceeded 触发（GUI 线程；扫码器也在 GUI 线程的模态框里跑）。
- * 顺序：先亮回 widgetTop → 刷登录人角标 → 切到视频监控页 → startAllStreams()。
+ * 顺序：先亮回标题栏与 widgetTop → 刷登录人角标 → 切到视频监控页 → startAllStreams()。
  *   切页在开流之前，报警面板因此先就位：alarmGenerated 的节流 lambda 里有
  *   "当前页 == pageMonitor 才刷面板"的判据，反过来就会把开门最初几秒的报警
  *   只留在 DB 里（切页时 buttonClick() 会补一次 refreshAlarms，所以不是丢数据，
@@ -1599,6 +1600,9 @@ void frmMain::openSessionDetail()
  */
 void frmMain::onLoginSucceeded()
 {
+    if (ui->widgetTitle) {
+        ui->widgetTitle->show();
+    }
     if (ui->widgetTop) {
         ui->widgetTop->show();
     }
@@ -1800,8 +1804,11 @@ void frmMain::initDebugPage()
             // 默认落最常用的"通道与检测"
             settingsTabs_->setCurrentIndex(kTabChannelDetect);
 
-            // 每页：QWidget → QScrollArea（frameless + widgetResizable）→ 内容布局，
-            // 尾部带 stretch：分组框一律插在 stretch 之前（insertWidget(count-1)）。
+            // 每页：QWidget → QScrollArea（frameless + widgetResizable）→ 内容布局。
+            // 除运行日志页外，尾部带 stretch：分组框一律插在 stretch 之前
+            // （insertWidget(count-1)）。运行日志页**不留 stretch**、日志分组按
+            // stretch=1 插入，日志区才会随页签一起长满；否则它会停在 12 行的下限上，
+            // 下面留一大片空白（现场看起来像"日志只占半页"）。
             for (int t = 0; t < kTabCount; ++t) {
                 QWidget *page = tabPages[t];
                 QVBoxLayout *pageLayout = new QVBoxLayout(page);
@@ -1818,7 +1825,8 @@ void frmMain::initDebugPage()
                 QVBoxLayout *contentLayout = new QVBoxLayout(scrollContent);
                 contentLayout->setContentsMargins(0, 0, 0, 0);
                 contentLayout->setSpacing(6);
-                contentLayout->addStretch();
+                if (t != kTabLog)
+                    contentLayout->addStretch();
 
                 scrollArea->setWidget(scrollContent);
                 pageLayout->addWidget(scrollArea);
@@ -1839,7 +1847,12 @@ void frmMain::initDebugPage()
                 }
                 QVBoxLayout *target = settingsTabLayouts_[tab];
                 if (w) {
-                    target->insertWidget(target->count() - 1, w);
+                    // 运行日志页没有尾部 stretch，日志分组要给 stretch=1 才能长满；
+                    // 其余页仍插在尾部 stretch 之前。
+                    if (tab == kTabLog)
+                        target->insertWidget(target->count(), w, 1);
+                    else
+                        target->insertWidget(target->count() - 1, w);
                 } else if (item->layout()) {
                     target->insertLayout(target->count() - 1, item->layout());
                 }
@@ -2006,6 +2019,7 @@ void frmMain::initDebugPage()
 
     // ========== 登高守护配置区（跨槽几何判定 + 状态机） ==========
     initLadderGuardUi();
+    initFireGuardUi();
 
     // ========== 报警类别已按模型配置（见"模型参数"表），隐藏旧的全局报警控件 ==========
     if (ui->editAlarmClasses) ui->editAlarmClasses->setVisible(false);
@@ -2806,6 +2820,18 @@ void frmMain::initModelParamsUi()
         .arg(theme::HOVER));
     v->addWidget(modelParamTable_);
 
+    // 特殊模型单独说明：它们不是"按类别直接报警"的普通检测模型，
+    // 而是给规则引擎提供触发源，最终产出的是独立的规则报警。
+    QLabel *specialHint = new QLabel(
+        QStringLiteral("特殊模型（后处理）：ladder / fire 除普通检测外，还会驱动独立规则。"
+                       "ladder →「报警规则 → 登高守护」（梯上有人时需梯下有人扶梯）；"
+                       "fire →「报警规则 → 动火监护」（动火作业现场需至少两人在场）。"
+                       "规则最终分别产出「登高无人看护」「动火无人监护」报警；"
+                       "若在上表为它们配置了报警类别，普通检测报警仍会照常产生（一般留空）。"));
+    specialHint->setWordWrap(true);
+    specialHint->setStyleSheet(theme::text(theme::TEXT_MUTED, theme::FS_HINT));
+    v->addWidget(specialHint);
+
     contentLayout->insertWidget(contentLayout->count() - 1, group);
     refreshModelParamsTable();
 }
@@ -3289,7 +3315,7 @@ void frmMain::openModelAlarmClassesDialog(const QString &libId, QPushButton *btn
 
 // ============================================================
 // initGeofenceUi: 围栏配置区（独立于级联模型）
-//   围栏不属于 ppe/coco 这些级联槽位：它复用本通道已有的检测结果，只做几何
+//   围栏不属于 ppe 这些级联槽位：它复用本通道已有的检测结果，只做几何
 //   判定，所以类别是**单值**（默认 person），另加一个报警最小间隔（进入沿才是主判据）。
 // ============================================================
 void frmMain::initGeofenceUi()
@@ -3440,6 +3466,97 @@ void frmMain::initLadderGuardUi()
         c.setLadderguardClearSeconds(v);
         c.save();
         log("ladderguard", QStringLiteral("登高守护消警确认: %1 秒").arg(v));
+    });
+
+    contentLayout->insertWidget(contentLayout->count() - 1, group);
+}
+
+// ============================================================
+// initFireGuardUi: 动火监护配置区
+//   判据 = 画面有明火/烟雾（动火作业）且在场人数不足 minPersons 持续超过宽限期。
+//   需要本通道级联里同时挂明火类模型（类名含 fire/smoke/flame）和人模型，
+//   缺一个守护就不激活。报的是 fire_no_watcher，与普通"明火"检测分开。
+//   解码线程逐帧现读配置，这里改完即生效，不用重开流。
+// ============================================================
+void frmMain::initFireGuardUi()
+{
+    ConfigManager &cfg = ConfigManager::instance();
+    QVBoxLayout *contentLayout = settingsTabLayout(kTabAlarmRules);
+    if (!contentLayout) {
+        qWarning() << "initFireGuardUi: 报警规则页布局未找到，动火监护分组未加入";
+        return;
+    }
+
+    QGroupBox *group = new QGroupBox("动火监护（动火作业现场不足两人报警）");
+    group->setStyleSheet(theme::panel(theme::PANEL));
+    QGridLayout *gl = new QGridLayout(group);
+    gl->setHorizontalSpacing(10);
+    gl->setVerticalSpacing(6);
+
+    QCheckBox *enableBox = new QCheckBox("启用");
+    enableBox->setChecked(cfg.fireguardEnabled());
+    enableBox->setMinimumHeight(theme::TOUCH_FIELD_H);
+    enableBox->setStyleSheet(theme::text(theme::TEXT, theme::FS_BODY));
+    gl->addWidget(enableBox, 0, 0, 1, 2);
+
+    QLabel *labPersons = new QLabel(QStringLiteral("最少在场人数:"));
+    labPersons->setMinimumWidth(140);
+    gl->addWidget(labPersons, 1, 0);
+
+    QSpinBox *personSpin = new QSpinBox;
+    personSpin->setRange(1, 10);
+    personSpin->setValue(cfg.fireguardMinPersons());
+    personSpin->setStyleSheet(theme::field(theme::PANEL));
+    gl->addWidget(personSpin, 1, 1);
+
+    QLabel *labGrace = new QLabel(QStringLiteral("告警宽限(秒):"));
+    labGrace->setMinimumWidth(140);
+    gl->addWidget(labGrace, 2, 0);
+
+    QDoubleSpinBox *graceSpin = new QDoubleSpinBox;
+    graceSpin->setRange(0.5, 60.0);
+    graceSpin->setDecimals(1);
+    graceSpin->setSingleStep(0.5);
+    graceSpin->setValue(cfg.fireguardGraceSeconds());
+    graceSpin->setStyleSheet(theme::field(theme::PANEL));
+    gl->addWidget(graceSpin, 2, 1);
+
+    QLabel *labClear = new QLabel(QStringLiteral("消警确认(秒):"));
+    labClear->setMinimumWidth(140);
+    gl->addWidget(labClear, 3, 0);
+
+    QDoubleSpinBox *clearSpin = new QDoubleSpinBox;
+    clearSpin->setRange(0.5, 60.0);
+    clearSpin->setDecimals(1);
+    clearSpin->setSingleStep(0.5);
+    clearSpin->setValue(cfg.fireguardClearSeconds());
+    clearSpin->setStyleSheet(theme::field(theme::PANEL));
+    gl->addWidget(clearSpin, 3, 1);
+
+    // 与 initLadderGuardUi 同一口径：先灌值、后连信号，避免程序化触发写盘。
+    connect(enableBox, &QCheckBox::toggled, this, [this](bool on) {
+        ConfigManager &c = ConfigManager::instance();
+        c.setFireguardEnabled(on);
+        c.save();
+        log("fireguard", QStringLiteral("动火监护: %1").arg(on ? "启用" : "停用"));
+    });
+    connect(personSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v) {
+        ConfigManager &c = ConfigManager::instance();
+        c.setFireguardMinPersons(v);
+        c.save();
+        log("fireguard", QStringLiteral("动火监护最少在场人数: %1").arg(v));
+    });
+    connect(graceSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double v) {
+        ConfigManager &c = ConfigManager::instance();
+        c.setFireguardGraceSeconds(v);
+        c.save();
+        log("fireguard", QStringLiteral("动火监护告警宽限: %1 秒").arg(v));
+    });
+    connect(clearSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double v) {
+        ConfigManager &c = ConfigManager::instance();
+        c.setFireguardClearSeconds(v);
+        c.save();
+        log("fireguard", QStringLiteral("动火监护消警确认: %1 秒").arg(v));
     });
 
     contentLayout->insertWidget(contentLayout->count() - 1, group);

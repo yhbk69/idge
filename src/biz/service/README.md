@@ -11,7 +11,7 @@
 | 文件 | 职责 |
 | --- | --- |
 | `roll_call_service.h/.cpp` | 点名服务：人脸注册、点名（重复检测）、注销三大流程；调用进程内 `InProcessFaceRecognizer` 做 SCRFD 检测 + 512 维特征提取；贪心一对一余弦相似度匹配 |
-| `equipment_inventory_service.h/.cpp` | 设备盘点服务：多模型（如 coco + 明火 + 工器具）进程内 YOLO11Model 检测、检出转换与计数、检测框绘制回写、按 phase 登记/注销落库 |
+| `equipment_inventory_service.h/.cpp` | 设备盘点服务：多模型（如 ppe + 明火 + 工器具）进程内 YOLO11Model 检测、检出转换与计数、检测框绘制回写、按 phase 登记/注销落库 |
 | `task_manager.h/.cpp` | 点名/盘点共用磁盘产物组织：带 `_N` 去重的任务目录、"时间戳+随机数"唯一文件名、抓拍落盘、列目录图片、删任务夹（原在 `src/base/utils`，因其职责就是业务产物规则而归位本域） |
 
 ## 核心类与流程
@@ -46,7 +46,7 @@ processPhotos(task_id, photos, phase)             // phase: 0=登记 1=注销
 saveResult(result)                                // 确认后落库：photo_id 数组下标 → DB rowid 重映射
 ```
 
-`initialize` 为每个模型一次性加载权重到 NPU 并常驻（避免每张照片重复 init 的秒级开销）；构造失败抛 `std::runtime_error`，被捕获后回收已加载实例、整体保持未就绪。模型清单由 `frmMain::initEquipmentService` 经 `ModelRegistry` 解析（当前主力 `yolo11n-coco`；明火/工器具模型按 id 含 `fire`/`tools` 自动探测，入库后自动加入）。
+`initialize` 为每个模型一次性加载权重到 NPU 并常驻（避免每张照片重复 init 的秒级开销）；构造失败抛 `std::runtime_error`，被捕获后回收已加载实例、整体保持未就绪。模型清单由 `frmMain::initEquipmentService` 经 `ModelRegistry` 解析（当前基础模型 `yolo11n-ppe`；明火/工器具模型按 id 含 `fire`/`tools` 自动探测，入库后自动加入）。
 
 ## 使用方法
 
@@ -73,7 +73,7 @@ rollCallService_->confirmCancellation(task_id, cancelledCount, cancelResult);
 // 4. 设备盘点（共享同一 db 连接，经 rollCallService_ 注入；路径来自模型库 ModelRegistry）
 auto equipmentService_ = std::make_shared<EquipmentInventoryService>(rollCallService_);
 equipmentService_->initialize({
-    {ws+"/model/library/yolo11n-coco/model.rknn",  ws+"/model/library/yolo11n-coco/labels.txt"},   // 明火等后续模型按同格式追加
+    {ws+"/model/library/yolo11n-ppe/model.rknn",   ws+"/model/library/yolo11n-ppe/labels.txt"},    // 明火等后续模型按同格式追加
 });
 auto inv = equipmentService_->processPhotos(equipmentService_->createEquipmentTask("塔吊核查"), photos, /*phase=*/0);
 equipmentService_->saveResult(inv);

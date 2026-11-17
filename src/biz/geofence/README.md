@@ -24,7 +24,7 @@
 | `fence_manager.h/.cpp` | 单例数据管理：config.json 读写、per-channel 围栏；**老配置的像素坐标在 `loadFromConfig` 里一次性换算成归一化** |
 | `fence_overlay.h/.cpp` | 透明覆盖层 QWidget：绘制与鼠标交互（矩形/多边形/删除），按角色配色与 `setRole`；归一化↔像素的换算基准由 `setContentRect` 提供 |
 | `pad_fence_store.h/.cpp` | **Pad 接口 v1 §5 那套围栏**的存储与版本状态机：`pad_fences`/`pad_fence_versions` 两张表、`regions` 的 8 条校验、草稿/生效/停用三态流转。与上面 `FenceManager` **没有任何共享**（见下节） |
-| `fence_frame_renderer.h/.cpp` | §5.3 要的"合成生效画面"PNG：1280×720，apply 时刻的真实帧等比铺底（取不到帧退深色底 + 网格）+ 按 `ruleType` 填色的区域 + 编号圆盘，写到 `<媒体根>/fence-frames/<fenceId>/v<n>.png`；`renderFenceImage` 另供管理页草稿黑底预览（不落盘）；RECT 一律按外接矩形画，点序出口归一为 左上→右上→右下→左下 |
+| `fence_frame_renderer.h/.cpp` | §5.3 要的"合成生效画面"PNG：1280×720，apply 时刻的真实帧等比铺底（取不到帧退深色底 + 网格）+ 按 `ruleType` 填色的区域 + 编号圆盘，写到 `<媒体根>/fence-frames/<fenceId>/v<n>.png`；`renderFenceImage` 另供管理页草稿黑底预览（不落盘）；RECT 一律按外接矩形画，点序出口归一为 左上→右上→右下→左下。**归一化→像素按底图 letterbox 后的内容矩形换算**（无底图=满幅），与 overlay/编辑画布同口径——乘整幅画布会让非 16:9 帧上的示意图围栏拉宽偏移（2026-11-17 修，判据见 test_fence_canvas G 组） |
 
 ## 核心类与数据流
 - **FenceChecker**（全静态方法）：
@@ -50,15 +50,15 @@
   （见下方注意事项），换算完置脏标记落盘并打一条中文告警；`overlay_w/overlay_h` 就此退役不再写回。
   连画布尺寸都没记录、无法换算的通道，`saveToConfig` 如实写 `coord:"pixel"` 而不是谎报 `norm`，
   告警每次启动都重复，直到用户删了重画（`setChannelFence` 会清掉该通道的 pixel 标记）。
-- **FenceOverlay**：绘制/交互，`saveFences()` 落盘的是**归一化顶点**，不再记 widget 尺寸。
+- **FenceOverlay（只读）**：只负责把 `FenceManager` 的围栏画到视频上，不再接收鼠标、
+  不提供绘制/删除入口；围栏的新增、改角色、停用都在标题栏「电子围栏」页完成。
   画与存的换算基准来自 `setContentRect()`（GLVideoWidget 的内容矩形），所以换视图/换窗口尺寸都不动围栏语义。
-  `setRole()` 只存值 + `update()`，**不清空**在画的多边形顶点（`setDrawMode` 会清，切角色不该丢顶点）。
-  配色按角色：禁区红、岗区域绿；正在画的临时图形用**当前所选角色**的颜色，所见即所得。
-  矩形最小尺寸检查**刻意留在 widget 像素空间**（>5px）——防误触的本意就是像素，不是画面比例。
+  配色唯一出处是 `fence_palette.h`：禁区 `#E53935`、岗区域 `#FB8C00`，与管理页一致。
+  `reloadForTask("")` 登出时会对每一路补发 `fenceChanged`，确保旧线框被擦掉。
 
 数据流：
 ```
-绘制：工具栏选角色 → FenceOverlay(鼠标，提交时盖 role) → saveFences → FenceManager → saveToConfig(config.json)
+管理：标题栏「电子围栏」页（Pad 围栏库）→ 应用/停用 → FenceManager 合并 → fenceChanged
 判定：解码线程（每帧，槽循环结束后一次，通道级而非槽位级）
       → 收集类别 == alarmClass 的检测候选
       → FenceManager::channelFence(ch)(快照) → FenceChecker::checkDetection → FenceViolation
@@ -111,7 +111,7 @@ if (v.verdict != geofence::FenceVerdict::None) { /* v.role / v.shapeIndex 决定
 | | 本机围栏（上面整篇） | Pad v1 围栏（`pad_fence_store`） |
 | --- | --- | --- |
 | 存哪 | `config.json` 的 `geofence.channels[].shapes` | `idge.db` 的 `pad_fences` + `pad_fence_versions` |
-| 谁画 | 界面上的 `FenceOverlay` | Pad 通过 `POST /api/fences/save-draft` 传 `regions` |
+| 谁画 | 界面上的 `FenceOverlay` | Pad 通过 `POST /api/fences/save-draft` 传 `regions`；管理页 `FenceCanvas` 也可画/改（2026-11-17 起新画多边形**第 3 点落地自动闭合**，绘制中与 Edit 锚点均带顶点序号；Edit 态**空白处单击追加顶点**，按 1-2-…-n-1 点序闭合，三角形可长成任意 n 边形；拖锚点改形状、拖内部整体平移；删除走「删除」工具、取消/撤点走工具栏按钮——全触屏口径不收右键、不叠操作提示） |
 | 坐标 | 归一化 `0..10000`（`kFenceNormBase`），两轴各除各的 | 归一化 `0..1`（v1 §13.4.3），越界**判 422/4001 而不是 clamp** |
 | 形状 | 矩形 2 对角点 / 多边形 ≥3 | `RECT` 恰好 4 点 / `POLYGON` 3–20 点，每版本 ≤8 区域 |
 | 角色 | `forbidden` / `workzone`（决定闯入还是离岗） | `INTRUSION` / `CROSS`（v1 的两个词，出站原样回显） |

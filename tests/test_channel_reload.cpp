@@ -306,9 +306,9 @@ int main(int argc, char *argv[])
     // 每轮的期望槽位集合：加一个、减一个、再加回来（同数量换模型也顺带覆盖）
     const QList<QStringList> rounds = {
         {QStringLiteral("yolo11n-ppe")},
-        {QStringLiteral("yolo11n-ppe"), QStringLiteral("yolo11n-coco")},
-        {QStringLiteral("yolo11n-coco")},
-        {QStringLiteral("yolo11n-ppe"), QStringLiteral("yolo11n-coco")},
+        {QStringLiteral("yolo11n-ppe"), QStringLiteral("yolo11n-tools")},
+        {QStringLiteral("yolo11n-tools")},
+        {QStringLiteral("yolo11n-ppe"), QStringLiteral("yolo11n-tools")},
     };
 
     FFmpegVideoDecoder dec;

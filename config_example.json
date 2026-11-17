@@ -69,13 +69,20 @@
         "alarm_uplink.enabled 出厂 false：往外发数据必须人来打开。recording.enabled 出厂 true（报警必带片段）。",
         "  alarm_uplink 段与 recording 段的迁移口径都是【只补缺失段、不覆盖已有段】，所以现场老 config.json",
         "  里新增的键永远不会自动出现，全靠 getter 的默认值兜底；要改只能手改 JSON 并重启（媒体服务不支持运行期重开）。",
-        "geofence.channels 的坐标是 overlay 像素空间，附带 overlay_w/h；改窗口布局或分屏方式后旧围栏会偏移。",
+        "geofence.channels 的坐标是归一化视频内容坐标（0..10000，见 fence_shape.h），不再依赖 overlay 像素尺寸；",
         "ladderguard 段是登高守护（梯上有人、梯下无人看护持续超过宽限期才报警，类型 ladder_no_spotter）：",
         "  激活前提 = 同一通道的级联里同时挂梯子模型（类名含 ladder，如 yolo11n-ladder）和人模型",
-        "  （类名含 worker/person/people/pedestrian，ppe/coco 都满足），缺一个守护就不激活，无需额外配置键。",
+        "  （类名含 worker/person/people/pedestrian，ppe 满足），缺一个守护就不激活，无需额外配置键。",
         "  enabled 出厂 true 但模板通道都没挂梯子模型，所以开箱不激活；要启用就把 yolo11n-ladder 加进某路 models。",
         "  graceSeconds = 无人看护持续多久升报警（默认 2.0）；clearSeconds = 扶梯人连续在场多久消警（默认 1.0）。",
-        "  解码线程逐帧现读，设置页「登高守护」分组改完即生效，不用重开流；几何阈值是编译期常量（梯框 W/H 比例）。"
+        "  解码线程逐帧现读，设置页「登高守护」分组改完即生效，不用重开流；几何阈值是编译期常量（梯框 W/H 比例）。",
+        "",
+        "fireguard 段是动火监护（明火/烟雾在场且现场人数不足门槛时报警，类型 fire_no_watcher）：",
+        "  激活前提 = 同一通道同时挂明火类模型（类名含 fire/smoke/flame，如 yolo11n-fire）和人模型，",
+        "  缺一个守护就不激活。minPersons = 动火现场最少在场人数（默认 2，即作业人 + 监火人）；",
+        "  graceSeconds = 人数不足持续多久升报警（默认 2.0）；clearSeconds = 人数连续达标多久消警（默认 1.0）。",
+        "  与 fire/smoke 的普通检测报警分开：本规则产出的是「动火无人监护」（fire_no_watcher）。",
+        "  解码线程逐帧现读，设置页「动火监护」分组改完即生效，不用重开流。"
     ],
     "video": {
         "sources": [
@@ -114,15 +121,15 @@
         "models": {
             "yolo11n-ppe": {
                 "alarm_class": "un_helmet",
-                "note": "PPE安全装备检测：un_helmet/helmet/people/vest/workWear"
-            },
-            "yolo11n-coco": {
-                "alarm_class": "",
-                "note": "COCO通用检测：留空=只画框不报警；填 person 则满画面人身告警；可多选逗号分隔如 person,car"
+                "note": "PPE安全装备检测：un_helmet/helmet/person/vest/workWear"
             },
             "yolo11n-ladder": {
                 "alarm_class": "",
                 "note": "梯子检测（登高守护触发源）：本报警类留空——违规由守护规则引擎报 ladder_no_spotter，不是见到梯子就报；加进某路 models 且该路有人模型即激活守护"
+            },
+            "yolo11n-fire": {
+                "alarm_class": "",
+                "note": "明火/烟雾检测（动火监护触发源）：本报警类留空——违规由动火监护规则报 fire_no_watcher，不是见到明火就报；加进某路 models 且该路有人模型即激活（动火现场需≥2人）"
             },
             "yolo11n-tools": {
                 "alarm_class": "",
@@ -136,8 +143,7 @@
                 "note": "东门",
                 "enabled": true,
                 "models": [
-                    "yolo11n-ppe",
-                    "yolo11n-coco"
+                    "yolo11n-ppe"
                 ]
             },
             {
@@ -146,8 +152,7 @@
                 "note": "",
                 "enabled": true,
                 "models": [
-                    "yolo11n-ppe",
-                    "yolo11n-coco"
+                    "yolo11n-ppe"
                 ]
             },
             {
@@ -156,8 +161,7 @@
                 "note": "",
                 "enabled": true,
                 "models": [
-                    "yolo11n-ppe",
-                    "yolo11n-coco"
+                    "yolo11n-ppe"
                 ]
             },
             {
@@ -166,8 +170,7 @@
                 "note": "",
                 "enabled": true,
                 "models": [
-                    "yolo11n-ppe",
-                    "yolo11n-coco"
+                    "yolo11n-ppe"
                 ]
             }
         ]
@@ -178,26 +181,23 @@
     },
     "geofence": {
         "enabled": true,
-        "mode": "inside_alarm",
         "alarmClass": "person",
         "throttleSeconds": 10,
         "channels": {
             "0": {
                 "enabled": true,
-                "overlay_w": 786,
-                "overlay_h": 521,
                 "shapes": [
                     {
                         "type": "rectangle",
                         "role": "forbidden",
                         "points": [
                             [
-                                421,
-                                320
+                                5000,
+                                5000
                             ],
                             [
-                                1240,
-                                709
+                                9000,
+                                9000
                             ]
                         ]
                     },
@@ -206,20 +206,20 @@
                         "role": "workzone",
                         "points": [
                             [
-                                239,
-                                131
+                                2500,
+                                2500
                             ],
                             [
-                                561,
-                                154
+                                5500,
+                                2700
                             ],
                             [
-                                524,
-                                338
+                                5200,
+                                6000
                             ],
                             [
-                                248,
-                                315
+                                2600,
+                                5800
                             ]
                         ]
                     }
@@ -229,6 +229,12 @@
     },
     "ladderguard": {
         "enabled": true,
+        "graceSeconds": 2.0,
+        "clearSeconds": 1.0
+    },
+    "fireguard": {
+        "enabled": true,
+        "minPersons": 2,
         "graceSeconds": 2.0,
         "clearSeconds": 1.0
     },
@@ -259,7 +265,7 @@
     "alarm": {
         "_readme": [
             "报警等级按【报警类型】配置（1紧急 2重要 3一般 4提示），等级由服务端下发。",
-            "所有报警（普通检测 detection / 围栏闯入 fence_in / 围栏离岗 fence_out / 登高无人看护 ladder_no_spotter）",
+            "所有报警（普通检测 detection / 围栏闯入 fence_in / 围栏离岗 fence_out / 登高无人看护 ladder_no_spotter / 动火无人监护 fire_no_watcher）",
             "都从 alarm.levels 取等级，代码里不再硬编码。键名 = alarmType，未配置的类型兜底为 3（一般），并夹到 [1,4]。",
             "老 config.json 缺的等级键由 migrateAlarmDefaults() 启动时补齐（只补缺失、不覆盖已有值）。",
             "alarm.track 是普通检测报警的跨帧轨迹闸门阈值：同一目标（跨批 IoU 关联）存活够 minSeconds 秒且命中够 minHits 个推理批次才确认成一次事件、只报一条；消失超过 keepSeconds 秒再出现算新事件。2 秒全局窗口在其下兜底防 ID switch 连记。非法值回默认并打 qWarning。"
@@ -268,7 +274,8 @@
             "detection": 3,
             "fence_in": 1,
             "fence_out": 1,
-            "ladder_no_spotter": 2
+            "ladder_no_spotter": 2,
+            "fire_no_watcher": 2
         },
         "track": {
             "minSeconds": 1.0,

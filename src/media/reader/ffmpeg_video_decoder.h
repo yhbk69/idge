@@ -53,6 +53,7 @@ extern "C" {
 #include "fence_shape.h"
 #include "ConfigManager.h"   // VideoSourceCfg：一条流的打开参数（base 在 media 之下，方向合法）
 #include "ladder_guard.h"    // 登高守护状态机（纯逻辑，biz 在 media 之下，方向合法）
+#include "fire_guard.h"      // 动火监护状态机（明火在场需≥2人，纯逻辑）
 
 /**
  * @brief 一个级联槽位在运行期可换的模型参数
@@ -255,6 +256,10 @@ private:
     // 级联各模型类别不同（coco80 / helmet 2类 / vest 2类…），共用一张表会把
     // helmet 的 cls_id 套用 coco 类名导致报警类别错标（2026-09-24 修复）。
     std::vector<std::vector<std::string>> slotClassNames_;
+    // 与 slotClassNames_ 同下标、同长度的中文显示名（UTF-8），只给画面叠加用。
+    // 数据源是与 labels.txt 逐行对齐的 label_zh.txt；没写中文表的模型回落英文。
+    // 建任务那刻写定、之后只读，协议/报警字段仍用英文的 slotClassNames_。
+    std::vector<std::vector<std::string>> slotClassNamesZh_;
     // 每槽位模型的版本串 `<库id>@<meta.version>`，与 slotClassNames_ 同下标，建任务时一次写定。
     // 报警要打"这条是哪版模型检出的"（v1 §13.2.1 的 modelVersion），而库可以在运行期被
     // 重新导入/换文件——所以这里存的是**加载那刻**解析出的版本，报警落地后就再也不动，
@@ -298,6 +303,11 @@ private:
     // 只在本通道同时挂了梯子类模型与人员类模型时推进（角色按类名子串识别，
     // 与参考实现 pick_classes 同口径）；只被解码线程访问，无需加锁。
     ladderguard::Tracker ladderGuard_;
+
+    // ===== 动火监护：每通道一个跨帧状态机 =====
+    // 明火类模型（类名含 fire/smoke/flame）与人模型同时挂载时推进；
+    // 判据 = 明火在场且人数不足参数门槛，持续 grace 后升 ALARM。
+    fireguard::Tracker fireGuard_;
 
     // ===== 围栏事件表（进入沿触发）=====
     // 每个元素 = 一次进行中的围栏违规事件，记最近一次命中时的框与时刻。
