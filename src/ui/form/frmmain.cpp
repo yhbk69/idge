@@ -522,6 +522,16 @@ void frmMain::initNewPages()
     ui->stackedWidget->insertWidget(1, dashboardWidget_);
     ui->stackedWidget->insertWidget(2, alarmListWidget_);
 
+    // 切页强制整页重绘：QStackedWidget 只把页面显隐涉及的**区域**标脏，被遮挡
+    // 期间没有任何控件再绘制的像素会原样留在帧缓冲里。视频页右侧报警栏与「报警
+    // 数据」页的工具栏/详情列同处一列，一旦那块区域没被整页重绘，上一页的按钮
+    // 就会从报警栏里透出来（2026-11-17 现场截图：橙色「打开截图目录」、绿色「截图」
+    // 和成列的蓝色「详情」）。面板底色的不透明化在 VideoAlarmWidget 里做，这里
+    // 再兜一道全量重绘，保证任何页面组合都从干净的一帧开始。
+    connect(ui->stackedWidget, &QStackedWidget::currentChanged, this, [this](int) {
+        ui->stackedWidget->update();
+    });
+
     // 电子围栏管理页：尾追加（切页按控件指针，不依赖索引）。背景帧从视频页
     // 对应通道的解码器抓（复用，不另开一路流），以回调注入——页面不握视频页指针。
     fenceManageWidget_ = new FenceManageWidget();
@@ -894,7 +904,7 @@ void frmMain::showAlarmToast(const AlarmRecord &alarm)
     }
     // 负责人不再出现在 toast 上：它是会话级常量（同一批报警全都一样），
     // 而这一页的口径是"列表与提示只看事件本身，人/计划进详情看"。
-    alarmToast_->setText(QString("%1 (%2%%)  %3")
+    alarmToast_->setText(QString("%1 (%2%)  %3")
         .arg(head)
         .arg(alarm.confidence * 100, 0, 'f', 1)
         .arg(dt.toString("HH:mm:ss")));

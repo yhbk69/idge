@@ -833,6 +833,36 @@ QToolTip{
 font-size:13px;
 }
 
+/* ===== 视频监控页右侧报警卡片（2026-11-17）=====
+   必须写在应用级：挂在中间容器 setStyleSheet 上的 QWidget#alarmItem 背景
+   不会给纯 QWidget 子件上色（离线实测卡片面一直透明）。声明保持单 token。 */
+QWidget#alarmItem{
+background:#2d2d3d;
+border-radius:6px;
+}
+QWidget#alarmItem:hover{
+background:#45455c;
+}
+QWidget#alarmItem QLabel{
+background:transparent;
+}
+QWidget#alarmItem QLabel#alarmThumb{
+background:#1e1e2e;
+border-width:1px;
+border-style:solid;
+border-color:#3d3d4d;
+border-radius:4px;
+}
+QLabel#alarmChannel{
+color:#9CA3AF;
+font-size:13px;
+}
+QLabel#alarmClass{
+color:#E5E7EB;
+font-size:13px;
+font-weight:bold;
+}
+
 /*TextColor:#E5E7EB*/
 /*PanelColor:#1e1e2e*/
 /*BorderColor:#3d3d4d*/

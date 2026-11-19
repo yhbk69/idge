@@ -500,6 +500,11 @@ install(DIRECTORY ${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg-rkmpp/lib/
         DESTINATION lib
         FILES_MATCHING PATTERN "*.so*")
 
+# 主程序装到 bin/：install 时 CMake 会用 CMAKE_INSTALL_RPATH（$ORIGIN/../lib）
+# 重链一次，剥掉构建期那些指向源码树的绝对 RPATH，部署树里 bin/idge 才能
+# 只靠自带的 lib/ 解析依赖（打包脚本 package-linux.sh 依赖这一条）
+install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION bin)
+
 # ============================================================================
 # 测试程序
 # ============================================================================
@@ -626,7 +631,12 @@ target_link_libraries(face_recognition
 
 set_target_properties(face_recognition PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/model/face
+    # 部署树里本 exe 位于 model/face/，自带库在根 lib/，故比主程序多退一级
+    INSTALL_RPATH "$ORIGIN/../../lib"
 )
+# 与主程序同口径用 DT_RPATH（可传递），间接依赖也能命中部署树 lib/
+target_link_options(face_recognition PRIVATE "LINKER:--disable-new-dtags")
+install(TARGETS face_recognition RUNTIME DESTINATION model/face)
 
 # ============================================================================
 # LatestFrameSlot 单元测试（header-only 广播邮箱，无第三方依赖）

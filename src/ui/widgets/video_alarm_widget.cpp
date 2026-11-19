@@ -69,6 +69,13 @@ VideoAlarmWidget::VideoAlarmWidget(QWidget *parent)
 // refreshAlarms 的 insertWidget(i, …) 下标也默认这条 stretch 恒在末尾，删掉它就会错位。
 void VideoAlarmWidget::setupUi()
 {
+    // 本面板与「报警数据」页的工具栏 / 操作列处在同一屏列（都贴右缘 280px）。
+    // 面板自身必须刷不透明底：切回视频页时只要这块区域没被整页重绘，上一页的
+    // 按钮像素就会从面板的透明区里透出来（2026-11-17 现场截图）。类型选择器
+    // 只命中自己，不会沿对象树压住子件。
+    setAttribute(Qt::WA_StyledBackground, true);
+    setStyleSheet(QStringLiteral("VideoAlarmWidget { background: %1; }").arg(theme::BG));
+
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
     mainLayout->setContentsMargins(0, 0, 0, 0);
     mainLayout->setSpacing(0);
@@ -86,25 +93,16 @@ void VideoAlarmWidget::setupUi()
     scrollArea_->setStyleSheet(QString("QScrollArea { background: %1; border: none; }").arg(theme::BG));
 
     contentWidget_ = new QWidget();
-    // 条目样式集中在父级设一次，条目内控件只用 objectName 命中规则：QSS 每次
-    // setStyleSheet 都要重新解析样式表文本并重新 polish 子树，一条报警 3 个控件、
-    // 20 条就是 60 次解析。实测条目构造本身只剩 3~5ms，大头转移到了抓拍图解码。
-    //
-    // 条目里的 QLabel 一律 transparent 底：卡片整张是点击入口后，悬停/按下的高亮
-    // 必须看得出来 —— 标签各自刷成 PANEL 的话，卡片换色只会在 8px 的缝隙里露一点，
-    // 等于没有反馈。（缩略图那条更具体，仍然保留自己的底。）
-    contentWidget_->setStyleSheet(QString(
-        "background: %1;"
-        "QWidget#alarmItem { background: %2; border-radius: 6px; }"
-        "QWidget#alarmItem:hover { background: %8; }"
-        "QWidget#alarmItem QLabel { background: transparent; }"
-        "QWidget#alarmItem QLabel#alarmThumb { background: %1; border: 1px solid %3; border-radius: 4px; }"
-        "QLabel#alarmChannel { color: %4; font-size: %5px; }"
-        "QLabel#alarmClass { color: %6; font-size: %5px; font-weight: bold; }")
-                                     .arg(theme::BG, theme::PANEL, theme::BORDER,
-                                          theme::TEXT_MUTED)
-                                     .arg(theme::FS_HINT)
-                                     .arg(theme::TEXT, theme::HOVER));   // 卡片底用"深悬停底"，不是按钮那一档亮蓝
+    contentWidget_->setObjectName("alarmContent");
+    // 条目样式（卡片底/悬停/缩略图/两行文字）统一放在 blacksoft.css 的应用级
+    // 规则里，按 objectName 命中 —— 不能像以前那样挂在下面这个 setStyleSheet 上：
+    // Qt 只给"自己设了样式表的控件"画 QSS 底，纯 QWidget 子件从祖先样式表拿到的
+    // background 不会上色（离线实测卡片面一直透明，缩略图和文字直接浮在页面底色上）。
+    // 而且外层不能再写无选择器的 background：它会沿对象树把标签也刷成页面底色，
+    // 标签因此变成一块块不透明矩形（残影就卡在这些矩形之外）。所以这里只给容器
+    // 自己刷底，且用类型选择器。
+    contentWidget_->setStyleSheet(
+        QStringLiteral("QWidget#alarmContent { background: %1; }").arg(theme::BG));
     contentLayout_ = new QVBoxLayout(contentWidget_);
     contentLayout_->setContentsMargins(8, 8, 8, 8);
     contentLayout_->setSpacing(8);
@@ -260,8 +258,8 @@ void VideoAlarmWidget::scheduleThumbRetry()
 // 内存：parent 为空，靠布局持有；refreshAlarms 删除时是 removeWidget + delete 成对做。
 QWidget *VideoAlarmWidget::createAlarmItem(const AlarmRecord &alarm)
 {
-    // 样式一律靠 objectName 命中 setupUi() 里那份集中样式表，
-    // 子控件上不要再 setStyleSheet（见那里的注释）
+    // 样式一律靠 objectName 命中 blacksoft.css 里那组应用级规则（QWidget#alarmItem
+    // 及其后代），子控件上不要再 setStyleSheet —— 应用级才画得出卡片底（见 setupUi 注释）
     QWidget *itemWidget = new QWidget();
     itemWidget->setObjectName("alarmItem");
     // 104→72：撤掉「详情」钮后卡片只剩两行文字，竖向再没有别的东西要地方。
